@@ -153,6 +153,7 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
         return 'ok'
       }
       case 'reaction':
+        if (event.origin === 'principal') return 'ok' // the phone already shows what its user did
         await this.client.sendReactions(connectionId, [
           { messageId: event.messageId, emoji: event.emoji, action: event.action },
         ])

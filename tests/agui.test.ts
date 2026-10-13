@@ -301,6 +301,42 @@ describe('runs, tools and history (PROF-RUN-002..005, PROF-MAP-005, PROF-HIST-00
     })
     expect(again.statusCode).toBe(409)
   })
+
+  it('keeps one reaction per person per message and quotes a reply in history (PROF-ACT-003, PROF-RUN-009)', async () => {
+    const { body } = await createSession()
+    await bindViaPhone(body.sessionId, 'did:peer:ivan')
+    const first = await run(body.sessionId, body.sessionToken, 'hello there')
+    const reply = first.events.find((e) => e.type === 'TEXT_MESSAGE_START' && e.role === 'assistant')
+    const messageId = String(reply?.messageId)
+    await run(body.sessionId, body.sessionToken, '', { kind: 'reaction', messageId, emoji: '👍', action: 'add' })
+    await run(body.sessionId, body.sessionToken, '', { kind: 'reaction', messageId, emoji: '❤️', action: 'add' })
+    const answered = await run(body.sessionId, body.sessionToken, 'and again', { kind: 'text', replyTo: messageId })
+    expect(answered.status).toBe(200)
+    const history = await running.app.inject({
+      method: 'GET',
+      url: `/agui/v3/sessions/${body.sessionId}/messages?limit=50`,
+      headers: { authorization: `Bearer ${body.sessionToken}` },
+    })
+    const messages = history.json().messages as {
+      id: string
+      role: string
+      content?: string
+      metadata: { reactions?: { emoji: string; by: string }[]; replyTo?: { id: string; text: string; role: string } }
+    }[]
+    const reacted = messages.find((m) => m.id === messageId)
+    expect(reacted?.metadata.reactions).toEqual([{ emoji: '❤️', by: expect.any(String) }])
+    const quoted = messages.find((m) => m.role === 'user' && m.content === 'and again')
+    expect(quoted?.metadata.replyTo?.id).toBe(messageId)
+    expect(quoted?.metadata.replyTo?.role).toBe('assistant')
+    await run(body.sessionId, body.sessionToken, '', { kind: 'reaction', messageId, emoji: '❤️', action: 'remove' })
+    const after = await running.app.inject({
+      method: 'GET',
+      url: `/agui/v3/sessions/${body.sessionId}/messages?limit=50`,
+      headers: { authorization: `Bearer ${body.sessionToken}` },
+    })
+    const cleared = (after.json().messages as typeof messages).find((m) => m.id === messageId)
+    expect(cleared?.metadata.reactions).toBeUndefined()
+  })
 })
 
 describe('session stream (PROF-STREAM-001..004)', () => {

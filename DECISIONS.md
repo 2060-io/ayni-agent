@@ -55,6 +55,16 @@ Decisions taken while implementing hologram-spec v3, in the order they came up. 
     `resume` entry carrying `menuId`/`itemId`); the run is not suspended with an interrupt outcome.
     Mid-run inputs that must block the model are approvals, which end the model's tool call with a
     pending result instead.
+17. **One reaction per person per message** (INTX-REACT-004, PROF-ACT-003). The current reaction of
+    each Principal lives in the target entry's payload (`reactions[principalId]`), so history carries
+    it in `metadata.reactions`; an `add` replaces the previous one, a `remove` clears it. The
+    reaction entry is still appended as the audit record. The Principal's own reaction is mirrored
+    to the session's channel with `origin: 'principal'`; the DIDComm adapter never echoes it to the
+    phone (the app already shows what its user did).
+18. **Replies** (PROF-RUN-009). A `text` or `attachments` action may carry `replyTo`, the id of a
+    message of the same conversation (or its resume lineage). The turn entry stores a short quote
+    in `payload.replyTo`, history exposes it in `metadata.replyTo`, and the model receives the
+    quote as a bracketed prefix of the user message. An unknown id is ignored, not refused.
 
 ## Not done in this iteration
 

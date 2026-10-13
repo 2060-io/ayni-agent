@@ -152,11 +152,12 @@ export class Orchestrator {
       return [
         { role: 'assistant', content: entry.completion === 'interrupted' ? `${entry.text} [interrupted]` : entry.text },
       ]
-    return [{ role: 'user', content: entry.text }]
+    return [{ role: 'user', content: withReplyContext(entry) }]
   }
 
   private async userMessage(entry: MessageEntry, imageBytes?: Map<string, Buffer>): Promise<ChatMessage> {
-    const parts: ContentPart[] = [{ type: 'text', text: entry.text }]
+    const text = withReplyContext(entry)
+    const parts: ContentPart[] = [{ type: 'text', text }]
     if (this.llm.multimodal) {
       for (const a of entry.attachments) {
         if (a.type !== 'image') continue
@@ -168,7 +169,7 @@ export class Orchestrator {
         }
       }
     }
-    return { role: 'user', content: parts.length === 1 ? entry.text : parts }
+    return { role: 'user', content: parts.length === 1 ? text : parts }
   }
 
   // ---- the turn -------------------------------------------------------------------------------
@@ -417,4 +418,12 @@ export class Orchestrator {
     })
     return content.slice(0, 20000)
   }
+}
+
+/** A reply carries the quoted message as context, in the user's voice (INTX-STATE-004). */
+function withReplyContext(entry: MessageEntry): string {
+  const r = entry.payload?.replyTo as { text?: string; role?: string } | undefined
+  if (!r?.text) return entry.text
+  const who = r.role === 'assistant' ? 'your message' : 'my earlier message'
+  return `[replying to ${who}: "${r.text}"]\n${entry.text}`
 }

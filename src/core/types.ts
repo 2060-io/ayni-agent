@@ -184,7 +184,7 @@ export interface MessageEntry {
   /** wrapped per-entry key; null once crypto-erased (D19) */
   encKeyRef: string | null
   reactionPolicy?: ReactionPolicy
-  /** structured payload for non-text kinds (tool-call, approval, menu...), encrypted with the entry */
+  /** structured payload (tool-call, approval, menu items, `reactions` by principal, `replyTo`), encrypted with the entry */
   payload?: Record<string, unknown>
   /** transport message id (DIDComm message id, AG-UI message id) for receipts and reactions */
   externalId?: string
@@ -353,7 +353,15 @@ export type CapabilityEvent =
     }
   | { kind: 'media'; entry: MessageEntry }
   | { kind: 'approval'; entry: MessageEntry; approval: ApprovalRecord; update?: boolean }
-  | { kind: 'reaction'; messageId: string; emoji: string; action: 'add' | 'remove'; by: string }
+  | {
+      kind: 'reaction'
+      messageId: string
+      emoji: string
+      action: 'add' | 'remove'
+      by: string
+      /** who reacted: the Principal's own reaction is mirrored to their web sessions, never echoed to their phone */
+      origin: 'principal' | 'agent'
+    }
   | { kind: 'receipt'; messageIds: string[]; state: 'received' | 'viewed' }
   | { kind: 'contextual-menu'; sessionId: string }
   | { kind: 'generating'; entryId: string; kindOf: 'image'; startedAt: string }

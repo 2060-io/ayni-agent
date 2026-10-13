@@ -3,73 +3,191 @@
   "$id": "https://2060.io/schemas/hologram-agui-profile/3.0/hologram-action.json",
   "title": "forwardedProps.hologram (profile section 6, PROF-RUN-003)",
   "type": "object",
-  "required": ["kind"],
+  "required": [
+    "kind"
+  ],
   "oneOf": [
-    { "properties": { "kind": { "const": "text" } }, "additionalProperties": false },
     {
       "properties": {
-        "kind": { "const": "menu.select" },
-        "menuId": { "type": "string" },
-        "itemId": { "type": "string" }
+        "kind": {
+          "const": "text"
+        },
+        "replyTo": {
+          "type": "string"
+        }
       },
-      "required": ["kind", "menuId", "itemId"],
-      "additionalProperties": false
-    },
-    {
-      "properties": { "kind": { "const": "contextual.select" }, "itemId": { "type": "string" } },
-      "required": ["kind", "itemId"],
       "additionalProperties": false
     },
     {
       "properties": {
-        "kind": { "const": "approval.decide" },
-        "approvalId": { "type": "string" },
-        "decision": { "enum": ["approve", "reject"] },
-        "note": { "type": "string" }
+        "kind": {
+          "const": "menu.select"
+        },
+        "menuId": {
+          "type": "string"
+        },
+        "itemId": {
+          "type": "string"
+        }
       },
-      "required": ["kind", "approvalId", "decision"],
-      "additionalProperties": false
-    },
-    {
-      "properties": { "kind": { "const": "approval.cancel" }, "approvalId": { "type": "string" } },
-      "required": ["kind", "approvalId"],
-      "additionalProperties": false
-    },
-    {
-      "properties": {
-        "kind": { "const": "elevation.request" },
-        "tool": { "type": "string" },
-        "purposeId": { "type": "string", "minLength": 1 },
-        "justification": { "type": "string", "minLength": 1 }
-      },
-      "required": ["kind", "tool", "purposeId", "justification"],
+      "required": [
+        "kind",
+        "menuId",
+        "itemId"
+      ],
       "additionalProperties": false
     },
     {
       "properties": {
-        "kind": { "const": "reaction" },
-        "messageId": { "type": "string" },
-        "emoji": { "type": "string" },
-        "action": { "enum": ["add", "remove"] }
+        "kind": {
+          "const": "contextual.select"
+        },
+        "itemId": {
+          "type": "string"
+        }
       },
-      "required": ["kind", "messageId", "emoji", "action"],
+      "required": [
+        "kind",
+        "itemId"
+      ],
       "additionalProperties": false
     },
     {
       "properties": {
-        "kind": { "const": "receipt" },
-        "messageIds": { "type": "array", "items": { "type": "string" } },
-        "state": { "enum": ["received", "viewed"] }
+        "kind": {
+          "const": "approval.decide"
+        },
+        "approvalId": {
+          "type": "string"
+        },
+        "decision": {
+          "enum": [
+            "approve",
+            "reject"
+          ]
+        },
+        "note": {
+          "type": "string"
+        }
       },
-      "required": ["kind", "messageIds", "state"],
+      "required": [
+        "kind",
+        "approvalId",
+        "decision"
+      ],
       "additionalProperties": false
     },
     {
       "properties": {
-        "kind": { "const": "attachments" },
-        "attachmentIds": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+        "kind": {
+          "const": "approval.cancel"
+        },
+        "approvalId": {
+          "type": "string"
+        }
       },
-      "required": ["kind", "attachmentIds"],
+      "required": [
+        "kind",
+        "approvalId"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "elevation.request"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "purposeId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "justification": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "kind",
+        "tool",
+        "purposeId",
+        "justification"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "reaction"
+        },
+        "messageId": {
+          "type": "string"
+        },
+        "emoji": {
+          "type": "string"
+        },
+        "action": {
+          "enum": [
+            "add",
+            "remove"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "messageId",
+        "emoji",
+        "action"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "receipt"
+        },
+        "messageIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "state": {
+          "enum": [
+            "received",
+            "viewed"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "messageIds",
+        "state"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "attachments"
+        },
+        "attachmentIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "replyTo": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "attachmentIds"
+      ],
       "additionalProperties": false
     }
   ]

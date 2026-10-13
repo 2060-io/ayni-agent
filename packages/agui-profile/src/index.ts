@@ -216,11 +216,28 @@ export interface ApprovalUpdateValue {
   grantExpiresAt?: string
 }
 
+/**
+ * One reaction per person per message (PROF-ACT-003): an `add` replaces whatever the same `by`
+ * had on that message; a `remove` clears it.
+ */
 export interface ReactionValue {
   messageId: string
   emoji: string
   action: 'add' | 'remove'
   by: string
+}
+
+/** `metadata` of a history or run message (PROF-HIST-006). */
+export interface MessageMetadata {
+  createdAt: string
+  initiatedAt?: string
+  sourceType?: string
+  completion?: 'completed' | 'interrupted'
+  entryId?: string
+  /** current reactions on the message, one per person */
+  reactions?: { emoji: string; by: string }[]
+  /** the message this one answers */
+  replyTo?: ReplyReference
 }
 
 export type ReceiptState = 'received' | 'viewed'
@@ -298,8 +315,16 @@ export const HOLOGRAM_ACTION_KINDS: readonly HologramActionKind[] = [
   'attachments',
 ]
 
+/** A message the turn answers: the id of a transcript message of the same session (PROF-RUN-009). */
+export interface ReplyReference {
+  id: string
+  /** short excerpt of the quoted message, for rendering */
+  text: string
+  role: 'user' | 'assistant'
+}
+
 export type HologramAction =
-  | { kind: 'text' }
+  | { kind: 'text'; replyTo?: string }
   | { kind: 'menu.select'; menuId: string; itemId: string }
   | { kind: 'contextual.select'; itemId: string }
   | { kind: 'approval.decide'; approvalId: string; decision: 'approve' | 'reject'; note?: string }
@@ -307,7 +332,7 @@ export type HologramAction =
   | { kind: 'elevation.request'; tool: string; purposeId: string; justification: string }
   | { kind: 'reaction'; messageId: string; emoji: string; action: 'add' | 'remove' }
   | { kind: 'receipt'; messageIds: string[]; state: ReceiptState }
-  | { kind: 'attachments'; attachmentIds: string[] }
+  | { kind: 'attachments'; attachmentIds: string[]; replyTo?: string }
 
 export interface HologramForwardedProps {
   hologram?: HologramAction

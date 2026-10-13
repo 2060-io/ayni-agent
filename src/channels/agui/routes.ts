@@ -431,6 +431,16 @@ export class AgUiRoutes {
         const voice = attachments.find((a) => a.type === 'voice')
         const entryText =
           text.trim() || voice?.textRepr || attachments.map((a) => a.textRepr).join('\n') || '(empty message)'
+        // a reply quotes a message of this conversation (PROF-RUN-009); an unknown id is ignored
+        const quoted = action.replyTo ? await this.agent.memory.get(action.replyTo) : undefined
+        const replyTo =
+          quoted && [session.id, ...(session.lineage ?? [])].includes(quoted.sessionId)
+            ? {
+                id: quoted.id,
+                text: quoted.text.slice(0, 200),
+                role: quoted.role === 'agent' ? 'assistant' : 'user',
+              }
+            : undefined
         result = await this.agent.turn(
           session,
           {
@@ -443,6 +453,7 @@ export class AgUiRoutes {
               attachments,
               language: session.locale ?? this.agent.pack.language.agent,
               backingIdentity: principal.backingIdentity,
+              payload: replyTo ? { replyTo } : undefined,
             },
           },
           sink,

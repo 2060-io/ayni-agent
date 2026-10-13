@@ -296,6 +296,22 @@ export class HologramAgent {
         await this.memory.append(
           entryBase(`Reaction ${action.action} ${action.emoji} on ${action.messageId}`, 'reaction', { ...action })
         )
+        // one reaction per person per message (INTX-REACT-004): the current one lives on the target entry
+        if (target && target.sessionId === session.id) {
+          const reactions = { ...((target.payload?.reactions as Record<string, unknown> | undefined) ?? {}) }
+          if (action.action === 'add')
+            reactions[principal.id] = { emoji: action.emoji, by: displayName(principal), at: new Date().toISOString() }
+          else delete reactions[principal.id]
+          await this.memory.rewrite({ ...target, payload: { ...(target.payload ?? {}), reactions } })
+          await this.router.deliver(session, {
+            kind: 'reaction',
+            messageId: target.id,
+            emoji: action.emoji,
+            action: action.action,
+            by: displayName(principal),
+            origin: 'principal',
+          })
+        }
         const policy = target?.reactionPolicy ?? 'historize'
         const notify = policy === 'notify' || (typeof policy === 'object' && policy.notifyOn.includes(action.emoji))
         if (notify && action.action === 'add') {

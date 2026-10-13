@@ -38,11 +38,15 @@ export function approvalValue(record: ApprovalRecord, viewerId: string, canDecid
 /** One entry becomes one or more AG-UI messages (text and activities), transcript order preserved. */
 export function entryToMessages(entry: MessageEntry): Record<string, unknown>[] {
   const out: Record<string, unknown>[] = []
+  const reactionMap = (entry.payload?.reactions ?? {}) as Record<string, { emoji: string; by: string }>
+  const reactions = Object.values(reactionMap).map((r) => ({ emoji: r.emoji, by: r.by }))
   const meta = {
     createdAt: entry.createdAt,
     initiatedAt: entry.initiatedAt,
     sourceType: entry.sourceType,
     completion: entry.completion,
+    reactions: reactions.length ? reactions : undefined,
+    replyTo: entry.payload?.replyTo,
   }
   switch (entry.sourceType) {
     case 'text':
