@@ -209,7 +209,7 @@ export class HologramAgent {
     action: HologramAction,
     sink: TurnSink,
     signal: AbortSignal
-  ): Promise<TurnResult | { text: string } | undefined> {
+  ): Promise<TurnResult | { text: string; await?: 'binding-code' } | undefined> {
     this.sessions.requireBound(session)
     const principal = await this.principalOf(session)
     if (!principal) throw new Error('principal missing')
@@ -311,7 +311,7 @@ export class HologramAgent {
     itemId: string,
     sink: TurnSink,
     signal: AbortSignal
-  ) {
+  ): Promise<TurnResult | { text: string; await?: 'binding-code' }> {
     if (itemId === PLATFORM_MENU.approvals) {
       const pending = await this.approvals.pendingFor(principal)
       const own = (await this.approvals.ownRequests(principal)).filter((r) => r.status === 'PENDING')
@@ -329,6 +329,9 @@ export class HologramAgent {
           approval: r,
         })
       return { text: lines.join('\n') }
+    }
+    if (itemId === PLATFORM_MENU.link) {
+      return { text: 'Type the code shown on the web page (for example 47-KM), or /link 47-KM.', await: 'binding-code' }
     }
     if (itemId === PLATFORM_MENU.sessions) {
       const open = await this.sessions.listOpen(principal.id)

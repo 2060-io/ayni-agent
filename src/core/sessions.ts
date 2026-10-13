@@ -205,6 +205,20 @@ export class SessionService {
     return session && session.state === 'provisional' ? session : undefined
   }
 
+  /** Manual pairing from the capability channel: the person types the code shown on the screen. */
+  public async findProvisionalByCode(code: string): Promise<Session | undefined> {
+    const wanted = code.toUpperCase().replace(/[^A-Z0-9]/g, '')
+    if (wanted.length !== 4) return undefined
+    const now = Date.now()
+    return (await this.store.sessions.listByState('provisional')).find(
+      (s) =>
+        s.binding &&
+        !s.binding.used &&
+        Date.parse(s.binding.expiresAt) > now &&
+        s.binding.bindingCode.replace('-', '') === wanted
+    )
+  }
+
   public async findProvisionalByNonce(nonce: string): Promise<Session | undefined> {
     const session = await this.store.sessions.findByNonce(nonce)
     return session && session.state === 'provisional' ? session : undefined

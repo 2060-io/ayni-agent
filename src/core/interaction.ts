@@ -6,6 +6,7 @@ import type { Principal, Session } from './types.js'
 
 export const PLATFORM_MENU = {
   sessions: 'hologram.sessions',
+  link: 'hologram.link-session',
   approvals: 'hologram.approvals',
   endSessionPrefix: 'hologram.end-session:',
 } as const
@@ -44,7 +45,10 @@ export function contextualMenuFor(
   if (bound && (pack.features?.approvals ?? true) && pendingApprovals > 0) {
     items.push({ id: PLATFORM_MENU.approvals, label: 'Approvals', badge: pendingApprovals })
   }
-  if (bound && session.channelType === 'didcomm') items.push({ id: PLATFORM_MENU.sessions, label: 'Sessions' })
+  if (bound && session.channelType === 'didcomm') {
+    items.push({ id: PLATFORM_MENU.link, label: 'Link a web session' })
+    items.push({ id: PLATFORM_MENU.sessions, label: 'Sessions' })
+  }
   return items
 }
 

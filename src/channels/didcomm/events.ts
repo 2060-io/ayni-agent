@@ -19,8 +19,15 @@ interface Envelope {
   data: Record<string, unknown>
 }
 
+const CODE_PATTERN = /^\/?(?:link\s+)?([a-z0-9]{2})-?([a-z0-9]{2})$/i
+const LINK_ATTEMPTS = 5
+const LINK_WINDOW_MS = 10 * 60_000
+
 export class DidcommEvents {
   private readonly identifying = new Set<string>()
+  /** connections that chose "Link a web session" and owe a code */
+  private readonly awaitingCode = new Map<string, number>()
+  private readonly linkAttempts = new Map<string, { count: number; since: number }>()
 
   public constructor(
     private readonly agent: HologramAgent,
@@ -146,6 +153,11 @@ export class DidcommEvents {
       )
       return
     }
+    await this.askBindingConfirmation(session, connectionId)
+  }
+
+  /** The confirmation question names the agent, the code and the client (CHAN-BIND-009, PROF-BIND-004). */
+  private async askBindingConfirmation(session: Session, connectionId: string): Promise<void> {
     if (session.binding && Date.parse(session.binding.expiresAt) < Date.now()) {
       await this.client.sendText(connectionId, 'This link code has expired. Ask the web page for a new one.')
       return
@@ -158,6 +170,34 @@ export class DidcommEvents {
       ['Yes', 'No']
     )
     await this.agent.sessions.markConfirmationSent(session, connectionId, threadId)
+  }
+
+  /**
+   * Manual pairing: the person types the binding code shown on the screen (when the wallet does not
+   * reuse the invitation). The confirmation question still gates the binding; attempts are limited.
+   */
+  private async linkByCode(connectionId: string, raw: string): Promise<boolean> {
+    const match = CODE_PATTERN.exec(raw.trim())
+    if (!match) return false
+    const attempts = this.linkAttempts.get(connectionId) ?? { count: 0, since: Date.now() }
+    if (Date.now() - attempts.since > LINK_WINDOW_MS) Object.assign(attempts, { count: 0, since: Date.now() })
+    attempts.count += 1
+    this.linkAttempts.set(connectionId, attempts)
+    if (attempts.count > LINK_ATTEMPTS) {
+      await this.client.sendText(connectionId, 'Too many attempts; try again in a few minutes.')
+      return true
+    }
+    this.awaitingCode.delete(connectionId)
+    const session = await this.agent.sessions.findProvisionalByCode(`${match[1]}${match[2]}`)
+    if (!session) {
+      await this.client.sendText(
+        connectionId,
+        'No web session is waiting with this code. Check the code on the screen, or ask the page for a new one.'
+      )
+      return true
+    }
+    await this.askBindingConfirmation(session, connectionId)
+    return true
   }
 
   private async onAnswer(connectionId: string, threadId: string, response: string): Promise<void> {
@@ -275,6 +315,10 @@ export class DidcommEvents {
     const bound = await this.agent.didcommSession(connectionId)
     if (!bound) return
     await this.receipt(connectionId, messageId, 'viewed')
+    const awaiting = this.awaitingCode.get(connectionId)
+    if ((awaiting && awaiting > Date.now()) || /^\/link\b/i.test(content.trim())) {
+      if (await this.linkByCode(connectionId, content.replace(/^\/link\s*/i, ''))) return
+    }
     await this.turn(bound.session, content)
   }
 
@@ -287,6 +331,8 @@ export class DidcommEvents {
       this.sinkFor(bound.session),
       new AbortController().signal
     )
+    if (result && 'await' in result && result.await === 'binding-code')
+      this.awaitingCode.set(connectionId, Date.now() + 5 * 60_000)
     if (result && 'text' in result && result.text) await this.client.sendText(connectionId, result.text)
   }
 
