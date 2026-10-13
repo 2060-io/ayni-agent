@@ -91,10 +91,12 @@ export class OpenAiChatModel implements ChatModel {
       this.client = new OpenAI({ baseURL, apiKey: apiKey ?? extraEnv.GOOGLE_ACCESS_TOKEN ?? 'missing' })
       return
     }
-    if ((config.provider === 'openai-compatible' || config.provider === 'ollama') && !config.baseUrl) {
-      throw new LlmError('baseUrl is required', config.provider)
+    // the deployment may supply the endpoint (LLM_BASE_URL in the reference profile) instead of the pack
+    const baseUrl = config.baseUrl ?? extraEnv.LLM_BASE_URL
+    if ((config.provider === 'openai-compatible' || config.provider === 'ollama') && !baseUrl) {
+      throw new LlmError('baseUrl (or LLM_BASE_URL) is required', config.provider)
     }
-    this.client = new OpenAI({ baseURL: config.baseUrl, apiKey: apiKey ?? 'not-needed' })
+    this.client = new OpenAI({ baseURL: baseUrl, apiKey: apiKey ?? 'not-needed' })
   }
 
   public async *stream(req: ChatRequest): AsyncIterable<ChatDelta> {
@@ -111,7 +113,8 @@ export class OpenAiChatModel implements ChatModel {
           model: this.model,
           messages: toOpenAiMessages(req.messages, this.multimodal),
           tools,
-          temperature: req.temperature,
+          // only when the pack sets it: some compatible endpoints (Kimi K3) do not accept temperature
+          ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
           max_completion_tokens: req.maxOutputTokens,
           stream: true,
           stream_options: { include_usage: true },

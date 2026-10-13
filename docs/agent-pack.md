@@ -111,7 +111,12 @@ adapter (`openai-compatible`, for gateways such as OpenRouter or LiteLLM and any
 `provider_options` as the adapter documents). `stub` is a deterministic offline model for
 development and tests (it echoes, and `/call <tool> {json}` triggers a tool call); the same value
 exists for `embeddings.provider`, and `model: stub` for `media.speechToText`, `media.vision` and an
-image generation provider. `apiKeyEnv` names the environment variable holding the
+image generation provider.
+
+Kimi (Moonshot) is an `openai-compatible` endpoint: `baseUrl: https://api.moonshot.ai/v1` (or the
+`LLM_BASE_URL` variable), `model: kimi-k3`, the key in `LLM_API_KEY`; omit `temperature` (the K3
+API does not list it) and use `reasoningEffort: low | high | max` if wanted. Kimi offers no
+embeddings endpoint: keep another `embeddings.provider`. `apiKeyEnv` names the environment variable holding the
 key; keys never appear in the pack. `multimodal: true` lets a capable model receive referenced media;
 the agent never depends on it. Embeddings are configured independently and may use another provider.
 

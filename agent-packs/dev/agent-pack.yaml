@@ -43,8 +43,11 @@ persona:
       action: { type: url, url: https://github.com/2060-io/hologram-agent }
 
 llm:
-  provider: stub
-  model: echo
+  # LLM_PROVIDER=openai-compatible LLM_MODEL=kimi-k3 LLM_BASE_URL=https://api.moonshot.ai/v1 LLM_API_KEY=... for Kimi
+  provider: ${LLM_PROVIDER:-stub}
+  model: ${LLM_MODEL:-echo}
+  apiKeyEnv: LLM_API_KEY
+  maxOutputTokens: 2048
 
 embeddings:
   provider: stub

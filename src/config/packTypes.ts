@@ -59,7 +59,7 @@ export interface LlmConfig {
   apiKeyEnv?: string
   temperature?: number
   maxOutputTokens?: number
-  reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high'
+  reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'max'
   multimodal?: boolean
   provider_options?: Record<string, unknown>
 }
