@@ -201,6 +201,83 @@ describe('sessions and binding (PROF-SESS-001..008, PROF-BIND-001..008)', () => 
   })
 })
 
+describe('device pairing (PROF-SESS-010..012, PROF-BIND-010, IDENT-DEV-001..005)', () => {
+  async function pair(actor: string) {
+    const { body } = await createSession()
+    await bindViaPhone(body.sessionId, actor)
+    const status = await running.app.inject({
+      method: 'GET',
+      url: `/agui/v3/sessions/${body.sessionId}`,
+      headers: { authorization: `Bearer ${body.sessionToken}` },
+    })
+    const { deviceHandle, deviceSecret } = status.json() as { deviceHandle: string; deviceSecret: string }
+    return { first: body, deviceHandle, deviceSecret }
+  }
+  const createWithProof = (deviceHandle: string, deviceProof: string, resumeSessionId?: string) =>
+    running.app.inject({
+      method: 'POST',
+      url: '/agui/v3/sessions',
+      payload: { client, locale: 'en', deviceHandle, deviceProof, ...(resumeSessionId ? { resumeSessionId } : {}) },
+    })
+
+  it('hands a device secret at the phone binding, binds the next session from it and rotates it', async () => {
+    const { first, deviceHandle, deviceSecret } = await pair('did:peer:judy')
+    expect(deviceHandle).toMatch(/^dev_/)
+    expect(deviceSecret).toMatch(/^dsk_/)
+    await running.agent.sessions.close((await running.agent.sessions.get(first.sessionId)) as never, 'idle-timeout')
+    const second = await createWithProof(deviceHandle, deviceSecret, first.sessionId)
+    expect(second.statusCode).toBe(201)
+    const body = second.json() as Record<string, unknown>
+    expect(body.state).toBe('bound')
+    expect(body.binding).toBeUndefined()
+    expect(body.deviceHandle).toBe(deviceHandle)
+    expect(body.deviceSecret).toMatch(/^dsk_/)
+    expect(body.deviceSecret).not.toBe(deviceSecret)
+    expect(body.resumedFromSessionId).toBe(first.sessionId)
+    expect((body.principal as { displayName: string }).displayName).toBeTruthy()
+    const r = await run(String(body.sessionId), String(body.sessionToken), 'still here')
+    expect(r.status).toBe(200)
+    // the old secret is dead: presenting it revokes the pairing, and the rotated one no longer works either
+    const stale = await createWithProof(deviceHandle, deviceSecret)
+    expect(stale.json().state).toBe('provisional')
+    expect(stale.json().pairing).toBe('invalid')
+    const afterRevoke = await createWithProof(deviceHandle, String(body.deviceSecret))
+    expect(afterRevoke.json().state).toBe('provisional')
+    expect(afterRevoke.json().pairing).toBe('invalid')
+  })
+
+  it('lists devices with a bound token and revokes one with the device proof alone', async () => {
+    const { first, deviceHandle, deviceSecret } = await pair('did:peer:kim')
+    const list = await running.app.inject({
+      method: 'GET',
+      url: '/agui/v3/sessions/devices',
+      headers: { authorization: `Bearer ${first.sessionToken}` },
+    })
+    const devices = list.json().devices as { handle: string; current: boolean; client: { platform: string } }[]
+    expect(devices).toHaveLength(1)
+    expect(devices[0]).toMatchObject({ handle: deviceHandle, current: true, client: { platform: 'web' } })
+    const unauth = await running.app.inject({ method: 'DELETE', url: `/agui/v3/sessions/devices/${deviceHandle}` })
+    expect(unauth.statusCode).toBe(401)
+    const revoked = await running.app.inject({
+      method: 'DELETE',
+      url: `/agui/v3/sessions/devices/${deviceHandle}`,
+      payload: { deviceProof: deviceSecret },
+    })
+    expect(revoked.statusCode).toBe(204)
+    const again = await createWithProof(deviceHandle, deviceSecret)
+    expect(again.json().state).toBe('provisional')
+    expect(again.json().pairing).toBe('invalid')
+  })
+
+  it('a disconnected phone leaves no pairing', async () => {
+    const { deviceHandle, deviceSecret } = await pair('did:peer:leo')
+    await running.agent.onPeerDisconnected('conn-did:peer:leo')
+    const after = await createWithProof(deviceHandle, deviceSecret)
+    expect(after.json().state).toBe('provisional')
+    expect(after.json().pairing).toBe('invalid')
+  })
+})
+
 describe('runs, tools and history (PROF-RUN-002..005, PROF-MAP-005, PROF-HIST-001)', () => {
   it('ignores client tools, runs a permitted tool with a step label, hides tool names from the wire', async () => {
     const { body } = await createSession()

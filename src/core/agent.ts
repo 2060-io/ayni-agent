@@ -18,10 +18,10 @@ import { nowIso } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import type { ChallengeService } from './challenges.js'
 import type { CapabilityRouter } from './channel.js'
-import { contextualMenuFor, describeSessions, greetingFor, PLATFORM_MENU } from './interaction.js'
+import { contextualMenuFor, describeDevices, describeSessions, greetingFor, PLATFORM_MENU } from './interaction.js'
 import type { Orchestrator, TurnInput, TurnResult, TurnSink } from './orchestrator.js'
 import type { PrincipalService, VerifiedFacts } from './principals.js'
-import type { SessionService } from './sessions.js'
+import { SessionError, type SessionService } from './sessions.js'
 import type { ApprovalRecord, ClientDescription, ClosureReason, MessageEntry, Principal, Session } from './types.js'
 
 export interface AgentParts {
@@ -124,6 +124,7 @@ export class HologramAgent {
       binding: session.state === 'provisional' && session.binding ? this.bindingMaterial(session) : undefined,
       parentSessionId: session.parentSessionId,
       deviceHandle: session.state === 'bound' ? session.deviceHandle : undefined,
+      deviceSecret: session.state === 'bound' ? session.deviceSecret : undefined,
       resumedFromSessionId: session.state === 'bound' ? session.resumedFromSessionId : undefined,
     }
   }
@@ -173,21 +174,59 @@ export class HologramAgent {
     client: ClientDescription,
     locale?: string,
     deviceHandle?: string,
-    resumeSessionId?: string
+    resumeSessionId?: string,
+    deviceProof?: string
   ) {
     const created = await this.sessions.createProvisional('ag-ui', client, locale, deviceHandle, resumeSessionId)
     let rebind: 'asked' | 'unavailable' | undefined
+    let pairing: 'expired' | 'invalid' | undefined
     if (deviceHandle) {
-      const principal = (await this.store.principals.list()).find((p) =>
-        p.devices?.some((d) => d.handle === deviceHandle)
-      )
+      const principal = await this.principalOfDevice(deviceHandle)
       const capability = principal ? await this.router.capabilitySession(principal) : undefined
+      // a paired device binds at once when its proof, the channel and the credential all hold (IDENT-DEV-002)
+      if (principal && capability && deviceProof) {
+        const live = await this.principals.ensureLive(principal)
+        if (!live.ok) pairing = 'expired'
+        else {
+          try {
+            await this.sessions.bindWithProof(created.session, principal, deviceProof)
+            return { ...created, pairing: undefined, rebind: undefined }
+          } catch (error) {
+            if (error instanceof SessionError && error.code === 'pairing-expired') pairing = 'expired'
+            else if (error instanceof SessionError && error.code === 'pairing-invalid') pairing = 'invalid'
+            else throw error
+          }
+        }
+      } else if (deviceProof) pairing = principal ? 'expired' : 'invalid'
       rebind = 'unavailable'
       if (principal && capability && this.rebindOffer) {
         rebind = (await this.rebindOffer(created.session, principal).catch(() => false)) ? 'asked' : 'unavailable'
       }
     }
-    return { ...created, rebind }
+    return { ...created, rebind, pairing }
+  }
+
+  private async principalOfDevice(handle: string): Promise<Principal | undefined> {
+    return (await this.store.principals.list()).find((p) => p.devices?.some((d) => d.handle === handle))
+  }
+
+  /** The Principal's paired devices (IDENT-DEV-005, PROF-SESS-011). */
+  public listDevices(principal: Principal, currentHandle?: string) {
+    return (principal.devices ?? []).map((d) => ({
+      handle: d.handle,
+      client: d.client,
+      createdAt: d.createdAt,
+      lastUsedAt: d.lastUsedAt ?? d.createdAt,
+      current: d.handle === currentHandle,
+    }))
+  }
+
+  /** Revokes a pairing by its own proof: a web client with no bound session unlinks itself (PROF-SESS-012). */
+  public async revokeDeviceByProof(handle: string, proof: string): Promise<boolean> {
+    const principal = await this.principalOfDevice(handle)
+    const device = principal?.devices?.find((d) => d.handle === handle)
+    if (!principal || !device || !this.sessions.proofMatches(device, proof)) return false
+    return this.sessions.revokeDevice(principal, handle)
   }
 
   public createSibling(parent: Session, client: ClientDescription, locale?: string, resumeSessionId?: string) {
@@ -377,6 +416,11 @@ export class HologramAgent {
         text: `Your open sessions with ${this.pack.metadata.displayName}:\n${describeSessions(open, session)}\nReply "end <number>" to close one.`,
       }
     }
+    if (itemId === PLATFORM_MENU.devices) {
+      return {
+        text: `Devices linked to ${this.pack.metadata.displayName}:\n${describeDevices(principal.devices ?? [])}\nReply "unlink <number>" to unlink one.`,
+      }
+    }
     if (itemId.startsWith(PLATFORM_MENU.endSessionPrefix)) {
       const target = await this.sessions.get(itemId.slice(PLATFORM_MENU.endSessionPrefix.length))
       if (target && target.principalId === principal.id && target.state === 'bound') {
@@ -430,6 +474,15 @@ export class HologramAgent {
       if (target.id === session.id) return 'This is the session you are using; disconnect from the app to close it.'
       await this.sessions.close(target, 'user')
       return `Session ${end[1]} closed.`
+    }
+    const unlink = /^unlink\s+(\d+)$/.exec(trimmed)
+    if (unlink) {
+      const device = (principal.devices ?? [])[Number(unlink[1]) - 1]
+      if (!device) return 'No such device.'
+      await this.sessions.revokeDevice(principal, device.handle)
+      for (const s of await this.sessions.listOpen(principal.id))
+        if (s.deviceHandle === device.handle) await this.sessions.close(s, 'user')
+      return `Device ${unlink[1]} unlinked; its browser will ask you again before it can talk to me.`
     }
     return undefined
   }
@@ -572,6 +625,7 @@ export class HologramAgent {
     await this.sessions.closeAll(principal.id, 'channel-closed')
     principal.capabilityChannelId = null
     await this.principals.save(principal)
+    await this.sessions.revokeAllDevices(principal) // no phone, no pairing (IDENT-DEV-005)
   }
 
   /** An inbound DIDComm message on the capability channel is a conversation turn (CHAN-ROUTE-003). */
@@ -585,6 +639,7 @@ export class HologramAgent {
   /** Credential failure terminates the Principal's sessions (IDENT-LIVE-004/005). */
   public async onCredentialInvalid(principal: Principal): Promise<void> {
     await this.sessions.closeAll(principal.id, 'credential-invalid')
+    await this.sessions.revokeAllDevices(principal)
   }
 
   public async closeByReason(session: Session, reason: ClosureReason): Promise<void> {

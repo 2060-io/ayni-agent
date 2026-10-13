@@ -27,7 +27,15 @@ export interface SessionEvents {
 export class SessionError extends Error {
   public constructor(
     message: string,
-    public readonly code: 'not-found' | 'closed' | 'not-bound' | 'conflict' | 'unauthorized' | 'forbidden',
+    public readonly code:
+      | 'not-found'
+      | 'closed'
+      | 'not-bound'
+      | 'conflict'
+      | 'unauthorized'
+      | 'forbidden'
+      | 'pairing-expired'
+      | 'pairing-invalid',
     public readonly reason?: ClosureReason
   ) {
     super(message)
@@ -60,6 +68,106 @@ export class SessionService {
     this.idleTimeoutSeconds = overrides.idleTimeoutSeconds ?? pack.sessions?.idleTimeoutSeconds ?? 1800
     this.bindingExpirySeconds = overrides.bindingExpirySeconds ?? pack.sessions?.bindingExpirySeconds ?? 300
     this.siblingsAllowed = pack.sessions?.siblingSessions ?? true
+    this.pairingSlidingDays = pack.sessions?.devicePairing?.slidingDays ?? 30
+    this.pairingMaxDays = pack.sessions?.devicePairing?.maxDays ?? 90
+  }
+
+  /** Device pairing window (D51, IDENT-DEV-004); sliding 0 disables silent binding. */
+  public readonly pairingSlidingDays: number
+  public readonly pairingMaxDays: number
+
+  // ---- device pairing (D51, IDENT-DEV) ---------------------------------------------------------
+
+  private newDeviceSecret(): { secret: string; hash: string } {
+    const secret = `dsk_${randomBytes(24).toString('base64url')}`
+    return { secret, hash: this.hash(`device:${secret}`) }
+  }
+
+  public proofMatches(device: { secretHash?: string }, proof: string): boolean {
+    if (!device.secretHash) return false
+    const a = Buffer.from(device.secretHash, 'hex')
+    const b = Buffer.from(this.hash(`device:${proof}`), 'hex')
+    return a.length === b.length && timingSafeEqual(a, b)
+  }
+
+  /** Why a pairing cannot bind silently, or undefined when it can. */
+  public pairingState(device: { createdAt: string; lastUsedAt?: string; secretHash?: string }): 'expired' | undefined {
+    if (this.pairingSlidingDays <= 0 || !device.secretHash) return 'expired'
+    const day = 86_400_000
+    const now = Date.now()
+    if (now - Date.parse(device.lastUsedAt ?? device.createdAt) > this.pairingSlidingDays * day) return 'expired'
+    if (now - Date.parse(device.createdAt) > this.pairingMaxDays * day) return 'expired'
+    return undefined
+  }
+
+  /** Mints or rotates the device's secret; the session carries the plaintext until the client takes it. */
+  private rotateDevice(session: Session, principal: Principal): void {
+    const now = nowIso()
+    let device = principal.devices?.find((d) => d.handle === session.deviceHandle)
+    if (!device) {
+      session.deviceHandle = prefixedId('dev', 24)
+      device = { handle: session.deviceHandle, client: session.client, createdAt: now }
+      principal.devices = [...(principal.devices ?? []).slice(-19), device]
+    }
+    const { secret, hash } = this.newDeviceSecret()
+    device.secretHash = hash
+    device.lastUsedAt = now
+    device.client = session.client
+    session.deviceSecret = secret
+  }
+
+  /** Binds a new session from a device proof, no phone round trip (IDENT-DEV-002/003). */
+  public async bindWithProof(session: Session, principal: Principal, proof: string): Promise<Session> {
+    if (session.state !== 'provisional') throw new SessionError('session is not provisional', 'conflict')
+    const device = principal.devices?.find((d) => d.handle === session.deviceHandle)
+    if (!device) throw new SessionError('unknown device', 'pairing-invalid')
+    if (!this.proofMatches(device, proof)) {
+      // a stale or copied secret: the pairing ends here, loudly (IDENT-DEV-003)
+      principal.devices = (principal.devices ?? []).filter((d) => d.handle !== device.handle)
+      await this.store.principals.save(principal)
+      this.logger.warn({ principalId: principal.id, device: device.handle }, 'device proof mismatch, pairing revoked')
+      throw new SessionError('device proof invalid', 'pairing-invalid')
+    }
+    const state = this.pairingState(device)
+    if (state) throw new SessionError('pairing expired', 'pairing-expired')
+    session.binding = undefined
+    session.principalId = principal.id
+    session.state = 'bound'
+    session.boundAt = nowIso()
+    session.lastActivityAt = nowIso()
+    await this.applyResume(session, principal)
+    this.rotateDevice(session, principal)
+    // older sessions of this device must not hand out the superseded secret through their status
+    for (const other of await this.store.sessions.listByPrincipal(principal.id, ['bound'])) {
+      if (other.deviceHandle === session.deviceHandle && other.deviceSecret) {
+        other.deviceSecret = undefined
+        await this.store.sessions.save(other)
+      }
+    }
+    await this.store.principals.save(principal)
+    await this.store.sessions.save(session)
+    this.logger.info(
+      { sessionId: session.id, principalId: principal.id, device: session.deviceHandle },
+      'session bound from device proof'
+    )
+    await this.events.onBound(session, principal)
+    return session
+  }
+
+  public async revokeDevice(principal: Principal, handle: string): Promise<boolean> {
+    const before = principal.devices?.length ?? 0
+    principal.devices = (principal.devices ?? []).filter((d) => d.handle !== handle)
+    if (principal.devices.length === before) return false
+    await this.store.principals.save(principal)
+    this.logger.info({ principalId: principal.id, device: handle }, 'device pairing revoked')
+    return true
+  }
+
+  public async revokeAllDevices(principal: Principal): Promise<void> {
+    if (!principal.devices?.length) return
+    principal.devices = []
+    await this.store.principals.save(principal)
+    this.logger.info({ principalId: principal.id }, 'all device pairings revoked')
   }
 
   // ---- tokens (PROF-SESS-002/004) ---------------------------------------------------------------
@@ -278,15 +386,9 @@ export class SessionService {
     session.boundAt = nowIso()
     session.lastActivityAt = nowIso()
     await this.applyResume(session, principal)
-    // the device handle lets a later session on the same browser profile ask the phone for a re-link
-    if (!principal.devices?.some((d) => d.handle === session.deviceHandle)) {
-      session.deviceHandle = prefixedId('dev', 24)
-      principal.devices = [
-        ...(principal.devices ?? []).slice(-19),
-        { handle: session.deviceHandle, client: session.client, createdAt: nowIso() },
-      ]
-      await this.store.principals.save(principal)
-    }
+    // the phone confirmed this device: it becomes a paired device with a fresh secret (D48, D51)
+    this.rotateDevice(session, principal)
+    await this.store.principals.save(principal)
     await this.store.sessions.save(session)
     this.logger.info({ sessionId: session.id, principalId: principal.id }, 'session bound')
     await this.events.onBound(session, principal)

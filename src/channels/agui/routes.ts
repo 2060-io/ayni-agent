@@ -120,6 +120,8 @@ export class AgUiRoutes {
         'not-bound': 403,
         'not-found': 404,
         conflict: 409,
+        'pairing-expired': 409,
+        'pairing-invalid': 409,
         closed: 410,
         forbidden: 403,
       }[error.code]
@@ -144,6 +146,7 @@ export class AgUiRoutes {
         client?: ClientDescription
         locale?: string
         deviceHandle?: string
+        deviceProof?: string
         resumeSessionId?: string
       }
       if (!validateCreate(body))
@@ -181,7 +184,30 @@ export class AgUiRoutes {
           session,
           token: newToken,
           rebind,
-        } = await this.agent.createSession(client, body.locale, body.deviceHandle, body.resumeSessionId)
+          pairing,
+        } = await this.agent.createSession(
+          client,
+          body.locale,
+          body.deviceHandle,
+          body.resumeSessionId,
+          body.deviceProof
+        )
+        if (session.state === 'bound') {
+          // a paired device: bound at once, no phone round trip (PROF-SESS-010)
+          const principal = await this.agent.principalOf(session)
+          if (!session.resumedFromSessionId) await this.agent.welcome(session)
+          return reply.code(201).send({
+            sessionId: session.id,
+            sessionToken: newToken,
+            state: session.state,
+            agent: { did, name: this.agent.pack.metadata.displayName },
+            principal: principal ? this.agent.principalDisplay(principal) : undefined,
+            deviceHandle: session.deviceHandle,
+            deviceSecret: session.deviceSecret,
+            resumedFromSessionId: session.resumedFromSessionId,
+            idleTimeoutSeconds: this.agent.sessions.idleTimeoutSeconds,
+          })
+        }
         return reply.code(201).send({
           sessionId: session.id,
           sessionToken: newToken,
@@ -190,10 +216,39 @@ export class AgUiRoutes {
           binding: this.agent.bindingMaterial(session),
           idleTimeoutSeconds: this.agent.sessions.idleTimeoutSeconds,
           ...(rebind ? { rebind } : {}),
+          ...(pairing ? { pairing } : {}),
         })
       } catch (error) {
         return this.sendError(reply, error)
       }
+    })
+
+    // PROF-SESS-011: the Principal's paired devices
+    app.get(`${base}/devices`, async (request, reply) => {
+      const session = await this.session(request, reply, true)
+      if (!session) return
+      const principal = await this.agent.principalOf(session)
+      return { devices: principal ? this.agent.listDevices(principal, session.deviceHandle) : [] }
+    })
+
+    // PROF-SESS-012: revoke a pairing with a bound token, or with the device's own proof
+    app.delete(`${base}/devices/:handle`, async (request, reply) => {
+      const { handle } = request.params as { handle: string }
+      const body = (request.body ?? {}) as { deviceProof?: string }
+      if (!this.token(request)) {
+        if (!body.deviceProof) return reply.code(401).send({ error: 'unauthorized' })
+        const revoked = await this.agent.revokeDeviceByProof(handle, body.deviceProof)
+        return revoked ? reply.code(204).send() : reply.code(404).send({ error: 'not-found' })
+      }
+      const session = await this.session(request, reply, true)
+      if (!session) return
+      const principal = await this.agent.principalOf(session)
+      if (!principal) return reply.code(404).send({ error: 'not-found' })
+      const revoked = await this.agent.sessions.revokeDevice(principal, handle)
+      if (revoked)
+        for (const s of await this.agent.sessions.listOpen(principal.id))
+          if (s.deviceHandle === handle && s.id !== session.id) await this.agent.sessions.close(s, 'user')
+      return revoked ? reply.code(204).send() : reply.code(404).send({ error: 'not-found' })
     })
 
     app.get(`${base}/:id`, async (request, reply) => {
@@ -504,6 +559,7 @@ export class AgUiRoutes {
         principal: this.agent.principalDisplay(principal),
         boundAt: session.boundAt,
         deviceHandle: session.deviceHandle,
+        deviceSecret: session.deviceSecret,
         resumedFromSessionId: session.resumedFromSessionId,
       })
     )

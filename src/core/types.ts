@@ -56,8 +56,14 @@ export interface Principal {
   identityCredentialRef: string | null
   livenessCache: Record<string, LivenessVerdict>
   userAgentVerified: boolean
-  /** devices (browser profiles) this Principal bound before, by opaque handle */
-  devices?: { handle: string; client: ClientDescription; createdAt: string }[]
+  /** paired devices (browser profiles), by opaque handle; the secret is kept hashed (D48, D51) */
+  devices?: {
+    handle: string
+    client: ClientDescription
+    createdAt: string
+    lastUsedAt?: string
+    secretHash?: string
+  }[]
   createdAt: string
   updatedAt: string
 }
@@ -108,6 +114,8 @@ export interface Session {
   binding?: BindingState
   /** opaque device handle: inherited from the creation request or minted at binding */
   deviceHandle?: string
+  /** the pairing secret handed to the client at binding, kept until the client rotates it (D51) */
+  deviceSecret?: string
   /** a closed session this one resumes: its entries stay readable here (IDENT-SESS-009) */
   resumedFromSessionId?: string
   /** ids of every session in the resume chain, oldest last */

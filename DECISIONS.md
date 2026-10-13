@@ -66,6 +66,19 @@ Decisions taken while implementing hologram-spec v3, in the order they came up. 
     in `payload.replyTo`, history exposes it in `metadata.replyTo`, and the model receives the
     quote as a bracketed prefix of the user message. An unknown id is ignored, not refused.
 
+19. **Device pairing outlives sessions** (D51, IDENT-DEV). At every binding confirmed on the phone the
+    agent mints a device secret beside the device handle, hands both to the client (bound event and
+    status) and keeps only an HMAC of the secret on the Principal's device entry. A session request
+    with `deviceHandle` + `deviceProof` binds at once when the hash matches, the pairing is within
+    its window (`sessions.devicePairing`, 30 days sliding / 90 hard), the capability channel is live
+    and the credential passes its liveness check; the secret rotates on every use and the superseded
+    plaintext is dropped from older sessions. A mismatch revokes the device (a copied secret is loud),
+    an expired pairing falls back to the known-device question. Pairings are revoked on phone
+    disconnection and credential failure, kept on supersede, listed and unlinked from the DIDComm menu
+    ("Linked devices", `unlink <n>`) and from `GET/DELETE {sessions}/devices`, the latter also with
+    the device's own proof so a browser with no bound session can unlink itself. The idle timeout is
+    unchanged: a paired browser simply opens its next session without the phone.
+
 ## Not done in this iteration
 
 - Database row-level security, consent management, PII redaction, external IAM (v4 per spec).

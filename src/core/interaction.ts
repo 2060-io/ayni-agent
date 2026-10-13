@@ -8,6 +8,7 @@ export const PLATFORM_MENU = {
   sessions: 'hologram.sessions',
   link: 'hologram.link-session',
   approvals: 'hologram.approvals',
+  devices: 'hologram.devices',
   endSessionPrefix: 'hologram.end-session:',
 } as const
 
@@ -48,8 +49,23 @@ export function contextualMenuFor(
   if (bound && session.channelType === 'didcomm') {
     items.push({ id: PLATFORM_MENU.link, label: 'Link a web session' })
     items.push({ id: PLATFORM_MENU.sessions, label: 'Sessions' })
+    items.push({ id: PLATFORM_MENU.devices, label: 'Linked devices' })
   }
   return items
+}
+
+/** The Principal's paired devices, numbered for the "unlink <n>" reply (INTX-MENU-007). */
+export function describeDevices(
+  devices: { handle: string; client: { name: string; platform: string }; createdAt: string; lastUsedAt?: string }[]
+): string {
+  if (devices.length === 0) return 'No linked devices.'
+  const when = (iso?: string) => (iso ? iso.slice(0, 16).replace('T', ' ') : '?')
+  return devices
+    .map(
+      (d, i) =>
+        `${i + 1}. ${d.client.name} on ${d.client.platform}, linked ${when(d.createdAt)}, last used ${when(d.lastUsedAt ?? d.createdAt)}`
+    )
+    .join('\n')
 }
 
 export function describeSessions(sessions: Session[], current: Session): string {

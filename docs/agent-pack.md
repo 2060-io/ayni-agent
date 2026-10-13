@@ -42,7 +42,7 @@ directory.
 | `purposes` | | governance list for elevation | D14, D15 |
 | `approvals` | | default approval and elevation policy | INTX-APPR |
 | `actions` | | per-tool auth challenge and credential freshness | D7, D28, INTX-AUTH |
-| `sessions` | | idle timeout, binding expiry, liveness TTL, sibling sessions | D6, D7, D36 |
+| `sessions` | | idle timeout, binding expiry, liveness TTL, sibling sessions, device pairing window | D6, D7, D36, D51 |
 | `channels` | | AG-UI and A2A adapters | D1, D2, CHAN-* |
 | `privacy` | yes | processing activities with lawful basis and retention, erasure | D18, PRIV-RETN |
 | `media` | | speech-to-text, vision, image generation, face verification | D45, INTX-AUTH-007 |
@@ -178,6 +178,11 @@ actions:
   tool runs; `0` forces a fresh check; absent means the session TTL `N`.
 
 ## sessions, channels
+
+`sessions.devicePairing` sets how long a browser the phone confirmed once keeps binding new sessions
+without the phone: `slidingDays` since the last use (default 30; 0 disables silent binding, every
+session then asks the phone) and `maxDays` since the pairing (default 90). Each silent binding rotates
+the device secret; a stale secret revokes the pairing (D51, IDENT-DEV).
 
 `sessions` sets the idle timeout, the binding window (invitation and code lifetime), the liveness TTL
 `N` and whether sibling sessions may be opened from a bound token. `channels.agui` sets the UI origins

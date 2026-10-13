@@ -81,6 +81,8 @@ export interface CreateSessionRequest {
   locale?: string
   /** handle of a device the agent bound before (PROF-BIND-009): the agent asks the phone to re-link it */
   deviceHandle?: string
+  /** the device secret handed with the handle (PROF-BIND-010): with it the session binds without the phone (PROF-SESS-010) */
+  deviceProof?: string
   /** a closed session of the same Principal to resume: its transcript stays readable in the new session (PROF-SESS-009) */
   resumeSessionId?: string
 }
@@ -118,6 +120,10 @@ export interface CreateSessionResponse {
   /** 'asked' when the phone of the known device received the re-link question (PROF-BIND-009) */
   rebind?: 'asked' | 'unavailable'
   deviceHandle?: string
+  /** the rotated device secret of a session bound from a proof, or minted at a phone binding (PROF-BIND-010) */
+  deviceSecret?: string
+  /** why a presented proof was not accepted (PROF-SESS-010); the client discards its secret */
+  pairing?: 'expired' | 'invalid'
   /** set when the resume was accepted (sibling) or recorded for binding (provisional) */
   resumedFromSessionId?: string
 }
@@ -128,6 +134,8 @@ export interface SessionStatus {
   reason?: ClosureReason
   principal: PrincipalDisplay | null
   boundAt?: string
+  /** the device secret of a freshly bound session, until the client uses it (PROF-BIND-010) */
+  deviceSecret?: string
   lastActivityAt: string
   idleTimeoutSeconds: number
   binding?: BindingMaterial
@@ -168,6 +176,8 @@ export interface SessionBoundValue {
   deviceHandle?: string
   /** the closed session this one resumes, when the agent accepted it */
   resumedFromSessionId?: string
+  /** the device secret minted at this binding (PROF-BIND-010) */
+  deviceSecret?: string
 }
 
 export interface SessionTokenValue {
@@ -394,6 +404,20 @@ export const RUN_ERROR_CODE = {
 
 // ---------------------------------------------------------------------------------------------
 // History (section 8)
+
+/** A paired device of the Principal (PROF-SESS-011). */
+export interface DeviceInfo {
+  handle: string
+  client: ClientDescription
+  createdAt: string
+  lastUsedAt: string
+  /** the caller's own device */
+  current: boolean
+}
+
+export interface DevicesResponse {
+  devices: DeviceInfo[]
+}
 
 export interface HistoryPage {
   messages: unknown[]

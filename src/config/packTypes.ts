@@ -220,6 +220,8 @@ export interface AgentPack {
     bindingExpirySeconds?: number
     credentialCheckTtlSeconds?: number
     siblingSessions?: boolean
+    /** device pairing window (D51, IDENT-DEV-004); slidingDays 0 disables silent binding */
+    devicePairing?: { slidingDays?: number; maxDays?: number }
   }
   channels?: {
     agui?: {
