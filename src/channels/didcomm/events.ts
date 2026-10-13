@@ -339,7 +339,7 @@ export class DidcommEvents {
         } else if (event.type === 'activity' && event.activityType === 'hologram.menu') {
           const content = event.content as { prompt: string; items: { label: string }[] }
           await client.sendQuestion(
-            connectionId,
+            session.externalRef,
             content.prompt,
             content.items.map((i) => i.label)
           )
