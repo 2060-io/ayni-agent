@@ -1,0 +1,11 @@
+{
+  "name": "hologram-agent-dev-tools",
+  "private": true,
+  "type": "module",
+  "description": "Developer tooling for the local Verana stack (faucet client, image build). Not part of the agent.",
+  "dependencies": {
+    "@cosmjs/amino": "^0.33.1",
+    "@cosmjs/crypto": "^0.33.1",
+    "@cosmjs/encoding": "^0.33.1"
+  }
+}

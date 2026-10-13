@@ -1,0 +1,61 @@
+# Local VS Agent for hologram-agent development: the agent, PostgreSQL and Redis.
+# The public port is exposed through an ngrok tunnel (PUBLIC_API_BASE_URL); the admin API is
+# reachable only from this host. Copy .env.example to .env and fill it in; see README.md.
+services:
+  vs-agent:
+    # Published images are amd64-only; on arm64 hosts build one with ../tools/build-vs-agent-image.sh
+    image: ${VS_AGENT_IMAGE:-veranalabs/vs-agent:v2.0.0-dev.91}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PUBLIC_API_PORT: "3001"
+      ADMIN_API_PORT: "3000"
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: vsagent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      REDIS_URL: redis://redis:6379
+      # Requests from this host arrive through the Docker bridge; never publish 3000 beyond loopback.
+      ADMIN_API_TRUSTED_NETWORKS: 127.0.0.0/8,::1/128,172.16.0.0/12
+    volumes:
+      - agent-data:/root/.afj
+    ports:
+      - "127.0.0.1:3010:3000"
+      - "127.0.0.1:3011:3001"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vsagent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: vsagent
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vsagent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  agent-data:
+  postgres-data:
+  redis-data:
