@@ -5,16 +5,7 @@
   "description": "Single configuration bundle of a Hologram Agent: behavior and policy (spec CORE-PACK-001). Any string value may contain ${VAR} or ${VAR:-default} placeholders resolved from the environment at load time (CORE-PACK-002).",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "schemaVersion",
-    "metadata",
-    "identity",
-    "language",
-    "persona",
-    "llm",
-    "embeddings",
-    "privacy"
-  ],
+  "required": ["schemaVersion", "metadata", "identity", "language", "persona", "llm", "embeddings", "privacy"],
   "properties": {
     "schemaVersion": {
       "description": "Agent-pack schema version (CORE-PACK-004). Major must be 3.",
@@ -24,10 +15,7 @@
     "metadata": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "id",
-        "displayName"
-      ],
+      "required": ["id", "displayName"],
       "properties": {
         "id": {
           "type": "string",
@@ -57,11 +45,7 @@
       "description": "Who this agent is and how it turns verified facts into roles (D30, D31, D34, D37, D38).",
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "homeBackingIdentity",
-        "recognizedBackingIdentities",
-        "roleRules"
-      ],
+      "required": ["homeBackingIdentity", "recognizedBackingIdentities", "roleRules"],
       "properties": {
         "homeBackingIdentity": {
           "$ref": "#/$defs/did",
@@ -70,10 +54,7 @@
         "userAgentGate": {
           "description": "Whether a connecting user agent must present an ECS-UserAgent credential (D38, IDENT-RES-003).",
           "type": "string",
-          "enum": [
-            "required",
-            "optional"
-          ],
+          "enum": ["required", "optional"],
           "default": "required"
         },
         "recognizedBackingIdentities": {
@@ -83,20 +64,14 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "identity",
-              "relation"
-            ],
+            "required": ["identity", "relation"],
             "properties": {
               "identity": {
                 "$ref": "#/$defs/did"
               },
               "relation": {
                 "type": "string",
-                "enum": [
-                  "home",
-                  "partner"
-                ]
+                "enum": ["home", "partner"]
               },
               "label": {
                 "type": "string",
@@ -111,10 +86,7 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "when",
-              "roles"
-            ],
+            "required": ["when", "roles"],
             "properties": {
               "when": {
                 "type": "object",
@@ -123,18 +95,11 @@
                 "properties": {
                   "relation": {
                     "type": "string",
-                    "enum": [
-                      "home",
-                      "partner",
-                      "unrecognized"
-                    ]
+                    "enum": ["home", "partner", "unrecognized"]
                   },
                   "connectionType": {
                     "type": "string",
-                    "enum": [
-                      "verifiable-user-agent",
-                      "verifiable-service"
-                    ]
+                    "enum": ["verifiable-user-agent", "verifiable-service"]
                   },
                   "userAgentVerified": {
                     "type": "boolean",
@@ -175,10 +140,7 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "actor",
-              "roles"
-            ],
+            "required": ["actor", "roles"],
             "properties": {
               "actor": {
                 "type": "string",
@@ -206,11 +168,7 @@
               },
               "crossSession": {
                 "type": "string",
-                "enum": [
-                  "own-sessions",
-                  "own-backing-identity",
-                  "all"
-                ],
+                "enum": ["own-sessions", "own-backing-identity", "all"],
                 "default": "own-sessions",
                 "description": "Scope of cross-session memory reads for this role (RBAC-XSESS)."
               },
@@ -304,9 +262,7 @@
       "description": "One agent language (D21). Presentation language is the channel's or frontend's concern.",
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "agent"
-      ],
+      "required": ["agent"],
       "properties": {
         "agent": {
           "$ref": "#/$defs/bcp47"
@@ -317,9 +273,7 @@
       "description": "The author's prompt and interaction surface (D46). The platform appends its own system-prompt add-on; the persona never overrides it (CORE-PROMPT-001).",
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "systemPrompt"
-      ],
+      "required": ["systemPrompt"],
       "properties": {
         "systemPrompt": {
           "type": "string",
@@ -335,11 +289,7 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "id",
-              "label",
-              "action"
-            ],
+            "required": ["id", "label", "action"],
             "properties": {
               "id": {
                 "type": "string",
@@ -353,17 +303,11 @@
               "action": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": [
-                  "type"
-                ],
+                "required": ["type"],
                 "properties": {
                   "type": {
                     "type": "string",
-                    "enum": [
-                      "prompt",
-                      "tool",
-                      "url"
-                    ],
+                    "enum": ["prompt", "tool", "url"],
                     "description": "prompt: send a text as the user's turn; tool: call a tool directly if allowed; url: open a link."
                   },
                   "prompt": {
@@ -380,11 +324,7 @@
               },
               "visibleWhen": {
                 "type": "string",
-                "enum": [
-                  "always",
-                  "bound",
-                  "role"
-                ],
+                "enum": ["always", "bound", "role"],
                 "default": "always"
               },
               "roles": {
@@ -400,23 +340,11 @@
       "description": "Language model provider and model (LLM-PROV). Keys come from the environment, never from the pack.",
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "provider",
-        "model"
-      ],
+      "required": ["provider", "model"],
       "properties": {
         "provider": {
           "type": "string",
-          "enum": [
-            "openai",
-            "anthropic",
-            "ollama",
-            "openai-compatible",
-            "azure-openai",
-            "bedrock",
-            "vertex",
-            "stub"
-          ],
+          "enum": ["openai", "anthropic", "ollama", "openai-compatible", "azure-openai", "bedrock", "vertex", "stub"],
           "description": "Adapter: native (openai, anthropic, ollama), generic chat-completions (openai-compatible), special-protocol (azure-openai, bedrock, vertex). stub is a deterministic offline model for development and tests only."
         },
         "model": {
@@ -447,13 +375,7 @@
         },
         "reasoningEffort": {
           "type": "string",
-          "enum": [
-            "minimal",
-            "low",
-            "medium",
-            "high",
-            "max"
-          ],
+          "enum": ["minimal", "low", "medium", "high", "max"],
           "description": "Passed as reasoning_effort to providers that accept it (OpenAI reasoning models; Kimi K3 accepts low, high, max)."
         },
         "multimodal": {
@@ -471,20 +393,11 @@
       "description": "Embeddings provider for the semantic index and RAG (LLM-EMB). Independent of llm.",
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "provider",
-        "model"
-      ],
+      "required": ["provider", "model"],
       "properties": {
         "provider": {
           "type": "string",
-          "enum": [
-            "openai",
-            "cohere",
-            "voyage",
-            "openai-compatible",
-            "stub"
-          ],
+          "enum": ["openai", "cohere", "voyage", "openai-compatible", "stub"],
           "description": "stub is an offline hash embedding for development and tests only."
         },
         "model": {
@@ -585,9 +498,7 @@
       "description": "Corpus sources exposed to the LLM as a tool (D42, MEM-RAG). Each source carries a visibility (MEM-RAG-005).",
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "sources"
-      ],
+      "required": ["sources"],
       "properties": {
         "enabled": {
           "type": "boolean",
@@ -598,10 +509,7 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "id",
-              "type"
-            ],
+            "required": ["id", "type"],
             "properties": {
               "id": {
                 "type": "string",
@@ -609,10 +517,7 @@
               },
               "type": {
                 "type": "string",
-                "enum": [
-                  "local",
-                  "url"
-                ]
+                "enum": ["local", "url"]
               },
               "path": {
                 "type": "string",
@@ -624,11 +529,7 @@
               },
               "visibility": {
                 "type": "string",
-                "enum": [
-                  "public",
-                  "organization-shared",
-                  "partner-shared"
-                ],
+                "enum": ["public", "organization-shared", "partner-shared"],
                 "default": "public"
               },
               "refreshHours": {
@@ -647,9 +548,7 @@
                   }
                 },
                 "then": {
-                  "required": [
-                    "path"
-                  ]
+                  "required": ["path"]
                 }
               },
               {
@@ -661,9 +560,7 @@
                   }
                 },
                 "then": {
-                  "required": [
-                    "url"
-                  ]
+                  "required": ["url"]
                 }
               }
             ]
@@ -691,12 +588,7 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "name",
-              "description",
-              "method",
-              "url"
-            ],
+            "required": ["name", "description", "method", "url"],
             "properties": {
               "name": {
                 "$ref": "#/$defs/toolName"
@@ -707,13 +599,7 @@
               },
               "method": {
                 "type": "string",
-                "enum": [
-                  "GET",
-                  "POST",
-                  "PUT",
-                  "PATCH",
-                  "DELETE"
-                ]
+                "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]
               },
               "url": {
                 "type": "string",
@@ -821,19 +707,14 @@
       "description": "MCP servers the agent connects to as a client (TOOL-MCP, D41).",
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "servers"
-      ],
+      "required": ["servers"],
       "properties": {
         "servers": {
           "type": "array",
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "name",
-              "transport"
-            ],
+            "required": ["name", "transport"],
             "properties": {
               "name": {
                 "type": "string",
@@ -841,11 +722,7 @@
               },
               "transport": {
                 "type": "string",
-                "enum": [
-                  "stdio",
-                  "sse",
-                  "streamable-http"
-                ]
+                "enum": ["stdio", "sse", "streamable-http"]
               },
               "url": {
                 "type": "string",
@@ -896,26 +773,19 @@
                   }
                 },
                 "then": {
-                  "required": [
-                    "command"
-                  ]
+                  "required": ["command"]
                 }
               },
               {
                 "if": {
                   "properties": {
                     "transport": {
-                      "enum": [
-                        "sse",
-                        "streamable-http"
-                      ]
+                      "enum": ["sse", "streamable-http"]
                     }
                   }
                 },
                 "then": {
-                  "required": [
-                    "url"
-                  ]
+                  "required": ["url"]
                 }
               }
             ]
@@ -929,10 +799,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "id",
-          "label"
-        ],
+        "required": ["id", "label"],
         "properties": {
           "id": {
             "type": "string",
@@ -989,31 +856,20 @@
           "authChallenge": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "type"
-            ],
+            "required": ["type"],
             "properties": {
               "type": {
                 "type": "string",
-                "enum": [
-                  "device",
-                  "face-match",
-                  "document"
-                ]
+                "enum": ["device", "face-match", "document"]
               },
               "onChannelUnavailable": {
                 "type": "string",
-                "enum": [
-                  "fail",
-                  "degrade"
-                ],
+                "enum": ["fail", "degrade"],
                 "default": "fail"
               },
               "referenceImage": {
                 "type": "string",
-                "enum": [
-                  "badge-photo"
-                ],
+                "enum": ["badge-photo"],
                 "default": "badge-photo",
                 "description": "face-match only: which credential photo is the reference (INTX-AUTH-007)."
               },
@@ -1100,13 +956,7 @@
                   "items": {
                     "type": "string"
                   },
-                  "default": [
-                    "image/*",
-                    "audio/webm",
-                    "audio/ogg",
-                    "audio/mp4",
-                    "application/pdf"
-                  ]
+                  "default": ["image/*", "audio/webm", "audio/ogg", "audio/mp4", "application/pdf"]
                 }
               }
             }
@@ -1128,9 +978,7 @@
       "description": "Processing activities with lawful basis and retention (D18, PRIV-RETN), erasure settings (D19, D20).",
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "processingActivities"
-      ],
+      "required": ["processingActivities"],
       "properties": {
         "processingActivities": {
           "type": "array",
@@ -1138,10 +986,7 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "id",
-              "lawfulBasis"
-            ],
+            "required": ["id", "lawfulBasis"],
             "properties": {
               "id": {
                 "type": "string",
@@ -1157,11 +1002,7 @@
               },
               "lawfulBasis": {
                 "type": "string",
-                "enum": [
-                  "consent",
-                  "contract",
-                  "legitimate-interest"
-                ]
+                "enum": ["consent", "contract", "legitimate-interest"]
               },
               "retention": {
                 "type": "object",
@@ -1174,10 +1015,7 @@
                   },
                   "onExpiry": {
                     "type": "string",
-                    "enum": [
-                      "archive",
-                      "delete"
-                    ],
+                    "enum": ["archive", "delete"],
                     "default": "archive",
                     "description": "Histories are archived, never deleted, so the digest chain stays verifiable (PRIV-RETN-002)."
                   }
@@ -1209,10 +1047,7 @@
         "speechToText": {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "provider",
-            "model"
-          ],
+          "required": ["provider", "model"],
           "properties": {
             "enabled": {
               "type": "boolean",
@@ -1220,10 +1055,7 @@
             },
             "provider": {
               "type": "string",
-              "enum": [
-                "openai",
-                "openai-compatible"
-              ]
+              "enum": ["openai", "openai-compatible"]
             },
             "model": {
               "type": "string"
@@ -1245,10 +1077,7 @@
         "vision": {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "provider",
-            "model"
-          ],
+          "required": ["provider", "model"],
           "properties": {
             "enabled": {
               "type": "boolean",
@@ -1256,11 +1085,7 @@
             },
             "provider": {
               "type": "string",
-              "enum": [
-                "openai",
-                "openai-compatible",
-                "llm"
-              ],
+              "enum": ["openai", "openai-compatible", "llm"],
               "description": "llm reuses the configured language model when it is multimodal."
             },
             "model": {
@@ -1288,9 +1113,7 @@
         "imageGeneration": {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "providers"
-          ],
+          "required": ["providers"],
           "properties": {
             "enabled": {
               "type": "boolean",
@@ -1302,11 +1125,7 @@
               "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": [
-                  "name",
-                  "type",
-                  "model"
-                ],
+                "required": ["name", "type", "model"],
                 "properties": {
                   "name": {
                     "type": "string",
@@ -1314,10 +1133,7 @@
                   },
                   "type": {
                     "type": "string",
-                    "enum": [
-                      "openai-image",
-                      "openai-compatible-image"
-                    ]
+                    "enum": ["openai-image", "openai-compatible-image"]
                   },
                   "model": {
                     "type": "string"
@@ -1338,20 +1154,11 @@
                   },
                   "quality": {
                     "type": "string",
-                    "enum": [
-                      "low",
-                      "medium",
-                      "high",
-                      "auto"
-                    ]
+                    "enum": ["low", "medium", "high", "auto"]
                   },
                   "outputFormat": {
                     "type": "string",
-                    "enum": [
-                      "png",
-                      "jpeg",
-                      "webp"
-                    ],
+                    "enum": ["png", "jpeg", "webp"],
                     "default": "png"
                   }
                 }
@@ -1368,10 +1175,7 @@
           "description": "Face-match challenges (INTX-AUTH-007/008): a call on the capability channel joined by the face-verification service.",
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "serviceUrl",
-            "webrtcServerUrl"
-          ],
+          "required": ["serviceUrl", "webrtcServerUrl"],
           "properties": {
             "enabled": {
               "type": "boolean",
@@ -1432,10 +1236,7 @@
         },
         "sink": {
           "type": "string",
-          "enum": [
-            "redis-stream",
-            "http"
-          ],
+          "enum": ["redis-stream", "http"],
           "default": "redis-stream"
         },
         "httpUrl": {
@@ -1534,16 +1335,11 @@
       "description": "How many approvers must accept (INTX-APPR-005).",
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "type"
-      ],
+      "required": ["type"],
       "properties": {
         "type": {
           "type": "string",
-          "enum": [
-            "count",
-            "percentage"
-          ]
+          "enum": ["count", "percentage"]
         },
         "value": {
           "type": "number",
@@ -1563,10 +1359,7 @@
       "properties": {
         "default": {
           "type": "string",
-          "enum": [
-            "none",
-            "all"
-          ],
+          "enum": ["none", "all"],
           "default": "none",
           "description": "none: unlisted tools are denied; all: unlisted tools are allowed to every bound Principal."
         },
@@ -1593,10 +1386,7 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "tools",
-              "approvers"
-            ],
+            "required": ["tools", "approvers"],
             "properties": {
               "tools": {
                 "type": "array",
@@ -1617,10 +1407,7 @@
               },
               "approverConnectionType": {
                 "type": "string",
-                "enum": [
-                  "verifiable-user-agent",
-                  "verifiable-service"
-                ],
+                "enum": ["verifiable-user-agent", "verifiable-service"],
                 "description": "Optionally restrict who may approve by connection type."
               }
             }
@@ -1631,11 +1418,7 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "tools",
-              "purposes",
-              "approvers"
-            ],
+            "required": ["tools", "purposes", "approvers"],
             "properties": {
               "tools": {
                 "type": "array",
