@@ -220,6 +220,7 @@ export async function buildAgent(
   await app.register(cors, {
     origin: (origin, cb) => cb(null, !origin || allowedOrigins.includes(origin) || allowedOrigins.includes('*')),
     credentials: true,
+    methods: ['GET', 'HEAD', 'POST', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['authorization', 'content-type', 'last-event-id', 'accept'],
     exposedHeaders: ['retry-after'],
   })
