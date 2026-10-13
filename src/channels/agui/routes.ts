@@ -122,6 +122,7 @@ export class AgUiRoutes {
         conflict: 409,
         'pairing-expired': 409,
         'pairing-invalid': 409,
+        final: 409,
         closed: 410,
         forbidden: 403,
       }[error.code]
@@ -148,6 +149,7 @@ export class AgUiRoutes {
         deviceHandle?: string
         deviceProof?: string
         resumeSessionId?: string
+        conversationId?: string
       }
       if (!validateCreate(body))
         return reply.code(400).send({ error: 'bad-request', message: ajv.errorsText(validateCreate.errors) })
@@ -161,16 +163,18 @@ export class AgUiRoutes {
             parent,
             client,
             body.locale,
-            body.resumeSessionId
+            body.resumeSessionId,
+            body.conversationId
           )
           const principal = await this.agent.principalOf(session)
-          await this.agent.welcome(session)
+          if (!session.lineage?.length) await this.agent.welcome(session)
           return reply.code(201).send({
             sessionId: session.id,
             sessionToken: newToken,
             state: session.state,
             agent: { did, name: this.agent.pack.metadata.displayName },
             parentSessionId: parent.id,
+            conversationId: session.conversationId,
             resumedFromSessionId: session.resumedFromSessionId,
             principal: principal ? this.agent.principalDisplay(principal) : undefined,
             idleTimeoutSeconds: this.agent.sessions.idleTimeoutSeconds,
@@ -190,12 +194,13 @@ export class AgUiRoutes {
           body.locale,
           body.deviceHandle,
           body.resumeSessionId,
-          body.deviceProof
+          body.deviceProof,
+          body.conversationId
         )
         if (session.state === 'bound') {
           // a paired device: bound at once, no phone round trip (PROF-SESS-010)
           const principal = await this.agent.principalOf(session)
-          if (!session.resumedFromSessionId) await this.agent.welcome(session)
+          if (!session.lineage?.length) await this.agent.welcome(session)
           return reply.code(201).send({
             sessionId: session.id,
             sessionToken: newToken,
@@ -204,6 +209,7 @@ export class AgUiRoutes {
             principal: principal ? this.agent.principalDisplay(principal) : undefined,
             deviceHandle: session.deviceHandle,
             deviceSecret: session.deviceSecret,
+            conversationId: session.conversationId,
             resumedFromSessionId: session.resumedFromSessionId,
             idleTimeoutSeconds: this.agent.sessions.idleTimeoutSeconds,
           })
@@ -218,6 +224,63 @@ export class AgUiRoutes {
           ...(rebind ? { rebind } : {}),
           ...(pairing ? { pairing } : {}),
         })
+      } catch (error) {
+        return this.sendError(reply, error)
+      }
+    })
+
+    // PROF-CONV-001: the Principal's conversations
+    app.get(`${base}/conversations`, async (request, reply) => {
+      const session = await this.session(request, reply, true)
+      if (!session) return
+      const list = await this.agent.sessions.listConversations(session.principalId ?? '')
+      return {
+        conversations: list.map((c) => ({
+          id: c.id,
+          title: c.title,
+          state: c.state,
+          createdAt: c.createdAt,
+          lastActivityAt: c.lastActivityAt,
+          lastPreview: c.lastPreview,
+          open: c.open,
+        })),
+      }
+    })
+
+    // PROF-CONV-002/003: rename, archive, unarchive
+    app.patch(`${base}/conversations/:conversationId`, async (request, reply) => {
+      const session = await this.session(request, reply, true)
+      if (!session) return
+      const { conversationId: id } = request.params as { conversationId: string }
+      const body = (request.body ?? {}) as { title?: string; state?: string }
+      try {
+        const principal = await this.agent.principalOf(session)
+        if (!principal) return reply.code(404).send({ error: 'not-found' })
+        let conversation = await this.agent.sessions.conversationOf(principal, id)
+        if (typeof body.title === 'string')
+          conversation = await this.agent.sessions.renameConversation(conversation, body.title)
+        if (body.state !== undefined) {
+          if (body.state !== 'active' && body.state !== 'archived')
+            return reply.code(400).send({ error: 'bad-request', message: 'state must be active or archived' })
+          conversation = await this.agent.sessions.setConversationState(conversation, body.state)
+        }
+        return { id: conversation.id, title: conversation.title, state: conversation.state }
+      } catch (error) {
+        return this.sendError(reply, error)
+      }
+    })
+
+    // PROF-CONV-004: close for good
+    app.delete(`${base}/conversations/:conversationId`, async (request, reply) => {
+      const session = await this.session(request, reply, true)
+      if (!session) return
+      const { conversationId: id } = request.params as { conversationId: string }
+      try {
+        const principal = await this.agent.principalOf(session)
+        if (!principal) return reply.code(404).send({ error: 'not-found' })
+        const conversation = await this.agent.sessions.conversationOf(principal, id)
+        await this.agent.sessions.finalizeConversation(conversation)
+        return reply.code(204).send()
       } catch (error) {
         return this.sendError(reply, error)
       }
@@ -560,6 +623,7 @@ export class AgUiRoutes {
         boundAt: session.boundAt,
         deviceHandle: session.deviceHandle,
         deviceSecret: session.deviceSecret,
+        conversationId: session.conversationId,
         resumedFromSessionId: session.resumedFromSessionId,
       })
     )

@@ -79,6 +79,18 @@ Decisions taken while implementing hologram-spec v3, in the order they came up. 
     the device's own proof so a browser with no bound session can unlink itself. The idle timeout is
     unchanged: a paired browser simply opens its next session without the phone.
 
+20. **Conversations belong to the Principal** (D52, IDENT-SESS-010..013, PROF-CONV). A `conversations`
+    table (`conv_` ids: principal, title, state active/archived/final, preview, timestamps, the
+    sessions that served it, newest first). Every AG-UI session attaches to one at binding: the one it
+    names (`conversationId`), the one of `resumeSessionId`, or a new one; the conversation's earlier
+    sessions become the session's lineage, so the memory scope follows the conversation and a second
+    device reads the same history. The first Principal message titles it; every turn refreshes the
+    preview and unarchives it. Archive closes its open sessions with reason `user`; final closes them,
+    hides the conversation from the list and refuses `POST {sessions}` naming it with `409 final`.
+    Ownership is checked at bind (a conversation of someone else is ignored and a new one starts) and
+    on every list, rename, archive and delete (404 for another Principal). The phone's DIDComm session
+    carries no conversation. Entries are untouched by any of this: retention and erasure govern them.
+
 ## Not done in this iteration
 
 - Database row-level security, consent management, PII redaction, external IAM (v4 per spec).

@@ -85,6 +85,8 @@ export interface CreateSessionRequest {
   deviceProof?: string
   /** a closed session of the same Principal to resume: its transcript stays readable in the new session (PROF-SESS-009) */
   resumeSessionId?: string
+  /** a conversation of the Principal to open on this device (PROF-CONV-005) */
+  conversationId?: string
 }
 
 export interface BindingMaterial {
@@ -126,6 +128,8 @@ export interface CreateSessionResponse {
   pairing?: 'expired' | 'invalid'
   /** set when the resume was accepted (sibling) or recorded for binding (provisional) */
   resumedFromSessionId?: string
+  /** the conversation this session serves, once bound (PROF-CONV-005) */
+  conversationId?: string
 }
 
 export interface SessionStatus {
@@ -136,6 +140,8 @@ export interface SessionStatus {
   boundAt?: string
   /** the device secret of a freshly bound session, until the client uses it (PROF-BIND-010) */
   deviceSecret?: string
+  /** the conversation this session serves, once bound */
+  conversationId?: string
   lastActivityAt: string
   idleTimeoutSeconds: number
   binding?: BindingMaterial
@@ -178,6 +184,7 @@ export interface SessionBoundValue {
   resumedFromSessionId?: string
   /** the device secret minted at this binding (PROF-BIND-010) */
   deviceSecret?: string
+  conversationId?: string
 }
 
 export interface SessionTokenValue {
@@ -404,6 +411,29 @@ export const RUN_ERROR_CODE = {
 
 // ---------------------------------------------------------------------------------------------
 // History (section 8)
+
+/** A conversation of the Principal with this agent (section 3.6, PROF-CONV-001). */
+export type ConversationState = 'active' | 'archived'
+
+export interface ConversationInfo {
+  id: string
+  title: string
+  state: ConversationState
+  createdAt: string
+  lastActivityAt: string
+  lastPreview?: string
+  /** a session is open on it somewhere */
+  open: boolean
+}
+
+export interface ConversationsResponse {
+  conversations: ConversationInfo[]
+}
+
+export interface ConversationPatch {
+  title?: string
+  state?: ConversationState
+}
 
 /** A paired device of the Principal (PROF-SESS-011). */
 export interface DeviceInfo {

@@ -2,6 +2,7 @@
 import type {
   ApprovalRecord,
   AuthChallengeRecord,
+  Conversation,
   CredentialPresentation,
   DigestAnchor,
   ElevationGrant,
@@ -23,6 +24,7 @@ export class MemoryStore implements Store {
   public readonly kind = 'memory' as const
   private principalRows = new Map<string, Principal>()
   private sessionRows = new Map<string, Session>()
+  private conversationRows = new Map<string, Conversation>()
   private entryRows = new Map<string, StoredEntry>()
   private embeddings = new Map<string, number[]>()
   private noteRows = new Map<string, WorkingMemoryNote>()
@@ -88,6 +90,19 @@ export class MemoryStore implements Store {
       s.streamCursor += 1
       return s.streamCursor
     },
+  }
+
+  public conversations = {
+    get: async (id: string) => clone(this.conversationRows.get(id)),
+    save: async (c: Conversation) => {
+      this.conversationRows.set(c.id, clone(c))
+    },
+    listByPrincipal: async (principalId: string, states?: Conversation['state'][]) =>
+      clone(
+        [...this.conversationRows.values()]
+          .filter((c) => c.principalId === principalId && (!states || states.includes(c.state)))
+          .sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt))
+      ),
   }
 
   private scoped(scope: ScopePredicate): StoredEntry[] {

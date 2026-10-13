@@ -125,6 +125,7 @@ export class HologramAgent {
       parentSessionId: session.parentSessionId,
       deviceHandle: session.state === 'bound' ? session.deviceHandle : undefined,
       deviceSecret: session.state === 'bound' ? session.deviceSecret : undefined,
+      conversationId: session.state === 'bound' ? session.conversationId : undefined,
       resumedFromSessionId: session.state === 'bound' ? session.resumedFromSessionId : undefined,
     }
   }
@@ -175,9 +176,18 @@ export class HologramAgent {
     locale?: string,
     deviceHandle?: string,
     resumeSessionId?: string,
-    deviceProof?: string
+    deviceProof?: string,
+    conversationId?: string
   ) {
-    const created = await this.sessions.createProvisional('ag-ui', client, locale, deviceHandle, resumeSessionId)
+    const conversation = await this.sessions.requireOpenable(conversationId, resumeSessionId)
+    const created = await this.sessions.createProvisional(
+      'ag-ui',
+      client,
+      locale,
+      deviceHandle,
+      resumeSessionId,
+      conversation
+    )
     let rebind: 'asked' | 'unavailable' | undefined
     let pairing: 'expired' | 'invalid' | undefined
     if (deviceHandle) {
@@ -229,8 +239,15 @@ export class HologramAgent {
     return this.sessions.revokeDevice(principal, handle)
   }
 
-  public createSibling(parent: Session, client: ClientDescription, locale?: string, resumeSessionId?: string) {
-    return this.sessions.createSibling(parent, client, locale, resumeSessionId)
+  public async createSibling(
+    parent: Session,
+    client: ClientDescription,
+    locale?: string,
+    resumeSessionId?: string,
+    conversationId?: string
+  ) {
+    const conversation = await this.sessions.requireOpenable(conversationId, resumeSessionId)
+    return this.sessions.createSibling(parent, client, locale, resumeSessionId, conversation)
   }
 
   public async closeSession(session: Session, reason: ClosureReason): Promise<void> {
@@ -261,7 +278,10 @@ export class HologramAgent {
     const principal = await this.principalOf(session)
     if (!principal) throw new Error('principal missing')
     await this.sessions.touch(session)
-    return this.orchestrator.run(session, principal, input, sink, signal)
+    await this.sessions.noteActivity(session, input.entry.text, { title: true })
+    const result = await this.orchestrator.run(session, principal, input, sink, signal)
+    if (result.reply?.text) await this.sessions.noteActivity(session, result.reply.text)
+    return result
   }
 
   /** Structured actions of a turn (profile section 6; INTX-MENU, INTX-APPR, INTX-REACT, INTX-STATE). */

@@ -278,6 +278,120 @@ describe('device pairing (PROF-SESS-010..012, PROF-BIND-010, IDENT-DEV-001..005)
   })
 })
 
+describe('conversations (PROF-CONV-001..005, IDENT-SESS-010..013)', () => {
+  const auth = (token: string) => ({ authorization: `Bearer ${token}` })
+  const list = async (token: string) =>
+    (await running.app.inject({ method: 'GET', url: '/agui/v3/sessions/conversations', headers: auth(token) })).json()
+      .conversations as { id: string; title: string; state: string; open: boolean; lastPreview?: string }[]
+
+  it('creates the conversation at binding, titles it from the first message, renames, archives and unarchives', async () => {
+    const { body } = await createSession()
+    await bindViaPhone(body.sessionId, 'did:peer:mia')
+    const status = (
+      await running.app.inject({
+        method: 'GET',
+        url: `/agui/v3/sessions/${body.sessionId}`,
+        headers: auth(body.sessionToken),
+      })
+    ).json() as { conversationId: string }
+    expect(status.conversationId).toMatch(/^conv_/)
+    let conversations = await list(body.sessionToken)
+    expect(conversations).toEqual([
+      expect.objectContaining({ id: status.conversationId, title: '', state: 'active', open: true }),
+    ])
+    await run(body.sessionId, body.sessionToken, 'where is my parcel')
+    conversations = await list(body.sessionToken)
+    expect(conversations[0].title).toBe('where is my parcel')
+    expect(conversations[0].lastPreview).toBeTruthy()
+    const renamed = await running.app.inject({
+      method: 'PATCH',
+      url: `/agui/v3/sessions/conversations/${status.conversationId}`,
+      headers: auth(body.sessionToken),
+      payload: { title: 'Parcel 4471' },
+    })
+    expect(renamed.json().title).toBe('Parcel 4471')
+    // a second session of the same person (sibling) sees the list and archives: the first session closes
+    const sibling = await createSession(body.sessionToken)
+    const archived = await running.app.inject({
+      method: 'PATCH',
+      url: `/agui/v3/sessions/conversations/${status.conversationId}`,
+      headers: auth(sibling.body.sessionToken),
+      payload: { state: 'archived' },
+    })
+    expect(archived.json().state).toBe('archived')
+    const first = await running.agent.sessions.get(body.sessionId)
+    expect(first?.state).toBe('closed')
+    conversations = await list(sibling.body.sessionToken)
+    expect(conversations.find((c) => c.id === status.conversationId)).toMatchObject({ state: 'archived', open: false })
+    // opening it again from the sibling token resumes its history; writing unarchives it
+    const reopened = await running.app.inject({
+      method: 'POST',
+      url: '/agui/v3/sessions',
+      headers: auth(sibling.body.sessionToken),
+      payload: { client, locale: 'en', conversationId: status.conversationId },
+    })
+    expect(reopened.statusCode).toBe(201)
+    const re = reopened.json() as { sessionId: string; sessionToken: string; conversationId: string }
+    expect(re.conversationId).toBe(status.conversationId)
+    const history = await running.app.inject({
+      method: 'GET',
+      url: `/agui/v3/sessions/${re.sessionId}/messages?limit=50`,
+      headers: auth(re.sessionToken),
+    })
+    const messages = history.json().messages as { role: string; content?: string }[]
+    expect(messages.some((m) => m.role === 'user' && m.content === 'where is my parcel')).toBe(true)
+    await run(re.sessionId, re.sessionToken, 'any news?')
+    conversations = await list(re.sessionToken)
+    expect(conversations.find((c) => c.id === status.conversationId)?.state).toBe('active')
+  })
+
+  it('closes a conversation for good: gone from the list, resumption refused with 409 final', async () => {
+    const { body } = await createSession()
+    await bindViaPhone(body.sessionId, 'did:peer:nina')
+    await run(body.sessionId, body.sessionToken, 'hello')
+    const [conversation] = await list(body.sessionToken)
+    const sibling = await createSession(body.sessionToken)
+    const closed = await running.app.inject({
+      method: 'DELETE',
+      url: `/agui/v3/sessions/conversations/${conversation.id}`,
+      headers: auth(sibling.body.sessionToken),
+    })
+    expect(closed.statusCode).toBe(204)
+    expect((await list(sibling.body.sessionToken)).some((c) => c.id === conversation.id)).toBe(false)
+    const refused = await running.app.inject({
+      method: 'POST',
+      url: '/agui/v3/sessions',
+      headers: auth(sibling.body.sessionToken),
+      payload: { client, locale: 'en', conversationId: conversation.id },
+    })
+    expect(refused.statusCode).toBe(409)
+    expect(refused.json().error).toBe('final')
+    const other = await running.app.inject({
+      method: 'POST',
+      url: '/agui/v3/sessions',
+      payload: { client, locale: 'en', conversationId: conversation.id },
+    })
+    expect(other.statusCode).toBe(409)
+  })
+
+  it("does not list another principal's conversation", async () => {
+    const a = await createSession()
+    await bindViaPhone(a.body.sessionId, 'did:peer:otto')
+    await run(a.body.sessionId, a.body.sessionToken, 'mine')
+    const [mine] = await list(a.body.sessionToken)
+    const b = await createSession()
+    await bindViaPhone(b.body.sessionId, 'did:peer:paula')
+    expect((await list(b.body.sessionToken)).some((c) => c.id === mine.id)).toBe(false)
+    const forbidden = await running.app.inject({
+      method: 'PATCH',
+      url: `/agui/v3/sessions/conversations/${mine.id}`,
+      headers: auth(b.body.sessionToken),
+      payload: { title: 'stolen' },
+    })
+    expect(forbidden.statusCode).toBe(404)
+  })
+})
+
 describe('runs, tools and history (PROF-RUN-002..005, PROF-MAP-005, PROF-HIST-001)', () => {
   it('ignores client tools, runs a permitted tool with a step label, hides tool names from the wire', async () => {
     const { body } = await createSession()

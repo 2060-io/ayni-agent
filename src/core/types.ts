@@ -69,6 +69,21 @@ export interface Principal {
 }
 
 export type ChannelType = 'didcomm' | 'ag-ui' | 'a2a'
+
+/** The Principal's view of a thread with the agent (D52): title, state, and the sessions that served it. */
+export type ConversationState = 'active' | 'archived' | 'final'
+export interface Conversation {
+  id: string
+  principalId: string
+  channelType: ChannelType
+  title: string
+  state: ConversationState
+  lastPreview?: string
+  createdAt: string
+  lastActivityAt: string
+  /** every session that served it, newest first; the lineage of the next one */
+  sessionIds: string[]
+}
 export type SessionState = 'provisional' | 'bound' | 'closed'
 export type ClosureReason =
   | 'user'
@@ -116,6 +131,8 @@ export interface Session {
   deviceHandle?: string
   /** the pairing secret handed to the client at binding, kept until the client rotates it (D51) */
   deviceSecret?: string
+  /** the conversation this session serves (D52); AG-UI sessions only */
+  conversationId?: string
   /** a closed session this one resumes: its entries stay readable here (IDENT-SESS-009) */
   resumedFromSessionId?: string
   /** ids of every session in the resume chain, oldest last */

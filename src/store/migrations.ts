@@ -155,4 +155,17 @@ CREATE TABLE IF NOT EXISTS kv (
 );
 `,
   },
+  {
+    version: '3.1.0',
+    sql: `
+CREATE TABLE IF NOT EXISTS conversations (
+  id TEXT PRIMARY KEY,
+  principal_id TEXT NOT NULL,
+  state TEXT NOT NULL,
+  last_activity_at TIMESTAMPTZ NOT NULL,
+  data JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS conversations_principal ON conversations (principal_id, state, last_activity_at DESC);
+`,
+  },
 ]

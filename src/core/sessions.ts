@@ -8,7 +8,7 @@ import type { AgentPack } from '../config/packTypes.js'
 import type { Store } from '../store/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
-import type { ChannelType, ClientDescription, ClosureReason, Principal, Session } from './types.js'
+import type { ChannelType, ClientDescription, ClosureReason, Conversation, Principal, Session } from './types.js'
 
 export interface InvitationMinter {
   /** obtains an Out-of-Band invitation from the DIDComm agent (CHAN-BIND-008) */
@@ -35,7 +35,8 @@ export class SessionError extends Error {
       | 'unauthorized'
       | 'forbidden'
       | 'pairing-expired'
-      | 'pairing-invalid',
+      | 'pairing-invalid'
+      | 'final',
     public readonly reason?: ClosureReason
   ) {
     super(message)
@@ -136,6 +137,7 @@ export class SessionService {
     session.boundAt = nowIso()
     session.lastActivityAt = nowIso()
     await this.applyResume(session, principal)
+    await this.attachConversation(session, principal)
     this.rotateDevice(session, principal)
     // older sessions of this device must not hand out the superseded secret through their status
     for (const other of await this.store.sessions.listByPrincipal(principal.id, ['bound'])) {
@@ -203,7 +205,8 @@ export class SessionService {
     client: ClientDescription,
     locale?: string,
     deviceHandle?: string,
-    resumeSessionId?: string
+    resumeSessionId?: string,
+    conversationId?: string
   ): Promise<{ session: Session; token: string }> {
     const { token, hash } = this.newToken()
     const id = prefixedId('ses')
@@ -216,6 +219,7 @@ export class SessionService {
       client,
       locale,
       deviceHandle,
+      conversationId,
       resumedFromSessionId: resumeSessionId,
       tokenHash: hash,
       lastActivityAt: nowIso(),
@@ -286,11 +290,8 @@ export class SessionService {
     const wanted = session.resumedFromSessionId
     if (!wanted) return
     const old = await this.store.sessions.get(wanted)
-    if (old?.state !== 'closed' || old.principalId !== principal.id) {
-      this.logger.warn(
-        { sessionId: session.id, resume: wanted },
-        'resume refused: not a closed session of this principal'
-      )
+    if (!old || old.principalId !== principal.id) {
+      this.logger.warn({ sessionId: session.id, resume: wanted }, 'resume refused: not a session of this principal')
       session.resumedFromSessionId = undefined
       return
     }
@@ -303,7 +304,8 @@ export class SessionService {
     parent: Session,
     client: ClientDescription,
     locale?: string,
-    resumeSessionId?: string
+    resumeSessionId?: string,
+    conversationId?: string
   ): Promise<{ session: Session; token: string }> {
     this.requireBound(parent)
     if (!this.siblingsAllowed) throw new SessionError('sibling sessions are disabled', 'forbidden')
@@ -321,6 +323,7 @@ export class SessionService {
       locale: locale ?? parent.locale,
       parentSessionId: parent.id,
       deviceHandle: parent.deviceHandle,
+      conversationId,
       resumedFromSessionId: resumeSessionId,
       tokenHash: hash,
       boundAt: nowIso(),
@@ -329,9 +332,118 @@ export class SessionService {
       streamCursor: 0,
     }
     await this.applyResume(session, principal)
+    await this.attachConversation(session, principal)
     await this.store.sessions.save(session)
     await this.events.onBound(session, principal)
     return { session, token }
+  }
+
+  // ---- conversations (D52, IDENT-SESS-010..013) -------------------------------------------------
+
+  /**
+   * Every AG-UI session serves one conversation of its Principal: the one it names, the one of the
+   * session it resumes, or a new one. The conversation's earlier sessions become the lineage.
+   */
+  private async attachConversation(session: Session, principal: Principal): Promise<void> {
+    if (session.channelType !== 'ag-ui') return
+    let wanted = session.conversationId
+    if (!wanted && session.resumedFromSessionId) {
+      wanted = (await this.store.sessions.get(session.resumedFromSessionId))?.conversationId
+    }
+    let conversation = wanted ? await this.store.conversations.get(wanted) : undefined
+    if (conversation && (conversation.principalId !== principal.id || conversation.state === 'final')) {
+      this.logger.warn({ sessionId: session.id, conversationId: wanted }, 'conversation not open to this session')
+      conversation = undefined
+      session.resumedFromSessionId = undefined
+      session.lineage = undefined
+    }
+    const now = nowIso()
+    if (!conversation) {
+      conversation = {
+        id: prefixedId('conv'),
+        principalId: principal.id,
+        channelType: session.channelType,
+        title: '',
+        state: 'active',
+        createdAt: now,
+        lastActivityAt: now,
+        sessionIds: [],
+      }
+    }
+    session.conversationId = conversation.id
+    const earlier = conversation.sessionIds.filter((id) => id !== session.id)
+    if (earlier.length) session.lineage = earlier.slice(0, 20)
+    conversation.sessionIds = [session.id, ...earlier]
+    conversation.lastActivityAt = now
+    await this.store.conversations.save(conversation)
+  }
+
+  /** The Principal's conversations, active and archived, newest activity first (PROF-CONV-001). */
+  public async listConversations(principalId: string): Promise<(Conversation & { open: boolean })[]> {
+    const open = new Set((await this.store.sessions.listByPrincipal(principalId, ['bound'])).map((s) => s.id))
+    const list = await this.store.conversations.listByPrincipal(principalId, ['active', 'archived'])
+    return list.map((c) => ({ ...c, open: c.sessionIds.some((id) => open.has(id)) }))
+  }
+
+  public async conversationOf(principal: Principal, id: string): Promise<Conversation> {
+    const conversation = await this.store.conversations.get(id)
+    if (!conversation || conversation.principalId !== principal.id)
+      throw new SessionError('conversation not found', 'not-found')
+    return conversation
+  }
+
+  /** Refuses a request that names a conversation this agent cannot open (final, PROF-CONV-004). */
+  public async requireOpenable(conversationId?: string, resumeSessionId?: string): Promise<string | undefined> {
+    let id = conversationId
+    if (!id && resumeSessionId) id = (await this.store.sessions.get(resumeSessionId))?.conversationId
+    if (!id) return undefined
+    const conversation = await this.store.conversations.get(id)
+    if (!conversation) throw new SessionError('conversation not found', 'not-found')
+    if (conversation.state === 'final') throw new SessionError('conversation is final', 'final')
+    return id
+  }
+
+  public async renameConversation(conversation: Conversation, title: string): Promise<Conversation> {
+    conversation.title = title.trim().slice(0, 120)
+    await this.store.conversations.save(conversation)
+    return conversation
+  }
+
+  /** Archiving closes the conversation's open sessions (PROF-CONV-003); unarchiving only flips the state. */
+  public async setConversationState(conversation: Conversation, state: 'active' | 'archived'): Promise<Conversation> {
+    if (conversation.state === 'final') throw new SessionError('conversation is final', 'final')
+    conversation.state = state
+    await this.store.conversations.save(conversation)
+    if (state === 'archived') await this.closeConversationSessions(conversation)
+    return conversation
+  }
+
+  /** Close for good (PROF-CONV-004): final, sessions closed, never listed or resumed again. */
+  public async finalizeConversation(conversation: Conversation): Promise<Conversation> {
+    conversation.state = 'final'
+    await this.store.conversations.save(conversation)
+    await this.closeConversationSessions(conversation)
+    this.logger.info({ conversationId: conversation.id }, 'conversation closed for good')
+    return conversation
+  }
+
+  private async closeConversationSessions(conversation: Conversation): Promise<void> {
+    for (const id of conversation.sessionIds) {
+      const s = await this.store.sessions.get(id)
+      if (s && s.state !== 'closed') await this.close(s, 'user')
+    }
+  }
+
+  /** A turn on a conversation keeps its title, preview and activity current (IDENT-SESS-013). */
+  public async noteActivity(session: Session, text: string, opts: { title?: boolean } = {}): Promise<void> {
+    if (!session.conversationId) return
+    const conversation = await this.store.conversations.get(session.conversationId)
+    if (!conversation || conversation.state === 'final') return
+    if (conversation.state === 'archived') conversation.state = 'active' // writing unarchives (UI-SESS-012)
+    if (opts.title && !conversation.title) conversation.title = text.trim().slice(0, 60)
+    if (text.trim()) conversation.lastPreview = text.trim().slice(0, 120)
+    conversation.lastActivityAt = nowIso()
+    await this.store.conversations.save(conversation)
   }
 
   // ---- binding (D5, CHAN-BIND-003/009, PROF-BIND-002/004) ---------------------------------------
@@ -386,6 +498,7 @@ export class SessionService {
     session.boundAt = nowIso()
     session.lastActivityAt = nowIso()
     await this.applyResume(session, principal)
+    await this.attachConversation(session, principal)
     // the phone confirmed this device: it becomes a paired device with a fresh secret (D48, D51)
     this.rotateDevice(session, principal)
     await this.store.principals.save(principal)

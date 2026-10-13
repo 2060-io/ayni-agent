@@ -45,6 +45,10 @@
     "deviceProof": {
       "type": "string",
       "maxLength": 128
+    },
+    "conversationId": {
+      "type": "string",
+      "maxLength": 128
     }
   }
 }

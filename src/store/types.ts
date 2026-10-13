@@ -7,6 +7,8 @@ import type {
   ApprovalStatus,
   AuthChallengeRecord,
   ChannelType,
+  Conversation,
+  ConversationState,
   CredentialPresentation,
   DigestAnchor,
   ElevationGrant,
@@ -59,6 +61,12 @@ export interface SessionRepo {
   listByPrincipal(principalId: string, states?: SessionState[]): Promise<Session[]>
   listByState(state: SessionState): Promise<Session[]>
   nextStreamCursor(id: string): Promise<number>
+}
+
+export interface ConversationRepo {
+  get(id: string): Promise<Conversation | undefined>
+  save(conversation: Conversation): Promise<void>
+  listByPrincipal(principalId: string, states?: ConversationState[]): Promise<Conversation[]>
 }
 
 export interface EntryRepo {
@@ -156,6 +164,7 @@ export interface Store {
   close(): Promise<void>
   principals: PrincipalRepo
   sessions: SessionRepo
+  conversations: ConversationRepo
   entries: EntryRepo
   notes: WorkingMemoryRepo
   preferences: PreferenceRepo

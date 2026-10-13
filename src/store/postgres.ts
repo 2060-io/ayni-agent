@@ -3,6 +3,7 @@ import pg from 'pg'
 import type {
   ApprovalRecord,
   AuthChallengeRecord,
+  Conversation,
   CredentialPresentation,
   DigestAnchor,
   ElevationGrant,
@@ -147,6 +148,27 @@ export class PostgresStore implements Store {
       if (!row) throw new Error(`session ${id} not found`)
       return Number(row.stream_cursor)
     },
+  }
+
+  public conversations = {
+    get: (id: string) => this.one<Conversation>('SELECT data FROM conversations WHERE id = $1', [id]),
+    save: async (c: Conversation) => {
+      await this.pool.query(
+        `INSERT INTO conversations (id, principal_id, state, last_activity_at, data) VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (id) DO UPDATE SET principal_id=$2, state=$3, last_activity_at=$4, data=$5`,
+        [c.id, c.principalId, c.state, c.lastActivityAt, c]
+      )
+    },
+    listByPrincipal: (principalId: string, states?: Conversation['state'][]) =>
+      states
+        ? this.many<Conversation>(
+            'SELECT data FROM conversations WHERE principal_id = $1 AND state = ANY($2) ORDER BY last_activity_at DESC',
+            [principalId, states]
+          )
+        : this.many<Conversation>(
+            'SELECT data FROM conversations WHERE principal_id = $1 ORDER BY last_activity_at DESC',
+            [principalId]
+          ),
   }
 
   private entryFromRow(r: Row): StoredEntry {
