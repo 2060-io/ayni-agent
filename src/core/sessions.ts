@@ -93,7 +93,8 @@ export class SessionService {
   public async createProvisional(
     channelType: ChannelType,
     client: ClientDescription,
-    locale?: string
+    locale?: string,
+    deviceHandle?: string
   ): Promise<{ session: Session; token: string }> {
     const { token, hash } = this.newToken()
     const id = prefixedId('ses')
@@ -105,6 +106,7 @@ export class SessionService {
       state: 'provisional',
       client,
       locale,
+      deviceHandle,
       tokenHash: hash,
       lastActivityAt: nowIso(),
       createdAt: nowIso(),
@@ -187,6 +189,7 @@ export class SessionService {
       client,
       locale: locale ?? parent.locale,
       parentSessionId: parent.id,
+      deviceHandle: parent.deviceHandle,
       tokenHash: hash,
       boundAt: nowIso(),
       lastActivityAt: nowIso(),
@@ -249,6 +252,15 @@ export class SessionService {
     session.state = 'bound'
     session.boundAt = nowIso()
     session.lastActivityAt = nowIso()
+    // the device handle lets a later session on the same browser profile ask the phone for a re-link
+    if (!principal.devices?.some((d) => d.handle === session.deviceHandle)) {
+      session.deviceHandle = prefixedId('dev', 24)
+      principal.devices = [
+        ...(principal.devices ?? []).slice(-19),
+        { handle: session.deviceHandle, client: session.client, createdAt: nowIso() },
+      ]
+      await this.store.principals.save(principal)
+    }
     await this.store.sessions.save(session)
     this.logger.info({ sessionId: session.id, principalId: principal.id }, 'session bound')
     await this.events.onBound(session, principal)

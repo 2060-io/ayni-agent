@@ -140,7 +140,7 @@ export class AgUiRoutes {
 
     // PROF-SESS-001 create, PROF-SESS-007 sibling
     app.post(base, async (request, reply) => {
-      const body = request.body as { client?: ClientDescription; locale?: string }
+      const body = request.body as { client?: ClientDescription; locale?: string; deviceHandle?: string }
       if (!validateCreate(body))
         return reply.code(400).send({ error: 'bad-request', message: ajv.errorsText(validateCreate.errors) })
       const client = body.client as ClientDescription
@@ -166,7 +166,11 @@ export class AgUiRoutes {
         }
       }
       try {
-        const { session, token: newToken } = await this.agent.createSession(client, body.locale)
+        const {
+          session,
+          token: newToken,
+          rebind,
+        } = await this.agent.createSession(client, body.locale, body.deviceHandle)
         return reply.code(201).send({
           sessionId: session.id,
           sessionToken: newToken,
@@ -174,6 +178,7 @@ export class AgUiRoutes {
           agent: { did, name: this.agent.pack.metadata.displayName },
           binding: this.agent.bindingMaterial(session),
           idleTimeoutSeconds: this.agent.sessions.idleTimeoutSeconds,
+          ...(rebind ? { rebind } : {}),
         })
       } catch (error) {
         return this.sendError(reply, error)
@@ -476,6 +481,7 @@ export class AgUiRoutes {
       ev.custom(CUSTOM_EVENT.sessionBound, {
         principal: this.agent.principalDisplay(principal),
         boundAt: session.boundAt,
+        deviceHandle: session.deviceHandle,
       })
     )
     await this.announceState(session)

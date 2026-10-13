@@ -79,6 +79,8 @@ export interface ClientDescription {
 export interface CreateSessionRequest {
   client: ClientDescription
   locale?: string
+  /** handle of a device the agent bound before (PROF-BIND-009): the agent asks the phone to re-link it */
+  deviceHandle?: string
 }
 
 export interface BindingMaterial {
@@ -111,6 +113,9 @@ export interface CreateSessionResponse {
   parentSessionId?: string
   principal?: PrincipalDisplay
   idleTimeoutSeconds: number
+  /** 'asked' when the phone of the known device received the re-link question (PROF-BIND-009) */
+  rebind?: 'asked' | 'unavailable'
+  deviceHandle?: string
 }
 
 export interface SessionStatus {
@@ -123,6 +128,7 @@ export interface SessionStatus {
   idleTimeoutSeconds: number
   binding?: BindingMaterial
   parentSessionId?: string
+  deviceHandle?: string
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -153,6 +159,8 @@ export interface SessionStateValue {
 export interface SessionBoundValue {
   principal: PrincipalDisplay
   boundAt: string
+  /** opaque handle of this device, presented on later session creations to ask the phone for a re-link */
+  deviceHandle?: string
 }
 
 export interface SessionTokenValue {

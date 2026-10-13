@@ -6,7 +6,7 @@
 import type { FastifyInstance } from 'fastify'
 import type { HologramAgent } from '../../core/agent.js'
 import type { TurnSink } from '../../core/orchestrator.js'
-import type { MessageAttachment, Session } from '../../core/types.js'
+import type { MessageAttachment, Principal, Session } from '../../core/types.js'
 import type { Logger } from '../../util/logger.js'
 import { clientOfConnection, DidcommAdapter } from './adapter.js'
 import type { IdentityFlow } from './identity.js'
@@ -22,11 +22,19 @@ interface Envelope {
 const CODE_PATTERN = /^\/?(?:link\s+)?([a-z0-9]{2})-?([a-z0-9]{2})$/i
 const LINK_ATTEMPTS = 5
 const LINK_WINDOW_MS = 10 * 60_000
+const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+
+function decoyCode(): string {
+  const pick = () => CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)]
+  return `${pick()}${pick()}-${pick()}${pick()}`
+}
 
 export class DidcommEvents {
   private readonly identifying = new Set<string>()
   /** connections that chose "Link a web session" and owe a code */
   private readonly awaitingCode = new Map<string, number>()
+  /** re-link questions sent to a known device's phone, by connection and question thread */
+  private readonly rebinds = new Map<string, { sessionId: string; stage: 'ask' | 'code'; codes: string[] }>()
   private readonly linkAttempts = new Map<string, { count: number; since: number }>()
 
   public constructor(
@@ -173,6 +181,70 @@ export class DidcommEvents {
   }
 
   /**
+   * A provisional session arrived from a device this Principal bound before (PROF-BIND-009): ask on
+   * the phone whether to link it, then which of three codes the screen shows; the right pick binds.
+   */
+  public async offerRebind(session: Session, principal: Principal): Promise<boolean> {
+    const capability = await this.agent.router.capabilitySession(principal)
+    if (!capability || !session.binding) return false
+    const connectionId = capability.externalRef
+    const threadId = await this.adapter.askQuestion(
+      connectionId,
+      `Link a new web session (${session.client.name} on ${session.client.platform})?`,
+      `A page in your browser asks to be linked to ${this.agent.pack.metadata.displayName}. Answer No if you did not open it.`,
+      ['Yes', 'No']
+    )
+    this.rebinds.set(`${connectionId}:${threadId}`, { sessionId: session.id, stage: 'ask', codes: [] })
+    return true
+  }
+
+  private async onRebindAnswer(connectionId: string, threadId: string, response: string): Promise<boolean> {
+    const key = `${connectionId}:${threadId}`
+    const pending = this.rebinds.get(key)
+    if (!pending) return false
+    this.rebinds.delete(key)
+    const session = await this.agent.sessions.get(pending.sessionId)
+    if (session?.state !== 'provisional' || !session.binding || Date.parse(session.binding.expiresAt) < Date.now()) {
+      await this.client.sendText(connectionId, 'That web session is no longer waiting.')
+      return true
+    }
+    if (pending.stage === 'ask') {
+      if (!/^(yes|y)$/i.test(response.trim())) return true
+      // the real code and two decoys, shuffled: picking the one on the screen is the nonce confirmation
+      const real = session.binding.bindingCode
+      const codes = new Set<string>([real])
+      while (codes.size < 3) codes.add(decoyCode())
+      const options = [...codes].sort(() => Math.random() - 0.5)
+      const next = await this.adapter.askQuestion(
+        connectionId,
+        'Which code is shown on the screen?',
+        'Pick the code the web page displays.',
+        options
+      )
+      this.rebinds.set(`${connectionId}:${next}`, { sessionId: session.id, stage: 'code', codes: options })
+      return true
+    }
+    const bound = await this.agent.didcommSession(connectionId)
+    if (!bound) return true
+    if (response.trim().toUpperCase() !== session.binding.bindingCode) {
+      await this.client.sendText(connectionId, 'That is not the code on the screen. The web session was not linked.')
+      return true
+    }
+    try {
+      await this.agent.sessions.bind(session, bound.principal, session.binding.nonce)
+      await this.client.sendText(
+        connectionId,
+        `Linked: ${session.client.name} on ${session.client.platform} (code ${session.binding.bindingCode}).`
+      )
+      await this.agent.welcome(session)
+    } catch (error) {
+      this.logger.warn({ err: error, sessionId: session.id }, 'rebind refused')
+      await this.client.sendText(connectionId, 'This link could not be completed; ask the web page for a new code.')
+    }
+    return true
+  }
+
+  /**
    * Manual pairing: the person types the binding code shown on the screen (when the wallet does not
    * reuse the invitation). The confirmation question still gates the binding; attempts are limited.
    */
@@ -201,6 +273,7 @@ export class DidcommEvents {
   }
 
   private async onAnswer(connectionId: string, threadId: string, response: string): Promise<void> {
+    if (await this.onRebindAnswer(connectionId, threadId, response)) return
     const yes = /^(yes|approve|y)$/i.test(response.trim())
     const binding = await this.agent.sessions.findByConfirmation(connectionId, threadId)
     if (binding) {

@@ -56,6 +56,8 @@ export interface Principal {
   identityCredentialRef: string | null
   livenessCache: Record<string, LivenessVerdict>
   userAgentVerified: boolean
+  /** devices (browser profiles) this Principal bound before, by opaque handle */
+  devices?: { handle: string; client: ClientDescription; createdAt: string }[]
   createdAt: string
   updatedAt: string
 }
@@ -104,6 +106,8 @@ export interface Session {
   closedAt?: string
   closedReason?: ClosureReason
   binding?: BindingState
+  /** opaque device handle: inherited from the creation request or minted at binding */
+  deviceHandle?: string
   tokenHash?: string
   lastActivityAt: string
   createdAt: string

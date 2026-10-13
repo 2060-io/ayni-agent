@@ -242,7 +242,9 @@ export async function buildAgent(
   aguiRoutes = new AgUiRoutes(agent, agui, streams, logger)
   aguiRoutes.register(app, did)
   const identity = new IdentityFlow(pack, vsAgent, resolver, env.devAllowUnidentifiedPrincipals, logger)
-  new DidcommEvents(agent, vsAgent, identity, didcomm, env.vsAgentEventsApiKey, logger).register(app)
+  const didcommEvents = new DidcommEvents(agent, vsAgent, identity, didcomm, env.vsAgentEventsApiKey, logger)
+  didcommEvents.register(app)
+  agent.rebindOffer = (session, principal) => didcommEvents.offerRebind(session, principal)
   registerDidcommCallbacks(app, agent, mediaLinks, logger)
   if (pack.channels?.a2a?.enabled) new A2aRoutes(agent, a2a, logger).register(app, did)
 
