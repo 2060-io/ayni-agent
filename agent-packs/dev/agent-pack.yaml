@@ -32,7 +32,7 @@ language:
 persona:
   systemPrompt: |
     You are the Hologram Agent development assistant. Be brief.
-  greeting: "Hello {userName}, this is the development agent. Type /call echo {\"text\":\"hi\"} to exercise a tool."
+  greeting: "Hello {userName}, this is the development agent. Ask me anything; try the echo tool."
   menu:
     - id: help
       label: Help
