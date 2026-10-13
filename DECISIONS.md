@@ -55,7 +55,7 @@ Decisions taken while implementing hologram-spec v3, in the order they came up. 
     `resume` entry carrying `menuId`/`itemId`); the run is not suspended with an interrupt outcome.
     Mid-run inputs that must block the model are approvals, which end the model's tool call with a
     pending result instead.
-17. **One reaction per person per message** (INTX-REACT-004, PROF-ACT-003). The current reaction of
+17. **One reaction per person per message** (INTX-REACT-004, PROF-RUN-010). The current reaction of
     each Principal lives in the target entry's payload (`reactions[principalId]`), so history carries
     it in `metadata.reactions`; an `add` replaces the previous one, a `remove` clears it. The
     reaction entry is still appended as the audit record. The Principal's own reaction is mirrored

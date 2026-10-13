@@ -420,7 +420,7 @@ export class Orchestrator {
   }
 }
 
-/** A reply carries the quoted message as context, in the user's voice (INTX-STATE-004). */
+/** A reply carries the quoted message as context, in the user's voice (INTX-REPLY-001). */
 function withReplyContext(entry: MessageEntry): string {
   const r = entry.payload?.replyTo as { text?: string; role?: string } | undefined
   if (!r?.text) return entry.text

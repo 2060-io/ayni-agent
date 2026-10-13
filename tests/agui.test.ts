@@ -302,7 +302,7 @@ describe('runs, tools and history (PROF-RUN-002..005, PROF-MAP-005, PROF-HIST-00
     expect(again.statusCode).toBe(409)
   })
 
-  it('keeps one reaction per person per message and quotes a reply in history (PROF-ACT-003, PROF-RUN-009)', async () => {
+  it('keeps one reaction per person per message and quotes a reply in history (PROF-RUN-010, PROF-RUN-009)', async () => {
     const { body } = await createSession()
     await bindViaPhone(body.sessionId, 'did:peer:ivan')
     const first = await run(body.sessionId, body.sessionToken, 'hello there')
