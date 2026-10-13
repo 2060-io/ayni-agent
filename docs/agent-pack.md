@@ -12,8 +12,10 @@ A complete example: [`agent-packs/example/agent-pack.yaml`](../agent-packs/examp
 ## Loading
 
 1. `AGENT_PACK_PATH` points to a directory containing `agent-pack.yaml` (or `.yml`, `.json`).
-2. Every string value is scanned for `${VAR}` and `${VAR:-default}`; placeholders are replaced from
-   the environment (CORE-PACK-002). A `${VAR}` with no value and no default is an error.
+2. After parsing, every string value is scanned for `${VAR}` and `${VAR:-default}`; placeholders are
+   replaced from the environment (CORE-PACK-002). A `${VAR}` with no value and no default is an
+   error. A default may not contain `}`; inside a YAML flow list or map, quote the value
+   (`["${ORIGINS}"]`). A comma-separated value becomes a list where the schema expects one.
 3. After substitution, values are coerced where the schema expects a number or a boolean
    (`"1800"` → `1800`, `"true"` → `true`) and the document is validated against the schema.
    Validation errors name the field and stop the start.

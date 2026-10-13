@@ -199,8 +199,8 @@ sessions:
 channels:
   agui:
     enabled: true
-    allowedOrigins: [${AGUI_ALLOWED_ORIGINS}]
-    walletLinkTemplate: ${WALLET_LINK_TEMPLATE:-https://hologram.zone/open?oob={oob}}
+    allowedOrigins: ["${AGUI_ALLOWED_ORIGINS}"]
+    walletLinkTemplate: https://hologram.zone/open?oob={oob}      # override with WALLET_LINK_TEMPLATE if needed
     uploads:
       maxBytes: 26214400
       types: ["image/*", "audio/webm", "audio/ogg", "audio/mp4", "application/pdf"]
