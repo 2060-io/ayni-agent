@@ -67,5 +67,21 @@ matter of changing the four network values in `.env` and redoing the bootstrap t
 | Operator account | `verana1eh0dne3gma5dla68v0askxjc4vn2jpfmsamhm4` (`hologram-agent`) |
 | Agent account | `verana1gr5y56futaeeu2ea45p6dykl82h04pcawwjavu` (`hologram-agent-vs`) |
 | ECS Service | ISSUER participant 156 active; Service credential self-issued, digest anchored, linked presentation published |
-| ECS Organization | HOLDER participant 155, onboarding process pending on the validator side (participant 7, `ecs-org-issuer.devnet.verana.network`) |
+| ECS Organization | HOLDER participant 157 active (155 was revoked after a stalled delivery); Organization credential issued and published; the indexer answers `trusted: true` |
 | Image | `vs-agent:local-arm64`, built from `verana-labs/vs-agent` `ee6417b` (origin/main, the `v2.0.0-dev.91` line) |
+
+## Validating on devnet without a colleague
+
+The devnet ECS org issuer's operator mnemonic (provided by Fabrice, kept in
+`~/.config/hologram-agent-dev/ecs-org-issuer.env`, never in git) lets `bootstrap.sh validate <id>`
+set a pending Organization onboarding to validated. Its operator grant had to be extended once with
+`MsgSetParticipantOPToValidated` through a group proposal of the issuer's corporation (the account is
+that group's only member). After the on-chain validation the issuer's agent offers the credential
+over DIDComm and our agent completes the flow within a minute.
+
+## Pitfall seen once
+
+After the laptop changed network, the container kept its old route and lost all egress while the
+host was fine: the indexer stream reconnected in a loop and a credential request never reached the
+issuer (exchange stuck at `request-sent`). `docker compose down && docker compose up -d` recreates
+the network. The stuck onboarding was replaced by revoking its participant and running a new one.

@@ -17,6 +17,9 @@
 #              account as vs_operator (HOLDER: TriggerResolver; ISSUER:
 #              CreateOrUpdateParticipantSession, the message types the VPR permits per role);
 #              the agent then runs the DIDComm flows by itself
+#   validate   <participant id>: validate an onboarding as the ECS org issuer's operator (devnet only;
+#              needs the issuer operator mnemonic in $CFG_DIR/ecs-org-issuer.env, imported as key
+#              "ecs-org-issuer"); the issuer's agent then issues the credential over DIDComm
 #   status     show corporation, participants and the indexer's trust verdict
 #
 # Usage: dev/vs-agent/bootstrap.sh <step> [args]     (see each step for arguments)
@@ -91,6 +94,18 @@ case "${1:-}" in
     echo "ISSUER self-creation on the ECS Service schema, root participant $SVC_ROOT"
     tx self_create_participant pp self-create-participant issuer "$SVC_ROOT" "$DID" --corporation "$POLICY" \
        --vs-operator "$(vsaddr)" --vs-operator-authz-msg-types /verana.pp.v1.MsgCreateOrUpdateParticipantSession ;;
+
+  validate)  # validate <participant id>
+    PID="${2:?participant id}"
+    if ! "$VERANAD" keys show ecs-org-issuer --keyring-backend test >/dev/null 2>&1; then
+      MN=$(sed -nE 's/^ECS_ORG_ISSUER_MNEMONIC="?([^"]*)"?$/\1/p' "$CFG_DIR/ecs-org-issuer.env")
+      [ -n "$MN" ] || { echo "no ECS_ORG_ISSUER_MNEMONIC in $CFG_DIR/ecs-org-issuer.env" >&2; exit 1; }
+      echo "$MN" | "$VERANAD" keys add ecs-org-issuer --recover --keyring-backend test >/dev/null
+    fi
+    ISSUER_POLICY="${ISSUER_POLICY:-verana1dlszg2sst9r69my4f84l3mj66zxcf3umcgujys30t84srg95dgvs9v9a3a}"   # corporation 2, devnet ECS org issuer
+    KEY=ecs-org-issuer TXF=(--from ecs-org-issuer --keyring-backend test --chain-id "$CHAIN_ID" --node "$RPC" --gas auto --gas-adjustment 1.6 --gas-prices 1uvna --output json -y)
+    tx set_participant_op_validated pp set-participant-op-validated "$PID" --corporation "$ISSUER_POLICY"
+    echo "validated; the issuer's agent now offers the credential, watch GET /v2/vt/flows" ;;
 
   status)
     echo "corporation:"; curl -s "$IDX/v4/corporation/get/${CORP_ID:?run corp first}" | jq -c '.corporation | {id, did, policy_address}'
