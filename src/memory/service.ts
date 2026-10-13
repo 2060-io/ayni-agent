@@ -69,7 +69,7 @@ export class MemoryService {
       'own-sessions'
     return {
       principalId: principal.id,
-      sessionId: session.id,
+      sessionIds: [session.id, ...(session.lineage ?? [])],
       backingIdentity: principal.backingIdentity,
       homeBackingIdentity: this.pack.identity.homeBackingIdentity,
       recognizedPartners: this.pack.identity.recognizedBackingIdentities
@@ -177,7 +177,7 @@ export class MemoryService {
     q: Omit<EntryQuery, 'sessionId'>
   ): Promise<MessageEntry[]> {
     const scope = this.scopeFor(principal, session)
-    const rows = await this.store.entries.query(scope, { ...q, sessionId: session.id })
+    const rows = await this.store.entries.query(scope, { ...q, sessionIds: [session.id, ...(session.lineage ?? [])] })
     const entries = rows.map((r) => this.open(r))
     if (principal) await this.log(principal, session, scope, entries, false)
     return entries
@@ -186,7 +186,10 @@ export class MemoryService {
   /** The token-bounded active window (MEM-RET-001), oldest first. */
   public async window(principal: Principal, session: Session, budgetTokens: number): Promise<MessageEntry[]> {
     const scope = this.scopeFor(principal, session)
-    const rows = await this.store.entries.query(scope, { sessionId: session.id, limit: 200 })
+    const rows = await this.store.entries.query(scope, {
+      sessionIds: [session.id, ...(session.lineage ?? [])],
+      limit: 200,
+    })
     const picked: MessageEntry[] = []
     let used = 0
     for (const row of rows) {

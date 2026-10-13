@@ -15,6 +15,7 @@
       }
     },
     "locale": { "type": "string", "maxLength": 20 },
-    "deviceHandle": { "type": "string", "maxLength": 128 }
+    "deviceHandle": { "type": "string", "maxLength": 128 },
+    "resumeSessionId": { "type": "string", "maxLength": 128 }
   }
 }

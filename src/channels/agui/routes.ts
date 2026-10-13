@@ -140,7 +140,12 @@ export class AgUiRoutes {
 
     // PROF-SESS-001 create, PROF-SESS-007 sibling
     app.post(base, async (request, reply) => {
-      const body = request.body as { client?: ClientDescription; locale?: string; deviceHandle?: string }
+      const body = request.body as {
+        client?: ClientDescription
+        locale?: string
+        deviceHandle?: string
+        resumeSessionId?: string
+      }
       if (!validateCreate(body))
         return reply.code(400).send({ error: 'bad-request', message: ajv.errorsText(validateCreate.errors) })
       const client = body.client as ClientDescription
@@ -149,7 +154,12 @@ export class AgUiRoutes {
         try {
           const parent = await this.agent.sessions.authenticate(token)
           this.agent.sessions.requireBound(parent)
-          const { session, token: newToken } = await this.agent.createSibling(parent, client, body.locale)
+          const { session, token: newToken } = await this.agent.createSibling(
+            parent,
+            client,
+            body.locale,
+            body.resumeSessionId
+          )
           const principal = await this.agent.principalOf(session)
           await this.agent.welcome(session)
           return reply.code(201).send({
@@ -158,6 +168,7 @@ export class AgUiRoutes {
             state: session.state,
             agent: { did, name: this.agent.pack.metadata.displayName },
             parentSessionId: parent.id,
+            resumedFromSessionId: session.resumedFromSessionId,
             principal: principal ? this.agent.principalDisplay(principal) : undefined,
             idleTimeoutSeconds: this.agent.sessions.idleTimeoutSeconds,
           })
@@ -170,7 +181,7 @@ export class AgUiRoutes {
           session,
           token: newToken,
           rebind,
-        } = await this.agent.createSession(client, body.locale, body.deviceHandle)
+        } = await this.agent.createSession(client, body.locale, body.deviceHandle, body.resumeSessionId)
         return reply.code(201).send({
           sessionId: session.id,
           sessionToken: newToken,
@@ -482,6 +493,7 @@ export class AgUiRoutes {
         principal: this.agent.principalDisplay(principal),
         boundAt: session.boundAt,
         deviceHandle: session.deviceHandle,
+        resumedFromSessionId: session.resumedFromSessionId,
       })
     )
     await this.announceState(session)

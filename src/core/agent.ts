@@ -124,6 +124,7 @@ export class HologramAgent {
       binding: session.state === 'provisional' && session.binding ? this.bindingMaterial(session) : undefined,
       parentSessionId: session.parentSessionId,
       deviceHandle: session.state === 'bound' ? session.deviceHandle : undefined,
+      resumedFromSessionId: session.state === 'bound' ? session.resumedFromSessionId : undefined,
     }
   }
 
@@ -168,8 +169,13 @@ export class HologramAgent {
   /** Asks the phone of a known device to re-link a provisional session (PROF-BIND-009); set by the DIDComm channel. */
   public rebindOffer?: (session: Session, principal: Principal) => Promise<boolean>
 
-  public async createSession(client: ClientDescription, locale?: string, deviceHandle?: string) {
-    const created = await this.sessions.createProvisional('ag-ui', client, locale, deviceHandle)
+  public async createSession(
+    client: ClientDescription,
+    locale?: string,
+    deviceHandle?: string,
+    resumeSessionId?: string
+  ) {
+    const created = await this.sessions.createProvisional('ag-ui', client, locale, deviceHandle, resumeSessionId)
     let rebind: 'asked' | 'unavailable' | undefined
     if (deviceHandle) {
       const principal = (await this.store.principals.list()).find((p) =>
@@ -184,8 +190,8 @@ export class HologramAgent {
     return { ...created, rebind }
   }
 
-  public createSibling(parent: Session, client: ClientDescription, locale?: string) {
-    return this.sessions.createSibling(parent, client, locale)
+  public createSibling(parent: Session, client: ClientDescription, locale?: string, resumeSessionId?: string) {
+    return this.sessions.createSibling(parent, client, locale, resumeSessionId)
   }
 
   public async closeSession(session: Session, reason: ClosureReason): Promise<void> {

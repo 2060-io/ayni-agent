@@ -116,6 +116,7 @@ export class MemoryStore implements Store {
     query: async (scope: ScopePredicate, q: EntryQuery) => {
       let rows = this.scoped(scope)
       if (q.sessionId) rows = rows.filter((e) => e.sessionId === q.sessionId)
+      if (q.sessionIds) rows = rows.filter((e) => q.sessionIds?.includes(e.sessionId))
       if (q.sourceTypes) rows = rows.filter((e) => q.sourceTypes?.includes(e.sourceType))
       if (q.roles) rows = rows.filter((e) => q.roles?.includes(e.role))
       rows.sort((a, b) =>

@@ -81,6 +81,8 @@ export interface CreateSessionRequest {
   locale?: string
   /** handle of a device the agent bound before (PROF-BIND-009): the agent asks the phone to re-link it */
   deviceHandle?: string
+  /** a closed session of the same Principal to resume: its transcript stays readable in the new session (PROF-SESS-009) */
+  resumeSessionId?: string
 }
 
 export interface BindingMaterial {
@@ -116,6 +118,8 @@ export interface CreateSessionResponse {
   /** 'asked' when the phone of the known device received the re-link question (PROF-BIND-009) */
   rebind?: 'asked' | 'unavailable'
   deviceHandle?: string
+  /** set when the resume was accepted (sibling) or recorded for binding (provisional) */
+  resumedFromSessionId?: string
 }
 
 export interface SessionStatus {
@@ -129,6 +133,7 @@ export interface SessionStatus {
   binding?: BindingMaterial
   parentSessionId?: string
   deviceHandle?: string
+  resumedFromSessionId?: string
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -161,6 +166,8 @@ export interface SessionBoundValue {
   boundAt: string
   /** opaque handle of this device, presented on later session creations to ask the phone for a re-link */
   deviceHandle?: string
+  /** the closed session this one resumes, when the agent accepted it */
+  resumedFromSessionId?: string
 }
 
 export interface SessionTokenValue {

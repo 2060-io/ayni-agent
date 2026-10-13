@@ -94,7 +94,8 @@ export class SessionService {
     channelType: ChannelType,
     client: ClientDescription,
     locale?: string,
-    deviceHandle?: string
+    deviceHandle?: string,
+    resumeSessionId?: string
   ): Promise<{ session: Session; token: string }> {
     const { token, hash } = this.newToken()
     const id = prefixedId('ses')
@@ -107,6 +108,7 @@ export class SessionService {
       client,
       locale,
       deviceHandle,
+      resumedFromSessionId: resumeSessionId,
       tokenHash: hash,
       lastActivityAt: nowIso(),
       createdAt: nowIso(),
@@ -168,11 +170,32 @@ export class SessionService {
     return { session, token: minted?.token }
   }
 
+  /**
+   * A session may resume a closed session of the same Principal (IDENT-SESS-009): the closed
+   * session's entries become readable here. A session of another Principal is never resumed.
+   */
+  private async applyResume(session: Session, principal: Principal): Promise<void> {
+    const wanted = session.resumedFromSessionId
+    if (!wanted) return
+    const old = await this.store.sessions.get(wanted)
+    if (old?.state !== 'closed' || old.principalId !== principal.id) {
+      this.logger.warn(
+        { sessionId: session.id, resume: wanted },
+        'resume refused: not a closed session of this principal'
+      )
+      session.resumedFromSessionId = undefined
+      return
+    }
+    session.lineage = [old.id, ...(old.lineage ?? [])].slice(0, 10)
+    if (!session.client.name && old.client.name) session.client = old.client
+  }
+
   /** Sibling session from a bound token (CHAN-BIND-010, PROF-SESS-007/008). */
   public async createSibling(
     parent: Session,
     client: ClientDescription,
-    locale?: string
+    locale?: string,
+    resumeSessionId?: string
   ): Promise<{ session: Session; token: string }> {
     this.requireBound(parent)
     if (!this.siblingsAllowed) throw new SessionError('sibling sessions are disabled', 'forbidden')
@@ -190,12 +213,14 @@ export class SessionService {
       locale: locale ?? parent.locale,
       parentSessionId: parent.id,
       deviceHandle: parent.deviceHandle,
+      resumedFromSessionId: resumeSessionId,
       tokenHash: hash,
       boundAt: nowIso(),
       lastActivityAt: nowIso(),
       createdAt: nowIso(),
       streamCursor: 0,
     }
+    await this.applyResume(session, principal)
     await this.store.sessions.save(session)
     await this.events.onBound(session, principal)
     return { session, token }
@@ -252,6 +277,7 @@ export class SessionService {
     session.state = 'bound'
     session.boundAt = nowIso()
     session.lastActivityAt = nowIso()
+    await this.applyResume(session, principal)
     // the device handle lets a later session on the same browser profile ask the phone for a re-link
     if (!principal.devices?.some((d) => d.handle === session.deviceHandle)) {
       session.deviceHandle = prefixedId('dev', 24)

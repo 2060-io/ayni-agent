@@ -108,6 +108,10 @@ export interface Session {
   binding?: BindingState
   /** opaque device handle: inherited from the creation request or minted at binding */
   deviceHandle?: string
+  /** a closed session this one resumes: its entries stay readable here (IDENT-SESS-009) */
+  resumedFromSessionId?: string
+  /** ids of every session in the resume chain, oldest last */
+  lineage?: string[]
   tokenHash?: string
   lastActivityAt: string
   createdAt: string

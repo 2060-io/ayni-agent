@@ -8,7 +8,8 @@ export type CrossSessionScope = 'own-sessions' | 'own-backing-identity' | 'all'
 
 export interface ScopeContext {
   principalId: string
-  sessionId: string
+  /** the session and the closed sessions it resumes (session-private entries of all of them are readable) */
+  sessionIds: string[]
   backingIdentity: BackingIdentity | null
   homeBackingIdentity: string
   recognizedPartners: string[]
@@ -18,7 +19,7 @@ export interface ScopeContext {
 /** One disjunct of the predicate: an entry matches when every present field equals. */
 export interface ScopeTerm {
   visibility: Visibility
-  sessionId?: string
+  sessionIds?: string[]
   principalId?: string
   backingIdentityId?: string
 }
@@ -34,8 +35,8 @@ export function buildScope(ctx: ScopeContext): ScopePredicate {
   if (ctx.crossSession === 'all') terms.push({ visibility: 'session-private' })
   else if (ctx.crossSession === 'own-backing-identity' && ctx.backingIdentity) {
     terms.push({ visibility: 'session-private', backingIdentityId: ctx.backingIdentity.id })
-    terms.push({ visibility: 'session-private', sessionId: ctx.sessionId })
-  } else terms.push({ visibility: 'session-private', sessionId: ctx.sessionId })
+    terms.push({ visibility: 'session-private', sessionIds: ctx.sessionIds })
+  } else terms.push({ visibility: 'session-private', sessionIds: ctx.sessionIds })
   terms.push({ visibility: 'principal-private', principalId: ctx.principalId })
   if (ctx.backingIdentity) {
     if (ctx.backingIdentity.id === ctx.homeBackingIdentity) {
@@ -65,7 +66,7 @@ export function matchesScope(scope: ScopePredicate, row: Scoped): boolean {
   return scope.terms.some(
     (t) =>
       t.visibility === row.visibility &&
-      (t.sessionId === undefined || t.sessionId === row.sessionId) &&
+      (t.sessionIds === undefined || (!!row.sessionId && t.sessionIds.includes(row.sessionId))) &&
       (t.principalId === undefined || t.principalId === row.principalId) &&
       (t.backingIdentityId === undefined || t.backingIdentityId === row.backingIdentity?.id)
   )
@@ -86,7 +87,7 @@ export function scopeToSql(
   if (scope.terms.length === 0) return { sql: 'false', params }
   const disjuncts = scope.terms.map((t) => {
     const parts = [`${alias}.visibility = ${next(t.visibility)}`]
-    if (t.sessionId !== undefined) parts.push(`${alias}.session_id = ${next(t.sessionId)}`)
+    if (t.sessionIds !== undefined) parts.push(`${alias}.session_id = ANY(${next(t.sessionIds)})`)
     if (t.principalId !== undefined) parts.push(`${alias}.principal_id = ${next(t.principalId)}`)
     if (t.backingIdentityId !== undefined) parts.push(`${alias}.backing_identity_id = ${next(t.backingIdentityId)}`)
     return `(${parts.join(' AND ')})`

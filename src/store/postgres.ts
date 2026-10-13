@@ -227,6 +227,10 @@ export class PostgresStore implements Store {
         where.push(`e.session_id = $${i++}`)
         params.push(q.sessionId)
       }
+      if (q.sessionIds) {
+        where.push(`e.session_id = ANY($${i++})`)
+        params.push(q.sessionIds)
+      }
       if (q.sourceTypes) {
         where.push(`e.source_type = ANY($${i++})`)
         params.push(q.sourceTypes)

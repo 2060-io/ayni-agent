@@ -72,7 +72,7 @@ describe('tool tiers (RBAC-TOOL-001..006)', () => {
 describe('scope predicate (D12, PRIV-SCOPE, PRIV-CLS-005)', () => {
   const ctx = {
     principalId: 'p1',
-    sessionId: 's1',
+    sessionIds: ['s1', 's0'],
     backingIdentity: { kind: 'org' as const, id: 'did:webvh:x:home' },
     homeBackingIdentity: 'did:webvh:x:home',
     recognizedPartners: ['did:webvh:x:partner'],
@@ -91,6 +91,7 @@ describe('scope predicate (D12, PRIV-SCOPE, PRIV-CLS-005)', () => {
     expect(matchesScope(scope, row({}))).toBe(true)
     expect(matchesScope(scope, row({ state: 'archived' }))).toBe(false)
     expect(matchesScope(scope, row({ visibility: 'session-private', sessionId: 's2' }))).toBe(false)
+    expect(matchesScope(scope, row({ visibility: 'session-private', sessionId: 's0' }))).toBe(true)
     expect(matchesScope(scope, row({ visibility: 'principal-private', principalId: 'p2' }))).toBe(false)
     expect(matchesScope(scope, row({ visibility: 'organization-shared', principalId: 'p9', sessionId: 's9' }))).toBe(
       true

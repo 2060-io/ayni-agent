@@ -28,6 +28,7 @@ export type StoredEntry = Omit<MessageEntry, 'text' | 'payload'> & { cipher: Buf
 
 export interface EntryQuery {
   sessionId?: string
+  sessionIds?: string[]
   before?: string
   limit: number
   sourceTypes?: string[]
