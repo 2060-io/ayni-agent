@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://2060.io/schemas/hologram-agui-profile/3.0/descriptor.json",
+  "title": "Hologram agent descriptor (profile section 2, PROF-DESC-002)",
+  "type": "object",
+  "required": ["profileVersion", "did", "name", "sessions", "binding", "features"],
+  "properties": {
+    "profileVersion": { "type": "string", "pattern": "^3\\.[0-9]+$" },
+    "did": { "type": "string", "pattern": "^did:[a-z0-9]+:.+$" },
+    "name": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" },
+    "logo": { "type": "string", "format": "uri" },
+    "sessions": { "type": "string", "format": "uri" },
+    "binding": {
+      "type": "object",
+      "required": ["modes", "walletLinkTemplate"],
+      "properties": {
+        "modes": { "type": "array", "items": { "enum": ["cross-device", "same-device"] } },
+        "walletLinkTemplate": { "type": "string", "pattern": "^https://.*\\{oob\\}.*$" }
+      }
+    },
+    "features": {
+      "type": "object",
+      "required": ["contextualMenu", "approvals", "reactions", "receipts", "history", "uploads"],
+      "properties": {
+        "contextualMenu": { "type": "boolean" },
+        "approvals": { "type": "boolean" },
+        "reactions": { "type": "boolean" },
+        "receipts": { "type": "boolean" },
+        "history": { "type": "boolean" },
+        "voiceNotes": { "type": "boolean" },
+        "uploads": {
+          "oneOf": [
+            { "const": false },
+            {
+              "type": "object",
+              "required": ["maxBytes", "types"],
+              "properties": {
+                "maxBytes": { "type": "integer" },
+                "types": { "type": "array", "items": { "type": "string" } }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "locales": { "type": "array", "items": { "type": "string" } }
+  }
+}

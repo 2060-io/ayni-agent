@@ -1,0 +1,167 @@
+# Dormant by default: gated on `vars.CD_ENABLED == 'true'` so a fresh repo never
+# publishes to Docker Hub before it's set up. To enable, either create the repo
+# variable CD_ENABLED=true, or delete the `&& vars.CD_ENABLED == 'true'` guards below.
+name: Continuous Deployment
+
+on:
+  push:
+    branches: [main, 'release/**', 'v[0-9]*']
+  workflow_dispatch:
+    inputs:
+      notify_tag:
+        description: "Release tag to (re)announce on Discord, e.g. v1.2.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write        # Required for release-please / semantic-release to push versions & tags
+  issues: write
+  pull-requests: write
+
+env:
+  IMAGE_NAME: 'hologram-agent'
+
+jobs:
+  # Resolve the next version using the shared 2060 flow:
+  #   - stable releases via release-please (merged Release PR)
+  #   - dev prereleases via semantic-release (every push with releasable commits)
+  resolve-version:
+    # Gate the whole pipeline: skipped unless the maintainer opts in (see header).
+    if: github.event_name == 'push' && vars.CD_ENABLED == 'true'
+    uses: 2060-io/organization/.github/workflows/resolve-version-call.yml@562f890be78c7fd3f07695446f4506d383c52219 # v0.5.2
+    with:
+      prerelease-branch: ${{ github.ref_name }}
+
+  docker:
+    needs: resolve-version
+    if: needs.resolve-version.outputs.new-release-published == 'true'
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TYPE: ${{ needs.resolve-version.outputs.release-type }}
+      RELEASE_VERSION: ${{ needs.resolve-version.outputs.release-version }}
+      RELEASE_MAJOR: ${{ needs.resolve-version.outputs.release-major }}
+      RELEASE_MINOR: ${{ needs.resolve-version.outputs.release-minor }}
+      RELEASE_PATCH: ${{ needs.resolve-version.outputs.release-patch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Compute tags
+        id: tags
+        env:
+          IS_MAIN: ${{ github.ref_name == 'main' }}
+        run: |
+          HUB="${{ secrets.DOCKER_HUB_LOGIN }}/${IMAGE_NAME}"
+          # The fully-qualified, immutable version tag is always published.
+          TAGS="${HUB}:${RELEASE_VERSION}"
+          if [ "$RELEASE_TYPE" = "stable" ]; then
+            # Minor-line pointer (e.g. v1.11): owned by whichever branch maintains that line.
+            TAGS="${TAGS}
+          ${HUB}:v${RELEASE_MAJOR}.${RELEASE_MINOR}"
+            # Cross-line floating pointers only from the default branch (main). A maintenance
+            # branch (e.g. v1.11) must never move 'latest' or the major (v1) pointer backwards.
+            if [ "$IS_MAIN" = "true" ]; then
+              TAGS="${TAGS}
+          ${HUB}:latest
+          ${HUB}:v${RELEASE_MAJOR}"
+            fi
+          else
+            # Patch-level dev pointer (e.g. v1.11.1-dev). Use the full patch number:
+            # release-patch is a plain integer, so truncating collapses 10-19 onto 1.
+            TAGS="${TAGS}
+          ${HUB}:v${RELEASE_MAJOR}.${RELEASE_MINOR}.${RELEASE_PATCH}-dev"
+            # Floating dev pointers ('dev', v1-dev, v1.11-dev) only from the default branch (main).
+            if [ "$IS_MAIN" = "true" ]; then
+              TAGS="${TAGS}
+          ${HUB}:dev
+          ${HUB}:v${RELEASE_MAJOR}-dev
+          ${HUB}:v${RELEASE_MAJOR}.${RELEASE_MINOR}-dev"
+            fi
+          fi
+          {
+            echo "list<<EOF"
+            echo "$TAGS"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Docker login
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          username: ${{ secrets.DOCKER_HUB_LOGIN }}
+          password: ${{ secrets.DOCKER_HUB_PWD }}
+
+      - name: Build & push ${{ env.IMAGE_NAME }}
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.tags.outputs.list }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  helm:
+    needs: [resolve-version, docker]
+    if: needs.resolve-version.outputs.new-release-published == 'true'
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TYPE: ${{ needs.resolve-version.outputs.release-type }}
+      RELEASE_VERSION: ${{ needs.resolve-version.outputs.release-version }}
+      RELEASE_MAJOR: ${{ needs.resolve-version.outputs.release-major }}
+      RELEASE_MINOR: ${{ needs.resolve-version.outputs.release-minor }}
+      RELEASE_PATCH: ${{ needs.resolve-version.outputs.release-patch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+
+      - name: Docker login
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          username: ${{ secrets.DOCKER_HUB_LOGIN }}
+          password: ${{ secrets.DOCKER_HUB_PWD }}
+
+      - name: Push Helm chart to Docker Hub OCI repo
+        run: |
+          if [ "$RELEASE_TYPE" = "stable" ]; then
+            TAGS=("${RELEASE_VERSION}")
+          else
+            TAGS=(
+              "v${RELEASE_MAJOR}.${RELEASE_MINOR}.${RELEASE_PATCH}-dev"
+              "${RELEASE_VERSION}"
+            )
+          fi
+          CHART_NAME=$(grep '^name:' ./charts/${IMAGE_NAME}/Chart.yaml | awk '{print $2}')
+          for tag in "${TAGS[@]}"; do
+            helm dependency update ./charts/${IMAGE_NAME}
+            helm package ./charts/${IMAGE_NAME} --version "$tag" --app-version "$tag" -d ./charts
+            helm push ./charts/${CHART_NAME}-"$tag".tgz oci://docker.io/${{ secrets.DOCKER_HUB_LOGIN }}
+          done
+
+  # Announce stable releases on Discord.
+  discord-notify:
+    needs: [resolve-version, docker, helm]
+    if: needs.resolve-version.outputs.new-release-published == 'true' && needs.resolve-version.outputs.release-type == 'stable'
+    permissions:
+      contents: read
+    uses: 2060-io/organization/.github/workflows/discord-release-notify-call.yml@562f890be78c7fd3f07695446f4506d383c52219 # v0.5.2
+    with:
+      tag_name: ${{ needs.resolve-version.outputs.release-version }}
+    secrets:
+      DISCORD_UPDATES_WEBHOOK_URL: ${{ secrets.DISCORD_UPDATES_WEBHOOK_URL }}
+
+  # Manually (re)announce a given tag on Discord via workflow_dispatch.
+  discord-notify-manual:
+    if: github.event_name == 'workflow_dispatch' && vars.CD_ENABLED == 'true'
+    permissions:
+      contents: read
+    uses: 2060-io/organization/.github/workflows/discord-release-notify-call.yml@562f890be78c7fd3f07695446f4506d383c52219 # v0.5.2
+    with:
+      tag_name: ${{ inputs.notify_tag }}
+    secrets:
+      DISCORD_UPDATES_WEBHOOK_URL: ${{ secrets.DISCORD_UPDATES_WEBHOOK_URL }}

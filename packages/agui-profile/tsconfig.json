@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "module": "es2022",
+    "moduleResolution": "bundler",
+    "target": "ES2022",
+    "declaration": true,
+    "strict": true,
+    "lib": ["es2023"],
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true
+  },
+  "include": ["src"]
+}

@@ -86,6 +86,12 @@ identity:
   persistent store outside LLM retrieval.
 - `userAgentGate: optional` lets wallets that do not present an ECS-UserAgent credential connect; the
   Principal is then marked `userAgentVerified: false`, which `roleRules` may use.
+- `credentials` names what the agent requests on DIDComm connect (IDENT-RES-001/002/003): `userAgent`
+  (the ECS-UserAgent credential of the gate), `badge` (one or more ECS-Badge credentials accepted as
+  a person's identity; one must be presented) and `service` (credentials accepted from a
+  verifiable-service peer). Each entry is a `jsonSchemaCredentialId` or a `credentialDefinitionId`
+  the DIDComm agent can resolve, with optional `attributes`. Without `badge`, a person can only be
+  admitted in development mode (`DEV_ALLOW_UNIDENTIFIED_PRINCIPALS`).
 
 ## persona
 
@@ -102,7 +108,10 @@ identity:
 `provider` selects an adapter: native (`openai`, `anthropic`, `ollama`), the generic chat-completions
 adapter (`openai-compatible`, for gateways such as OpenRouter or LiteLLM and any compatible endpoint,
 `baseUrl` required) or a special-protocol adapter (`azure-openai`, `bedrock`, `vertex`, with
-`provider_options` as the adapter documents). `apiKeyEnv` names the environment variable holding the
+`provider_options` as the adapter documents). `stub` is a deterministic offline model for
+development and tests (it echoes, and `/call <tool> {json}` triggers a tool call); the same value
+exists for `embeddings.provider`, and `model: stub` for `media.speechToText`, `media.vision` and an
+image generation provider. `apiKeyEnv` names the environment variable holding the
 key; keys never appear in the pack. `multimodal: true` lets a capable model receive referenced media;
 the agent never depends on it. Embeddings are configured independently and may use another provider.
 
