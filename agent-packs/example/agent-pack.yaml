@@ -1,0 +1,270 @@
+# Hologram Agent pack, schema 3.0
+# Example: a customer-support agent of a logistics company, reachable from Hologram App (DIDComm)
+# and from the Hologram UI (AG-UI). Every ${VAR} is resolved from the environment at load time;
+# ${VAR:-default} supplies a default. Keys and connection strings never live in this file.
+
+schemaVersion: "3.0"
+
+metadata:
+  id: northwind-support
+  displayName: Northwind Support
+  description: Customer support for Northwind shipments and invoices.
+  tags: [support, logistics]
+
+identity:
+  homeBackingIdentity: ${HOME_BACKING_IDENTITY}          # did:webvh:... of Northwind Logistics GmbH
+  userAgentGate: ${USER_AGENT_GATE:-required}              # required | optional (D38)
+  recognizedBackingIdentities:
+    - identity: ${HOME_BACKING_IDENTITY}
+      relation: home
+      label: Northwind Logistics GmbH
+    - identity: did:webvh:example:baltic-forwarding
+      relation: partner
+      label: Baltic Forwarding OÜ
+  roles:
+    employee:
+      description: Any verified Northwind employee.
+    finance:
+      description: Finance department.
+      crossSession: own-backing-identity
+    finance-manager:
+      description: Approves refunds.
+      crossSession: own-backing-identity
+      canApprove: true
+    security-officer:
+      description: Approves out-of-role access for investigations.
+      canApprove: true
+    operator:
+      description: Support operators.
+      crossSession: all
+    partner:
+      description: Baseline for recognized partner organizations.
+    auditor:
+      description: Read-only access to the persistent store.
+      auditor: true
+  roleRules:                                               # first match wins (D34)
+    - when: { relation: home, claims: { department: [Finance, Treasury] } }
+      roles: [employee, finance]
+    - when: { relation: home, claims: { title: Finance Manager } }
+      roles: [employee, finance, finance-manager]
+    - when: { relation: home, claims: { department: Security } }
+      roles: [employee, security-officer]
+    - when: { relation: home, claims: { department: Support } }
+      roles: [employee, operator]
+    - when: { relation: home }
+      roles: [employee]
+    - when: { relation: partner, claims: { tier: gold } }
+      roles: [partner]
+      comment: Partner elevation on a verified claim; same baseline for now.
+    - when: { relation: partner }
+      roles: [partner]
+    # no match: authenticated, no backing identity, public visibility only
+  perActorOverrides:
+    - actor: ${AUDITOR_BADGE_SUBJECT}
+      roles: [auditor]
+      comment: External compliance reviewer.
+
+language:
+  agent: en
+
+persona:
+  systemPrompt: |
+    You are Northwind Support, the assistant of Northwind Logistics GmbH for shipments and invoices.
+    Be precise and brief. Never promise a refund or a change before the corresponding tool has
+    succeeded. Mention the order and invoice identifiers you act on.
+  greeting: "Welcome back, {userName}. How can I help with your shipments or invoices today?"
+  menu:
+    - id: open-orders
+      label: Open orders
+      action: { type: prompt, prompt: "Show my open orders." }
+      visibleWhen: bound
+    - id: shipment-reports
+      label: Shipment reports
+      action: { type: prompt, prompt: "Which shipment reports are available?" }
+      visibleWhen: role
+      roles: [operator, finance]
+    - id: help
+      label: Help
+      action: { type: url, url: https://support.northwind.example/help }
+
+llm:
+  provider: ${LLM_PROVIDER:-openai}
+  model: ${LLM_MODEL:-gpt-4o-mini}
+  apiKeyEnv: LLM_API_KEY
+  temperature: 0.2
+  maxOutputTokens: 1024
+
+embeddings:
+  provider: ${EMBEDDINGS_PROVIDER:-openai}
+  model: ${EMBEDDINGS_MODEL:-text-embedding-3-small}
+  apiKeyEnv: EMBEDDINGS_API_KEY
+
+memory:
+  contextWindowTokens: 12000
+  workingMemory: { enabled: true, maxNotes: 200 }
+  summarization: { enabled: true }
+  retrieval: { topK: 8, ambientDescriptions: true }
+
+rag:
+  enabled: true
+  sources:
+    - id: shipping-terms
+      type: local
+      path: ./knowledge/shipping-terms
+      visibility: public
+    - id: internal-procedures
+      type: local
+      path: ./knowledge/procedures
+      visibility: organization-shared
+    - id: partner-sla
+      type: url
+      url: https://partners.northwind.example/sla.md
+      visibility: partner-shared
+      refreshHours: 24
+
+tools:
+  http:
+    - name: track_shipment
+      description: Current status and ETA of a shipment by tracking number.
+      method: GET
+      url: https://api.northwind.example/shipments/{trackingNumber}
+      headers: { Authorization: "Bearer ${SHIPMENTS_API_TOKEN}" }
+      parameters:
+        type: object
+        required: [trackingNumber]
+        properties:
+          trackingNumber: { type: string, description: "Northwind tracking number" }
+  bundled:
+    statistics: { enabled: false }
+    principalCredentials: { enabled: true }
+    principalPreferences: { enabled: true }
+    workingMemory: { enabled: true }
+  access:
+    default: none
+    roles:
+      employee: [track_shipment]
+      partner: [track_shipment]
+      operator: ["*"]
+
+mcp:
+  servers:
+    - name: crm
+      transport: streamable-http
+      url: ${CRM_MCP_URL}
+      headers: { Authorization: "Bearer ${CRM_MCP_TOKEN}" }   # deployment-held, shared (TOOL-ACCESS-001)
+      lazy: true
+      toolAccess:
+        default: none
+        roles:
+          employee: [search_customer, search_invoices]
+          finance:  [search_customer, search_invoices, read_invoice, issue_refund]
+          operator: [search_customer, search_invoices, read_invoice]
+        approval:                                # APPROVAL tier: in-role, high stakes
+          - tools: [issue_refund]
+            approvers: [finance-manager]
+            timeoutMinutes: 60
+            policy: { type: count, value: 1 }
+        elevation:                               # REQUESTABLE tier: out-of-role, declared purpose
+          - tools: [read_customer_record]
+            purposes: [fraud-audit, legal-review]
+            approvers: [security-officer]
+            grantTtlMinutes: 480
+
+purposes:
+  - id: fraud-audit
+    label: Fraud investigation
+    permittedRoles: [employee, operator, finance]
+  - id: legal-review
+    label: Legal or litigation review
+
+approvals:
+  timeoutMinutes: 60
+  policy: { type: count, value: 1 }
+  selfApproval: true
+  grantTtlMinutes: 480
+
+actions:
+  issue_refund:
+    authChallenge: { type: face-match, onChannelUnavailable: fail, referenceImage: badge-photo }
+    maxCredentialAge: 0
+  read_customer_record:
+    authChallenge: { type: device, onChannelUnavailable: fail }
+
+sessions:
+  idleTimeoutSeconds: ${SESSION_IDLE_TIMEOUT_SECONDS:-1800}
+  bindingExpirySeconds: ${BINDING_EXPIRY_SECONDS:-300}
+  credentialCheckTtlSeconds: ${CREDENTIAL_CHECK_TTL_SECONDS:-300}
+  siblingSessions: true
+
+channels:
+  agui:
+    enabled: true
+    allowedOrigins: [${AGUI_ALLOWED_ORIGINS}]
+    walletLinkTemplate: ${WALLET_LINK_TEMPLATE:-https://hologram.zone/open?oob={oob}}
+    uploads:
+      maxBytes: 26214400
+      types: ["image/*", "audio/webm", "audio/ogg", "audio/mp4", "application/pdf"]
+  a2a:
+    enabled: false
+
+privacy:
+  processingActivities:
+    - id: conversation-memory
+      lawfulBasis: contract
+      retention: { days: 365, onExpiry: archive }
+    - id: working-memory
+      lawfulBasis: contract
+    - id: rag-corpus
+      lawfulBasis: legitimate-interest
+    - id: media-objects
+      lawfulBasis: contract
+      retention: { days: 365, onExpiry: archive }
+    - id: credential-presentations
+      lawfulBasis: contract
+    - id: approvals
+      lawfulBasis: legitimate-interest
+    - id: statistics
+      lawfulBasis: legitimate-interest
+      retention: { days: 730, onExpiry: delete }
+  erasureRequests: true
+  mediaOrphanGraceDays: 30
+
+media:
+  speechToText:
+    enabled: true
+    provider: ${STT_PROVIDER:-openai}
+    model: ${STT_MODEL:-whisper-1}
+    apiKeyEnv: STT_API_KEY
+  vision:
+    enabled: true
+    provider: llm
+    model: ${LLM_MODEL:-gpt-4o-mini}
+  faceVerification:
+    enabled: true
+    serviceUrl: ${VISION_URL}
+    webrtcServerUrl: ${WEBRTC_SERVER_URL}
+    timeoutSeconds: 180
+
+integrity:
+  anchoring:
+    enabled: ${ANCHORING_ENABLED:-true}
+    batchIntervalSeconds: 600
+
+statistics:
+  enabled: false
+
+features:
+  approvals: true
+  elevation: true
+  reactions: true
+  receipts: true
+  voiceNotes: true
+  inboundImages: true
+  imageGeneration: false
+  rag: true
+  workingMemory: true
+  semanticRecall: true
+  preferences: true
+  credentialTool: true
+  anchoring: true
+  history: true

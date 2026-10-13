@@ -1,0 +1,573 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://2060.io/schemas/hologram-agent/agent-pack-3.0.json",
+  "title": "Hologram Agent pack (schema 3.0)",
+  "description": "Single configuration bundle of a Hologram Agent: behavior and policy (spec CORE-PACK-001). Any string value may contain ${VAR} or ${VAR:-default} placeholders resolved from the environment at load time (CORE-PACK-002).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "metadata", "identity", "language", "persona", "llm", "embeddings", "privacy"],
+  "properties": {
+    "schemaVersion": {
+      "description": "Agent-pack schema version (CORE-PACK-004). Major must be 3.",
+      "type": "string",
+      "pattern": "^3\\.[0-9]+$"
+    },
+
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "displayName"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,62}$", "description": "Stable agent identifier (used in logs, statistics, object keys)." },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 80, "description": "Name shown in the descriptor, menus and binding questions. Must match the ECS-Service credential name once trust resolution confirms it." },
+        "description": { "type": "string", "maxLength": 1000 },
+        "tags": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+      }
+    },
+
+    "identity": {
+      "description": "Who this agent is and how it turns verified facts into roles (D30, D31, D34, D37, D38).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["homeBackingIdentity", "recognizedBackingIdentities", "roleRules"],
+      "properties": {
+        "homeBackingIdentity": { "$ref": "#/$defs/did", "description": "DID of the organization or persona that operates this agent (D30, D37). Must appear in recognizedBackingIdentities with relation home." },
+        "userAgentGate": {
+          "description": "Whether a connecting user agent must present an ECS-UserAgent credential (D38, IDENT-RES-003).",
+          "type": "string", "enum": ["required", "optional"], "default": "required"
+        },
+        "recognizedBackingIdentities": {
+          "description": "Organizations or personas whose actors get org/partner visibility and may be elevated by roleRules (D34, D35).",
+          "type": "array", "minItems": 1,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["identity", "relation"],
+            "properties": {
+              "identity": { "$ref": "#/$defs/did" },
+              "relation": { "type": "string", "enum": ["home", "partner"] },
+              "label": { "type": "string", "maxLength": 80 }
+            }
+          }
+        },
+        "roleRules": {
+          "description": "Evaluated in order over verified facts; the first matching rule assigns the roles (D34). No match: authenticated, no backing identity, public-only.",
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["when", "roles"],
+            "properties": {
+              "when": {
+                "type": "object", "additionalProperties": false, "minProperties": 1,
+                "properties": {
+                  "relation": { "type": "string", "enum": ["home", "partner", "unrecognized"] },
+                  "connectionType": { "type": "string", "enum": ["verifiable-user-agent", "verifiable-service"] },
+                  "userAgentVerified": { "type": "boolean", "description": "Match on whether the ECS-UserAgent credential was presented (only meaningful with userAgentGate optional)." },
+                  "claims": {
+                    "description": "Verified claim values that must all match (ECS-Badge facts such as department or title, or ECS-Service attributes). A list matches any of its values.",
+                    "type": "object",
+                    "additionalProperties": { "oneOf": [ { "type": "string" }, { "type": "array", "items": { "type": "string" }, "minItems": 1 } ] }
+                  }
+                }
+              },
+              "roles": { "$ref": "#/$defs/roleList" },
+              "comment": { "type": "string" }
+            }
+          }
+        },
+        "perActorOverrides": {
+          "description": "Roles for specific known actors, applied before roleRules (D34).",
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["actor", "roles"],
+            "properties": {
+              "actor": { "type": "string", "minLength": 1, "description": "ECS-Service id of a service, or the ECS-Badge subject identifier of a person." },
+              "roles": { "$ref": "#/$defs/roleList" },
+              "comment": { "type": "string" }
+            }
+          }
+        },
+        "roles": {
+          "description": "Declared roles with the approval rights they carry (RBAC-TOOL, INTX-APPR). Any role named in roleRules, toolAccess or approvers must be declared here.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "object", "additionalProperties": false,
+            "properties": {
+              "description": { "type": "string" },
+              "crossSession": { "type": "string", "enum": ["own-sessions", "own-backing-identity", "all"], "default": "own-sessions", "description": "Scope of cross-session memory reads for this role (RBAC-XSESS)." },
+              "canApprove": { "type": "boolean", "default": false, "description": "May act as an approver where listed." },
+              "auditor": { "type": "boolean", "default": false, "description": "Read-only access to the whole persistent store, outside LLM retrieval (RBAC-XSESS)." }
+            }
+          }
+        }
+      }
+    },
+
+    "language": {
+      "description": "One agent language (D21). Presentation language is the channel's or frontend's concern.",
+      "type": "object", "additionalProperties": false, "required": ["agent"],
+      "properties": {
+        "agent": { "$ref": "#/$defs/bcp47" }
+      }
+    },
+
+    "persona": {
+      "description": "The author's prompt and interaction surface (D46). The platform appends its own system-prompt add-on; the persona never overrides it (CORE-PROMPT-001).",
+      "type": "object", "additionalProperties": false, "required": ["systemPrompt"],
+      "properties": {
+        "systemPrompt": { "type": "string", "minLength": 1 },
+        "greeting": { "type": "string", "description": "Sent on first contact and on each new conversation; {userName} is replaced by the Principal's display name." },
+        "menu": {
+          "description": "Contextual menu items (INTX-MENU). Built-in commands (sessions, approvals) are added by the platform and need no entry.",
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["id", "label", "action"],
+            "properties": {
+              "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+              "label": { "type": "string", "minLength": 1, "maxLength": 60 },
+              "action": {
+                "type": "object", "additionalProperties": false, "required": ["type"],
+                "properties": {
+                  "type": { "type": "string", "enum": ["prompt", "tool", "url"], "description": "prompt: send a text as the user's turn; tool: call a tool directly if allowed; url: open a link." },
+                  "prompt": { "type": "string" },
+                  "tool": { "type": "string" },
+                  "url": { "type": "string", "format": "uri" }
+                }
+              },
+              "visibleWhen": { "type": "string", "enum": ["always", "bound", "role"], "default": "always" },
+              "roles": { "$ref": "#/$defs/roleList", "description": "With visibleWhen role: roles that see the item." }
+            }
+          }
+        }
+      }
+    },
+
+    "llm": {
+      "description": "Language model provider and model (LLM-PROV). Keys come from the environment, never from the pack.",
+      "type": "object", "additionalProperties": false, "required": ["provider", "model"],
+      "properties": {
+        "provider": { "type": "string", "enum": ["openai", "anthropic", "ollama", "openai-compatible", "azure-openai", "bedrock", "vertex"] },
+        "model": { "type": "string", "minLength": 1 },
+        "baseUrl": { "type": "string", "format": "uri", "description": "Required for ollama and openai-compatible (gateways included)." },
+        "apiKeyEnv": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$", "default": "LLM_API_KEY", "description": "Name of the environment variable holding the key." },
+        "temperature": { "type": "number", "minimum": 0, "maximum": 2, "default": 0.3 },
+        "maxOutputTokens": { "type": "integer", "minimum": 1, "default": 1024 },
+        "reasoningEffort": { "type": "string", "enum": ["minimal", "low", "medium", "high"] },
+        "multimodal": { "type": "boolean", "default": false, "description": "Pass referenced media to the model when it supports it (LLM-MODE-002). Never required." },
+        "provider_options": { "type": "object", "description": "Provider-specific settings as the adapter documents (deployment name, region, project)." }
+      }
+    },
+
+    "embeddings": {
+      "description": "Embeddings provider for the semantic index and RAG (LLM-EMB). Independent of llm.",
+      "type": "object", "additionalProperties": false, "required": ["provider", "model"],
+      "properties": {
+        "provider": { "type": "string", "enum": ["openai", "cohere", "voyage", "openai-compatible"] },
+        "model": { "type": "string", "minLength": 1 },
+        "dimensions": { "type": "integer", "minimum": 16 },
+        "baseUrl": { "type": "string", "format": "uri" },
+        "apiKeyEnv": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$", "default": "EMBEDDINGS_API_KEY" }
+      }
+    },
+
+    "memory": {
+      "description": "Memory tiers and retrieval (D9, D10, D24, D25).",
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "contextWindowTokens": { "type": "integer", "minimum": 1024, "default": 12000, "description": "Token budget of the active window (MEM-TIER-003)." },
+        "workingMemory": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "maxNotes": { "type": "integer", "minimum": 1, "default": 200 },
+            "maxNoteChars": { "type": "integer", "minimum": 50, "default": 500 }
+          }
+        },
+        "summarization": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "triggerTokens": { "type": "integer", "minimum": 512, "description": "Compress the window when it exceeds this many tokens; defaults to contextWindowTokens." }
+          }
+        },
+        "retrieval": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "topK": { "type": "integer", "minimum": 1, "maximum": 50, "default": 8 },
+            "ambientDescriptions": { "type": "boolean", "default": true, "description": "Keep short stored descriptions of recent entries in context (D24)." },
+            "chunkSize": { "type": "integer", "minimum": 100, "default": 1000 },
+            "chunkOverlap": { "type": "integer", "minimum": 0, "default": 150 }
+          }
+        }
+      }
+    },
+
+    "rag": {
+      "description": "Corpus sources exposed to the LLM as a tool (D42, MEM-RAG). Each source carries a visibility (MEM-RAG-005).",
+      "type": "object", "additionalProperties": false, "required": ["sources"],
+      "properties": {
+        "enabled": { "type": "boolean", "default": true },
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["id", "type"],
+            "properties": {
+              "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+              "type": { "type": "string", "enum": ["local", "url"] },
+              "path": { "type": "string", "description": "Directory or file for local sources." },
+              "url": { "type": "string", "format": "uri" },
+              "visibility": { "type": "string", "enum": ["public", "organization-shared", "partner-shared"], "default": "public" },
+              "refreshHours": { "type": "integer", "minimum": 1, "description": "Re-fetch interval for url sources." }
+            },
+            "allOf": [
+              { "if": { "properties": { "type": { "const": "local" } } }, "then": { "required": ["path"] } },
+              { "if": { "properties": { "type": { "const": "url" } } }, "then": { "required": ["url"] } }
+            ]
+          }
+        },
+        "chunkSize": { "type": "integer", "minimum": 100, "default": 1000 },
+        "chunkOverlap": { "type": "integer", "minimum": 0, "default": 150 }
+      }
+    },
+
+    "tools": {
+      "description": "Declarative HTTP tools and bundled tools (TOOL-HTTP, D41). Tool credentials are deployment-held (TOOL-ACCESS-001).",
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "http": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["name", "description", "method", "url"],
+            "properties": {
+              "name": { "$ref": "#/$defs/toolName" },
+              "description": { "type": "string", "minLength": 1 },
+              "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
+              "url": { "type": "string", "description": "URL template; {param} placeholders are filled from parameters." },
+              "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+              "parameters": { "type": "object", "description": "JSON Schema (object) of the tool's parameters as shown to the model." },
+              "bodyTemplate": { "type": "string", "description": "Request body template with {param} placeholders (non-GET)." },
+              "timeoutSeconds": { "type": "integer", "minimum": 1, "default": 30 }
+            }
+          }
+        },
+        "bundled": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "statistics": {
+              "type": "object", "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean", "default": false },
+                "endpoint": { "type": "string", "format": "uri" },
+                "defaultStatClass": { "type": "string" }
+              }
+            },
+            "generateImage": { "type": "object", "additionalProperties": false, "properties": { "enabled": { "type": "boolean", "default": false }, "provider": { "type": "string", "description": "Name of a media.imageGeneration provider." } } },
+            "principalCredentials": { "type": "object", "additionalProperties": false, "properties": { "enabled": { "type": "boolean", "default": true } }, "description": "get_principal_credentials (INTX-CRED-001)." },
+            "principalPreferences": { "type": "object", "additionalProperties": false, "properties": { "enabled": { "type": "boolean", "default": true } }, "description": "save_principal_preference (INTX-PREF)." },
+            "workingMemory": { "type": "object", "additionalProperties": false, "properties": { "enabled": { "type": "boolean", "default": true } }, "description": "Working-memory read/write tools (MEM-TIER)." }
+          }
+        },
+        "access": { "$ref": "#/$defs/toolAccess", "description": "Access policy for http and bundled tools (same shape as mcp.servers[].toolAccess)." }
+      }
+    },
+
+    "mcp": {
+      "description": "MCP servers the agent connects to as a client (TOOL-MCP, D41).",
+      "type": "object", "additionalProperties": false, "required": ["servers"],
+      "properties": {
+        "servers": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["name", "transport"],
+            "properties": {
+              "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+              "transport": { "type": "string", "enum": ["stdio", "sse", "streamable-http"] },
+              "url": { "type": "string", "format": "uri" },
+              "command": { "type": "string" },
+              "args": { "type": "array", "items": { "type": "string" } },
+              "env": { "type": "object", "additionalProperties": { "type": "string" } },
+              "headers": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Deployment-held credentials, typically ${VAR} placeholders." },
+              "lazy": { "type": "boolean", "default": true, "description": "Connect on first need (TOOL-MCP-002)." },
+              "reconnect": { "type": "boolean", "default": true },
+              "toolAccess": { "$ref": "#/$defs/toolAccess" }
+            },
+            "allOf": [
+              { "if": { "properties": { "transport": { "const": "stdio" } } }, "then": { "required": ["command"] } },
+              { "if": { "properties": { "transport": { "enum": ["sse", "streamable-http"] } } }, "then": { "required": ["url"] } }
+            ]
+          }
+        }
+      }
+    },
+
+    "purposes": {
+      "description": "The governance list a principal may declare when requesting elevation (D14, D15, PRIV-ELEV).",
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["id", "label"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "label": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "description": { "type": "string" },
+          "permittedRoles": { "$ref": "#/$defs/roleList", "description": "Optional restriction: only these roles may declare this purpose (D15)." }
+        }
+      }
+    },
+
+    "approvals": {
+      "description": "Defaults for approval and elevation policies (INTX-APPR). Per-tool entries in toolAccess may override them.",
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "timeoutMinutes": { "type": "integer", "minimum": 1, "default": 60 },
+        "policy": { "$ref": "#/$defs/approvalPolicy" },
+        "selfApproval": { "type": "boolean", "default": true, "description": "A requester who holds an approver role for the tool runs it without a prompt (INTX-APPR)." },
+        "grantTtlMinutes": { "type": "integer", "minimum": 1, "default": 480, "description": "Default duration of an elevation grant." }
+      }
+    },
+
+    "actions": {
+      "description": "Per-action (tool) policies: auth challenges and credential freshness (D7, D28, INTX-AUTH). Keys are tool names.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "authChallenge": {
+            "type": "object", "additionalProperties": false, "required": ["type"],
+            "properties": {
+              "type": { "type": "string", "enum": ["device", "face-match", "document"] },
+              "onChannelUnavailable": { "type": "string", "enum": ["fail", "degrade"], "default": "fail" },
+              "referenceImage": { "type": "string", "enum": ["badge-photo"], "default": "badge-photo", "description": "face-match only: which credential photo is the reference (INTX-AUTH-007)." },
+              "timeoutSeconds": { "type": "integer", "minimum": 30 }
+            }
+          },
+          "maxCredentialAge": { "type": "integer", "minimum": 0, "description": "Seconds; 0 forces a fresh liveness check before each run; absent means the TTL N (D7)." }
+        }
+      }
+    },
+
+    "sessions": {
+      "description": "Session lifecycle (D6, D7, D36). Deployment-tunable through ${VAR} placeholders.",
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "idleTimeoutSeconds": { "type": "integer", "minimum": 60, "default": 1800 },
+        "bindingExpirySeconds": { "type": "integer", "minimum": 30, "default": 300 },
+        "credentialCheckTtlSeconds": { "type": "integer", "minimum": 0, "default": 300, "description": "N of the credential-liveness TTL (D7)." },
+        "siblingSessions": { "type": "boolean", "default": true, "description": "Allow sibling sessions from a bound token (CHAN-BIND-010)." }
+      }
+    },
+
+    "channels": {
+      "description": "Channel adapters (D1, D2). DIDComm is always on: it is the capability channel.",
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "agui": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "allowedOrigins": { "type": "array", "items": { "type": "string", "format": "uri" }, "description": "UI origins allowed by CORS on the session endpoints." },
+            "walletLinkTemplate": { "type": "string", "pattern": "^https://.*\\{oob\\}.*$", "default": "https://hologram.zone/open?oob={oob}", "description": "HTTPS app link with {oob}; never a didcomm:// link (PROF-BIND-008)." },
+            "uploads": {
+              "type": "object", "additionalProperties": false,
+              "properties": {
+                "maxBytes": { "type": "integer", "minimum": 1024, "default": 26214400 },
+                "types": { "type": "array", "items": { "type": "string" }, "default": ["image/*", "audio/webm", "audio/ogg", "audio/mp4", "application/pdf"] }
+              }
+            }
+          }
+        },
+        "a2a": {
+          "type": "object", "additionalProperties": false,
+          "properties": { "enabled": { "type": "boolean", "default": false } }
+        }
+      }
+    },
+
+    "privacy": {
+      "description": "Processing activities with lawful basis and retention (D18, PRIV-RETN), erasure settings (D19, D20).",
+      "type": "object", "additionalProperties": false, "required": ["processingActivities"],
+      "properties": {
+        "processingActivities": {
+          "type": "array", "minItems": 1,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["id", "lawfulBasis"],
+            "properties": {
+              "id": { "type": "string", "enum": ["conversation-memory", "working-memory", "rag-corpus", "media-objects", "credential-presentations", "approvals", "statistics"] },
+              "lawfulBasis": { "type": "string", "enum": ["consent", "contract", "legitimate-interest"] },
+              "retention": {
+                "type": "object", "additionalProperties": false,
+                "properties": {
+                  "days": { "type": "integer", "minimum": 1, "description": "Omit for indefinite." },
+                  "onExpiry": { "type": "string", "enum": ["archive", "delete"], "default": "archive", "description": "Histories are archived, never deleted, so the digest chain stays verifiable (PRIV-RETN-002)." }
+                }
+              },
+              "description": { "type": "string" }
+            }
+          }
+        },
+        "erasureRequests": { "type": "boolean", "default": true, "description": "Accept erasure requests (crypto-erasure with lineage cascade)." },
+        "mediaOrphanGraceDays": { "type": "integer", "minimum": 1, "default": 30 }
+      }
+    },
+
+    "media": {
+      "description": "Inbound media to text and media generation (D45).",
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "speechToText": {
+          "type": "object", "additionalProperties": false, "required": ["provider", "model"],
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "provider": { "type": "string", "enum": ["openai", "openai-compatible"] },
+            "model": { "type": "string" },
+            "baseUrl": { "type": "string", "format": "uri" },
+            "apiKeyEnv": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$", "default": "STT_API_KEY" },
+            "languageHint": { "$ref": "#/$defs/bcp47" }
+          }
+        },
+        "vision": {
+          "type": "object", "additionalProperties": false, "required": ["provider", "model"],
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "provider": { "type": "string", "enum": ["openai", "openai-compatible", "llm"], "description": "llm reuses the configured language model when it is multimodal." },
+            "model": { "type": "string" },
+            "baseUrl": { "type": "string", "format": "uri" },
+            "apiKeyEnv": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$", "default": "VISION_API_KEY" },
+            "prompt": { "type": "string" },
+            "maxOutputTokens": { "type": "integer", "minimum": 50, "default": 300 }
+          }
+        },
+        "imageGeneration": {
+          "type": "object", "additionalProperties": false, "required": ["providers"],
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "providers": {
+              "type": "array", "minItems": 1,
+              "items": {
+                "type": "object", "additionalProperties": false, "required": ["name", "type", "model"],
+                "properties": {
+                  "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+                  "type": { "type": "string", "enum": ["openai-image", "openai-compatible-image"] },
+                  "model": { "type": "string" },
+                  "baseUrl": { "type": "string", "format": "uri" },
+                  "apiKeyEnv": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$", "default": "IMAGE_API_KEY" },
+                  "defaultSize": { "type": "string", "pattern": "^[0-9]+x[0-9]+$|^auto$", "default": "1024x1024" },
+                  "quality": { "type": "string", "enum": ["low", "medium", "high", "auto"] },
+                  "outputFormat": { "type": "string", "enum": ["png", "jpeg", "webp"], "default": "png" }
+                }
+              }
+            },
+            "thumbnailPx": { "type": "integer", "minimum": 64, "default": 256 }
+          }
+        },
+        "faceVerification": {
+          "description": "Face-match challenges (INTX-AUTH-007/008): a call on the capability channel joined by the face-verification service.",
+          "type": "object", "additionalProperties": false, "required": ["serviceUrl", "webrtcServerUrl"],
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "serviceUrl": { "type": "string", "format": "uri" },
+            "webrtcServerUrl": { "type": "string", "format": "uri" },
+            "timeoutSeconds": { "type": "integer", "minimum": 30, "default": 180 }
+          }
+        }
+      }
+    },
+
+    "integrity": {
+      "description": "Verana anchoring (D26, INTEG-ANCHOR).",
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "anchoring": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "batchIntervalSeconds": { "type": "integer", "minimum": 10, "default": 600 },
+            "maxBatchEntries": { "type": "integer", "minimum": 1, "default": 1000 }
+          }
+        }
+      }
+    },
+
+    "statistics": {
+      "description": "Statistics ingestion (PLAT-STATS).",
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean", "default": false },
+        "sink": { "type": "string", "enum": ["redis-stream", "http"], "default": "redis-stream" },
+        "httpUrl": { "type": "string", "format": "uri" }
+      }
+    },
+
+    "features": {
+      "description": "Feature gates. A disabled feature is absent from the system-prompt add-on (CORE-PROMPT-002) and from the descriptor.",
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "approvals": { "type": "boolean", "default": true },
+        "elevation": { "type": "boolean", "default": true },
+        "reactions": { "type": "boolean", "default": true },
+        "receipts": { "type": "boolean", "default": true },
+        "voiceNotes": { "type": "boolean", "default": true },
+        "inboundImages": { "type": "boolean", "default": true },
+        "imageGeneration": { "type": "boolean", "default": false },
+        "rag": { "type": "boolean", "default": false },
+        "workingMemory": { "type": "boolean", "default": true },
+        "semanticRecall": { "type": "boolean", "default": true },
+        "preferences": { "type": "boolean", "default": true },
+        "credentialTool": { "type": "boolean", "default": true },
+        "anchoring": { "type": "boolean", "default": true },
+        "history": { "type": "boolean", "default": true }
+      }
+    }
+  },
+
+  "$defs": {
+    "did": { "type": "string", "pattern": "^did:[a-z0-9]+:.+$" },
+    "bcp47": { "type": "string", "pattern": "^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$" },
+    "toolName": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,63}$" },
+    "roleList": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" } },
+    "approvalPolicy": {
+      "description": "How many approvers must accept (INTX-APPR-005).",
+      "type": "object", "additionalProperties": false, "required": ["type"],
+      "properties": {
+        "type": { "type": "string", "enum": ["count", "percentage"] },
+        "value": { "type": "number", "minimum": 1, "description": "count: number of distinct approvers; percentage: 1 to 100 of eligible approvers." },
+        "vetoOnRefusal": { "type": "boolean", "default": false }
+      }
+    },
+    "toolAccess": {
+      "description": "Tier model per (role, tool): ALLOW via roles, APPROVAL via approval, REQUESTABLE via elevation, DENY otherwise (D12, D14, RBAC-TOOL).",
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "default": { "type": "string", "enum": ["none", "all"], "default": "none", "description": "none: unlisted tools are denied; all: unlisted tools are allowed to every bound Principal." },
+        "roles": {
+          "type": "object",
+          "additionalProperties": { "type": "array", "items": { "$ref": "#/$defs/toolName" }, "uniqueItems": true },
+          "description": "role -> tools in its ALLOW set. '*' allows every tool of the server."
+        },
+        "approval": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["tools", "approvers"],
+            "properties": {
+              "tools": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/toolName" } },
+              "approvers": { "$ref": "#/$defs/roleList" },
+              "timeoutMinutes": { "type": "integer", "minimum": 1 },
+              "policy": { "$ref": "#/$defs/approvalPolicy" },
+              "approverConnectionType": { "type": "string", "enum": ["verifiable-user-agent", "verifiable-service"], "description": "Optionally restrict who may approve by connection type." }
+            }
+          }
+        },
+        "elevation": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["tools", "purposes", "approvers"],
+            "properties": {
+              "tools": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/toolName" } },
+              "purposes": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "Ids from the top-level purposes list." },
+              "approvers": { "$ref": "#/$defs/roleList" },
+              "grantTtlMinutes": { "type": "integer", "minimum": 1 },
+              "timeoutMinutes": { "type": "integer", "minimum": 1 },
+              "policy": { "$ref": "#/$defs/approvalPolicy" }
+            }
+          }
+        }
+      }
+    }
+  }
+}
