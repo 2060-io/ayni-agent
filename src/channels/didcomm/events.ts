@@ -328,7 +328,6 @@ export class DidcommEvents {
 
   private sinkFor(session: Session): TurnSink {
     const client = this.client
-    const connectionId = session.externalRef
     let buffer = ''
     return {
       emit: async (event) => {
@@ -336,7 +335,7 @@ export class DidcommEvents {
         else if (event.type === 'text-end') {
           const text = buffer
           buffer = ''
-          if (text.trim()) await client.sendText(connectionId, text)
+          if (text.trim()) await this.adapter.sendText(session, text)
         } else if (event.type === 'activity' && event.activityType === 'hologram.menu') {
           const content = event.content as { prompt: string; items: { label: string }[] }
           await client.sendQuestion(
@@ -354,7 +353,7 @@ export class DidcommEvents {
     if (!principal) return
     const command = await this.agent.sessionsCommand(session, text)
     if (command !== undefined) {
-      await this.client.sendText(session.externalRef, command)
+      await this.adapter.sendText(session, command)
       return
     }
     await this.agent.turn(
@@ -406,7 +405,7 @@ export class DidcommEvents {
     )
     if (result && 'await' in result && result.await === 'binding-code')
       this.awaitingCode.set(connectionId, Date.now() + 5 * 60_000)
-    if (result && 'text' in result && result.text) await this.client.sendText(connectionId, result.text)
+    if (result && 'text' in result && result.text) await this.adapter.sendText(bound.session, result.text)
   }
 
   private async onMenuRequest(connectionId: string): Promise<void> {

@@ -119,6 +119,7 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
     switch (event.kind) {
       case 'text':
         await this.sendEntryText(connectionId, event.entry)
+        await this.sendContextualMenu(session).catch(() => undefined)
         return 'ok'
       case 'menu':
         await this.client.sendQuestion(
@@ -162,17 +163,9 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
           event.messageIds.map((messageId) => ({ messageId, state: event.state }))
         )
         return 'ok'
-      case 'contextual-menu': {
-        if (!this.agent) return 'unsupported'
-        const state = await this.agent.hologramState(session)
-        const options = state.contextualMenu.items.map((i) => ({
-          name: i.id,
-          title: i.badge ? `${i.label} (${i.badge})` : i.label,
-          description: '',
-        }))
-        await this.client.sendActionMenu(connectionId, this.agent.pack.metadata.displayName, 'Options', options)
+      case 'contextual-menu':
+        await this.sendContextualMenu(session)
         return 'ok'
-      }
       case 'generating':
         await this.client.sendText(connectionId, 'Working on your image, it will arrive shortly.')
         return 'ok'
@@ -186,8 +179,26 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
 
   private async sendEntryText(connectionId: string, entry: MessageEntry): Promise<void> {
     const text = entry.completion === 'interrupted' ? `${entry.text}\n(interrupted)` : entry.text
-    const { id } = await this.client.sendText(connectionId, text)
-    void id
+    await this.client.sendText(connectionId, text)
+  }
+
+  /** The wallet keeps the last contextual menu it received: every message re-sends the current one (INTX-MENU-002). */
+  public async sendContextualMenu(session: Session): Promise<void> {
+    if (!this.agent) return
+    const state = await this.agent.hologramState(session)
+    const options = state.contextualMenu.items.map((i) => ({
+      name: i.id,
+      title: i.badge ? `${i.label} (${i.badge})` : i.label,
+      description: '',
+    }))
+    if (!options.length) return
+    await this.client.sendActionMenu(session.externalRef, this.agent.pack.metadata.displayName, 'Options', options)
+  }
+
+  /** A reply on the capability channel: the text, then the menu that reflects the new state. */
+  public async sendText(session: Session, text: string): Promise<void> {
+    if (text.trim()) await this.client.sendText(session.externalRef, text)
+    await this.sendContextualMenu(session).catch(() => undefined)
   }
 }
 
