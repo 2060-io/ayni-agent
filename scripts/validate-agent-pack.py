@@ -37,6 +37,7 @@ def cross_field(doc):
     for r in ident["roleRules"]: used |= set(r["roles"])
     for r in ident.get("perActorOverrides", []): used |= set(r["roles"])
     def access(t):
+        nonlocal used
         for k in (t.get("roles") or {}): used.add(k)
         for a in t.get("approval", []) + t.get("elevation", []):
             used |= set(a["approvers"])
