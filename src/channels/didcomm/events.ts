@@ -57,7 +57,12 @@ export class DidcommEvents {
           String(data.connectionId ?? '')
         )
       case 'didcomm.basic-messages.message-received':
-        return this.onText(String(data.connectionId), String(data.content ?? ''), String(data.id ?? ''))
+        // the record's thread id is the DIDComm message id when the message carries no thread decorator
+        return this.onText(
+          String(data.connectionId),
+          String(data.content ?? ''),
+          String(data.threadId ?? data.id ?? '')
+        )
       case 'didcomm.question-answer.answer-received':
         return this.onAnswer(String(data.connectionId), String(data.threadId ?? ''), String(data.response ?? ''))
       case 'didcomm.action-menu.perform-received':
@@ -257,10 +262,19 @@ export class DidcommEvents {
     )
   }
 
+  /** Message states for what the person sent (INTX-STATE-001): received at once, viewed when the agent reads it. */
+  private async receipt(connectionId: string, messageId: string, state: 'received' | 'viewed'): Promise<void> {
+    if (!messageId || !this.agent.features.receipts) return
+    await this.client
+      .sendReceipts(connectionId, [{ messageId, state, timestamp: new Date().toISOString() }])
+      .catch((err) => this.logger.debug({ err, messageId, state }, 'receipt not sent'))
+  }
+
   private async onText(connectionId: string, content: string, messageId: string): Promise<void> {
+    await this.receipt(connectionId, messageId, 'received')
     const bound = await this.agent.didcommSession(connectionId)
     if (!bound) return
-    void messageId
+    await this.receipt(connectionId, messageId, 'viewed')
     await this.turn(bound.session, content)
   }
 
@@ -313,8 +327,11 @@ export class DidcommEvents {
   }
 
   private async onMedia(connectionId: string, data: Record<string, unknown>): Promise<void> {
+    const messageId = String(data.threadId ?? data.id ?? '')
+    await this.receipt(connectionId, messageId, 'received')
     const bound = await this.agent.didcommSession(connectionId)
     if (!bound) return
+    await this.receipt(connectionId, messageId, 'viewed')
     const items =
       (data.items as
         | {
