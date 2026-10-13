@@ -15,7 +15,14 @@ import {
 } from './types.js'
 
 export function toOpenAiMessages(messages: ChatMessage[], multimodal: boolean): ChatCompletionMessageParam[] {
-  return messages.map((m): ChatCompletionMessageParam => {
+  // one system message: several compatible endpoints honor only the first and surface the others
+  // as conversation content
+  const system = messages.filter((m): m is Extract<ChatMessage, { role: 'system' }> => m.role === 'system')
+  const rest = messages.filter((m) => m.role !== 'system')
+  const merged: ChatMessage[] = system.length
+    ? [{ role: 'system', content: system.map((m) => m.content).join('\n\n') }, ...rest]
+    : rest
+  return merged.map((m): ChatCompletionMessageParam => {
     switch (m.role) {
       case 'system':
         return { role: 'system', content: m.content }

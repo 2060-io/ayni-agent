@@ -137,11 +137,21 @@ export class Orchestrator {
         { role: 'tool', toolCallId: id, name: p.name, content: (p.result ?? '').slice(0, 2000) },
       ]
     }
+    // receipts and reactions are bookkeeping, not conversation (a reaction the model must know about
+    // arrives as its own turn); approvals and challenges become short notes in the agent's voice
+    if (entry.sourceType === 'state-update' || entry.sourceType === 'reaction') return []
+    if (
+      entry.sourceType === 'approval' ||
+      entry.sourceType === 'refusal' ||
+      entry.sourceType === 'auth-challenge' ||
+      entry.role === 'system'
+    ) {
+      return [{ role: 'assistant', content: `[note] ${entry.text}` }]
+    }
     if (entry.role === 'agent')
       return [
         { role: 'assistant', content: entry.completion === 'interrupted' ? `${entry.text} [interrupted]` : entry.text },
       ]
-    if (entry.role === 'system') return [{ role: 'system', content: entry.text }]
     return [{ role: 'user', content: entry.text }]
   }
 
