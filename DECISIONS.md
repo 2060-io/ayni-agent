@@ -90,6 +90,11 @@ Decisions taken while implementing hologram-spec v3, in the order they came up. 
     Ownership is checked at bind (a conversation of someone else is ignored and a new one starts) and
     on every list, rename, archive and delete (404 for another Principal). The phone's DIDComm session
     carries no conversation. Entries are untouched by any of this: retention and erasure govern them.
+21. **One open session per device per conversation** (IDENT-SESS-014). When a session binds to or is
+    created on a conversation where another bound session of the same device handle exists, the earlier
+    one closes with reason `supersede`. Siblings inherit the device handle, so a browser that opens the
+    same conversation twice keeps one session; other devices on the conversation are untouched. Found
+    live: a browser accumulated five bound sessions on one conversation, each holding a stream.
 
 ## Not done in this iteration
 

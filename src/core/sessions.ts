@@ -379,6 +379,14 @@ export class SessionService {
         sessionIds: [],
       }
     }
+    // one open session per device per conversation (IDENT-SESS-014): the newer one supersedes the older
+    if (session.deviceHandle) {
+      for (const id of conversation.sessionIds) {
+        if (id === session.id) continue
+        const other = await this.store.sessions.get(id)
+        if (other?.state === 'bound' && other.deviceHandle === session.deviceHandle) await this.close(other, 'supersede')
+      }
+    }
     session.conversationId = conversation.id
     const earlier = conversation.sessionIds.filter((id) => id !== session.id)
     if (earlier.length) session.lineage = earlier.slice(0, 20)

@@ -367,6 +367,43 @@ describe('conversations (PROF-CONV-001..005, IDENT-SESS-010..013)', () => {
     expect((await list(fresh.body.sessionToken)).length).toBe(2)
   })
 
+  it('a device holds one open session per conversation; opening it again supersedes the earlier one (IDENT-SESS-014)', async () => {
+    const { body } = await createSession()
+    await bindViaPhone(body.sessionId, 'did:peer:kara')
+    const status = (
+      await running.app.inject({
+        method: 'GET',
+        url: `/agui/v3/sessions/${body.sessionId}`,
+        headers: auth(body.sessionToken),
+      })
+    ).json() as { conversationId: string }
+    // a sibling inherits the device handle: the same browser opening the same conversation again
+    const again = await running.app.inject({
+      method: 'POST',
+      url: '/agui/v3/sessions',
+      headers: auth(body.sessionToken),
+      payload: { client, locale: 'en', conversationId: status.conversationId },
+    })
+    expect(again.statusCode).toBe(201)
+    expect((again.json() as { conversationId: string }).conversationId).toBe(status.conversationId)
+    const earlier = await running.app.inject({
+      method: 'GET',
+      url: `/agui/v3/sessions/${body.sessionId}`,
+      headers: auth(body.sessionToken),
+    })
+    expect(earlier.statusCode).toBe(410)
+    expect((earlier.json() as { reason: string }).reason).toBe('supersede')
+    // a different device on the same conversation is left alone
+    const other = await createSession()
+    await bindViaPhone(other.body.sessionId, 'did:peer:kara')
+    const newer = await running.app.inject({
+      method: 'GET',
+      url: `/agui/v3/sessions/${(again.json() as { sessionId: string }).sessionId}`,
+      headers: auth((again.json() as { sessionToken: string }).sessionToken),
+    })
+    expect(newer.statusCode).toBe(200)
+  })
+
   it('closes a conversation for good: gone from the list, resumption refused with 409 final', async () => {
     const { body } = await createSession()
     await bindViaPhone(body.sessionId, 'did:peer:nina')
