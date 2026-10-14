@@ -156,7 +156,12 @@ export class Orchestrator {
   }
 
   private async userMessage(entry: MessageEntry, imageBytes?: Map<string, Buffer>): Promise<ChatMessage> {
-    const text = withReplyContext(entry)
+    // extracted file content (a PDF's text) travels with the message; images go as parts when the model can see
+    const files = entry.attachments
+      .filter((a) => a.type === 'file' && a.textRepr && !a.textRepr.startsWith('[file '))
+      .map((a) => `\n\n--- attached file: ${a.filename ?? a.id} ---\n${a.textRepr}`)
+      .join('')
+    const text = withReplyContext(entry) + files
     const parts: ContentPart[] = [{ type: 'text', text }]
     if (this.llm.multimodal) {
       for (const a of entry.attachments) {

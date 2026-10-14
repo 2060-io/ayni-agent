@@ -62,7 +62,7 @@ export class AgUiAdapter implements ChannelAdapter {
             await s.publish(
               session.id,
               ev.activitySnapshot(a.id, ACTIVITY.attachment, {
-                ...attachmentActivity(a),
+                ...attachmentActivity(a, event.entry.role === 'agent' ? 'assistant' : 'user'),
                 entryId: event.entry.id,
                 initiatedAt: event.entry.initiatedAt,
               })

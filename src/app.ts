@@ -80,9 +80,7 @@ export async function buildAgent(
     await s3
       .init()
       .then(() => logger.info({ bucket: env.objectStore?.bucket }, 'object store ready'))
-      .catch((err: unknown) =>
-        logger.error({ err }, 'object store unavailable: media uploads will fail until it is')
-      )
+      .catch((err: unknown) => logger.error({ err }, 'object store unavailable: media uploads will fail until it is'))
 
   const redis = env.redisUrl ? new Redis(env.redisUrl, { lazyConnect: true, maxRetriesPerRequest: 2 }) : undefined
   if (redis) await redis.connect().catch((err) => logger.warn({ err }, 'redis unavailable'))

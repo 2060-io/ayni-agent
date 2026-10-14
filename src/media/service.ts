@@ -85,6 +85,9 @@ export class MediaService {
         attachment.textRepr =
           (await this.transcriber.transcribe(bytes, mimeType, filename ?? 'voice-note', language)) ||
           '[voice note without words]'
+      } else if (type === 'file' && mimeType === 'application/pdf') {
+        const text = await extractPdfText(bytes)
+        if (text) attachment.textRepr = `[file ${filename ?? 'document.pdf'}]\n${text}`
       } else if (type === 'image') {
         const meta = await sharp(bytes)
           .metadata()
@@ -222,4 +225,30 @@ export class MediaService {
     })()
     return { entryId }
   }
+}
+
+/** The text of a PDF, first pages first, bounded so a long document never floods the model (D13). */
+export async function extractPdfText(bytes: Buffer, maxChars = 20_000, maxPages = 40): Promise<string> {
+  const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs')
+  const doc = await getDocument({ data: new Uint8Array(bytes), isEvalSupported: false, useSystemFonts: true }).promise
+  const out: string[] = []
+  let total = 0
+  for (let i = 1; i <= Math.min(doc.numPages, maxPages) && total < maxChars; i++) {
+    const page = await doc.getPage(i)
+    const content = await page.getTextContent()
+    const line = content.items
+      .map((item) => ('str' in item ? item.str : ''))
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+    if (line) {
+      out.push(line)
+      total += line.length
+    }
+  }
+  await doc.destroy()
+  let text = out.join('\n')
+  if (text.length > maxChars) text = `${text.slice(0, maxChars)}…`
+  if (doc.numPages > maxPages) text += `\n[${doc.numPages - maxPages} more pages not read]`
+  return text
 }

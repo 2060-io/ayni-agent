@@ -380,7 +380,10 @@ export interface AttachmentActivity {
   attachmentId: string
   type: AttachmentType
   mimeType: string
+  /** a short text stand-in: a caption, a transcription, a description; long extractions stay on the agent */
   textRepr: string
+  /** who sent it: the person (`user`) or the agent (`assistant`) */
+  role?: 'user' | 'assistant'
   size?: number
   width?: number
   height?: number

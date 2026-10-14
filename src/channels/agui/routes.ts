@@ -533,7 +533,10 @@ export class AgUiRoutes {
             // echo of the inbound entry for voice notes: the transcription under the note (PROF-MAP-006)
             for (const a of event.entry.attachments)
               write(
-                ev.activitySnapshot(a.id, ACTIVITY.attachment, { ...attachmentActivity(a), entryId: event.entry.id })
+                ev.activitySnapshot(a.id, ACTIVITY.attachment, {
+                  ...attachmentActivity(a, 'user'),
+                  entryId: event.entry.id,
+                })
               )
             return
         }

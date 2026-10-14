@@ -2,12 +2,13 @@
 import { ACTIVITY, type AttachmentActivity } from '@2060.io/hologram-agui-profile'
 import type { ApprovalRecord, MessageAttachment, MessageEntry } from '../../core/types.js'
 
-export function attachmentActivity(a: MessageAttachment): AttachmentActivity {
+export function attachmentActivity(a: MessageAttachment, role?: 'user' | 'assistant'): AttachmentActivity {
   return {
     attachmentId: a.id,
     type: a.type === 'credential' ? 'file' : a.type,
     mimeType: a.mimeType,
-    textRepr: a.textRepr,
+    textRepr: caption(a),
+    role,
     size: a.size,
     width: a.width,
     height: a.height,
@@ -35,6 +36,12 @@ export function approvalValue(record: ApprovalRecord, viewerId: string, canDecid
   }
 }
 
+/** The wire caption: a file's extracted text stays on the agent, the UI gets the name and a short excerpt. */
+function caption(a: MessageAttachment): string {
+  if (a.type !== 'file' || a.textRepr.length <= 200) return a.textRepr
+  return `${a.textRepr.slice(0, 200).trim()}…`
+}
+
 /** One entry becomes one or more AG-UI messages (text and activities), transcript order preserved. */
 export function entryToMessages(entry: MessageEntry): Record<string, unknown>[] {
   const out: Record<string, unknown>[] = []
@@ -57,7 +64,7 @@ export function entryToMessages(entry: MessageEntry): Record<string, unknown>[] 
           id: a.id,
           role: 'activity',
           activityType: ACTIVITY.attachment,
-          content: attachmentActivity(a),
+          content: attachmentActivity(a, entry.role === 'agent' ? 'assistant' : 'user'),
           metadata: { entryId: entry.id, ...meta },
         })
       }

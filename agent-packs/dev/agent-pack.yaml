@@ -48,6 +48,7 @@ llm:
   model: ${LLM_MODEL:-echo}
   apiKeyEnv: LLM_API_KEY
   maxOutputTokens: 2048
+  multimodal: ${LLM_MULTIMODAL:-false}
 
 embeddings:
   provider: stub
