@@ -74,6 +74,31 @@ Development switches, refused in production (`NODE_ENV=production`):
 | `/.well-known/agent.json`, `/a2a` | A2A (when `channels.a2a.enabled`) |
 | `/health/live`, `/health/ready`, `/stats`, `/integrity/anchors` | operations |
 
+## Docker
+
+```bash
+docker build -t io2060/ayni-agent:local .
+docker run --rm -p 3010:3010 --env-file .env io2060/ayni-agent:local
+```
+
+## Continuous integration and releases
+
+- **CI** (`.github/workflows/ci.yml`) runs on every pull request to `main` and on pushes: the shared
+  2060 pipeline (install, build, format, types, unit tests, Helm chart lint, conventional PR title)
+  plus a Docker image build without push.
+- **CD** (`.github/workflows/cd.yml`) runs on pushes to `main`, `release/**` and `v[0-9]*` branches
+  once the repository variable `CD_ENABLED` is `true`:
+  - every push with releasable commits publishes a **dev prerelease** `vX.Y.Z-dev` (semantic-release),
+    the image `io2060/ayni-agent:vX.Y.Z-dev` with the floating `dev`, `vX-dev`, `vX.Y-dev` tags from
+    `main`, and the Helm chart `oci://docker.io/io2060/ayni-agent` at the same version;
+  - **release-please** keeps a Release PR open on `main`; merging it creates the stable tag `vX.Y.Z`,
+    the GitHub release with `CHANGELOG.md`, the image tags `vX.Y.Z`, `vX.Y`, `vX` and `latest`, the
+    chart at `vX.Y.Z`, and a Discord announcement.
+- Versions follow conventional commits: `fix:` bumps the patch, `feat:` the minor, `feat!:` the
+  major (minor while below 1.0).
+- Secrets and variables expected by CD: `DOCKER_HUB_LOGIN`, `DOCKER_HUB_PWD`,
+  `DISCORD_UPDATES_WEBHOOK_URL` (secrets) and `CD_ENABLED` (variable).
+
 ## Dependencies on other components
 
 - VS Agent 2.x with `POST /v2/didcomm/out-of-band` and the `didcomm.out-of-band.handshake-reused`
