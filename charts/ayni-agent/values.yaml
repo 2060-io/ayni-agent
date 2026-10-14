@@ -1,3 +1,6 @@
+# Kubernetes namespace the resources are created in
+namespace: ayni
+
 replicaCount: 1
 
 image:

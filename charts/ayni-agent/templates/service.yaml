@@ -3,6 +3,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: {{ include "ayni-agent.fullname" . }}
+  namespace: {{ .Values.namespace }}
   labels:
     {{- include "ayni-agent.labels" . | nindent 4 }}
 spec:
