@@ -73,11 +73,16 @@ export async function buildAgent(
   const llm = createChatModel(pack.llm)
   const embeddings = createEmbeddings(pack.embeddings)
   const memory = new MemoryService(store, crypto, embeddings, pack, logger)
-  const objects: ObjectStore = env.objectStore
-    ? new S3ObjectStore(env.objectStore, crypto)
-    : new MemoryObjectStore(crypto)
-  if (!env.objectStore)
-    logger.warn('OBJECT_STORE_ENDPOINT not set: media objects are kept in memory (development only)')
+  const s3 = env.objectStore ? new S3ObjectStore(env.objectStore, crypto) : undefined
+  const objects: ObjectStore = s3 ?? new MemoryObjectStore(crypto)
+  if (!s3) logger.warn('OBJECT_STORE_ENDPOINT not set: media objects are kept in memory (development only)')
+  else
+    await s3
+      .init()
+      .then(() => logger.info({ bucket: env.objectStore?.bucket }, 'object store ready'))
+      .catch((err: unknown) =>
+        logger.error({ err }, 'object store unavailable: media uploads will fail until it is')
+      )
 
   const redis = env.redisUrl ? new Redis(env.redisUrl, { lazyConnect: true, maxRetriesPerRequest: 2 }) : undefined
   if (redis) await redis.connect().catch((err) => logger.warn({ err }, 'redis unavailable'))
