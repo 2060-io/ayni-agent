@@ -26,7 +26,7 @@ other agents reach it over A2A. Identity comes from Verifiable Trust v4 credenti
 | `schemas/`, `docs/agent-pack.md`, `agent-packs/` | the agent-pack schema 3.0, its documentation, the example and development packs | CORE-PACK |
 | `dev/` | the local VS Agent on the Verana devnet (`dev/vs-agent`), the agent's own stack (`dev/compose`), tools | PLAT-DEPLOY-002 |
 | `agent-packs/welcome/` | "Welcome to Ayni", the onboarding agent deployed with the UI (in the image at `/app/agent-packs/welcome`) | |
-| `charts/ayni-agent/` | Helm chart (`namespace` value, ingress, inline or ConfigMap agent pack) | PLAT-DEPLOY-001 |
+| `charts/ayni-agent/` | Helm chart `ayni-agent-chart` (`namespace` value, ingress, inline or ConfigMap agent pack) | PLAT-DEPLOY-001 |
 
 [DECISIONS.md](DECISIONS.md) records the implementation decisions taken while building, and what
 is deferred.
@@ -91,7 +91,7 @@ docker run --rm -p 3010:3010 --env-file .env io2060/ayni-agent:local
   once the repository variable `CD_ENABLED` is `true`:
   - every push with releasable commits publishes a **dev prerelease** `vX.Y.Z-dev` (semantic-release),
     the image `io2060/ayni-agent:vX.Y.Z-dev` with the floating `dev`, `vX-dev`, `vX.Y-dev` tags from
-    `main`, and the Helm chart `oci://docker.io/io2060/ayni-agent` at the same version;
+    `main`, and the Helm chart `oci://docker.io/io2060/ayni-agent-chart` at the same version;
   - **release-please** keeps a Release PR open on `main`; merging it creates the stable tag `vX.Y.Z`,
     the GitHub release with `CHANGELOG.md`, the image tags `vX.Y.Z`, `vX.Y`, `vX` and `latest`, the
     chart at `vX.Y.Z`, and a Discord announcement.

@@ -9,7 +9,8 @@ image:
   tag: ""
 
 imagePullSecrets: []
-nameOverride: ""
+# resources are named after the application, not the chart
+nameOverride: "ayni-agent"
 fullnameOverride: ""
 podAnnotations: {}
 resources: {}
