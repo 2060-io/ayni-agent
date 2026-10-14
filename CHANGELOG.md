@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.1](https://github.com/2060-io/ayni-agent/compare/v0.3.0...v0.3.1) (2026-10-14)
+
+
+### Bug Fixes
+
+* **chart:** name the chart ayni-agent-chart so it no longer overwrites the image tag ([d29d71e](https://github.com/2060-io/ayni-agent/commit/d29d71efc347e922daf6e63f8a8afe4cc721c417))
+* **chart:** name the chart ayni-agent-chart so it no longer overwrites the image tag on Docker Hub ([247b0dd](https://github.com/2060-io/ayni-agent/commit/247b0dd9583ee2dbd3d1eb4ee7ad7aa3658132fc))
+
 ## [0.3.0](https://github.com/2060-io/ayni-agent/compare/v0.2.0...v0.3.0) (2026-10-14)
 
 
