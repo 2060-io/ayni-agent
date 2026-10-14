@@ -38,13 +38,30 @@ env:
 # OBJECT_STORE_SECRET_KEY, ENTRY_ENCRYPTION_KEY, LLM_API_KEY, EMBEDDINGS_API_KEY, ANCHOR_SIGNER_MNEMONIC...
 existingSecret: ""
 
-# ConfigMap holding agent-pack.yaml (mounted at AGENT_PACK_PATH)
+# The agent pack, one of: a pack shipped in the image (set AGENT_PACK_PATH to its directory, e.g.
+# /app/agent-packs/welcome), an existing ConfigMap holding agent-pack.yaml (agentPackConfigMap), or
+# the pack given inline here (agentPack); the two ConfigMap forms are mounted at /app/agent-pack.
 agentPackConfigMap: ""
+agentPack: ""
 
 service:
   enabled: true
   type: ClusterIP
   port: 3010
+
+# Public entry (the descriptor and the AG-UI endpoints). With a VS Agent on the same host, keep the
+# paths narrow so the DID Document and DIDComm stay with the VS Agent.
+ingress:
+  enabled: false
+  className: nginx
+  clusterIssuer: letsencrypt-prod
+  host: ""
+  tlsSecret: "public.{{ .Values.ingress.host }}-cert"
+  proxyBodySize: 30m
+  annotations: {}
+  paths:
+    - path: /
+      pathType: Prefix
 
 nodeSelector: {}
 tolerations: []

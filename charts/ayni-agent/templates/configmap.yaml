@@ -1,0 +1,14 @@
+{{- if .Values.agentPack }}
+# The agent pack given inline in values (agentPack), mounted at AGENT_PACK_PATH. Alternatively name an
+# existing ConfigMap in agentPackConfigMap.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ayni-agent.fullname" . }}-pack
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "ayni-agent.labels" . | nindent 4 }}
+data:
+  agent-pack.yaml: |
+    {{- .Values.agentPack | nindent 4 }}
+{{- end }}
