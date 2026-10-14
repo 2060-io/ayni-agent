@@ -1,0 +1,167 @@
+# Development pack: offline stub model and embeddings, no keys. Used by `pnpm dev` and the tests.
+schemaVersion: "3.0"
+
+metadata:
+  id: ayni-dev
+  displayName: ${AGENT_DISPLAY_NAME:-Ayni Agent (dev)}
+  description: Development instance of the Ayni Agent.
+
+identity:
+  homeBackingIdentity: ${HOME_BACKING_IDENTITY:-did:webvh:QmPk9gWBYyz93N8odMFuTpSS1yMPJhPpKynNwQw1oxjiqf:moonlit-trowel-unedited.ngrok-free.dev}
+  userAgentGate: ${USER_AGENT_GATE:-optional}
+  recognizedBackingIdentities:
+    - identity: ${HOME_BACKING_IDENTITY:-did:webvh:QmPk9gWBYyz93N8odMFuTpSS1yMPJhPpKynNwQw1oxjiqf:moonlit-trowel-unedited.ngrok-free.dev}
+      relation: home
+      label: 2060 OÜ (dev)
+  roles:
+    employee: { description: Any verified home employee. }
+    manager: { description: Approves sensitive actions., canApprove: true, crossSession: own-backing-identity }
+    operator: { description: Support operators., crossSession: all }
+    guest: { description: Authenticated peers without a recognized backing identity. }
+  roleRules:
+    - when: { relation: home, claims: { title: Manager } }
+      roles: [employee, manager]
+    - when: { relation: home }
+      roles: [employee]
+    - when: { relation: unrecognized }
+      roles: [guest]
+
+language:
+  agent: en
+
+persona:
+  systemPrompt: |
+    You are the Ayni Agent development assistant. Be brief.
+  greeting: "Hello {userName}, this is the development agent. Ask me anything; try the echo tool."
+  menu:
+    - id: help
+      label: Help
+      action: { type: prompt, prompt: "What can you do?" }
+      visibleWhen: bound
+    - id: site
+      label: Project
+      action: { type: url, url: https://github.com/2060-io/ayni-agent }
+
+llm:
+  # LLM_PROVIDER=openai-compatible LLM_MODEL=kimi-k3 LLM_BASE_URL=https://api.moonshot.ai/v1 LLM_API_KEY=... for Kimi
+  provider: ${LLM_PROVIDER:-stub}
+  model: ${LLM_MODEL:-echo}
+  apiKeyEnv: LLM_API_KEY
+  maxOutputTokens: 2048
+  multimodal: ${LLM_MULTIMODAL:-false}
+
+embeddings:
+  provider: stub
+  model: hash
+
+memory:
+  contextWindowTokens: 4000
+
+rag:
+  enabled: true
+  sources:
+    - id: notes
+      type: local
+      path: ./knowledge
+      visibility: public
+
+tools:
+  http:
+    - name: echo
+      description: Echoes the given text through a public HTTP echo service.
+      method: POST
+      url: https://httpbin.org/post
+      parameters:
+        type: object
+        required: [text]
+        properties:
+          text: { type: string }
+    - name: wire_money
+      description: Transfers money (development stand-in for a sensitive action).
+      method: POST
+      url: https://httpbin.org/post
+      parameters:
+        type: object
+        properties:
+          amount: { type: number }
+  bundled:
+    principalCredentials: { enabled: true }
+    principalPreferences: { enabled: true }
+    workingMemory: { enabled: true }
+  access:
+    default: none
+    roles:
+      employee: [echo, wire_money]
+      guest: [echo]
+      operator: ["*"]
+    approval:
+      - tools: [wire_money]
+        approvers: [manager]
+        timeoutMinutes: 30
+    elevation:
+      - tools: [wire_money]
+        purposes: [support-case]
+        approvers: [manager]
+        grantTtlMinutes: 60
+
+purposes:
+  - id: support-case
+    label: Support case handling
+
+approvals:
+  timeoutMinutes: 30
+  policy: { type: count, value: 1 }
+  selfApproval: true
+
+actions:
+  wire_money:
+    authChallenge: { type: device, onChannelUnavailable: "${DEV_CHALLENGE_FALLBACK:-degrade}" }
+    maxCredentialAge: 0
+
+sessions:
+  idleTimeoutSeconds: ${SESSION_IDLE_TIMEOUT_SECONDS:-1800}
+  bindingExpirySeconds: ${BINDING_EXPIRY_SECONDS:-300}
+  credentialCheckTtlSeconds: 300
+  siblingSessions: true
+
+channels:
+  agui:
+    enabled: true
+    allowedOrigins: ["${AGUI_ALLOWED_ORIGINS:-http://localhost:5173}"]
+    walletLinkTemplate: https://hologram.zone/open?oob={oob}
+    uploads:
+      maxBytes: 26214400
+      types: ["image/*", "audio/webm", "audio/ogg", "audio/mp4", "application/pdf"]
+  a2a:
+    enabled: true
+
+privacy:
+  processingActivities:
+    - { id: conversation-memory, lawfulBasis: contract, retention: { days: 365, onExpiry: archive } }
+    - { id: working-memory, lawfulBasis: contract }
+    - { id: rag-corpus, lawfulBasis: legitimate-interest }
+    - { id: media-objects, lawfulBasis: contract, retention: { days: 365, onExpiry: archive } }
+    - { id: credential-presentations, lawfulBasis: contract }
+    - { id: approvals, lawfulBasis: legitimate-interest }
+  erasureRequests: true
+
+media:
+  speechToText:
+    enabled: true
+    provider: openai-compatible
+    model: ${STT_MODEL:-stub}
+    baseUrl: ${STT_BASE_URL:-http://localhost:9999/v1}
+  vision:
+    enabled: true
+    provider: llm
+    model: ${VISION_MODEL:-stub}
+
+integrity:
+  anchoring:
+    enabled: ${ANCHORING_ENABLED:-false}
+    batchIntervalSeconds: 600
+
+features:
+  rag: true
+  imageGeneration: false
+  anchoring: ${ANCHORING_ENABLED:-false}

@@ -1,0 +1,51 @@
+# Kubernetes namespace the resources are created in
+namespace: ayni
+
+replicaCount: 1
+
+image:
+  repository: io2060/ayni-agent
+  pullPolicy: IfNotPresent
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+podAnnotations: {}
+resources: {}
+
+# Deployment values (see the spec's reference implementation profile, "Container configuration").
+# Secrets come from `existingSecret` (keys named like the variables), never from values.
+env:
+  - name: PORT
+    value: "3010"
+  - name: LOG_LEVEL
+    value: info
+  - name: AGENT_PACK_PATH
+    value: /app/agent-pack
+  - name: PUBLIC_BASE_URL
+    value: https://agent.example.com
+  - name: VS_AGENT_ADMIN_URL
+    value: http://127.0.0.1:3000
+  - name: AGUI_ALLOWED_ORIGINS
+    value: https://ui.example.com
+  - name: OBJECT_STORE_ENDPOINT
+    value: http://minio:9000
+  - name: OBJECT_STORE_BUCKET
+    value: ayni-agent
+
+# Secret holding SESSION_TOKEN_SECRET, DATABASE_URL, REDIS_URL, OBJECT_STORE_ACCESS_KEY,
+# OBJECT_STORE_SECRET_KEY, ENTRY_ENCRYPTION_KEY, LLM_API_KEY, EMBEDDINGS_API_KEY, ANCHOR_SIGNER_MNEMONIC...
+existingSecret: ""
+
+# ConfigMap holding agent-pack.yaml (mounted at AGENT_PACK_PATH)
+agentPackConfigMap: ""
+
+service:
+  enabled: true
+  type: ClusterIP
+  port: 3010
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

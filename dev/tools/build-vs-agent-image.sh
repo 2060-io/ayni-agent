@@ -11,4 +11,4 @@ git -C "$SRC" fetch -q origin
 git -C "$SRC" worktree add -q --detach "$WORK" "$REF"
 trap 'git -C "$SRC" worktree remove --force "$WORK"' EXIT
 echo "building $TAG from $(git -C "$WORK" log --oneline -1)"
-docker build --target vs-agent -t "$TAG" -f apps/vs-agent/Dockerfile "$WORK"
+docker build --target vs-agent -t "$TAG" -f "$WORK/apps/vs-agent/Dockerfile" "$WORK"

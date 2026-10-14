@@ -1,6 +1,6 @@
 # Agent pack, schema 3.0
 
-The agent pack is the single configuration bundle of a Hologram Agent: everything about behavior and
+The agent pack is the single configuration bundle of a Ayni Agent: everything about behavior and
 policy lives in one `agent-pack.yaml`, validated at startup against
 [`schemas/agent-pack.schema.json`](../schemas/agent-pack.schema.json). The agent refuses to start
 without a valid pack (spec CORE-PACK-001, CORE-PACK-003). Deployment values and secrets stay in the
@@ -42,7 +42,7 @@ directory.
 | `purposes` | | governance list for elevation | D14, D15 |
 | `approvals` | | default approval and elevation policy | INTX-APPR |
 | `actions` | | per-tool auth challenge and credential freshness | D7, D28, INTX-AUTH |
-| `sessions` | | idle timeout, binding expiry, liveness TTL, sibling sessions | D6, D7, D36 |
+| `sessions` | | idle timeout, binding expiry, liveness TTL, sibling sessions, device pairing window | D6, D7, D36, D51 |
 | `channels` | | AG-UI and A2A adapters | D1, D2, CHAN-* |
 | `privacy` | yes | processing activities with lawful basis and retention, erasure | D18, PRIV-RETN |
 | `media` | | speech-to-text, vision, image generation, face verification | D45, INTX-AUTH-007 |
@@ -86,6 +86,12 @@ identity:
   persistent store outside LLM retrieval.
 - `userAgentGate: optional` lets wallets that do not present an ECS-UserAgent credential connect; the
   Principal is then marked `userAgentVerified: false`, which `roleRules` may use.
+- `credentials` names what the agent requests on DIDComm connect (IDENT-RES-001/002/003): `userAgent`
+  (the ECS-UserAgent credential of the gate), `badge` (one or more ECS-Badge credentials accepted as
+  a person's identity; one must be presented) and `service` (credentials accepted from a
+  verifiable-service peer). Each entry is a `jsonSchemaCredentialId` or a `credentialDefinitionId`
+  the DIDComm agent can resolve, with optional `attributes`. Without `badge`, a person can only be
+  admitted in development mode (`DEV_ALLOW_UNIDENTIFIED_PRINCIPALS`).
 
 ## persona
 
@@ -102,7 +108,15 @@ identity:
 `provider` selects an adapter: native (`openai`, `anthropic`, `ollama`), the generic chat-completions
 adapter (`openai-compatible`, for gateways such as OpenRouter or LiteLLM and any compatible endpoint,
 `baseUrl` required) or a special-protocol adapter (`azure-openai`, `bedrock`, `vertex`, with
-`provider_options` as the adapter documents). `apiKeyEnv` names the environment variable holding the
+`provider_options` as the adapter documents). `stub` is a deterministic offline model for
+development and tests (it echoes, and `/call <tool> {json}` triggers a tool call); the same value
+exists for `embeddings.provider`, and `model: stub` for `media.speechToText`, `media.vision` and an
+image generation provider.
+
+Kimi (Moonshot) is an `openai-compatible` endpoint: `baseUrl: https://api.moonshot.ai/v1` (or the
+`LLM_BASE_URL` variable), `model: kimi-k3`, the key in `LLM_API_KEY`; omit `temperature` (the K3
+API does not list it) and use `reasoningEffort: low | high | max` if wanted. Kimi offers no
+embeddings endpoint: keep another `embeddings.provider`. `apiKeyEnv` names the environment variable holding the
 key; keys never appear in the pack. `multimodal: true` lets a capable model receive referenced media;
 the agent never depends on it. Embeddings are configured independently and may use another provider.
 
@@ -164,6 +178,11 @@ actions:
   tool runs; `0` forces a fresh check; absent means the session TTL `N`.
 
 ## sessions, channels
+
+`sessions.devicePairing` sets how long a browser the phone confirmed once keeps binding new sessions
+without the phone: `slidingDays` since the last use (default 30; 0 disables silent binding, every
+session then asks the phone) and `maxDays` since the pairing (default 90). Each silent binding rotates
+the device secret; a stale secret revokes the pairing (D51, IDENT-DEV).
 
 `sessions` sets the idle timeout, the binding window (invitation and code lifetime), the liveness TTL
 `N` and whether sibling sessions may be opened from a bound token. `channels.agui` sets the UI origins

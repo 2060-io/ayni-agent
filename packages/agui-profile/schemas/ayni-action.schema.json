@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://2060.io/schemas/ayni-agui-profile/3.0/ayni-action.json",
+  "title": "forwardedProps.ayni (profile section 6, PROF-RUN-003)",
+  "type": "object",
+  "required": ["kind"],
+  "oneOf": [
+    {
+      "properties": {
+        "kind": {
+          "const": "text"
+        },
+        "replyTo": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "menu.select"
+        },
+        "menuId": {
+          "type": "string"
+        },
+        "itemId": {
+          "type": "string"
+        }
+      },
+      "required": ["kind", "menuId", "itemId"],
+      "additionalProperties": false
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "contextual.select"
+        },
+        "itemId": {
+          "type": "string"
+        }
+      },
+      "required": ["kind", "itemId"],
+      "additionalProperties": false
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "approval.decide"
+        },
+        "approvalId": {
+          "type": "string"
+        },
+        "decision": {
+          "enum": ["approve", "reject"]
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "required": ["kind", "approvalId", "decision"],
+      "additionalProperties": false
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "approval.cancel"
+        },
+        "approvalId": {
+          "type": "string"
+        }
+      },
+      "required": ["kind", "approvalId"],
+      "additionalProperties": false
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "elevation.request"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "purposeId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "justification": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": ["kind", "tool", "purposeId", "justification"],
+      "additionalProperties": false
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "reaction"
+        },
+        "messageId": {
+          "type": "string"
+        },
+        "emoji": {
+          "type": "string"
+        },
+        "action": {
+          "enum": ["add", "remove"]
+        }
+      },
+      "required": ["kind", "messageId", "emoji", "action"],
+      "additionalProperties": false
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "receipt"
+        },
+        "messageIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "state": {
+          "enum": ["received", "viewed"]
+        }
+      },
+      "required": ["kind", "messageIds", "state"],
+      "additionalProperties": false
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "attachments"
+        },
+        "attachmentIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "replyTo": {
+          "type": "string"
+        }
+      },
+      "required": ["kind", "attachmentIds"],
+      "additionalProperties": false
+    }
+  ]
+}

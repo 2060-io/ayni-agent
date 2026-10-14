@@ -1,4 +1,4 @@
-# Local VS Agent for hologram-agent development: the agent, PostgreSQL and Redis.
+# Local VS Agent for ayni-agent development: the agent, PostgreSQL and Redis.
 # The public port is exposed through an ngrok tunnel (PUBLIC_API_BASE_URL); the admin API is
 # reachable only from this host. Copy .env.example to .env and fill it in; see README.md.
 services:

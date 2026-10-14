@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://2060.io/schemas/ayni-agui-profile/3.0/create-session.json",
+  "title": "POST {sessions} body (profile section 3.2)",
+  "type": "object",
+  "required": ["client"],
+  "properties": {
+    "client": {
+      "type": "object",
+      "required": ["name", "version", "platform"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "version": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "platform": {
+          "type": "string",
+          "maxLength": 80
+        }
+      }
+    },
+    "locale": {
+      "type": "string",
+      "maxLength": 20
+    },
+    "deviceHandle": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "resumeSessionId": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "deviceProof": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "conversationId": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "newConversation": {
+      "type": "boolean"
+    }
+  }
+}

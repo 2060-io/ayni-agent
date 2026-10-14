@@ -24,9 +24,9 @@
 # =============================================================================
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CFG_DIR="${HOLOGRAM_DEV_CFG:-$HOME/.config/hologram-agent-dev}"
+CFG_DIR="${AYNI_DEV_CFG:-$HOME/.config/ayni-agent-dev}"
 VERANAD="${VERANAD:-veranad}"
-KEY="${KEY_NAME:-hologram-agent}"
+KEY="${KEY_NAME:-ayni-agent}"
 NETWORK="${NETWORK:-devnet}"
 case "$NETWORK" in
   devnet)  CHAIN_ID=vna-devnet-1;  RPC=https://rpc.devnet.verana.network;  IDX=https://idx.devnet.verana.network;  FAUCET=https://faucet.devnet.verana.network ;;

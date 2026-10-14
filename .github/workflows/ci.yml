@@ -1,0 +1,41 @@
+name: Continuous Integration
+
+on:
+  pull_request:
+    branches: [main, 'v[0-9]*']
+    types: [opened, synchronize, reopened, labeled]
+  push:
+    branches: [main, 'v[0-9]*']
+  workflow_dispatch:
+
+# Cancel superseded runs on the same branch/PR to save CI minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Reusable 2060 pipeline: build + format + types + unit/integration/e2e tests,
+  # PR-title (conventional commits) validation and Helm chart linting.
+  ci:
+    uses: 2060-io/organization/.github/workflows/2060-linter-call.yml@562f890be78c7fd3f07695446f4506d383c52219 # v0.5.2
+    with:
+      enable-charts-lint: true
+
+  # Validate the Docker image builds on every PR/push (without pushing it).
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
