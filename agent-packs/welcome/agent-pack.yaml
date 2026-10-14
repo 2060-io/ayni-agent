@@ -1,0 +1,158 @@
+# "Welcome to Ayni": the onboarding agent deployed with the UI on each Verana network. It explains what
+# Ayni is, how the trust behind an agent is proven, and lets a visitor try the conversation features.
+# Deployment values come from the environment (CORE-PACK-002); nothing here is a secret.
+schemaVersion: "3.0"
+
+metadata:
+  id: ayni-welcome
+  displayName: ${AGENT_DISPLAY_NAME:-Welcome to Ayni}
+  description: ${AGENT_DESCRIPTION:-The first agent to talk to on Ayni. It explains what Ayni is and lets you try it.}
+
+identity:
+  # the DID of the VS Agent this instance controls (its operator's backing identity)
+  homeBackingIdentity: ${HOME_BACKING_IDENTITY:-did:example:unset}
+  userAgentGate: ${USER_AGENT_GATE:-optional}
+  recognizedBackingIdentities:
+    - identity: ${HOME_BACKING_IDENTITY:-did:example:unset}
+      relation: home
+      label: ${HOME_BACKING_LABEL:-2060 OÜ}
+  roles:
+    team: { description: People of the operator organization. }
+    visitor: { description: Anyone else with a verified identity. }
+  roleRules:
+    - when: { relation: home }
+      roles: [team, visitor]
+    - when: { relation: unrecognized }
+      roles: [visitor]
+
+language:
+  agent: en
+
+persona:
+  systemPrompt: |
+    You are "Welcome to Ayni", the first agent people meet on Ayni. Ayni is a way for people to talk
+    to AI agents that can prove who stands behind them. Every Ayni agent is a Verifiable Service on
+    the Verana network: it has a DID, it presents credentials issued to its operator (an organization
+    or a person), and the app checks those credentials against the Verana trust registry before the
+    conversation starts. The person talking to you proved their identity the same way, through their
+    wallet app on their phone; you know their verified name and whether they belong to a recognized
+    organization. The word "ayni" is Quechua and Aymara for reciprocity: an obligation that runs both
+    ways, which is what verifiable trust is.
+
+    What you can do here: answer questions about Ayni, Verana and verifiable trust in plain words;
+    show how the conversation works (reactions, replies, attachments, the menu, archiving); and keep
+    small notes the person asks you to remember. You have no tools that act on the outside world, and
+    you say so when asked to do something you cannot do. Never invent credentials, registries or
+    facts about the person; what you know about them comes from the verified facts you were given.
+
+    Be warm, short and concrete. Answer in the language the person writes in. When someone asks how
+    to build their own agent, point them to https://github.com/2060-io/ayni-agent and
+    https://verana.io. When they ask who you are, say you are run by the operator shown in your
+    trust card and that the card is the proof.
+  greeting: "Hello {userName}, welcome to Ayni. I can explain what Ayni is, how the trust behind an agent is proven, and show you around. What would you like to know?"
+  menu:
+    - id: what
+      label: What is Ayni?
+      action: { type: prompt, prompt: "What is Ayni and why does it matter that an agent can prove who is behind it?" }
+      visibleWhen: bound
+    - id: trust
+      label: How is trust proven?
+      action: { type: prompt, prompt: "How do you prove who stands behind you, and how did you verify me?" }
+      visibleWhen: bound
+    - id: tour
+      label: Show me around
+      action: { type: prompt, prompt: "Give me a short tour of what I can do in this conversation." }
+      visibleWhen: bound
+    - id: verana
+      label: Verana
+      action: { type: url, url: https://verana.io }
+    - id: build
+      label: Build your own agent
+      action: { type: url, url: https://github.com/2060-io/ayni-agent }
+
+llm:
+  provider: ${LLM_PROVIDER:-openai-compatible}
+  model: ${LLM_MODEL:-kimi-k3}
+  baseUrl: ${LLM_BASE_URL:-https://api.moonshot.ai/v1}
+  apiKeyEnv: LLM_API_KEY
+  maxOutputTokens: 2048
+  multimodal: ${LLM_MULTIMODAL:-true}
+
+embeddings:
+  provider: stub
+  model: hash
+
+memory:
+  contextWindowTokens: 8000
+
+rag:
+  enabled: false
+  sources: []
+
+tools:
+  http: []
+  bundled:
+    principalCredentials: { enabled: true }
+    principalPreferences: { enabled: true }
+    workingMemory: { enabled: true }
+  access:
+    default: none
+    roles:
+      visitor: []
+      team: []
+
+purposes: []
+
+approvals:
+  timeoutMinutes: 30
+  policy: { type: count, value: 1 }
+  selfApproval: false
+
+sessions:
+  idleTimeoutSeconds: ${SESSION_IDLE_TIMEOUT_SECONDS:-1800}
+  bindingExpirySeconds: ${BINDING_EXPIRY_SECONDS:-300}
+  credentialCheckTtlSeconds: 300
+  siblingSessions: true
+  devicePairing:
+    slidingDays: 30
+    maxDays: 90
+
+channels:
+  agui:
+    enabled: true
+    allowedOrigins: ["${AGUI_ALLOWED_ORIGINS:-http://localhost:5173}"]
+    walletLinkTemplate: ${WALLET_LINK_TEMPLATE:-https://hologram.zone/open?oob={oob}}
+    uploads:
+      maxBytes: 26214400
+      types: ["image/*", "audio/webm", "audio/ogg", "audio/mp4", "application/pdf"]
+  a2a:
+    enabled: false
+
+privacy:
+  processingActivities:
+    - { id: conversation-memory, lawfulBasis: contract, retention: { days: 90, onExpiry: archive } }
+    - { id: working-memory, lawfulBasis: contract }
+    - { id: media-objects, lawfulBasis: contract, retention: { days: 90, onExpiry: archive } }
+    - { id: credential-presentations, lawfulBasis: contract }
+    - { id: approvals, lawfulBasis: legitimate-interest }
+  erasureRequests: true
+
+media:
+  speechToText:
+    enabled: false
+    provider: openai-compatible
+    model: stub
+  vision:
+    enabled: true
+    provider: llm
+    model: ${VISION_MODEL:-kimi-k3}
+
+integrity:
+  anchoring:
+    enabled: false
+    batchIntervalSeconds: 600
+
+features:
+  rag: false
+  imageGeneration: false
+  anchoring: false

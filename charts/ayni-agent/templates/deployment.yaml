@@ -12,10 +12,13 @@ spec:
       {{- include "ayni-agent.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      {{- with .Values.podAnnotations }}
       annotations:
+        {{- if .Values.agentPack }}
+        checksum/agent-pack: {{ .Values.agentPack | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
       labels:
         {{- include "ayni-agent.selectorLabels" . | nindent 8 }}
     spec:
@@ -48,7 +51,7 @@ spec:
             httpGet:
               path: /health/live
               port: http
-          {{- if .Values.agentPackConfigMap }}
+          {{- if or .Values.agentPackConfigMap .Values.agentPack }}
           volumeMounts:
             - name: agent-pack
               mountPath: /app/agent-pack
@@ -56,11 +59,11 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-      {{- if .Values.agentPackConfigMap }}
+      {{- if or .Values.agentPackConfigMap .Values.agentPack }}
       volumes:
         - name: agent-pack
           configMap:
-            name: {{ .Values.agentPackConfigMap }}
+            name: {{ .Values.agentPackConfigMap | default (printf "%s-pack" (include "ayni-agent.fullname" .)) }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
