@@ -1,6 +1,6 @@
 apiVersion: v2
-name: hologram-agent
-description: Helm chart for the Hologram Agent
+name: ayni-agent
+description: Helm chart for the Ayni Agent
 type: application
 # version / appVersion are overwritten at publish time by the CD pipeline
 # (helm package --version --app-version). These are just sane defaults.

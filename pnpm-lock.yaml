@@ -8,7 +8,7 @@ importers:
 
   .:
     dependencies:
-      '@2060.io/hologram-agui-profile':
+      '@2060.io/ayni-agui-profile':
         specifier: workspace:*
         version: link:packages/agui-profile
       '@anthropic-ai/sdk':

@@ -37,7 +37,7 @@ describe('agent-pack loader (CORE-PACK-001..004)', () => {
 
   it('loads the dev pack and the example pack', () => {
     const dev = loadPack('agent-packs/dev', { ...process.env, ...env })
-    expect(dev.pack.metadata.id).toBe('hologram-dev')
+    expect(dev.pack.metadata.id).toBe('ayni-dev')
     expect(dev.pack.llm.provider).toBe('stub')
     const example = loadPack('agent-packs/example', {
       ...env,

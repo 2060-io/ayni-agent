@@ -1,15 +1,15 @@
 /** Welcome, state-aware contextual menus with badges, the /sessions command (D46, INTX-MENU-001..005). */
 
-import type { ContextualMenuItem } from '@2060.io/hologram-agui-profile'
+import type { ContextualMenuItem } from '@2060.io/ayni-agui-profile'
 import type { AgentPack, MenuItemDef } from '../config/packTypes.js'
 import type { Principal, Session } from './types.js'
 
 export const PLATFORM_MENU = {
-  sessions: 'hologram.sessions',
-  link: 'hologram.link-session',
-  approvals: 'hologram.approvals',
-  devices: 'hologram.devices',
-  endSessionPrefix: 'hologram.end-session:',
+  sessions: 'ayni.sessions',
+  link: 'ayni.link-session',
+  approvals: 'ayni.approvals',
+  devices: 'ayni.devices',
+  endSessionPrefix: 'ayni.end-session:',
 } as const
 
 export function greetingFor(pack: AgentPack, principal: Principal | null): string {

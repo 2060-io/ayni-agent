@@ -5,7 +5,7 @@
  * or context maps to one conversation session bound to that Principal.
  */
 import type { FastifyInstance } from 'fastify'
-import type { HologramAgent } from '../../core/agent.js'
+import type { AyniAgent } from '../../core/agent.js'
 import { A2A_CAPABILITIES, type ChannelAdapter, type RenderResult } from '../../core/channel.js'
 import { SessionError } from '../../core/sessions.js'
 import type { CapabilityEvent, Session } from '../../core/types.js'
@@ -53,7 +53,7 @@ export class A2aAdapter implements ChannelAdapter {
 
 export class A2aRoutes {
   public constructor(
-    private readonly agent: HologramAgent,
+    private readonly agent: AyniAgent,
     private readonly adapter: A2aAdapter,
     private readonly logger: Logger
   ) {}
@@ -85,7 +85,7 @@ export class A2aRoutes {
       },
       security: [{ bearer: [] }],
       extensions: [
-        { uri: 'https://2060.io/hologram/a2a/identity', description: `Peer identity through DIDComm with ${did}` },
+        { uri: 'https://2060.io/ayni/a2a/identity', description: `Peer identity through DIDComm with ${did}` },
       ],
     }))
 

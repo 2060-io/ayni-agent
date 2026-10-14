@@ -2,7 +2,7 @@
  * The agent facade: wires the channel-agnostic core and exposes the operations channels call.
  * Channels never reach persistence or the model directly (architecture section 4).
  */
-import type { HologramAction, HologramState, PrincipalDisplay, SessionStatus } from '@2060.io/hologram-agui-profile'
+import type { AyniAction, AyniState, PrincipalDisplay, SessionStatus } from '@2060.io/ayni-agui-profile'
 import type { Env } from '../config/env.js'
 import type { AgentPack, Features } from '../config/packTypes.js'
 import { featuresOf } from '../config/packTypes.js'
@@ -46,7 +46,7 @@ export interface AgentParts {
 /** A sink that renders a server-initiated reply through the router (welcome, late results). */
 export class RouterSink implements TurnSink {
   public constructor(
-    private readonly agent: HologramAgent,
+    private readonly agent: AyniAgent,
     private readonly session: Session
   ) {}
   public async emit(): Promise<void> {}
@@ -55,7 +55,7 @@ export class RouterSink implements TurnSink {
   }
 }
 
-export class HologramAgent {
+export class AyniAgent {
   public readonly features: Features
   public readonly env: Env
   public readonly pack: AgentPack
@@ -150,7 +150,7 @@ export class HologramAgent {
     }
   }
 
-  public async hologramState(session: Session): Promise<HologramState> {
+  public async ayniState(session: Session): Promise<AyniState> {
     const principal = await this.principalOf(session)
     const pending = principal && this.features.approvals ? (await this.approvals.pendingFor(principal)).length : 0
     return {
@@ -290,7 +290,7 @@ export class HologramAgent {
   /** Structured actions of a turn (profile section 6; INTX-MENU, INTX-APPR, INTX-REACT, INTX-STATE). */
   public async action(
     session: Session,
-    action: HologramAction,
+    action: AyniAction,
     sink: TurnSink,
     signal: AbortSignal
   ): Promise<TurnResult | { text: string; await?: 'binding-code' } | undefined> {

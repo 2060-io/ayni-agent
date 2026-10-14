@@ -1,6 +1,6 @@
-# Hologram Agent pack, schema 3.0
-# Example: a customer-support agent of a logistics company, reachable from Hologram App (DIDComm)
-# and from the Hologram UI (AG-UI). Every ${VAR} is resolved from the environment at load time;
+# Ayni Agent pack, schema 3.0
+# Example: a customer-support agent of a logistics company, reachable from wallet app (DIDComm)
+# and from the Ayni UI (AG-UI). Every ${VAR} is resolved from the environment at load time;
 # ${VAR:-default} supplies a default. Keys and connection strings never live in this file.
 
 schemaVersion: "3.0"

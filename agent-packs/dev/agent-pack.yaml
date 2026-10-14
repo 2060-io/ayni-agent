@@ -2,9 +2,9 @@
 schemaVersion: "3.0"
 
 metadata:
-  id: hologram-dev
-  displayName: ${AGENT_DISPLAY_NAME:-Hologram Agent (dev)}
-  description: Development instance of the Hologram Agent.
+  id: ayni-dev
+  displayName: ${AGENT_DISPLAY_NAME:-Ayni Agent (dev)}
+  description: Development instance of the Ayni Agent.
 
 identity:
   homeBackingIdentity: ${HOME_BACKING_IDENTITY:-did:webvh:QmPk9gWBYyz93N8odMFuTpSS1yMPJhPpKynNwQw1oxjiqf:moonlit-trowel-unedited.ngrok-free.dev}
@@ -31,7 +31,7 @@ language:
 
 persona:
   systemPrompt: |
-    You are the Hologram Agent development assistant. Be brief.
+    You are the Ayni Agent development assistant. Be brief.
   greeting: "Hello {userName}, this is the development agent. Ask me anything; try the echo tool."
   menu:
     - id: help
@@ -40,7 +40,7 @@ persona:
       visibleWhen: bound
     - id: site
       label: Project
-      action: { type: url, url: https://github.com/2060-io/hologram-agent }
+      action: { type: url, url: https://github.com/2060-io/ayni-agent }
 
 llm:
   # LLM_PROVIDER=openai-compatible LLM_MODEL=kimi-k3 LLM_BASE_URL=https://api.moonshot.ai/v1 LLM_API_KEY=... for Kimi

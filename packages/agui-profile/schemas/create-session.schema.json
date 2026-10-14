@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://2060.io/schemas/hologram-agui-profile/3.0/create-session.json",
+  "$id": "https://2060.io/schemas/ayni-agui-profile/3.0/create-session.json",
   "title": "POST {sessions} body (profile section 3.2)",
   "type": "object",
   "required": ["client"],

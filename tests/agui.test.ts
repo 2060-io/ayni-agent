@@ -8,7 +8,7 @@ import { SessionStreams } from '../src/channels/agui/streams.js'
 import { parseSse, startTestAgent } from './helpers.js'
 
 let running: RunningAgent
-const client = { name: 'hologram-ui', version: '3.0.0', platform: 'web' }
+const client = { name: 'ayni-ui', version: '3.0.0', platform: 'web' }
 
 async function createSession(token?: string) {
   // a sibling from a bound token stands for the UI's "New conversation": it asks for a new one (PROF-CONV-006)
@@ -39,7 +39,7 @@ async function bindViaPhone(sessionId: string, actor = 'did:peer:alice') {
       identityCredentialRef: null,
     },
     connectionId,
-    { name: 'Hologram', version: '2.5.0', platform: 'ios' }
+    { name: 'Wallet', version: '2.5.0', platform: 'ios' }
   )
   const thread = `thread-${Math.random().toString(36).slice(2, 10)}`
   await running.agent.sessions.markConfirmationSent(session, connectionId, thread)
@@ -49,7 +49,7 @@ async function bindViaPhone(sessionId: string, actor = 'did:peer:alice') {
   return principal
 }
 
-async function run(sessionId: string, token: string, text: string, hologram?: Record<string, unknown>) {
+async function run(sessionId: string, token: string, text: string, ayni?: Record<string, unknown>) {
   const response = await running.app.inject({
     method: 'POST',
     url: `/agui/v3/sessions/${sessionId}/runs`,
@@ -60,7 +60,7 @@ async function run(sessionId: string, token: string, text: string, hologram?: Re
       messages: text ? [{ id: 'u1', role: 'user', content: text }] : [],
       tools: [{ name: 'frontend_tool', description: 'ignored', parameters: {} }],
       context: [],
-      forwardedProps: hologram ? { hologram } : undefined,
+      forwardedProps: ayni ? { ayni } : undefined,
     },
   })
   return { status: response.statusCode, events: parseSse(response.body).map((e) => e.event), body: response.body }
@@ -85,7 +85,7 @@ afterAll(async () => {
 
 describe('descriptor (PROF-DESC-001/002)', () => {
   it('publishes the descriptor at the well-known path', async () => {
-    const response = await running.app.inject({ method: 'GET', url: '/.well-known/hologram-agent.json' })
+    const response = await running.app.inject({ method: 'GET', url: '/.well-known/ayni-agent.json' })
     expect(response.statusCode).toBe(200)
     const body = response.json()
     expect(body.profileVersion).toBe('3.0')

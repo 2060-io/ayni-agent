@@ -24,7 +24,7 @@ export class McpServerSource implements ToolSource {
     if (this.client) return this.client
     if (this.connecting) return this.connecting
     this.connecting = (async () => {
-      const client = new Client({ name: 'hologram-agent', version: '3.0.0' })
+      const client = new Client({ name: 'ayni-agent', version: '3.0.0' })
       const transport = this.createTransport()
       await client.connect(transport)
       client.onclose = () => {

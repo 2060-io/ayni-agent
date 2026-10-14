@@ -1,5 +1,5 @@
 {
-  "name": "hologram-agent-dev-tools",
+  "name": "ayni-agent-dev-tools",
   "private": true,
   "type": "module",
   "description": "Developer tooling for the local Verana stack (faucet client, image build). Not part of the agent.",

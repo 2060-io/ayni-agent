@@ -26,7 +26,7 @@ function tinyPdf(text: string): Buffer {
 
 describe('PDF text extraction (D13)', () => {
   it('reads the text of a PDF so the model can use it', async () => {
-    const text = await extractPdfText(tinyPdf('Hologram reads PDF files'))
-    expect(text).toContain('Hologram reads PDF files')
+    const text = await extractPdfText(tinyPdf('Ayni reads PDF files'))
+    expect(text).toContain('Ayni reads PDF files')
   })
 })

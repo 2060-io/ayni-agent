@@ -1,6 +1,6 @@
 /** Composition root: configuration, persistence, models, core, channels, jobs. */
 
-import { DESCRIPTOR_PATH, DID_SERVICE_TYPE } from '@2060.io/hologram-agui-profile'
+import { DESCRIPTOR_PATH, DID_SERVICE_TYPE } from '@2060.io/ayni-agui-profile'
 import cors from '@fastify/cors'
 import multipart from '@fastify/multipart'
 import Fastify, { type FastifyInstance } from 'fastify'
@@ -17,7 +17,7 @@ import { VsAgentClient } from './channels/didcomm/vsAgentClient.js'
 import { type Env, loadEnv } from './config/env.js'
 import { loadPack } from './config/pack.js'
 import { featuresOf } from './config/packTypes.js'
-import { HologramAgent } from './core/agent.js'
+import { AyniAgent } from './core/agent.js'
 import { ChallengeService } from './core/challenges.js'
 import { CapabilityRouter } from './core/channel.js'
 import { Orchestrator } from './core/orchestrator.js'
@@ -48,7 +48,7 @@ import { createLogger, type Logger } from './util/logger.js'
 
 export interface RunningAgent {
   app: FastifyInstance
-  agent: HologramAgent
+  agent: AyniAgent
   stop(): Promise<void>
 }
 
@@ -133,7 +133,7 @@ export async function buildAgent(
     { idleTimeoutSeconds: env.sessionIdleTimeoutSeconds, bindingExpirySeconds: env.bindingExpirySeconds }
   )
 
-  let agentRef: HologramAgent | undefined
+  let agentRef: AyniAgent | undefined
   const approvals = new ApprovalService(store, pack, {
     onChange: (record, change) => agentRef?.onApprovalChange(record, change) ?? Promise.resolve(),
   })
@@ -195,7 +195,7 @@ export async function buildAgent(
   )
   orchestratorRef = orchestrator
 
-  const agent = new HologramAgent({
+  const agent = new AyniAgent({
     env,
     pack,
     store,
@@ -343,7 +343,7 @@ export async function start(): Promise<RunningAgent> {
   const logger = createLogger(env.logLevel)
   const running = await buildAgent(env, logger)
   await running.app.listen({ port: env.port, host: '0.0.0.0' })
-  logger.info({ port: env.port, publicBaseUrl: env.publicBaseUrl }, 'hologram-agent listening')
+  logger.info({ port: env.port, publicBaseUrl: env.publicBaseUrl }, 'ayni-agent listening')
   return running
 }
 
@@ -360,9 +360,15 @@ async function declareAgUiService(
   const serviceEndpoint = `${publicBaseUrl.replace(/\/+$/, '')}${DESCRIPTOR_PATH}`
   try {
     const { items } = await vsAgent.listServiceEndpoints()
-    const existing = items.find((s) => s.type === DID_SERVICE_TYPE)
+    let existing = items.find((s) => s.type === DID_SERVICE_TYPE)
+    // an entry declared under the former product name is retyped rather than duplicated
+    const legacy = items.find((s) => s.type === 'HologramAgUI')
+    if (!existing && legacy) {
+      existing = await vsAgent.updateServiceEndpoint(legacy.id, { type: DID_SERVICE_TYPE, serviceEndpoint })
+      logger.info({ did, serviceEndpoint }, 'AG-UI descriptor service renamed in the DID Document')
+    }
     if (!existing) {
-      await vsAgent.addServiceEndpoint({ type: DID_SERVICE_TYPE, serviceEndpoint, id: '#hologram-agui' })
+      await vsAgent.addServiceEndpoint({ type: DID_SERVICE_TYPE, serviceEndpoint, id: '#ayni-agui' })
       logger.info({ did, serviceEndpoint }, 'AG-UI descriptor declared in the DID Document (IDENT-SELF-005)')
     } else if (existing.serviceEndpoint !== serviceEndpoint) {
       await vsAgent.updateServiceEndpoint(existing.id, { serviceEndpoint })

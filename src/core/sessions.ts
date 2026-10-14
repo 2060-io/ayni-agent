@@ -384,7 +384,8 @@ export class SessionService {
       for (const id of conversation.sessionIds) {
         if (id === session.id) continue
         const other = await this.store.sessions.get(id)
-        if (other?.state === 'bound' && other.deviceHandle === session.deviceHandle) await this.close(other, 'supersede')
+        if (other?.state === 'bound' && other.deviceHandle === session.deviceHandle)
+          await this.close(other, 'supersede')
       }
     }
     session.conversationId = conversation.id

@@ -5,7 +5,7 @@ import type { Store } from '../store/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 
-export const STATS_STREAM = 'hologram-agent:stats'
+export const STATS_STREAM = 'ayni-agent:stats'
 
 export interface StatsSink {
   emit(statClass: string, value: number, dimensions?: Record<string, string>): void
@@ -21,7 +21,7 @@ export class RedisStreamStats implements StatsSink {
     private readonly redis: Redis,
     private readonly store: Store,
     private readonly logger: Logger,
-    private readonly group = 'hologram-agent'
+    private readonly group = 'ayni-agent'
   ) {}
 
   public emit(statClass: string, value: number, dimensions: Record<string, string> = {}): void {

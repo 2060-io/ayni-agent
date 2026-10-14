@@ -1,7 +1,7 @@
 replicaCount: 1
 
 image:
-  repository: io2060/hologram-agent
+  repository: io2060/ayni-agent
   pullPolicy: IfNotPresent
   tag: ""
 
@@ -29,7 +29,7 @@ env:
   - name: OBJECT_STORE_ENDPOINT
     value: http://minio:9000
   - name: OBJECT_STORE_BUCKET
-    value: hologram-agent
+    value: ayni-agent
 
 # Secret holding SESSION_TOKEN_SECRET, DATABASE_URL, REDIS_URL, OBJECT_STORE_ACCESS_KEY,
 # OBJECT_STORE_SECRET_KEY, ENTRY_ENCRYPTION_KEY, LLM_API_KEY, EMBEDDINGS_API_KEY, ANCHOR_SIGNER_MNEMONIC...

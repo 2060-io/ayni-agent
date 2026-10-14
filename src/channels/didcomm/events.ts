@@ -4,7 +4,7 @@
  * (conversation on DIDComm), reactions, receipts, calls and documents (challenges), presentations.
  */
 import type { FastifyInstance } from 'fastify'
-import type { HologramAgent } from '../../core/agent.js'
+import type { AyniAgent } from '../../core/agent.js'
 import type { TurnSink } from '../../core/orchestrator.js'
 import type { MessageAttachment, Principal, Session } from '../../core/types.js'
 import type { Logger } from '../../util/logger.js'
@@ -38,7 +38,7 @@ export class DidcommEvents {
   private readonly linkAttempts = new Map<string, { count: number; since: number }>()
 
   public constructor(
-    private readonly agent: HologramAgent,
+    private readonly agent: AyniAgent,
     private readonly client: VsAgentClient,
     private readonly identity: IdentityFlow,
     private readonly adapter: DidcommAdapter,
@@ -336,7 +336,7 @@ export class DidcommEvents {
           const text = buffer
           buffer = ''
           if (text.trim()) await this.adapter.sendText(session, text)
-        } else if (event.type === 'activity' && event.activityType === 'hologram.menu') {
+        } else if (event.type === 'activity' && event.activityType === 'ayni.menu') {
           const content = event.content as { prompt: string; items: { label: string }[] }
           await client.sendQuestion(
             session.externalRef,

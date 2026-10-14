@@ -1,5 +1,5 @@
 /**
- * The AG-UI channel endpoints of the Hologram AG-UI Profile v3 (CHAN-ADP-004, PROF-*):
+ * The AG-UI channel endpoints of the Ayni AG-UI Profile v3 (CHAN-ADP-004, PROF-*):
  * descriptor, sessions, binding refresh, session stream, runs and cancellation, history, attachments.
  */
 
@@ -8,16 +8,16 @@ import { createRequire } from 'node:module'
 import {
   ACTIVITY,
   type AgentDescriptor,
+  type AyniAction,
   CUSTOM_EVENT,
   DESCRIPTOR_PATH,
-  type HologramAction,
   PROFILE_VERSION,
   RUN_ERROR_CODE,
-} from '@2060.io/hologram-agui-profile'
+} from '@2060.io/ayni-agui-profile'
 import { Ajv2020 } from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
-import type { HologramAgent } from '../../core/agent.js'
+import type { AyniAgent } from '../../core/agent.js'
 import type { TurnEvent, TurnSink } from '../../core/orchestrator.js'
 import { SessionError } from '../../core/sessions.js'
 import type { ClientDescription, Session } from '../../core/types.js'
@@ -31,16 +31,16 @@ import type { SessionStreams } from './streams.js'
 
 const require = createRequire(import.meta.url)
 const loadSchema = (name: string) =>
-  JSON.parse(readFileSync(require.resolve(`@2060.io/hologram-agui-profile/schemas/${name}`), 'utf8'))
+  JSON.parse(readFileSync(require.resolve(`@2060.io/ayni-agui-profile/schemas/${name}`), 'utf8'))
 const createSessionSchema = loadSchema('create-session.schema.json')
-const actionSchema = loadSchema('hologram-action.schema.json')
+const actionSchema = loadSchema('ayni-action.schema.json')
 
 interface RunAgentInput {
   threadId: string
   runId: string
   messages?: { id?: string; role: string; content?: unknown }[]
   tools?: unknown[]
-  forwardedProps?: { hologram?: HologramAction }
+  forwardedProps?: { ayni?: AyniAction }
   resume?: { interruptId: string; status: string; payload?: unknown }[]
 }
 
@@ -54,7 +54,7 @@ export class AgUiRoutes {
   private readonly uploads: { maxBytes: number; types: string[] }
 
   public constructor(
-    private readonly agent: HologramAgent,
+    private readonly agent: AyniAgent,
     private readonly adapter: AgUiAdapter,
     private readonly streams: SessionStreams,
     private readonly logger: Logger
@@ -365,8 +365,8 @@ export class AgUiRoutes {
         lastEventId
       )
       // a full snapshot at stream start (PROF-STREAM-004), then deltas through the stream
-      const state = await this.agent.hologramState(session)
-      reply.raw.write(sse(ev.stateSnapshot({ hologram: state })))
+      const state = await this.agent.ayniState(session)
+      reply.raw.write(sse(ev.stateSnapshot({ ayni: state })))
       const heartbeat = setInterval(() => reply.raw.write(': ping\n\n'), 25_000)
       request.raw.on('close', () => {
         clearInterval(heartbeat)
@@ -384,11 +384,11 @@ export class AgUiRoutes {
         return reply
           .code(400)
           .send({ error: 'bad-request', message: 'threadId must equal the session id and runId is required' })
-      const action: HologramAction = input.forwardedProps?.hologram ?? { kind: 'text' }
+      const action: AyniAction = input.forwardedProps?.ayni ?? { kind: 'text' }
       if (!validateAction(action))
         return reply.code(400).send({
           error: 'bad-request',
-          message: `invalid forwardedProps.hologram: ${ajv.errorsText(validateAction.errors)}`,
+          message: `invalid forwardedProps.ayni: ${ajv.errorsText(validateAction.errors)}`,
         })
       const userMessages = (input.messages ?? []).filter((m) => m.role === 'user')
       const last = userMessages[userMessages.length - 1]
@@ -399,7 +399,7 @@ export class AgUiRoutes {
           : Array.isArray(content)
             ? (content as { type: string; text?: string }[]).map((p) => p.text ?? '').join(' ')
             : ''
-      let resumeAction: HologramAction | undefined
+      let resumeAction: AyniAction | undefined
       const resumed = input.resume?.find((r) => r.status === 'resolved')
       if (resumed?.payload && typeof resumed.payload === 'object') {
         const p = resumed.payload as { menuId?: string; itemId?: string }
@@ -495,7 +495,7 @@ export class AgUiRoutes {
   private async run(
     session: Session,
     runId: string,
-    action: HologramAction,
+    action: AyniAction,
     text: string,
     reply: FastifyReply,
     request: FastifyRequest
@@ -548,7 +548,7 @@ export class AgUiRoutes {
     try {
       const principal = await this.agent.principalOf(session)
       if (!principal) throw new SessionError('principal missing', 'not-bound')
-      let result: Awaited<ReturnType<HologramAgent['action']>>
+      let result: Awaited<ReturnType<AyniAgent['action']>>
       if (action.kind === 'text' || action.kind === 'attachments') {
         const attachments =
           action.kind === 'attachments' ? this.agent.media.takeUploads(session, action.attachmentIds) : []
@@ -597,7 +597,7 @@ export class AgUiRoutes {
       } else {
         write(ev.runFinished(session.id, runId, { type: 'success' }))
       }
-      await this.streams.publish(session.id, ev.stateSnapshot({ hologram: await this.agent.hologramState(session) }))
+      await this.streams.publish(session.id, ev.stateSnapshot({ ayni: await this.agent.ayniState(session) }))
     } catch (error) {
       if (error instanceof SessionError && error.code === 'not-bound')
         write(ev.runError(error.message, RUN_ERROR_CODE.notBound))

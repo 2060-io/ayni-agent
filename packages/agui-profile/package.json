@@ -1,7 +1,7 @@
 {
-  "name": "@2060.io/hologram-agui-profile",
+  "name": "@2060.io/ayni-agui-profile",
   "version": "3.0.0",
-  "description": "Hologram AG-UI Profile v3: the wire contract between a Hologram Agent and a Hologram UI (types, constants, JSON schemas)",
+  "description": "Ayni AG-UI Profile v3: the wire contract between a Ayni Agent and a Ayni UI (types, constants, JSON schemas)",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -24,7 +24,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/2060-io/hologram-agent",
+    "url": "https://github.com/2060-io/ayni-agent",
     "directory": "packages/agui-profile"
   },
   "devDependencies": {

@@ -3,13 +3,13 @@
  * the per-challenge token, never a session token. Also the short-lived media links for the wallet.
  */
 import type { FastifyInstance } from 'fastify'
-import type { HologramAgent } from '../../core/agent.js'
+import type { AyniAgent } from '../../core/agent.js'
 import type { Logger } from '../../util/logger.js'
 import type { MediaLinks } from './adapter.js'
 
 export function registerDidcommCallbacks(
   app: FastifyInstance,
-  agent: HologramAgent,
+  agent: AyniAgent,
   links: MediaLinks,
   logger: Logger
 ): void {

@@ -1,6 +1,6 @@
 # Local VS Agent for development
 
-The Hologram Agent delegates DIDComm, credentials and trust resolution to a VS Agent (spec:
+The Ayni Agent delegates DIDComm, credentials and trust resolution to a VS Agent (spec:
 Verifiable Trust v4-compliant DIDComm agent). This directory runs one locally, in standalone mode,
 registered on the Verana **devnet** (v4). The testnet moves to v4 on 13 October 2026; switching is a
 matter of changing the four network values in `.env` and redoing the bootstrap there.
@@ -20,8 +20,8 @@ matter of changing the four network values in `.env` and redoing the bootstrap t
 1. **Tunnel.** `ngrok http 3011` and note the `https://…` URL. The agent derives its DID from it on
    first start, so the URL must not change afterwards (a reserved ngrok domain is strongly advised).
 2. **Accounts.** `bootstrap.sh key` creates two keys in keyring `test`, saves their mnemonics under
-   `~/.config/hologram-agent-dev/` and funds both from the faucet (50 VNA per account per hour):
-   `hologram-agent` signs the registry transactions as corporation operator; `hologram-agent-vs` is
+   `~/.config/ayni-agent-dev/` and funds both from the faucet (50 VNA per account per hour):
+   `ayni-agent` signs the registry transactions as corporation operator; `ayni-agent-vs` is
    the agent's own account (`VERANA_ACCOUNT_MNEMONIC`, the `vs_operator`). The chain refuses one
    account holding both an operator authorization and a vs_operator authorization.
 3. **Corporation.** `bootstrap.sh corp did:web:<ngrok host> <governance document URL>` creates the
@@ -52,9 +52,9 @@ matter of changing the four network values in `.env` and redoing the bootstrap t
 
 ## Notes
 
-- The Admin API is unprotected and bound to loopback; the Hologram Agent reaches it at
+- The Admin API is unprotected and bound to loopback; the Ayni Agent reaches it at
   `http://127.0.0.1:3010` (in Compose: `http://vs-agent:3000`). Never publish port 3000.
-- `EVENTS_WEBHOOK_URL` points at the Hologram Agent's events endpoint once it runs.
+- `EVENTS_WEBHOOK_URL` points at the Ayni Agent's events endpoint once it runs.
 - A fresh DID means redoing steps 5 and 6: wipe the `agent-data` volume only on purpose.
 
 ## State of the development instance (13 October 2026)
@@ -64,8 +64,8 @@ matter of changing the four network values in `.env` and redoing the bootstrap t
 | Public URL | `https://moonlit-trowel-unedited.ngrok-free.dev` (free ngrok domain; a reserved domain is needed for durability) |
 | Agent DID | `did:webvh:QmPk9gWBYyz93N8odMFuTpSS1yMPJhPpKynNwQw1oxjiqf:moonlit-trowel-unedited.ngrok-free.dev` |
 | Corporation | id 33, policy `verana10qtgwuea5kfmcyuvtpygqzgfz5fuv5qny6xsksfglhgyta2jc38sct5wad` |
-| Operator account | `verana1eh0dne3gma5dla68v0askxjc4vn2jpfmsamhm4` (`hologram-agent`) |
-| Agent account | `verana1gr5y56futaeeu2ea45p6dykl82h04pcawwjavu` (`hologram-agent-vs`) |
+| Operator account | `verana1eh0dne3gma5dla68v0askxjc4vn2jpfmsamhm4` (`ayni-agent`) |
+| Agent account | `verana1gr5y56futaeeu2ea45p6dykl82h04pcawwjavu` (`ayni-agent-vs`) |
 | ECS Service | ISSUER participant 156 active; Service credential self-issued, digest anchored, linked presentation published |
 | ECS Organization | HOLDER participant 155, onboarding process pending on the validator side (participant 7, `ecs-org-issuer.devnet.verana.network`) |
 | Image | `vs-agent:local-arm64`, built from `verana-labs/vs-agent` `ee6417b` (origin/main, the `v2.0.0-dev.91` line) |

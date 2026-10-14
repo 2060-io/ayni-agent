@@ -4,7 +4,7 @@
  * (CHAN-ADP-001/002, CHAN-ROUTE-001/003, CHAN-PROF-001/002, CHAN-BIND-008/009, INTX-AUTH-007/009).
  */
 import { randomBytes } from 'node:crypto'
-import type { HologramAgent } from '../../core/agent.js'
+import type { AyniAgent } from '../../core/agent.js'
 import type { CapabilityChannelOps } from '../../core/challenges.js'
 import { type ChannelAdapter, DIDCOMM_CAPABILITIES, type RenderResult } from '../../core/channel.js'
 import type { InvitationMinter } from '../../core/sessions.js'
@@ -18,7 +18,7 @@ import type {
 import type { Logger } from '../../util/logger.js'
 import type { VsAgentClient } from './vsAgentClient.js'
 
-export const BINDING_GOAL_CODE = 'hologram.bind-session'
+export const BINDING_GOAL_CODE = 'ayni.bind-session'
 
 /** Short-lived media links for the wallet: the agent streams decrypted bytes, keyed by a random token. */
 export class MediaLinks {
@@ -43,7 +43,7 @@ export class MediaLinks {
 export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, InvitationMinter {
   public readonly type = 'didcomm' as const
   public readonly capabilities = DIDCOMM_CAPABILITIES
-  private agent?: HologramAgent
+  private agent?: AyniAgent
 
   public constructor(
     private readonly client: VsAgentClient,
@@ -53,7 +53,7 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
     readonly _logger: Logger
   ) {}
 
-  public attach(agent: HologramAgent): void {
+  public attach(agent: AyniAgent): void {
     this.agent = agent
   }
 
@@ -186,7 +186,7 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
   /** The wallet keeps the last contextual menu it received: every message re-sends the current one (INTX-MENU-002). */
   public async sendContextualMenu(session: Session): Promise<void> {
     if (!this.agent) return
-    const state = await this.agent.hologramState(session)
+    const state = await this.agent.ayniState(session)
     const options = state.contextualMenu.items.map((i) => ({
       name: i.id,
       title: i.badge ? `${i.label} (${i.badge})` : i.label,

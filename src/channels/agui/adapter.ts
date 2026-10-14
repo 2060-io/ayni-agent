@@ -1,6 +1,6 @@
 /** The AG-UI channel adapter: renders capability events on session streams (CHAN-PROF-005, profile sections 5 and 7). */
-import { ACTIVITY, CUSTOM_EVENT } from '@2060.io/hologram-agui-profile'
-import type { HologramAgent } from '../../core/agent.js'
+import { ACTIVITY, CUSTOM_EVENT } from '@2060.io/ayni-agui-profile'
+import type { AyniAgent } from '../../core/agent.js'
 import { AGUI_CAPABILITIES, type ChannelAdapter, type RenderResult } from '../../core/channel.js'
 import type { CapabilityEvent, Session } from '../../core/types.js'
 import { prefixedId } from '../../util/ids.js'
@@ -11,11 +11,11 @@ import type { SessionStreams } from './streams.js'
 export class AgUiAdapter implements ChannelAdapter {
   public readonly type = 'ag-ui' as const
   public readonly capabilities = AGUI_CAPABILITIES
-  private agent?: HologramAgent
+  private agent?: AyniAgent
 
   public constructor(private readonly streams: SessionStreams) {}
 
-  public attach(agent: HologramAgent): void {
+  public attach(agent: AyniAgent): void {
     this.agent = agent
   }
 
@@ -29,8 +29,8 @@ export class AgUiAdapter implements ChannelAdapter {
 
   public async pushState(session: Session): Promise<void> {
     if (!this.agent) return
-    const state = await this.agent.hologramState(session)
-    await this.streams.publish(session.id, ev.stateSnapshot({ hologram: state }))
+    const state = await this.agent.ayniState(session)
+    await this.streams.publish(session.id, ev.stateSnapshot({ ayni: state }))
   }
 
   public async render(session: Session, event: CapabilityEvent): Promise<RenderResult> {

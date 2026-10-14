@@ -1,9 +1,9 @@
-# Hologram Agent
+# Ayni Agent
 
 A **Verifiable Service** that holds conversations, keeps memory and performs trust-bound actions for
-its operator, as specified by [hologram-spec v3](https://github.com/2060-io/hologram-spec/tree/main/v3/hologram-agent).
-People reach it from the Hologram App over DIDComm and from a [Hologram UI](https://github.com/2060-io/hologram-ui)
-in the browser over the [Hologram AG-UI Profile](https://github.com/2060-io/hologram-spec/tree/main/v3/hologram-agui-profile);
+its operator, as specified by [ayni-spec v3](https://github.com/2060-io/ayni-spec/tree/main/v3/ayni-agent).
+People reach it from the wallet app over DIDComm and from a [Ayni UI](https://github.com/2060-io/ayni-ui)
+in the browser over the [Ayni AG-UI Profile](https://github.com/2060-io/ayni-spec/tree/main/v3/ayni-agui-profile);
 other agents reach it over A2A. Identity comes from Verifiable Trust v4 credentials, never from accounts.
 
 ## Layout
@@ -22,10 +22,10 @@ other agents reach it over A2A. Identity comes from Verifiable Trust v4 credenti
 | `src/channels/agui/` | the AG-UI profile: descriptor, sessions, binding, stream, runs, history, attachments | CHAN-ADP-004, PROF-* |
 | `src/channels/a2a/` | agent card and JSON-RPC endpoint | CHAN-ADP-001, CHAN-BIND-007 |
 | `src/integrity/`, `src/platform/` | Verana anchoring, statistics, retention | INTEG, PLAT |
-| `packages/agui-profile/` | `@2060.io/hologram-agui-profile`: types, constants and JSON schemas of the wire contract, consumed by the UI | PROF-* |
+| `packages/agui-profile/` | `@2060.io/ayni-agui-profile`: types, constants and JSON schemas of the wire contract, consumed by the UI | PROF-* |
 | `schemas/`, `docs/agent-pack.md`, `agent-packs/` | the agent-pack schema 3.0, its documentation, the example and development packs | CORE-PACK |
 | `dev/` | the local VS Agent on the Verana devnet (`dev/vs-agent`), the agent's own stack (`dev/compose`), tools | PLAT-DEPLOY-002 |
-| `charts/hologram-agent/` | Helm chart | PLAT-DEPLOY-001 |
+| `charts/ayni-agent/` | Helm chart | PLAT-DEPLOY-001 |
 
 [DECISIONS.md](DECISIONS.md) records the implementation decisions taken while building, and what
 is deferred.
@@ -39,7 +39,7 @@ pnpm install
 docker compose -f dev/compose/docker-compose.yml up -d      # pgvector, redis, minio
 cp .env.example .env                                         # fill DATABASE_URL etc. (defaults match the compose stack)
 pnpm dev                                                     # the dev pack: stub model, no keys
-curl http://localhost:3020/.well-known/hologram-agent.json
+curl http://localhost:3020/.well-known/ayni-agent.json
 ```
 
 Binding and every trust-bound event need a DIDComm agent (VS Agent) registered on a Verana network;
@@ -66,7 +66,7 @@ Development switches, refused in production (`NODE_ENV=production`):
 
 | Path | Purpose |
 |------|---------|
-| `/.well-known/hologram-agent.json` | agent descriptor (profile section 2) |
+| `/.well-known/ayni-agent.json` | agent descriptor (profile section 2) |
 | `/agui/v3/sessions…` | the AG-UI profile (sessions, binding, stream, runs, history, attachments) |
 | `/vs-agent/events` | webhook of the DIDComm agent (`EVENTS_WEBHOOK_URL`) |
 | `/webrtc/call-event`, `/vision/…` | face-match callbacks (WebRTC server, vision service) |
@@ -78,5 +78,5 @@ Development switches, refused in production (`NODE_ENV=production`):
 
 - VS Agent 2.x with `POST /v2/didcomm/out-of-band` and the `didcomm.out-of-band.handshake-reused`
   event ([verana-labs/vs-agent#800](https://github.com/verana-labs/vs-agent/pull/800)).
-- Hologram App presenting an ECS-UserAgent credential (hologram-spec `CC-APP-001`); until then run
+- wallet app presenting an ECS-UserAgent credential (ayni-spec `CC-APP-001`); until then run
   with `userAgentGate: optional`.

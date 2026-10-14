@@ -19,7 +19,7 @@ permissions:
   pull-requests: write
 
 env:
-  IMAGE_NAME: 'hologram-agent'
+  IMAGE_NAME: 'ayni-agent'
 
 jobs:
   # Resolve the next version using the shared 2060 flow:

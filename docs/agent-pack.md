@@ -1,6 +1,6 @@
 # Agent pack, schema 3.0
 
-The agent pack is the single configuration bundle of a Hologram Agent: everything about behavior and
+The agent pack is the single configuration bundle of a Ayni Agent: everything about behavior and
 policy lives in one `agent-pack.yaml`, validated at startup against
 [`schemas/agent-pack.schema.json`](../schemas/agent-pack.schema.json). The agent refuses to start
 without a valid pack (spec CORE-PACK-001, CORE-PACK-003). Deployment values and secrets stay in the

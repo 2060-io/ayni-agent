@@ -1,5 +1,5 @@
 /**
- * Hologram AG-UI Profile v3 (2060-io/hologram-spec, v3/hologram-agui-profile/profile.md).
+ * Ayni AG-UI Profile v3 (2060-io/ayni-spec, v3/ayni-agui-profile/profile.md).
  * Every name below cites the section or the PROF-* requirement it implements.
  */
 
@@ -7,11 +7,11 @@ export const PROFILE_VERSION = '3.0'
 export const PROFILE_MAJOR = 3
 
 /** DID Document service type that references the descriptor (PROF-DESC-001). */
-export const DID_SERVICE_TYPE = 'HologramAgUI'
+export const DID_SERVICE_TYPE = 'AyniAgUI'
 /** Well-known path of the descriptor on the agent origin (PROF-DESC-001). */
-export const DESCRIPTOR_PATH = '/.well-known/hologram-agent.json'
+export const DESCRIPTOR_PATH = '/.well-known/ayni-agent.json'
 /** goal_code of the binding invitation (profile section 4). */
-export const BINDING_GOAL_CODE = 'hologram.bind-session'
+export const BINDING_GOAL_CODE = 'ayni.bind-session'
 
 // ---------------------------------------------------------------------------------------------
 // Descriptor (section 2)
@@ -50,7 +50,7 @@ export interface AgentDescriptor {
 
 export type SessionState = 'provisional' | 'bound' | 'closed'
 
-/** Closure reasons (section 5, hologram.session.state). */
+/** Closure reasons (section 5, ayni.session.state). */
 export type ClosureReason =
   | 'user'
   | 'supersede'
@@ -156,14 +156,14 @@ export interface SessionStatus {
 // Custom events on the session stream (section 5)
 
 export const CUSTOM_EVENT = {
-  sessionState: 'hologram.session.state',
-  sessionBound: 'hologram.session.bound',
-  sessionToken: 'hologram.session.token',
-  capabilityRouted: 'hologram.capability.routed',
-  approvalRequest: 'hologram.approval.request',
-  approvalUpdate: 'hologram.approval.update',
-  reaction: 'hologram.reaction',
-  receipt: 'hologram.receipt',
+  sessionState: 'ayni.session.state',
+  sessionBound: 'ayni.session.bound',
+  sessionToken: 'ayni.session.token',
+  capabilityRouted: 'ayni.capability.routed',
+  approvalRequest: 'ayni.approval.request',
+  approvalUpdate: 'ayni.approval.update',
+  reaction: 'ayni.reaction',
+  receipt: 'ayni.receipt',
 } as const
 
 export type CustomEventName = (typeof CUSTOM_EVENT)[keyof typeof CUSTOM_EVENT]
@@ -267,18 +267,18 @@ export interface ReceiptValue {
 }
 
 export interface CustomEventValueMap {
-  'hologram.session.state': SessionStateValue
-  'hologram.session.bound': SessionBoundValue
-  'hologram.session.token': SessionTokenValue
-  'hologram.capability.routed': CapabilityRoutedValue
-  'hologram.approval.request': ApprovalRequestValue
-  'hologram.approval.update': ApprovalUpdateValue
-  'hologram.reaction': ReactionValue
-  'hologram.receipt': ReceiptValue
+  'ayni.session.state': SessionStateValue
+  'ayni.session.bound': SessionBoundValue
+  'ayni.session.token': SessionTokenValue
+  'ayni.capability.routed': CapabilityRoutedValue
+  'ayni.approval.request': ApprovalRequestValue
+  'ayni.approval.update': ApprovalUpdateValue
+  'ayni.reaction': ReactionValue
+  'ayni.receipt': ReceiptValue
 }
 
 // ---------------------------------------------------------------------------------------------
-// state.hologram (section 5, PROF-STREAM-004)
+// state.ayni (section 5, PROF-STREAM-004)
 
 export interface ContextualMenuItem {
   id: string
@@ -295,7 +295,7 @@ export interface GeneratingEntry {
   startedAt: string
 }
 
-export interface HologramState {
+export interface AyniState {
   contextualMenu: { items: ContextualMenuItem[] }
   pendingApprovals: number
   generating: GeneratingEntry[]
@@ -305,13 +305,13 @@ export interface HologramState {
 }
 
 export interface AgUiState {
-  hologram: HologramState
+  ayni: AyniState
 }
 
 // ---------------------------------------------------------------------------------------------
 // Runs and input (section 6)
 
-export type HologramActionKind =
+export type AyniActionKind =
   | 'text'
   | 'menu.select'
   | 'contextual.select'
@@ -322,7 +322,7 @@ export type HologramActionKind =
   | 'receipt'
   | 'attachments'
 
-export const HOLOGRAM_ACTION_KINDS: readonly HologramActionKind[] = [
+export const AYNI_ACTION_KINDS: readonly AyniActionKind[] = [
   'text',
   'menu.select',
   'contextual.select',
@@ -342,7 +342,7 @@ export interface ReplyReference {
   role: 'user' | 'assistant'
 }
 
-export type HologramAction =
+export type AyniAction =
   | { kind: 'text'; replyTo?: string }
   | { kind: 'menu.select'; menuId: string; itemId: string }
   | { kind: 'contextual.select'; itemId: string }
@@ -353,17 +353,17 @@ export type HologramAction =
   | { kind: 'receipt'; messageIds: string[]; state: ReceiptState }
   | { kind: 'attachments'; attachmentIds: string[]; replyTo?: string }
 
-export interface HologramForwardedProps {
-  hologram?: HologramAction
+export interface AyniForwardedProps {
+  ayni?: AyniAction
 }
 
 /** Activity message types inside runs (section 6). */
 export const ACTIVITY = {
-  menu: 'hologram.menu',
-  attachment: 'hologram.attachment',
-  approval: 'hologram.approval',
-  capability: 'hologram.capability',
-  generating: 'hologram.generating',
+  menu: 'ayni.menu',
+  attachment: 'ayni.attachment',
+  approval: 'ayni.approval',
+  capability: 'ayni.capability',
+  generating: 'ayni.generating',
 } as const
 
 export type ActivityType = (typeof ACTIVITY)[keyof typeof ACTIVITY]
@@ -403,7 +403,7 @@ export interface GeneratingActivity {
 
 /** Interrupt reasons the agent uses (PROF-RUN-006). */
 export const INTERRUPT_REASON = {
-  menu: 'hologram.menu',
+  menu: 'ayni.menu',
 } as const
 
 /** RunError codes the agent uses (PROF-RUN-007). */

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://2060.io/schemas/hologram-agui-profile/3.0/descriptor.json",
-  "title": "Hologram agent descriptor (profile section 2, PROF-DESC-002)",
+  "$id": "https://2060.io/schemas/ayni-agui-profile/3.0/descriptor.json",
+  "title": "Ayni agent descriptor (profile section 2, PROF-DESC-002)",
   "type": "object",
   "required": ["profileVersion", "did", "name", "sessions", "binding", "features"],
   "properties": {

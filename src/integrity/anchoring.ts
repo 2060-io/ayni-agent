@@ -45,7 +45,7 @@ export class VeranaLedgerWriter implements LedgerWriter {
       typeUrl: veranaTypeUrls.MsgStoreDigest,
       value: { authority: this.authority, operator: address, digest },
     }
-    const result = await client.signAndBroadcast(address, [msg], 'auto', 'hologram-agent anchor')
+    const result = await client.signAndBroadcast(address, [msg], 'auto', 'ayni-agent anchor')
     if (result.code !== 0) throw new Error(`store-digest failed: code ${result.code} ${result.rawLog ?? ''}`)
     return result.transactionHash
   }
