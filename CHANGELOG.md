@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0](https://github.com/2060-io/ayni-agent/compare/v0.2.0...v0.3.0) (2026-10-14)
+
+
+### Features
+
+* **chart:** ingress and inline agent-pack ConfigMap; the Welcome to Ayni pack ships in the image ([446aaae](https://github.com/2060-io/ayni-agent/commit/446aaaeeb695bc2e6b926cdb0508630bb0a02abb))
+* **chart:** ingress, inline agent pack and the Welcome to Ayni pack ([74f0aac](https://github.com/2060-io/ayni-agent/commit/74f0aac72c39cee3a218899a3d0cb9e0de6225f6))
+
 ## [0.2.0](https://github.com/2060-io/ayni-agent/compare/v0.1.0...v0.2.0) (2026-10-14)
 
 
