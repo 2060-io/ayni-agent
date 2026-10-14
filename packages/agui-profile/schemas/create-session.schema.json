@@ -3,17 +3,11 @@
   "$id": "https://2060.io/schemas/hologram-agui-profile/3.0/create-session.json",
   "title": "POST {sessions} body (profile section 3.2)",
   "type": "object",
-  "required": [
-    "client"
-  ],
+  "required": ["client"],
   "properties": {
     "client": {
       "type": "object",
-      "required": [
-        "name",
-        "version",
-        "platform"
-      ],
+      "required": ["name", "version", "platform"],
       "properties": {
         "name": {
           "type": "string",

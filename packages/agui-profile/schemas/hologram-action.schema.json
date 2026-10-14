@@ -3,9 +3,7 @@
   "$id": "https://2060.io/schemas/hologram-agui-profile/3.0/hologram-action.json",
   "title": "forwardedProps.hologram (profile section 6, PROF-RUN-003)",
   "type": "object",
-  "required": [
-    "kind"
-  ],
+  "required": ["kind"],
   "oneOf": [
     {
       "properties": {
@@ -30,11 +28,7 @@
           "type": "string"
         }
       },
-      "required": [
-        "kind",
-        "menuId",
-        "itemId"
-      ],
+      "required": ["kind", "menuId", "itemId"],
       "additionalProperties": false
     },
     {
@@ -46,10 +40,7 @@
           "type": "string"
         }
       },
-      "required": [
-        "kind",
-        "itemId"
-      ],
+      "required": ["kind", "itemId"],
       "additionalProperties": false
     },
     {
@@ -61,20 +52,13 @@
           "type": "string"
         },
         "decision": {
-          "enum": [
-            "approve",
-            "reject"
-          ]
+          "enum": ["approve", "reject"]
         },
         "note": {
           "type": "string"
         }
       },
-      "required": [
-        "kind",
-        "approvalId",
-        "decision"
-      ],
+      "required": ["kind", "approvalId", "decision"],
       "additionalProperties": false
     },
     {
@@ -86,10 +70,7 @@
           "type": "string"
         }
       },
-      "required": [
-        "kind",
-        "approvalId"
-      ],
+      "required": ["kind", "approvalId"],
       "additionalProperties": false
     },
     {
@@ -109,12 +90,7 @@
           "minLength": 1
         }
       },
-      "required": [
-        "kind",
-        "tool",
-        "purposeId",
-        "justification"
-      ],
+      "required": ["kind", "tool", "purposeId", "justification"],
       "additionalProperties": false
     },
     {
@@ -129,18 +105,10 @@
           "type": "string"
         },
         "action": {
-          "enum": [
-            "add",
-            "remove"
-          ]
+          "enum": ["add", "remove"]
         }
       },
-      "required": [
-        "kind",
-        "messageId",
-        "emoji",
-        "action"
-      ],
+      "required": ["kind", "messageId", "emoji", "action"],
       "additionalProperties": false
     },
     {
@@ -155,17 +123,10 @@
           }
         },
         "state": {
-          "enum": [
-            "received",
-            "viewed"
-          ]
+          "enum": ["received", "viewed"]
         }
       },
-      "required": [
-        "kind",
-        "messageIds",
-        "state"
-      ],
+      "required": ["kind", "messageIds", "state"],
       "additionalProperties": false
     },
     {
@@ -184,10 +145,7 @@
           "type": "string"
         }
       },
-      "required": [
-        "kind",
-        "attachmentIds"
-      ],
+      "required": ["kind", "attachmentIds"],
       "additionalProperties": false
     }
   ]
