@@ -12,7 +12,7 @@ import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import type { ImageGenerator } from './imageGen.js'
 import type { ObjectStore } from './objectStore.js'
-import type { Transcriber } from './stt.js'
+import { type Transcriber, StubTranscriber } from './stt.js'
 import type { ImageDescriber } from './vision.js'
 
 export interface PendingUpload {
@@ -110,6 +110,11 @@ export class MediaService {
     const pending: PendingUpload = { id: attachment.id, sessionId: session.id, attachment, createdAt: nowIso() }
     this.pendingUploads.set(attachment.id, pending)
     return attachment
+  }
+
+  /** Voice notes are offered only when a real transcriber is configured (the stub only labels them). */
+  public get canTranscribe(): boolean {
+    return !!this.transcriber && !(this.transcriber instanceof StubTranscriber)
   }
 
   public takeUploads(session: Session, ids: string[]): MessageAttachment[] {

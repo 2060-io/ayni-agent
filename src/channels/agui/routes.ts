@@ -85,7 +85,7 @@ export class AgUiRoutes {
         reactions: f.reactions,
         receipts: f.receipts,
         history: f.history,
-        voiceNotes: f.voiceNotes,
+        voiceNotes: f.voiceNotes && this.agent.media.canTranscribe,
         uploads: f.voiceNotes || f.inboundImages ? this.uploads : false,
       },
       locales: [this.agent.pack.language.agent],
