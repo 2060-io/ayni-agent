@@ -12,7 +12,7 @@ import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import type { ImageGenerator } from './imageGen.js'
 import type { ObjectStore } from './objectStore.js'
-import { type Transcriber, StubTranscriber } from './stt.js'
+import { StubTranscriber, type Transcriber } from './stt.js'
 import type { ImageDescriber } from './vision.js'
 
 export interface PendingUpload {

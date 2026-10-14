@@ -57,6 +57,12 @@ export class VsAgentError extends Error {
   }
 }
 
+export interface ServiceEndpointEntry {
+  id: string
+  type: string
+  serviceEndpoint: unknown
+}
+
 export class VsAgentClient {
   public constructor(
     private readonly baseUrl: string,
@@ -79,6 +85,27 @@ export class VsAgentClient {
 
   public info(): Promise<VsAgentInfo> {
     return this.request('GET', '/agent/info')
+  }
+
+  // ---- DID Document services (VS Agent admin API, vt/service-endpoints) ----------------------
+
+  public listServiceEndpoints(): Promise<{ items: ServiceEndpointEntry[] }> {
+    return this.request('GET', '/vt/service-endpoints')
+  }
+
+  public addServiceEndpoint(body: {
+    type: string
+    serviceEndpoint: unknown
+    id?: string
+  }): Promise<ServiceEndpointEntry> {
+    return this.request('POST', '/vt/service-endpoints', body)
+  }
+
+  public updateServiceEndpoint(
+    id: string,
+    body: { type?: string; serviceEndpoint?: unknown }
+  ): Promise<ServiceEndpointEntry> {
+    return this.request('PATCH', `/vt/service-endpoints/${encodeURIComponent(id)}`, body)
   }
 
   public async ready(): Promise<boolean> {

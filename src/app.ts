@@ -1,4 +1,6 @@
 /** Composition root: configuration, persistence, models, core, channels, jobs. */
+
+import { DESCRIPTOR_PATH, DID_SERVICE_TYPE } from '@2060.io/hologram-agui-profile'
 import cors from '@fastify/cors'
 import multipart from '@fastify/multipart'
 import Fastify, { type FastifyInstance } from 'fastify'
@@ -244,6 +246,7 @@ export async function buildAgent(
 
   aguiRoutes = new AgUiRoutes(agent, agui, streams, logger)
   aguiRoutes.register(app, did)
+  if (did !== 'did:unknown') await declareAgUiService(vsAgent, did, env.publicBaseUrl, logger)
   const identity = new IdentityFlow(pack, vsAgent, resolver, env.devAllowUnidentifiedPrincipals, logger)
   const didcommEvents = new DidcommEvents(agent, vsAgent, identity, didcomm, env.vsAgentEventsApiKey, logger)
   didcommEvents.register(app)
@@ -342,4 +345,30 @@ export async function start(): Promise<RunningAgent> {
   await running.app.listen({ port: env.port, host: '0.0.0.0' })
   logger.info({ port: env.port, publicBaseUrl: env.publicBaseUrl }, 'hologram-agent listening')
   return running
+}
+
+/**
+ * The AG-UI descriptor is a service of the agent's DID Document (IDENT-SELF-005): wallets, the
+ * directory and the UI discover the agent through it. Declared through the VS Agent, idempotently.
+ */
+async function declareAgUiService(
+  vsAgent: VsAgentClient,
+  did: string,
+  publicBaseUrl: string,
+  logger: Logger
+): Promise<void> {
+  const serviceEndpoint = `${publicBaseUrl.replace(/\/+$/, '')}${DESCRIPTOR_PATH}`
+  try {
+    const { items } = await vsAgent.listServiceEndpoints()
+    const existing = items.find((s) => s.type === DID_SERVICE_TYPE)
+    if (!existing) {
+      await vsAgent.addServiceEndpoint({ type: DID_SERVICE_TYPE, serviceEndpoint, id: '#hologram-agui' })
+      logger.info({ did, serviceEndpoint }, 'AG-UI descriptor declared in the DID Document (IDENT-SELF-005)')
+    } else if (existing.serviceEndpoint !== serviceEndpoint) {
+      await vsAgent.updateServiceEndpoint(existing.id, { serviceEndpoint })
+      logger.info({ did, serviceEndpoint }, 'AG-UI descriptor service updated in the DID Document')
+    }
+  } catch (error) {
+    logger.warn({ err: error }, 'could not declare the AG-UI descriptor in the DID Document')
+  }
 }
