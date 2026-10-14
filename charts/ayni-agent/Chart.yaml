@@ -1,5 +1,7 @@
 apiVersion: v2
-name: ayni-agent
+name: ayni-agent-chart
+# The chart is published next to the image on Docker Hub (io2060/ayni-agent-chart); a chart named like
+# the image would overwrite the image tag with the chart artifact.
 description: Helm chart for the Ayni Agent
 type: application
 # version / appVersion are overwritten at publish time by the CD pipeline
