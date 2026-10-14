@@ -177,7 +177,8 @@ export class HologramAgent {
     deviceHandle?: string,
     resumeSessionId?: string,
     deviceProof?: string,
-    conversationId?: string
+    conversationId?: string,
+    newConversation = false
   ) {
     const conversation = await this.sessions.requireOpenable(conversationId, resumeSessionId)
     const created = await this.sessions.createProvisional(
@@ -186,7 +187,8 @@ export class HologramAgent {
       locale,
       deviceHandle,
       resumeSessionId,
-      conversation
+      conversation,
+      newConversation
     )
     let rebind: 'asked' | 'unavailable' | undefined
     let pairing: 'expired' | 'invalid' | undefined
@@ -244,10 +246,11 @@ export class HologramAgent {
     client: ClientDescription,
     locale?: string,
     resumeSessionId?: string,
-    conversationId?: string
+    conversationId?: string,
+    newConversation = false
   ) {
     const conversation = await this.sessions.requireOpenable(conversationId, resumeSessionId)
-    return this.sessions.createSibling(parent, client, locale, resumeSessionId, conversation)
+    return this.sessions.createSibling(parent, client, locale, resumeSessionId, conversation, newConversation)
   }
 
   public async closeSession(session: Session, reason: ClosureReason): Promise<void> {

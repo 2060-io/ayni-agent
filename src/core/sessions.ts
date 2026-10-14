@@ -206,7 +206,8 @@ export class SessionService {
     locale?: string,
     deviceHandle?: string,
     resumeSessionId?: string,
-    conversationId?: string
+    conversationId?: string,
+    newConversation = false
   ): Promise<{ session: Session; token: string }> {
     const { token, hash } = this.newToken()
     const id = prefixedId('ses')
@@ -220,6 +221,7 @@ export class SessionService {
       locale,
       deviceHandle,
       conversationId,
+      newConversation,
       resumedFromSessionId: resumeSessionId,
       tokenHash: hash,
       lastActivityAt: nowIso(),
@@ -305,7 +307,8 @@ export class SessionService {
     client: ClientDescription,
     locale?: string,
     resumeSessionId?: string,
-    conversationId?: string
+    conversationId?: string,
+    newConversation = false
   ): Promise<{ session: Session; token: string }> {
     this.requireBound(parent)
     if (!this.siblingsAllowed) throw new SessionError('sibling sessions are disabled', 'forbidden')
@@ -324,6 +327,7 @@ export class SessionService {
       parentSessionId: parent.id,
       deviceHandle: parent.deviceHandle,
       conversationId,
+      newConversation,
       resumedFromSessionId: resumeSessionId,
       tokenHash: hash,
       boundAt: nowIso(),
@@ -356,6 +360,11 @@ export class SessionService {
       conversation = undefined
       session.resumedFromSessionId = undefined
       session.lineage = undefined
+    }
+    // nothing named and no new conversation asked: a pairing continues the latest active one (PROF-CONV-006)
+    if (!conversation && !wanted && !session.newConversation) {
+      const latest = (await this.store.conversations.listByPrincipal(principal.id, ['active']))[0]
+      if (latest) conversation = latest
     }
     const now = nowIso()
     if (!conversation) {
@@ -528,9 +537,14 @@ export class SessionService {
   }
 
   /** Closes every session of a Principal (supersede, channel closure, identity failure). */
-  public async closeAll(principalId: string, reason: ClosureReason, except?: string): Promise<number> {
+  public async closeAll(
+    principalId: string,
+    reason: ClosureReason,
+    except?: string,
+    states: ('provisional' | 'bound')[] = ['provisional', 'bound']
+  ): Promise<number> {
     let n = 0
-    for (const session of await this.store.sessions.listByPrincipal(principalId, ['provisional', 'bound'])) {
+    for (const session of await this.store.sessions.listByPrincipal(principalId, states)) {
       if (session.id === except) continue
       await this.close(session, reason)
       n++
@@ -541,7 +555,8 @@ export class SessionService {
   /** Supersede: a new capability channel for an actor that already has one closes the old one and its sessions (IDENT-SESS-003). */
   public async supersede(principal: Principal, newChannelId: string): Promise<number> {
     if (principal.capabilityChannelId && principal.capabilityChannelId !== newChannelId) {
-      const closed = await this.closeAll(principal.id, 'supersede')
+      // only sessions that depend on the old channel close; a provisional session is waiting to bind to the new one
+      const closed = await this.closeAll(principal.id, 'supersede', undefined, ['bound'])
       this.logger.info({ principalId: principal.id, closed }, 'capability channel superseded')
       return closed
     }

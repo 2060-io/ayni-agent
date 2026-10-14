@@ -87,6 +87,8 @@ export interface CreateSessionRequest {
   resumeSessionId?: string
   /** a conversation of the Principal to open on this device (PROF-CONV-005) */
   conversationId?: string
+  /** start a new conversation; without it and without a conversation named, the session continues the Principal's latest active one (PROF-CONV-006) */
+  newConversation?: boolean
 }
 
 export interface BindingMaterial {

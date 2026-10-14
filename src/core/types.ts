@@ -133,6 +133,8 @@ export interface Session {
   deviceSecret?: string
   /** the conversation this session serves (D52); AG-UI sessions only */
   conversationId?: string
+  /** the request asked for a new conversation rather than continuing the latest (PROF-CONV-006) */
+  newConversation?: boolean
   /** a closed session this one resumes: its entries stay readable here (IDENT-SESS-009) */
   resumedFromSessionId?: string
   /** ids of every session in the resume chain, oldest last */

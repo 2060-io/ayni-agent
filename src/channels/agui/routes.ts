@@ -150,6 +150,7 @@ export class AgUiRoutes {
         deviceProof?: string
         resumeSessionId?: string
         conversationId?: string
+        newConversation?: boolean
       }
       if (!validateCreate(body))
         return reply.code(400).send({ error: 'bad-request', message: ajv.errorsText(validateCreate.errors) })
@@ -164,7 +165,8 @@ export class AgUiRoutes {
             client,
             body.locale,
             body.resumeSessionId,
-            body.conversationId
+            body.conversationId,
+            body.newConversation === true
           )
           const principal = await this.agent.principalOf(session)
           if (!session.lineage?.length) await this.agent.welcome(session)
@@ -195,7 +197,8 @@ export class AgUiRoutes {
           body.deviceHandle,
           body.resumeSessionId,
           body.deviceProof,
-          body.conversationId
+          body.conversationId,
+          body.newConversation === true
         )
         if (session.state === 'bound') {
           // a paired device: bound at once, no phone round trip (PROF-SESS-010)

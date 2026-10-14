@@ -49,6 +49,9 @@
     "conversationId": {
       "type": "string",
       "maxLength": 128
+    },
+    "newConversation": {
+      "type": "boolean"
     }
   }
 }

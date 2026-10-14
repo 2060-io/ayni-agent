@@ -11,11 +11,12 @@ let running: RunningAgent
 const client = { name: 'hologram-ui', version: '3.0.0', platform: 'web' }
 
 async function createSession(token?: string) {
+  // a sibling from a bound token stands for the UI's "New conversation": it asks for a new one (PROF-CONV-006)
   const response = await running.app.inject({
     method: 'POST',
     url: '/agui/v3/sessions',
     headers: token ? { authorization: `Bearer ${token}` } : {},
-    payload: { client, locale: 'en' },
+    payload: { client, locale: 'en', ...(token ? { newConversation: true } : {}) },
   })
   return {
     status: response.statusCode,
@@ -40,8 +41,9 @@ async function bindViaPhone(sessionId: string, actor = 'did:peer:alice') {
     connectionId,
     { name: 'Hologram', version: '2.5.0', platform: 'ios' }
   )
-  await running.agent.sessions.markConfirmationSent(session, connectionId, 'thread-1')
-  const confirm = await running.agent.sessions.findByConfirmation(connectionId, 'thread-1')
+  const thread = `thread-${Math.random().toString(36).slice(2, 10)}`
+  await running.agent.sessions.markConfirmationSent(session, connectionId, thread)
+  const confirm = await running.agent.sessions.findByConfirmation(connectionId, thread)
   if (!confirm?.binding) throw new Error('confirmation not found')
   await running.agent.sessions.bind(confirm, principal, confirm.binding.nonce)
   return principal
@@ -343,6 +345,26 @@ describe('conversations (PROF-CONV-001..005, IDENT-SESS-010..013)', () => {
     await run(re.sessionId, re.sessionToken, 'any news?')
     conversations = await list(re.sessionToken)
     expect(conversations.find((c) => c.id === status.conversationId)?.state).toBe('active')
+  })
+
+  it('a new pairing continues the latest conversation; only an explicit request starts a new one (PROF-CONV-006)', async () => {
+    const { body } = await createSession()
+    await bindViaPhone(body.sessionId, 'did:peer:quinn')
+    await run(body.sessionId, body.sessionToken, 'first words')
+    const [first] = await list(body.sessionToken)
+    const again = await createSession()
+    await bindViaPhone(again.body.sessionId, 'did:peer:quinn')
+    const status = (
+      await running.app.inject({
+        method: 'GET',
+        url: `/agui/v3/sessions/${again.body.sessionId}`,
+        headers: auth(again.body.sessionToken),
+      })
+    ).json() as { conversationId: string }
+    expect(status.conversationId).toBe(first.id)
+    expect((await list(again.body.sessionToken)).length).toBe(1)
+    const fresh = await createSession(again.body.sessionToken)
+    expect((await list(fresh.body.sessionToken)).length).toBe(2)
   })
 
   it('closes a conversation for good: gone from the list, resumption refused with 409 final', async () => {
