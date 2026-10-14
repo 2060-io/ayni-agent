@@ -22,6 +22,7 @@ COPY --from=builder /app/packages/agui-profile/dist ./packages/agui-profile/dist
 COPY --from=builder /app/dist ./dist
 COPY schemas ./schemas
 COPY agent-packs/example ./agent-packs/example
+COPY agent-packs/welcome ./agent-packs/welcome
 USER node
 EXPOSE 3010
 CMD ["node", "dist/index.js"]

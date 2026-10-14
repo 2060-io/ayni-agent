@@ -25,7 +25,8 @@ other agents reach it over A2A. Identity comes from Verifiable Trust v4 credenti
 | `packages/agui-profile/` | `@2060.io/ayni-agui-profile`: types, constants and JSON schemas of the wire contract, consumed by the UI | PROF-* |
 | `schemas/`, `docs/agent-pack.md`, `agent-packs/` | the agent-pack schema 3.0, its documentation, the example and development packs | CORE-PACK |
 | `dev/` | the local VS Agent on the Verana devnet (`dev/vs-agent`), the agent's own stack (`dev/compose`), tools | PLAT-DEPLOY-002 |
-| `charts/ayni-agent/` | Helm chart (`namespace` value, default `ayni`) | PLAT-DEPLOY-001 |
+| `agent-packs/welcome/` | "Welcome to Ayni", the onboarding agent deployed with the UI (in the image at `/app/agent-packs/welcome`) | |
+| `charts/ayni-agent/` | Helm chart (`namespace` value, ingress, inline or ConfigMap agent pack) | PLAT-DEPLOY-001 |
 
 [DECISIONS.md](DECISIONS.md) records the implementation decisions taken while building, and what
 is deferred.
