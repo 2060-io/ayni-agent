@@ -19,6 +19,8 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY packages/agui-profile/package.json packages/agui-profile/
 RUN pnpm install --frozen-lockfile --prod
 COPY --from=builder /app/packages/agui-profile/dist ./packages/agui-profile/dist
+# the JSON schemas the AG-UI routes validate requests with (resolved through the package's exports)
+COPY --from=builder /app/packages/agui-profile/schemas ./packages/agui-profile/schemas
 COPY --from=builder /app/dist ./dist
 COPY schemas ./schemas
 COPY agent-packs/example ./agent-packs/example
