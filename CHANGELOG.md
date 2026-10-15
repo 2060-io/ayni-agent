@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.2](https://github.com/2060-io/ayni-agent/compare/v0.3.1...v0.3.2) (2026-10-15)
+
+
+### Bug Fixes
+
+* **docker:** ship the profile package's JSON schemas in the runtime image ([6a5556b](https://github.com/2060-io/ayni-agent/commit/6a5556bf57ac04a428a71ddee0f040a5a7fb8770))
+* **docker:** ship the profile package's JSON schemas in the runtime image ([7f11967](https://github.com/2060-io/ayni-agent/commit/7f11967eeaad514d36b16f68d39d6563eda983db))
+
 ## [0.3.1](https://github.com/2060-io/ayni-agent/compare/v0.3.0...v0.3.1) (2026-10-14)
 
 
