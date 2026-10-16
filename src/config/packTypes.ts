@@ -32,6 +32,8 @@ export interface CredentialRef {
 export interface PackIdentity {
   homeBackingIdentity: string
   userAgentGate?: 'required' | 'optional'
+  /** what becomes of a user agent that presents no valid identity credential (D53, IDENT-RES-007) */
+  unidentifiedPeers?: 'refuse' | 'admit'
   recognizedBackingIdentities: { identity: string; relation: 'home' | 'partner'; label?: string }[]
   roles?: Record<string, RoleDefinition>
   roleRules: RoleRule[]
