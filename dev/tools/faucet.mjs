@@ -1,18 +1,22 @@
 // Request devnet/testnet coins from the Verana faucet (verana-spec v4/verana-faucet) with an
-// ADR-036 signature made from a mnemonic. Usage: node faucet.mjs <faucet-base-url> <mnemonic> [amount-uvna]
-import { makeSignDoc, Secp256k1HdWallet } from '@cosmjs/amino'
+// ADR-036 signature made from a mnemonic or a raw private key (hex).
+// Usage: node faucet.mjs <faucet-base-url> <mnemonic|privkey-hex> [amount-uvna]
+import { makeSignDoc, Secp256k1HdWallet, Secp256k1Wallet } from '@cosmjs/amino'
 import { stringToPath } from '@cosmjs/crypto'
-import { toBase64 } from '@cosmjs/encoding'
+import { fromHex, toBase64 } from '@cosmjs/encoding'
 
 const [, , base, mnemonic, amount] = process.argv
 if (!base || !mnemonic) {
   console.error('usage: node faucet.mjs <faucet-base-url> <mnemonic> [amount-uvna]')
   process.exit(2)
 }
-const wallet = await Secp256k1HdWallet.fromMnemonic(mnemonic, {
-  prefix: 'verana',
-  hdPaths: [stringToPath("m/44'/118'/0'/0/0")],
-})
+// the second argument is a mnemonic, or the raw secp256k1 private key in hex (veranad keys export --unarmored-hex)
+const wallet = /^[0-9a-fA-F]{64}$/.test(mnemonic)
+  ? await Secp256k1Wallet.fromKey(fromHex(mnemonic), 'verana')
+  : await Secp256k1HdWallet.fromMnemonic(mnemonic, {
+      prefix: 'verana',
+      hdPaths: [stringToPath("m/44'/118'/0'/0/0")],
+    })
 const [{ address, pubkey }] = await wallet.getAccounts()
 const post = (path, body, token) =>
   fetch(`${base}${path}`, {
