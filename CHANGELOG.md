@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0](https://github.com/2060-io/ayni-agent/compare/v0.4.0...v0.5.0) (2026-10-16)
+
+
+### Features
+
+* **identity:** identity.unidentifiedPeers admits wallets without a valid identity credential (D53, IDENT-RES-007) ([ccd844e](https://github.com/2060-io/ayni-agent/commit/ccd844ef5fa05925f420a9c8ecc9e0f0690a7aad))
+* **identity:** identity.unidentifiedPeers admits wallets without a valid identity credential (D53) ([ab659ca](https://github.com/2060-io/ayni-agent/commit/ab659ca2ffdda29aec8a8084b13290cfbf3f3934))
+
 ## [0.4.0](https://github.com/2060-io/ayni-agent/compare/v0.3.2...v0.4.0) (2026-10-16)
 
 
