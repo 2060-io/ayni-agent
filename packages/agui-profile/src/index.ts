@@ -253,6 +253,8 @@ export interface MessageMetadata {
   sourceType?: string
   completion?: 'completed' | 'interrupted'
   entryId?: string
+  /** the id the client gave this message in the run that sent it, when it was the client's */
+  externalId?: string
   /** current reactions on the message, one per person */
   reactions?: { emoji: string; by: string }[]
   /** the message this one answers */

@@ -476,8 +476,18 @@ describe('runs, tools and history (PROF-RUN-002..005, PROF-MAP-005, PROF-HIST-00
       url: `/agui/v3/sessions/${body.sessionId}/messages?limit=50`,
       headers: { authorization: `Bearer ${body.sessionToken}` },
     })
-    const messages = history.json().messages as { role: string; content?: string; activityType?: string }[]
-    expect(messages.some((m) => m.role === 'user' && m.content?.includes('/call'))).toBe(true)
+    const messages = history.json().messages as {
+      id: string
+      role: string
+      content?: string
+      activityType?: string
+      metadata?: { externalId?: string }
+    }[]
+    const sent = messages.find((m) => m.role === 'user' && m.content?.includes('/call'))
+    expect(sent).toBeDefined()
+    // history names the message under the agent's id and recalls the id the client gave it (PROF-HIST-006)
+    expect(sent?.id).not.toBe('u1')
+    expect(sent?.metadata?.externalId).toBe('u1')
     expect(messages.some((m) => m.role === 'assistant')).toBe(true)
     expect(JSON.stringify(messages)).not.toContain('"arguments"')
   })

@@ -54,6 +54,7 @@ export function entryToMessages(entry: MessageEntry): Record<string, unknown>[] 
     completion: entry.completion,
     reactions: reactions.length ? reactions : undefined,
     replyTo: entry.payload?.replyTo,
+    externalId: entry.externalId,
   }
   switch (entry.sourceType) {
     case 'text':
