@@ -59,6 +59,16 @@ matter of changing the four network values in `.env` and redoing the bootstrap t
 - A network reset keeps the DID but removes the corporation and the participants: fund the accounts
   again (`bootstrap.sh key`), then steps 3 (with the real DID) and 6, set the new corporation id and
   the ecosystem's new DID in `.env`, and recreate the container.
+- The agent sends its onboarding request to the validator at boot, for every entry of its own that is
+  still PENDING, and from its own transaction when it started the entry itself. An entry started from
+  `veranad` (step 6) therefore needs a restart of the container before the validator sees anything.
+- The validator (the devnet ECS organization issuer) must hold the request before the validation:
+  a validation done on chain alone (frontend, CLI) leaves the credential unissued. Validate through
+  the issuer's Admin API instead (`POST /v2/vt/flows/{session}/validate`; verana-deploy has the
+  workflow `validateEcsOnboarding`), which writes the chain outcome and issues the credential.
+- Through ngrok the issuer may end up with several connection records for this agent and then
+  rejects every inbound message from it (`RecordDuplicateError`): keep the one its flow names
+  (`GET /v2/vt/flows/{session}` → `connectionId`) and delete the others on the issuer.
 
 ## State of the development instance (13 October 2026)
 
