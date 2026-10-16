@@ -406,7 +406,7 @@ export class AgUiRoutes {
         if (p.menuId && p.itemId) resumeAction = { kind: 'menu.select', menuId: p.menuId, itemId: p.itemId }
       }
       const effective = resumeAction ?? action
-      await this.run(session, input.runId, effective, text, reply, request)
+      await this.run(session, input.runId, effective, text, reply, request, last?.id ? String(last.id) : undefined)
     })
 
     // PROF-RUN-007
@@ -498,7 +498,9 @@ export class AgUiRoutes {
     action: AyniAction,
     text: string,
     reply: FastifyReply,
-    request: FastifyRequest
+    request: FastifyRequest,
+    /** the id the client gave its message, kept on the entry so history names it the same way (PROF-HIST-006) */
+    clientMessageId?: string
   ): Promise<void> {
     const controller = new AbortController()
     this.runs.set(runId, { sessionId: session.id, controller })
@@ -574,6 +576,8 @@ export class AgUiRoutes {
               role: 'principal',
               sourceType: voice ? 'voice' : attachments.length ? 'media' : 'text',
               text: entryText,
+              // the id the client gave the message in its run, so history names it the same way (PROF-HIST-006)
+              externalId: clientMessageId,
               attachments,
               language: session.locale ?? this.agent.pack.language.agent,
               backingIdentity: principal.backingIdentity,
