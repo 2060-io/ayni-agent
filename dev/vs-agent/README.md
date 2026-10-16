@@ -45,8 +45,8 @@ matter of changing the four network values in `.env` and redoing the bootstrap t
 
 | Item | Value |
 |------|-------|
-| ECS ecosystem | id 1, `did:webvh:QmQueP3dCakEphRR694eYzZEhF53FvzPCPrdoHK3aMeFKh:ecs-ecosystem.devnet.verana.network` |
-| ECS Organization schema | id 1, holder onboarding = ISSUER_ONBOARDING_PROCESS, validator participant 7 (`ecs-org-issuer.devnet.verana.network`, zero fees) |
+| ECS ecosystem | id 1, `did:webvh:QmTjgAgrSEKmXDgyzQvzar92uwQvW8VSJV8ZS5SjzYqCxX:ecs-ecosystem.devnet.verana.network` since the reset of 2026-10-15 (the DID changes at every reset: update `TRUSTED_ECS_ECOSYSTEM_DIDS`) |
+| ECS Organization schema | id 1, holder onboarding = ISSUER_ONBOARDING_PROCESS, validator participant 7 (`ecs-org-issuer.devnet.verana.network`, zero fees); its operator validates the pending onboarding from the Verana frontend |
 | ECS Service schema | id 3, issuer onboarding OPEN, root participant 3 |
 | Faucet | `https://faucet.devnet.verana.network` (challenge, token, dispense) |
 
@@ -56,6 +56,9 @@ matter of changing the four network values in `.env` and redoing the bootstrap t
   `http://127.0.0.1:3010` (in Compose: `http://vs-agent:3000`). Never publish port 3000.
 - `EVENTS_WEBHOOK_URL` points at the Ayni Agent's events endpoint once it runs.
 - A fresh DID means redoing steps 5 and 6: wipe the `agent-data` volume only on purpose.
+- A network reset keeps the DID but removes the corporation and the participants: fund the accounts
+  again (`bootstrap.sh key`), then steps 3 (with the real DID) and 6, set the new corporation id and
+  the ecosystem's new DID in `.env`, and recreate the container.
 
 ## State of the development instance (13 October 2026)
 
