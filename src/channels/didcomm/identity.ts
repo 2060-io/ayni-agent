@@ -160,8 +160,11 @@ export class IdentityFlow {
       if (record?.verified) return this.factsFromBadge(connectionId, peerId, record, userAgentVerified)
       this.logger.warn({ connectionId, state: record?.state, error: record?.errorMessage }, 'badge not presented')
     }
-    if (this.devAllowUnidentified) {
-      this.logger.warn({ connectionId }, 'DEV: unidentified principal admitted (no badge); development only')
+    // the pack admits unidentified peers (D53, IDENT-RES-007), or the development flag does
+    if (this.pack.identity.unidentifiedPeers === 'admit' || this.devAllowUnidentified) {
+      if (this.pack.identity.unidentifiedPeers === 'admit')
+        this.logger.info({ connectionId }, 'unidentified principal admitted (identity.unidentifiedPeers: admit)')
+      else this.logger.warn({ connectionId }, 'DEV: unidentified principal admitted (no badge); development only')
       return {
         connectionType: 'verifiable-user-agent',
         actorIdentity: peerId,

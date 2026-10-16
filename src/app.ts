@@ -58,6 +58,11 @@ export async function buildAgent(
 ): Promise<RunningAgent> {
   const { pack, dir: packDir } = loadPack(env.agentPackPath)
   if (env.userAgentGate) pack.identity.userAgentGate = env.userAgentGate
+  if (env.unidentifiedPeers) pack.identity.unidentifiedPeers = env.unidentifiedPeers
+  if (pack.identity.unidentifiedPeers === 'admit')
+    logger.warn(
+      'identity: user agents without a valid identity credential are admitted as unidentified Principals (D53)'
+    )
   const features = featuresOf(pack)
   logger.info(
     {

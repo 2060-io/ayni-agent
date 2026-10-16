@@ -102,6 +102,12 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     `ayni-agent`. The person's phone app keeps its own name: copy says "wallet app", and the wallet
     link template still points at the app's domain until the app is renamed. No compatibility shim
     for the old identifiers: nothing was deployed under them.
+23. **Unidentified peers are a pack choice** (D53, IDENT-RES-007). `identity.unidentifiedPeers`
+    (`refuse` by default, `admit`), overridable per deployment with `UNIDENTIFIED_PEERS`, admits a
+    wallet that presents no valid identity credential as a Principal with no backing identity, the
+    `unrecognized` relation and `public` visibility. The welcome pack admits them: it exists for
+    people without a credential. `DEV_ALLOW_UNIDENTIFIED_PRINCIPALS` keeps its development-only
+    meaning and is still refused in production. The agent says at boot when it admits them.
 
 ## Not done in this iteration
 

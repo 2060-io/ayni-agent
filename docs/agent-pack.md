@@ -56,6 +56,7 @@ directory.
 identity:
   homeBackingIdentity: did:webvh:...          # the operator's Org or Persona
   userAgentGate: required                     # required | optional
+  unidentifiedPeers: refuse                   # refuse | admit (D53): a wallet with no valid identity credential
   recognizedBackingIdentities:
     - { identity: did:webvh:..., relation: home }
     - { identity: did:webvh:..., relation: partner, label: Baltic Forwarding }
@@ -84,6 +85,11 @@ identity:
   memory scope (RBAC-XSESS): `own-sessions` (default), `own-backing-identity`, `all`. `canApprove`
   marks roles that may appear in `approvers`. `auditor` grants read-only access to the whole
   persistent store outside LLM retrieval.
+- `unidentifiedPeers: admit` lets a wallet that presents no valid identity credential in as a Principal
+  without backing identity: relation `unrecognized`, `public` visibility only, role rules decide the rest.
+  The default `refuse` ends the connection with a short message. `UNIDENTIFIED_PEERS` in the environment
+  overrides the pack, as `USER_AGENT_GATE` does. It replaces `DEV_ALLOW_UNIDENTIFIED_PRINCIPALS` for
+  deployments; that flag stays development-only.
 - `userAgentGate: optional` lets wallets that do not present an ECS-UserAgent credential connect; the
   Principal is then marked `userAgentVerified: false`, which `roleRules` may use.
 - `credentials` names what the agent requests on DIDComm connect (IDENT-RES-001/002/003): `userAgent`

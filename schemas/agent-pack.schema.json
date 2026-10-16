@@ -255,6 +255,12 @@
               }
             }
           }
+        },
+        "unidentifiedPeers": {
+          "description": "What becomes of a user agent that presents no valid identity credential: refuse (default) or admit it as a Principal without backing identity, unrecognized relation and public visibility only (D53, IDENT-RES-007).",
+          "type": "string",
+          "enum": ["refuse", "admit"],
+          "default": "refuse"
         }
       }
     },
