@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/2060-io/ayni-agent/compare/v0.3.2...v0.4.0) (2026-10-16)
+
+
+### Features
+
+* **history:** a message the client sent keeps the id the client gave it (PROF-HIST-006 externalId) ([3faaf46](https://github.com/2060-io/ayni-agent/commit/3faaf46dfe7c4e03beae5684bb4f41e811d10c0b))
+* **history:** a message the client sent keeps the id the client gave it (PROF-HIST-006 externalId) ([b24cdb2](https://github.com/2060-io/ayni-agent/commit/b24cdb2366af8c4c3062882e23de8d6570680050))
+
 ## [0.3.2](https://github.com/2060-io/ayni-agent/compare/v0.3.1...v0.3.2) (2026-10-15)
 
 
