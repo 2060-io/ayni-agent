@@ -11,7 +11,6 @@ import {
   type AyniAction,
   CUSTOM_EVENT,
   DESCRIPTOR_PATH,
-  PROFILE_VERSION,
   RUN_ERROR_CODE,
 } from '@2060.io/ayni-agui-profile'
 import { Ajv2020 } from 'ajv/dist/2020.js'
@@ -28,6 +27,13 @@ import type { AgUiAdapter } from './adapter.js'
 import { type AgUiEvent, ev, sse } from './events.js'
 import { attachmentActivity, entryToMessages } from './mapping.js'
 import type { SessionStreams } from './streams.js'
+
+/**
+ * The profile revision this agent implements. The package is at 3.1 (session grant, flows, app links); the agent
+ * advertises 3.0 until the v4 channel work lands (spec v4/ayni-agent D54-D60), so that a UI never reads 3.1 features
+ * into a descriptor that does not declare them.
+ */
+const AGENT_PROFILE_VERSION = '3.0'
 
 const require = createRequire(import.meta.url)
 const loadSchema = (name: string) =>
@@ -73,7 +79,7 @@ export class AgUiRoutes {
   public descriptor(did: string): AgentDescriptor {
     const f = this.agent.features
     return {
-      profileVersion: PROFILE_VERSION,
+      profileVersion: AGENT_PROFILE_VERSION,
       did,
       name: this.agent.pack.metadata.displayName,
       description: this.agent.pack.metadata.description,

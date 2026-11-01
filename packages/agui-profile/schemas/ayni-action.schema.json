@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://2060.io/schemas/ayni-agui-profile/3.0/ayni-action.json",
+  "$id": "https://2060.io/schemas/ayni-agui-profile/3.1/ayni-action.json",
   "title": "forwardedProps.ayni (profile section 6, PROF-RUN-003)",
   "type": "object",
   "required": ["kind"],
