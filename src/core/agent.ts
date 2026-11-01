@@ -2,7 +2,7 @@
  * The agent facade: wires the channel-agnostic core and exposes the operations channels call.
  * Channels never reach persistence or the model directly (architecture section 4).
  */
-import type { AyniAction, AyniState, PrincipalDisplay, SessionStatus } from '@2060.io/ayni-agui-profile'
+import type { AyniAction, AyniState, PrincipalDisplay, SessionStatus } from '@ayni.org/ayni-agui-profile'
 import type { Env } from '../config/env.js'
 import type { AgentPack, Features } from '../config/packTypes.js'
 import { featuresOf } from '../config/packTypes.js'

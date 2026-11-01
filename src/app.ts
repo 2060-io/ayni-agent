@@ -1,6 +1,6 @@
 /** Composition root: configuration, persistence, models, core, channels, jobs. */
 
-import { DESCRIPTOR_PATH, DID_SERVICE_TYPE } from '@2060.io/ayni-agui-profile'
+import { DESCRIPTOR_PATH, DID_SERVICE_TYPE } from '@ayni.org/ayni-agui-profile'
 import cors from '@fastify/cors'
 import multipart from '@fastify/multipart'
 import Fastify, { type FastifyInstance } from 'fastify'

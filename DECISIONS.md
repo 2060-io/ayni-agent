@@ -6,7 +6,7 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
 1. **Runtime.** TypeScript on Node 24, Fastify, provider SDKs behind our own adapter interfaces, no
    agent framework. Project layout from `2060-io/ts-project-template` (Biome, pnpm, vitest, reusable
    CI/CD, Helm chart), with a pnpm workspace for the shared profile package.
-2. **Shared profile package.** `@2060.io/ayni-agui-profile` (types, constants, JSON schemas) is
+2. **Shared profile package.** `@ayni.org/ayni-agui-profile` (types, constants, JSON schemas) is
    published from this repo and consumed by `ayni-ui`, so both sides compile against one contract.
 3. **Out-of-band invitations.** VS Agent 2.x had no Admin API call to mint a plain connection
    invitation and no event for handshake reuse. Both were added in
@@ -96,7 +96,7 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     same conversation twice keeps one session; other devices on the conversation are untouched. Found
     live: a browser accumulated five bound sessions on one conversation, each holding a stream.
 22. **Renamed from Hologram to Ayni** (2026-10-14). Product, repos, packages and wire identifiers carry
-    the new name: `@2060.io/ayni-agui-profile`, descriptor at `/.well-known/ayni-agent.json`, DID
+    the new name: `@ayni.org/ayni-agui-profile`, descriptor at `/.well-known/ayni-agent.json`, DID
     Document service type `AyniAgUI` (an existing `HologramAgUI` entry is retyped at boot),
     `forwardedProps.ayni`, `state.ayni`, custom events and activity messages `ayni.*`, Helm chart
     `ayni-agent`. The person's phone app keeps its own name: copy says "wallet app", and the wallet

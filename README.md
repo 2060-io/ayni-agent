@@ -22,7 +22,7 @@ other agents reach it over A2A. Identity comes from Verifiable Trust v4 credenti
 | `src/channels/agui/` | the AG-UI profile: descriptor, sessions, binding, stream, runs, history, attachments | CHAN-ADP-004, PROF-* |
 | `src/channels/a2a/` | agent card and JSON-RPC endpoint | CHAN-ADP-001, CHAN-BIND-007 |
 | `src/integrity/`, `src/platform/` | Verana anchoring, statistics, retention | INTEG, PLAT |
-| `packages/agui-profile/` | `@2060.io/ayni-agui-profile`: types, constants and JSON schemas of the wire contract, consumed by the UI | PROF-* |
+| `packages/agui-profile/` | `@ayni.org/ayni-agui-profile`: types, constants and JSON schemas of the wire contract, consumed by the UI | PROF-* |
 | `schemas/`, `docs/agent-pack.md`, `agent-packs/` | the agent-pack schema 3.0, its documentation, the example and development packs | CORE-PACK |
 | `dev/` | the local VS Agent on the Verana devnet (`dev/vs-agent`), the agent's own stack (`dev/compose`), tools | PLAT-DEPLOY-002 |
 | `agent-packs/welcome/` | "Welcome to Ayni", the onboarding agent deployed with the UI (in the image at `/app/agent-packs/welcome`) | |

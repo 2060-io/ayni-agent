@@ -1,5 +1,5 @@
 /** The AG-UI channel adapter: renders capability events on session streams (CHAN-PROF-005, profile sections 5 and 7). */
-import { ACTIVITY, CUSTOM_EVENT } from '@2060.io/ayni-agui-profile'
+import { ACTIVITY, CUSTOM_EVENT } from '@ayni.org/ayni-agui-profile'
 import type { AyniAgent } from '../../core/agent.js'
 import { AGUI_CAPABILITIES, type ChannelAdapter, type RenderResult } from '../../core/channel.js'
 import type { CapabilityEvent, Session } from '../../core/types.js'
