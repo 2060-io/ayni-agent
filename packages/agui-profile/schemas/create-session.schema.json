@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://2060.io/schemas/ayni-agui-profile/3.0/create-session.json",
-  "title": "POST {sessions} body (profile section 3.2)",
+  "$id": "https://2060.io/schemas/ayni-agui-profile/3.1/create-session.json",
+  "title": "POST {sessions} body (profile section 3.2, PROF-SESS-013, PROF-SESS-014)",
   "type": "object",
   "required": ["client"],
   "properties": {
@@ -20,7 +20,13 @@
         },
         "platform": {
           "type": "string",
-          "maxLength": 80
+          "maxLength": 80,
+          "description": "web, ios or android (PROF-SESS-014); a 3.0 client sent free text, which a 3.1 agent records as description and treats as web"
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "what the phone shows when it links this session (PROF-SESS-014)"
         }
       }
     },
@@ -46,6 +52,11 @@
     },
     "newConversation": {
       "type": "boolean"
+    },
+    "grant": {
+      "type": "string",
+      "maxLength": 256,
+      "description": "the single-use grant the session-grant flow returned (section 4.1, PROF-SESS-013)"
     }
   }
 }

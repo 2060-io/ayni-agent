@@ -1,17 +1,38 @@
 /**
- * Ayni AG-UI Profile v3 (2060-io/ayni-spec, v3/ayni-agui-profile/profile.md).
+ * Ayni AG-UI Profile 3.1 (2060-io/ayni-spec, v4/ayni-agui-profile/profile.md).
  * Every name below cites the section or the PROF-* requirement it implements.
+ *
+ * 3.1 over 3.0: the session grant (`CreateSessionRequest.grant`, `features.sessionGrant`, §4.1), `features.flows`,
+ * `client.platform` as `web` | `ios` | `android` with `client.description` (PROF-SESS-014), the `ayni.flow` activity
+ * and `flowId` on routed capabilities (§5, §6, PROF-MAP-007), `metadata.flowId` (§8), the `grant-used` and
+ * `grant-expired` errors (§9), app links (§10, PROF-LINK-*). A 3.0 UI keeps working against a 3.1 agent.
  */
 
-export const PROFILE_VERSION = '3.0'
+export const PROFILE_VERSION = '3.1'
 export const PROFILE_MAJOR = 3
+export const PROFILE_MINOR = 1
 
 /** DID Document service type that references the descriptor (PROF-DESC-001). */
 export const DID_SERVICE_TYPE = 'AyniAgUI'
 /** Well-known path of the descriptor on the agent origin (PROF-DESC-001). */
 export const DESCRIPTOR_PATH = '/.well-known/ayni-agent.json'
-/** goal_code of the binding invitation (profile section 4). */
+/**
+ * goal_code of the 3.0 binding invitation (profile section 4). Flow-capable wallets read the flow profile's codes
+ * below instead; agents keep emitting this one for wallets without flows.
+ */
 export const BINDING_GOAL_CODE = 'ayni.bind-session'
+
+/** goal_code values of the flow profile §4 (FLOW-CONN-001): what follows the invitation. */
+export const INVITATION_GOAL_CODE = {
+  /** just connect */
+  connect: 'ayni.connect',
+  /** a web UI binding, confirmed by the `link-session` flow */
+  linkSession: 'ayni.link-session',
+  /** a service-initiated flow follows */
+  flow: 'ayni.flow',
+} as const
+
+export type InvitationGoalCode = (typeof INVITATION_GOAL_CODE)[keyof typeof INVITATION_GOAL_CODE]
 
 // ---------------------------------------------------------------------------------------------
 // Descriptor (section 2)
@@ -29,6 +50,10 @@ export interface DescriptorFeatures {
   history: boolean
   voiceNotes?: boolean
   uploads: UploadLimits | false
+  /** the agent answers the `session-grant` flow (§4.1, PROF-DESC-004); absent on a 3.0 descriptor */
+  sessionGrant?: boolean
+  /** the agent opens flows through the flow profile rather than question-answer and chat (PROF-DESC-004) */
+  flows?: boolean
 }
 
 export type BindingMode = 'cross-device' | 'same-device'
@@ -40,6 +65,10 @@ export interface AgentDescriptor {
   description?: string
   logo?: string
   sessions: string
+  /**
+   * `walletLinkTemplate` is an HTTPS app link on the wallet app's domain with an `{oob}` placeholder, for the Ayni app
+   * `https://<app-link-domain>/app/connect?oob={oob}` (PROF-BIND-008); never a `didcomm://` URL.
+   */
   binding: { modes: BindingMode[]; walletLinkTemplate: string }
   features: DescriptorFeatures
   locales: string[]
@@ -70,10 +99,24 @@ export const CLOSURE_REASONS: readonly ClosureReason[] = [
   'agent',
 ]
 
+/** The kind of device a client runs on (PROF-SESS-014). */
+export const CLIENT_PLATFORMS = ['web', 'ios', 'android'] as const
+export type ClientPlatform = (typeof CLIENT_PLATFORMS)[number]
+
 export interface ClientDescription {
   name: string
   version: string
-  platform: string
+  /**
+   * `web`, `ios` or `android` (PROF-SESS-014). A 3.0 client sent free text here ("Firefox on Linux"); a 3.1 agent
+   * records such a value as `description` and treats the platform as `web`.
+   */
+  platform: ClientPlatform | (string & {})
+  /** what the phone shows when it links this session: "Firefox on Linux", "Ayni on iPhone" (PROF-SESS-014) */
+  description?: string
+}
+
+export function isClientPlatform(value: unknown): value is ClientPlatform {
+  return typeof value === 'string' && (CLIENT_PLATFORMS as readonly string[]).includes(value)
 }
 
 export interface CreateSessionRequest {
@@ -89,6 +132,8 @@ export interface CreateSessionRequest {
   conversationId?: string
   /** start a new conversation; without it and without a conversation named, the session continues the Principal's latest active one (PROF-CONV-006) */
   newConversation?: boolean
+  /** the single-use grant the `session-grant` flow returned (§4.1, PROF-SESS-013): the session is created bound */
+  grant?: string
 }
 
 export interface BindingMaterial {
@@ -168,7 +213,14 @@ export const CUSTOM_EVENT = {
 
 export type CustomEventName = (typeof CUSTOM_EVENT)[keyof typeof CUSTOM_EVENT]
 
-export type CapabilityKind = 'authentication' | 'credential-exchange' | 'auth-challenge'
+export type CapabilityKind =
+  | 'authentication'
+  | 'credential-exchange'
+  | 'auth-challenge'
+  | 'authorization'
+  | 'confirmation'
+  | 'signature'
+  | 'link-session'
 export type ChallengeType = 'device' | 'face-match' | 'document'
 export type CapabilityStatus = 'pending' | 'completed' | 'failed' | 'expired' | 'unavailable' | 'degraded'
 
@@ -201,6 +253,8 @@ export interface CapabilityRoutedValue {
   expiresAt?: string
   /** operator wording for unavailable or degraded outcomes */
   message?: string
+  /** the flow profile's flow id when the capability is served as a flow (PROF-MAP-007) */
+  flowId?: string
 }
 
 export type ApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED' | 'EXPIRED'
@@ -259,6 +313,8 @@ export interface MessageMetadata {
   reactions?: { emoji: string; by: string }[]
   /** the message this one answers */
   replyTo?: ReplyReference
+  /** on an `ayni.flow` activity, the flow it records (section 8) */
+  flowId?: string
 }
 
 export type ReceiptState = 'received' | 'viewed'
@@ -365,6 +421,7 @@ export const ACTIVITY = {
   attachment: 'ayni.attachment',
   approval: 'ayni.approval',
   capability: 'ayni.capability',
+  flow: 'ayni.flow',
   generating: 'ayni.generating',
 } as const
 
@@ -398,6 +455,33 @@ export interface AttachmentActivity {
 
 export type ApprovalActivity = ApprovalRequestValue & { status: ApprovalStatus }
 export type CapabilityActivity = CapabilityRoutedValue
+
+/** Lifecycle of a flow (flow profile §5.2). */
+export type FlowState = 'pending' | 'active' | 'completed' | 'declined' | 'cancelled' | 'failed' | 'expired'
+export type FlowOutcome = 'completed' | 'declined' | 'cancelled' | 'failed' | 'expired'
+
+export interface FlowReference {
+  type: string
+  id: string
+}
+
+/**
+ * The flow card (section 6, PROF-MAP-007; app spec §8.5): one per flow whose origin is a conversation, ordered at
+ * `openedAt`, replaced in place at close. `preview` holds only what the person received or disclosed, in a shape per
+ * kind that the agent pack may restrict.
+ */
+export interface FlowActivity {
+  flowId: string
+  /** a kind of the flow profile §6: `present`, `issue`, `authorize`, `sign-tx`, `link-session`... */
+  kind: string
+  state: FlowState
+  title: string
+  openedAt: string
+  closedAt?: string
+  outcome?: FlowOutcome
+  references?: FlowReference[]
+  preview?: Record<string, unknown>
+}
 export interface GeneratingActivity {
   entryId: string
   kind: 'image'
@@ -480,6 +564,10 @@ export type ErrorCode =
   | 'too-large'
   | 'rate-limited'
   | 'bad-request'
+  /** `POST {sessions}` with a grant already used (§3.2, PROF-SESS-013) */
+  | 'grant-used'
+  /** `POST {sessions}` with a grant past its sixty seconds */
+  | 'grant-expired'
 
 export interface ErrorBody {
   error: ErrorCode | string
@@ -490,3 +578,86 @@ export interface ErrorBody {
 
 /** Binding code format: two letters, a dash, two letters or digits, derived from the nonce (section 3.2). */
 export const BINDING_CODE_PATTERN = /^[A-Z0-9]{2}-[A-Z0-9]{2}$/
+
+// ---------------------------------------------------------------------------------------------
+// App links (section 10, PROF-LINK-001..003)
+
+/** The app-link domain of each network (section 10; app spec D39): the hosts of the web UI. */
+export const APP_LINK_DOMAIN = {
+  devnet: 'app.dev.ayni.org',
+  testnet: 'app.test.ayni.org',
+  mainnet: 'app.ayni.org',
+} as const
+
+export type AppLinkNetwork = keyof typeof APP_LINK_DOMAIN
+
+/** The first path segment after `/app/` of every destination of section 10. */
+export const APP_LINK_ROUTES = [
+  'home',
+  'recent',
+  'scan',
+  'explore',
+  'wallet',
+  'service',
+  'settings',
+  'connect',
+] as const
+export type AppLinkRoute = (typeof APP_LINK_ROUTES)[number]
+
+/** The only query parameters a link may carry (PROF-LINK-003); a UI ignores any other. */
+export const APP_LINK_PARAMS = ['q', 'to', 'amount', 'memo', 'oob'] as const
+export type AppLinkParam = (typeof APP_LINK_PARAMS)[number]
+
+export interface AppLink {
+  route: AppLinkRoute
+  /** the path segments after the route: a controller key, `documents`, `card` and an id, a DID, `backup`... */
+  segments: string[]
+  params: Partial<Record<AppLinkParam, string>>
+}
+
+/** Builds an HTTPS app link of section 10 on the given app-link domain (PROF-LINK-001). */
+export function buildAppLink(
+  domain: string,
+  route: AppLinkRoute,
+  segments: string[] = [],
+  params: Partial<Record<AppLinkParam, string>> = {}
+): string {
+  const path = ['app', route, ...segments.map((segment) => encodeURIComponent(segment))].join('/')
+  const url = new URL(`https://${domain}/${path}`)
+  for (const key of APP_LINK_PARAMS) {
+    const value = params[key]
+    if (value !== undefined) url.searchParams.set(key, value)
+  }
+  return url.toString()
+}
+
+/**
+ * Reads an app link (PROF-LINK-002): null when the URL is not HTTPS on the app-link domain, or not an `/app/<route>`
+ * path of section 10. Parameters outside PROF-LINK-003 are dropped. Links navigate, never act.
+ */
+export function parseAppLink(url: string, domain: string): AppLink | null {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return null
+  }
+  if (parsed.protocol !== 'https:' || parsed.host.toLowerCase() !== domain.toLowerCase()) return null
+
+  const segments = parsed.pathname.split('/').filter(Boolean).map(decodeURIComponent)
+  if (segments.length < 2 || segments[0] !== 'app') return null
+  const route = segments[1]
+  if (!(APP_LINK_ROUTES as readonly string[]).includes(route)) return null
+
+  const params: Partial<Record<AppLinkParam, string>> = {}
+  for (const key of APP_LINK_PARAMS) {
+    const value = parsed.searchParams.get(key)
+    if (value !== null) params[key] = value
+  }
+  return { route: route as AppLinkRoute, segments: segments.slice(2), params }
+}
+
+/** Whether a URL is a link on the app-link domain, whatever its path. */
+export function isAppLink(url: string, domain: string): boolean {
+  return parseAppLink(url, domain) !== null
+}
