@@ -1,5 +1,5 @@
 {
-  "name": "@2060.io/ayni-agui-profile",
+  "name": "@ayni.org/ayni-agui-profile",
   "version": "3.1.0",
   "description": "Ayni AG-UI Profile 3.1: the wire contract between an Ayni Agent and an Ayni UI (types, constants, JSON schemas, app links)",
   "type": "module",

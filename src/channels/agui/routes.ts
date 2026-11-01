@@ -12,7 +12,7 @@ import {
   CUSTOM_EVENT,
   DESCRIPTOR_PATH,
   RUN_ERROR_CODE,
-} from '@2060.io/ayni-agui-profile'
+} from '@ayni.org/ayni-agui-profile'
 import { Ajv2020 } from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
@@ -37,7 +37,7 @@ const AGENT_PROFILE_VERSION = '3.0'
 
 const require = createRequire(import.meta.url)
 const loadSchema = (name: string) =>
-  JSON.parse(readFileSync(require.resolve(`@2060.io/ayni-agui-profile/schemas/${name}`), 'utf8'))
+  JSON.parse(readFileSync(require.resolve(`@ayni.org/ayni-agui-profile/schemas/${name}`), 'utf8'))
 const createSessionSchema = loadSchema('create-session.schema.json')
 const actionSchema = loadSchema('ayni-action.schema.json')
 
