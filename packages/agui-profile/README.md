@@ -1,4 +1,4 @@
-# @2060.io/ayni-agui-profile
+# @ayni.org/ayni-agui-profile
 
 TypeScript types, constants and JSON schemas of the **Ayni AG-UI Profile 3.1**, the wire contract
 between an Ayni Agent (server) and an Ayni UI (client: the browser UI or the Ayni app). The normative
@@ -11,7 +11,7 @@ endpoints, binding material, the session grant, `ayni.*` custom events, `forward
 few AG-UI message shapes it reuses.
 
 ```ts
-import { APP_LINK_DOMAIN, buildAppLink, parseAppLink, PROFILE_VERSION } from '@2060.io/ayni-agui-profile'
+import { APP_LINK_DOMAIN, buildAppLink, parseAppLink, PROFILE_VERSION } from '@ayni.org/ayni-agui-profile'
 
 buildAppLink(APP_LINK_DOMAIN.devnet, 'wallet', ['card', 'cred-1'])
 // https://app.dev.ayni.org/app/wallet/card/cred-1

@@ -1,6 +1,6 @@
 /** Welcome, state-aware contextual menus with badges, the /sessions command (D46, INTX-MENU-001..005). */
 
-import type { ContextualMenuItem } from '@2060.io/ayni-agui-profile'
+import type { ContextualMenuItem } from '@ayni.org/ayni-agui-profile'
 import type { AgentPack, MenuItemDef } from '../config/packTypes.js'
 import type { Principal, Session } from './types.js'
 

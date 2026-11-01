@@ -1,5 +1,5 @@
 /** Canonical entries to AG-UI messages (profile sections 6 to 8, PROF-MAP-002/006, PROF-HIST-001). */
-import { ACTIVITY, type AttachmentActivity } from '@2060.io/ayni-agui-profile'
+import { ACTIVITY, type AttachmentActivity } from '@ayni.org/ayni-agui-profile'
 import type { ApprovalRecord, MessageAttachment, MessageEntry } from '../../core/types.js'
 
 export function attachmentActivity(a: MessageAttachment, role?: 'user' | 'assistant'): AttachmentActivity {
