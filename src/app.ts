@@ -21,6 +21,7 @@ import { featuresOf } from './config/packTypes.js'
 import { AyniAgent } from './core/agent.js'
 import { ChallengeService } from './core/challenges.js'
 import { CapabilityRouter } from './core/channel.js'
+import { FlowService } from './core/flows.js'
 import { Orchestrator } from './core/orchestrator.js'
 import { PrincipalService } from './core/principals.js'
 import { PROMPT_ADDON_VERSION } from './core/promptAddon.js'
@@ -153,6 +154,8 @@ export async function buildAgent(
     pack.media?.faceVerification?.timeoutSeconds ?? env.faceMatchTimeoutSeconds
   )
   challenges.setChannelOps(didcomm)
+  const flows = new FlowService(vsAgent, memory, router, store.kv, logger)
+  didcomm.setFlows(flows)
 
   const media = new MediaService(
     pack,
@@ -216,6 +219,7 @@ export async function buildAgent(
     registry,
     approvals,
     challenges,
+    flows,
     orchestrator,
     llm,
     stats,
@@ -244,6 +248,8 @@ export async function buildAgent(
   try {
     const info = await vsAgent.info()
     did = info.did
+    agent.did = did
+    flows.setAgentDid(did)
     logger.info({ did, vsAgent: info.version }, 'DIDComm agent reachable (IDENT-SELF-001)')
   } catch (error) {
     logger.error(
@@ -256,6 +262,7 @@ export async function buildAgent(
   aguiRoutes.register(app, did)
   if (did !== 'did:unknown') await declareAgUiService(vsAgent, did, env.publicBaseUrl, logger)
   const identity = new IdentityFlow(pack, vsAgent, resolver, env.devAllowUnidentifiedPrincipals, logger)
+  identity.setFlows(flows)
   const didcommEvents = new DidcommEvents(
     agent,
     vsAgent,

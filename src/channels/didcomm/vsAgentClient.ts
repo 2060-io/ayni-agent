@@ -46,6 +46,51 @@ export interface PresentationRecord {
   requestedCredentials?: RequestedCredential[]
 }
 
+// ---- Ayni flow profile (plugin @ayni.org/vs-agent-plugin-ayni-flow, CC-VSA-005) ----------------------
+
+export interface FlowOrigin {
+  channel: 'ag-ui' | 'none'
+  agentDid?: string
+  sessionId?: string
+  conversationId?: string
+  client?: { description: string; platform: 'web' | 'ios' | 'android' }
+}
+
+/** `FlowDto` of the plugin: the flow as the DIDComm agent holds it. */
+export interface FlowRecord {
+  flowId: string
+  connectionId: string
+  role: 'holder' | 'service'
+  openedByMe: boolean
+  state: 'pending' | 'active' | 'completed' | 'declined' | 'cancelled' | 'failed' | 'expired'
+  kind: string
+  title: string
+  description?: string
+  origin: FlowOrigin
+  expiresTime: string
+  requires?: string[]
+  reason?: string
+  references?: { type: string; id: string }[]
+  errorCode?: string
+  closedAt?: string
+  closedBy?: 'me' | 'peer' | 'expiry'
+  createdAt: string
+}
+
+/** `CarrierExchangeDto` of the plugin: one request/response exchange of a carrier protocol. */
+export interface CarrierExchange {
+  threadId: string
+  flowId?: string
+  connectionId: string
+  role: string
+  state: string
+  request: Record<string, unknown>
+  response?: Record<string, unknown>
+  errorCode?: string
+  errorDescription?: string
+  createdAt: string
+}
+
 export class VsAgentError extends Error {
   public constructor(
     public readonly status: number,
@@ -227,20 +272,81 @@ export class VsAgentClient {
     return this.request('POST', '/didcomm/mrtd/request-emrtd', { connectionId })
   }
 
+  /** `parentThreadId` makes the request a step of a flow (`~thread.pthid` = flow id, FLOW-CORE-001). */
   public requestPresentation(
     connectionId: string,
     requestedCredentials: RequestedCredential[],
-    requireNonRevocation = true
+    requireNonRevocation = true,
+    parentThreadId?: string
   ): Promise<{ proofExchangeId: string }> {
     return this.request('POST', '/didcomm/presentation-request', {
       connectionId,
       requestedCredentials,
       requireNonRevocation,
       autoAccept: true,
+      ...(parentThreadId ? { parentThreadId } : {}),
     })
   }
 
   public getPresentation(proofExchangeId: string): Promise<PresentationRecord> {
     return this.request('GET', `/didcomm/presentations/${encodeURIComponent(proofExchangeId)}`)
+  }
+
+  // ---- flows (flow profile §5, plugin routes) ---------------------------------------------------------
+
+  public openFlow(body: {
+    connectionId: string
+    kind: string
+    title: string
+    description?: string
+    origin: FlowOrigin
+    expiresTime: string
+    requires?: string[]
+  }): Promise<FlowRecord> {
+    return this.request('POST', '/didcomm/ayni-flow/flows', body)
+  }
+
+  public closeFlow(
+    flowId: string,
+    body: {
+      outcome: 'completed' | 'declined' | 'cancelled' | 'failed' | 'expired'
+      reason?: string
+      references?: { type: string; id: string }[]
+    }
+  ): Promise<FlowRecord> {
+    return this.request('POST', `/didcomm/ayni-flow/flows/${encodeURIComponent(flowId)}/close`, body)
+  }
+
+  public flowProblemReport(flowId: string, body: { code: string; description?: string }): Promise<FlowRecord> {
+    return this.request('POST', `/didcomm/ayni-flow/flows/${encodeURIComponent(flowId)}/problem-report`, body)
+  }
+
+  public getFlow(flowId: string): Promise<FlowRecord> {
+    return this.request('GET', `/didcomm/ayni-flow/flows/${encodeURIComponent(flowId)}`)
+  }
+
+  /** `confirm/1.0/request` inside a flow (flow profile §6.6, INTX-AUTH-009). */
+  public sendConfirmRequest(body: {
+    connectionId: string
+    flowId: string
+    request: { text: string; code: string; attested: boolean }
+  }): Promise<CarrierExchange> {
+    return this.request('POST', '/didcomm/confirm', body)
+  }
+
+  /** `link-session/1.0/request` inside a flow (flow profile §6.7, CHAN-BIND-009/012). */
+  public sendLinkSessionRequest(body: {
+    connectionId: string
+    flowId: string
+    request: {
+      agent: { did: string; name: string }
+      browser: { description: string; platform: 'web' | 'ios' | 'android' }
+      webOrigin: string
+      startedAt: string
+      invitationId: string
+      codes?: string[] | null
+    }
+  }): Promise<CarrierExchange> {
+    return this.request('POST', '/didcomm/link-session', body)
   }
 }

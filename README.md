@@ -110,5 +110,13 @@ docker run --rm -p 3010:3010 --env-file .env io2060/ayni-agent:local
   (ayni-spec D54): no welcome text, menus, receipts, reactions or chat on its connection; everything
   it needs goes through its own sessions and flows. Any other wallet is served as before. The devnet
   image `io2060/vs-agent-ayni` (ayni-deploy) ships both.
+- In flow mode the agent uses the plugin's routes (`/v2/didcomm/ayni-flow/flows`, `/v2/didcomm/confirm`,
+  `/v2/didcomm/link-session`) and its events (`didcomm.ayni-flow.state-changed`, `didcomm.confirm.state-changed`,
+  `didcomm.link-session.state-changed`): identity at connect is an `identify-ua` then a `present` flow, the device
+  challenge a `confirm` flow, browser binding a `link-session` flow (ayni-spec D55, INTX-FLOW, INTX-AUTH-009,
+  CHAN-BIND-009). Every flow opened from a conversation is one entry (`sourceType: flow`) shown as the `ayni.flow`
+  card and updated in place at its close; `presentation-request` and `credential-offer` take `parentThreadId`
+  (VS Agent branch `feat/ayni-plugin-loader`). Face-match calls and NFC reads still go out as v3 messages until
+  the OWF `calls` and `mrtd` modules carry a parent thread (CC-EXT-002).
 - wallet app presenting an ECS-UserAgent credential (ayni-spec `CC-APP-001`); until then run
   with `userAgentGate: optional`.

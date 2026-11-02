@@ -1,6 +1,8 @@
 /**
  * Auth challenges (D28, D32, INTX-AUTH-001..009): declared per action in the agent-pack, enforced by
- * the system, routed to the capability channel, result returned to the originating session only.
+ * the system, routed to the capability channel, result returned to the originating session only. On a
+ * flow-capable wallet the device challenge is a `confirm` flow and the routed status carries its flow id
+ * (D54, D58, INTX-FLOW-003).
  */
 import type { ActionPolicy, AgentPack } from '../config/packTypes.js'
 import type { Store } from '../store/types.js'
@@ -14,6 +16,17 @@ import type { AuthChallengeRecord, ChallengeOutcome, ChallengeType, Principal, S
 export interface CapabilityChannelOps {
   /** question-answer with a per-challenge nonce; returns the thread id (INTX-AUTH-009) */
   askQuestion(connectionId: string, question: string, detail: string | undefined, answers: string[]): Promise<string>
+  /**
+   * The device challenge: a `confirm` flow (text, code, attested) on a flow-capable wallet, a question-answer
+   * message carrying the purpose and a per-challenge nonce otherwise (INTX-AUTH-009); returns the request
+   * thread id and, in flow mode, the flow id.
+   */
+  askConfirmation(
+    connectionId: string,
+    challenge: AuthChallengeRecord,
+    purpose: string,
+    originSession: Session
+  ): Promise<{ threadId: string; flowId?: string }>
   /** call offer whose room the face-verification service joins (INTX-AUTH-007); returns the call thread id */
   offerFaceMatchCall(connectionId: string, challenge: AuthChallengeRecord, description: string): Promise<string>
   /** NFC document read request (INTX-AUTH-001) */
@@ -34,7 +47,7 @@ export class ChallengeService {
 
   public constructor(
     private readonly store: Store,
-    private readonly pack: AgentPack,
+    readonly _pack: AgentPack,
     private readonly router: CapabilityRouter,
     private readonly logger: Logger,
     private readonly defaultTimeoutSeconds: number
@@ -93,13 +106,10 @@ export class ChallengeService {
     const connectionId = capability.externalRef
     try {
       if (req.policy.type === 'device') {
-        const threadId = await this.ops.askQuestion(
-          connectionId,
-          `Confirm: ${req.purpose}`,
-          `${this.pack.metadata.displayName} asks you to confirm this action on your phone. Code ${record.token.slice(-6).toUpperCase()}.`,
-          ['Yes', 'No']
-        )
-        record.details = { threadId, connectionId }
+        const sent = await this.ops.askConfirmation(connectionId, record, req.purpose, req.originSession)
+        record.details = { threadId: sent.threadId, connectionId, ...(sent.flowId ? { flowId: sent.flowId } : {}) }
+        // the routed status names the flow once it exists (INTX-FLOW-003)
+        if (sent.flowId) await this.router.notifyOrigin(req.originSession.id, routed(record, 'pending'))
       } else if (req.policy.type === 'face-match') {
         const threadId = await this.ops.offerFaceMatchCall(connectionId, record, `Face check for: ${req.purpose}`)
         record.details = { ...(record.details ?? {}), threadId, connectionId }
@@ -156,6 +166,7 @@ export class ChallengeService {
 }
 
 export function routed(record: AuthChallengeRecord, status: ChallengeOutcome) {
+  const flowId = record.details?.flowId
   return {
     kind: 'routed' as const,
     trustBound: 'auth-challenge' as const,
@@ -163,5 +174,16 @@ export function routed(record: AuthChallengeRecord, status: ChallengeOutcome) {
     status,
     originSessionId: record.originSessionId,
     expiresAt: record.expiresAt,
+    ...(typeof flowId === 'string' ? { flowId } : {}),
   }
+}
+
+/** The question text of a device challenge, shared by the flow and the question-answer forms. */
+export function confirmationText(purpose: string): string {
+  return `Confirm: ${purpose}`
+}
+
+/** The short code the device shows for a challenge, derived from its token (INTX-AUTH-009). */
+export function challengeCode(record: AuthChallengeRecord): string {
+  return record.token.slice(-6).toUpperCase()
 }

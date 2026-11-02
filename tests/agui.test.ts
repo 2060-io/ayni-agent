@@ -88,7 +88,7 @@ describe('descriptor (PROF-DESC-001/002)', () => {
     const response = await running.app.inject({ method: 'GET', url: '/.well-known/ayni-agent.json' })
     expect(response.statusCode).toBe(200)
     const body = response.json()
-    expect(body.profileVersion).toBe('3.0')
+    expect(body.profileVersion).toBe('3.1')
     expect(body.sessions).toBe('http://agent.test/agui/v3/sessions')
     expect(body.binding.walletLinkTemplate).toMatch(/^https:\/\/.*\{oob\}/)
     expect(body.features.uploads.types).toContain('audio/webm')

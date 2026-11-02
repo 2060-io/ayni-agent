@@ -61,6 +61,7 @@ export function capabilityOf(event: CapabilityEvent): Capability {
     case 'text':
     case 'contextual-menu':
     case 'generating':
+    case 'flow':
       return 'text'
     case 'menu':
       return 'menu'
@@ -73,7 +74,9 @@ export function capabilityOf(event: CapabilityEvent): Capability {
     case 'receipt':
       return 'receipt'
     case 'routed':
-      return event.trustBound === 'auth-challenge' ? 'auth-challenge' : 'credential-exchange'
+      return event.trustBound === 'auth-challenge' || event.trustBound === 'confirmation'
+        ? 'auth-challenge'
+        : 'credential-exchange'
   }
 }
 
@@ -127,6 +130,10 @@ export class CapabilityRouter {
       if (only && !only(session)) continue
       await this.deliver(session, event)
     }
+  }
+
+  public session(id: string): Promise<Session | undefined> {
+    return this.store.sessions.get(id)
   }
 
   /** The Principal's capability channel: its bound DIDComm session, when live (D3). */
