@@ -128,5 +128,11 @@ docker run --rm -p 3010:3010 --env-file .env io2060/ayni-agent:local
   collapse key), never for a flow; the agent holds no push token (ayni-spec D57, INTX-NOTIFY-001/002). An approval
   rule with `attested: true` reaches a flow-capable approver as an `authorize` flow and the decision's attestation
   method is recorded on the approval (D58, INTX-APPR-011).
+- App links: with `APP_LINK_BASE` (or `channels.agui.appLinkBase`, e.g. `https://app.dev.ayni.org/app/`) the platform
+  rules let the model send people to the app's destinations (`explore`, `scan`, `wallet`, `settings/backup`...) with
+  links on the network's app-link domain and nothing else (AG-UI profile 3.1 §10, PROF-LINK-001). The Welcome pack
+  uses them in its menu and prompt (CC-WEL-003). A holder's `reissue` request after a restore is answered
+  `unknown-reference` (this agent issues no credential; an issuing agent plugs its policy into
+  `DidcommEvents.onReissueStateChanged`), and revocation notifications come with issuance (INTX-FLOW-006/007).
 - wallet app presenting an ECS-UserAgent credential (ayni-spec `CC-APP-001`); until then run
   with `userAgentGate: optional`.

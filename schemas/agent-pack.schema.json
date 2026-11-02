@@ -969,6 +969,11 @@
               "default": "https://hologram.zone/open?oob={oob}",
               "description": "HTTPS app link with {oob}; never a didcomm:// link (PROF-BIND-008)."
             },
+            "appLinkBase": {
+              "type": "string",
+              "pattern": "^https://.*/app/$",
+              "description": "Base of the app links the model may write in replies, on the network's app-link domain (AG-UI profile section 10, PROF-LINK-001); absent: the model writes no app links."
+            },
             "uploads": {
               "type": "object",
               "additionalProperties": false,

@@ -232,6 +232,8 @@ export interface AgentPack {
       enabled?: boolean
       allowedOrigins?: string[]
       walletLinkTemplate?: string
+      /** base of the app links the model may write, on the network's app-link domain (PROF-LINK-001, §10) */
+      appLinkBase?: string
       uploads?: { maxBytes?: number; types?: string[] }
     }
     a2a?: { enabled?: boolean }

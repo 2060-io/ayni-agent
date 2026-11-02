@@ -15,6 +15,8 @@ export interface Env {
   userAgentGate?: 'required' | 'optional'
   unidentifiedPeers?: 'refuse' | 'admit'
   walletLinkTemplate?: string
+  /** base of the app links the agent may write in replies, e.g. https://app.dev.ayni.org/app/ (PROF-LINK-001) */
+  appLinkBase?: string
   /** development only: a DIDComm peer that presents no ECS-Badge becomes an unidentified Principal */
   devAllowUnidentifiedPrincipals: boolean
 
@@ -107,6 +109,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
     userAgentGate: source.USER_AGENT_GATE as Env['userAgentGate'],
     unidentifiedPeers: source.UNIDENTIFIED_PEERS as Env['unidentifiedPeers'],
     walletLinkTemplate: source.WALLET_LINK_TEMPLATE || undefined,
+    appLinkBase: source.APP_LINK_BASE || undefined,
     devAllowUnidentifiedPrincipals: bool(source.DEV_ALLOW_UNIDENTIFIED_PRINCIPALS, false),
 
     sessionTokenSecret: required('SESSION_TOKEN_SECRET'),
