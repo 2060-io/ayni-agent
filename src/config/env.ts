@@ -21,6 +21,8 @@ export interface Env {
   sessionTokenSecret: string
   sessionIdleTimeoutSeconds?: number
   bindingExpirySeconds?: number
+  /** lifetime of a session grant, at most sixty seconds (CHAN-BIND-014) */
+  grantExpirySeconds?: number
   credentialCheckTtlSeconds?: number
   aguiAllowedOrigins: string[]
   uploadMaxBytes?: number
@@ -110,6 +112,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
     sessionTokenSecret: required('SESSION_TOKEN_SECRET'),
     sessionIdleTimeoutSeconds: num(source.SESSION_IDLE_TIMEOUT_SECONDS),
     bindingExpirySeconds: num(source.BINDING_EXPIRY_SECONDS),
+    grantExpirySeconds: num(source.GRANT_EXPIRY_SECONDS),
     credentialCheckTtlSeconds: num(source.CREDENTIAL_CHECK_TTL_SECONDS),
     aguiAllowedOrigins: list(source.AGUI_ALLOWED_ORIGINS) ?? [],
     uploadMaxBytes: num(source.UPLOAD_MAX_BYTES),

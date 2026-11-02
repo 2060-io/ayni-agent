@@ -334,6 +334,14 @@ export class VsAgentClient {
     return this.request('POST', '/didcomm/confirm', body)
   }
 
+  /** `session-grant/1.0/grant`: the answer to a holder's request (flow profile §6.8, CHAN-BIND-014). */
+  public grantSession(
+    threadId: string,
+    grant: { grant: string; sessionsUrl: string; expiresAt: string }
+  ): Promise<CarrierExchange> {
+    return this.request('POST', `/didcomm/session-grant/${encodeURIComponent(threadId)}/grant`, { grant })
+  }
+
   /** `link-session/1.0/request` inside a flow (flow profile §6.7, CHAN-BIND-009/012). */
   public sendLinkSessionRequest(body: {
     connectionId: string

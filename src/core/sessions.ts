@@ -36,6 +36,8 @@ export class SessionError extends Error {
       | 'forbidden'
       | 'pairing-expired'
       | 'pairing-invalid'
+      | 'grant-used'
+      | 'grant-expired'
       | 'final',
     public readonly reason?: ClosureReason
   ) {
@@ -52,9 +54,32 @@ export function bindingCodeOf(nonce: string, secret: string): string {
   return `${pick(0)}${pick(1)}-${pick(2)}${pick(3)}`
 }
 
+/** A 3.0 client sends free text as platform: it becomes the description and the platform is `web` (PROF-SESS-014). */
+export function normalizeClient(client: ClientDescription): ClientDescription {
+  const platform = client.platform === 'ios' || client.platform === 'android' ? client.platform : 'web'
+  const description =
+    client.description ?? (client.platform !== platform && client.platform !== 'web' ? client.platform : undefined)
+  return { ...client, platform, ...(description ? { description } : {}) }
+}
+
+/** A session grant (D56, CHAN-BIND-014): single use, sixty seconds, bound to a Principal and its connection. */
+export interface SessionGrant {
+  principalId: string
+  connectionId: string
+  client: ClientDescription
+  conversationId?: string
+  newConversation: boolean
+  expiresAt: string
+  used: boolean
+}
+
+const GRANT_PREFIX = 'session-grant:'
+const MAX_GRANT_SECONDS = 60
+
 export class SessionService {
   public readonly idleTimeoutSeconds: number
   public readonly bindingExpirySeconds: number
+  public readonly grantExpirySeconds: number
   private readonly siblingsAllowed: boolean
 
   public constructor(
@@ -64,10 +89,14 @@ export class SessionService {
     private readonly minter: InvitationMinter,
     private readonly events: SessionEvents,
     private readonly logger: Logger,
-    overrides: { idleTimeoutSeconds?: number; bindingExpirySeconds?: number } = {}
+    overrides: { idleTimeoutSeconds?: number; bindingExpirySeconds?: number; grantExpirySeconds?: number } = {}
   ) {
     this.idleTimeoutSeconds = overrides.idleTimeoutSeconds ?? pack.sessions?.idleTimeoutSeconds ?? 1800
     this.bindingExpirySeconds = overrides.bindingExpirySeconds ?? pack.sessions?.bindingExpirySeconds ?? 300
+    this.grantExpirySeconds = Math.min(
+      MAX_GRANT_SECONDS,
+      Math.max(1, overrides.grantExpirySeconds ?? MAX_GRANT_SECONDS)
+    )
     this.siblingsAllowed = pack.sessions?.siblingSessions ?? true
     this.pairingSlidingDays = pack.sessions?.devicePairing?.slidingDays ?? 30
     this.pairingMaxDays = pack.sessions?.devicePairing?.maxDays ?? 90
@@ -76,6 +105,75 @@ export class SessionService {
   /** Device pairing window (D51, IDENT-DEV-004); sliding 0 disables silent binding. */
   public readonly pairingSlidingDays: number
   public readonly pairingMaxDays: number
+
+  // ---- session grant (D56, CHAN-BIND-014, PROF-SESS-013) ------------------------------------------
+
+  /** Mints a grant for a resolved Principal on its capability channel; only the hash is kept. */
+  public async issueGrant(
+    input: Omit<SessionGrant, 'expiresAt' | 'used'>
+  ): Promise<{ grant: string; expiresAt: string }> {
+    const grant = `sg_${randomBytes(24).toString('base64url')}`
+    const expiresAt = new Date(Date.now() + this.grantExpirySeconds * 1000).toISOString()
+    const record: SessionGrant = { ...input, expiresAt, used: false }
+    await this.store.kv.set(GRANT_PREFIX + this.hash(`grant:${grant}`), JSON.stringify(record))
+    this.logger.info({ principalId: input.principalId, connectionId: input.connectionId }, 'session grant issued')
+    return { grant, expiresAt }
+  }
+
+  /** Consumes a grant; a reused or expired one is refused (PROF-SESS-013). */
+  public async redeemGrant(grant: string): Promise<SessionGrant> {
+    const key = GRANT_PREFIX + this.hash(`grant:${grant}`)
+    const stored = await this.store.kv.get(key)
+    if (!stored) throw new SessionError('unknown grant', 'grant-expired')
+    const record = JSON.parse(stored) as SessionGrant
+    if (record.used) throw new SessionError('grant already used', 'grant-used')
+    if (Date.parse(record.expiresAt) < Date.now()) throw new SessionError('grant expired', 'grant-expired')
+    record.used = true
+    await this.store.kv.set(key, JSON.stringify(record))
+    return record
+  }
+
+  /**
+   * A session bound at creation from a grant: the Principal and capability channel of the connection that received
+   * the grant, a device handle and a fresh secret, nothing asked on the channel (D56).
+   */
+  public async createFromGrant(
+    client: ClientDescription,
+    locale: string | undefined,
+    principal: Principal,
+    grant: SessionGrant,
+    conversationId?: string,
+    newConversation = false,
+    resumeSessionId?: string
+  ): Promise<{ session: Session; token: string }> {
+    const { token, hash } = this.newToken()
+    const id = prefixedId('ses')
+    const session: Session = {
+      id,
+      principalId: principal.id,
+      channelType: 'ag-ui',
+      externalRef: id,
+      state: 'bound',
+      client,
+      locale,
+      conversationId: conversationId ?? grant.conversationId,
+      newConversation: newConversation || grant.newConversation,
+      resumedFromSessionId: resumeSessionId,
+      tokenHash: hash,
+      boundAt: nowIso(),
+      lastActivityAt: nowIso(),
+      createdAt: nowIso(),
+      streamCursor: 0,
+    }
+    await this.applyResume(session, principal)
+    await this.attachConversation(session, principal)
+    this.rotateDevice(session, principal)
+    await this.store.principals.save(principal)
+    await this.store.sessions.save(session)
+    this.logger.info({ sessionId: session.id, principalId: principal.id }, 'session bound from a grant')
+    await this.events.onBound(session, principal)
+    return { session, token }
+  }
 
   // ---- device pairing (D51, IDENT-DEV) ---------------------------------------------------------
 

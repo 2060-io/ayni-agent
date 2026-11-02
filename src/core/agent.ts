@@ -178,6 +178,42 @@ export class AyniAgent {
   /** Asks the phone of a known device to re-link a provisional session (PROF-BIND-009); set by the DIDComm channel. */
   public rebindOffer?: (session: Session, principal: Principal) => Promise<boolean>
 
+  /**
+   * A session from a grant (D56, CHAN-BIND-014): bound at once to the Principal and capability channel that received
+   * the grant; refused when the grant is used or expired, or when that channel is no longer live.
+   */
+  public async createSessionFromGrant(
+    client: ClientDescription,
+    locale: string | undefined,
+    grant: string,
+    conversationId?: string,
+    newConversation = false,
+    resumeSessionId?: string
+  ): Promise<{ session: Session; token: string }> {
+    const record = await this.sessions.redeemGrant(grant)
+    const principal = await this.store.principals.get(record.principalId)
+    const capability = principal ? await this.router.capabilitySession(principal) : undefined
+    if (!principal || !capability || capability.externalRef !== record.connectionId)
+      throw new SessionError('the connection that received the grant is gone', 'grant-expired')
+    const live = await this.principals.ensureLive(principal)
+    if (!live.ok) throw new SessionError('identity credential no longer valid', 'grant-expired')
+    const conversation = await this.sessions.requireOpenable(conversationId ?? record.conversationId, resumeSessionId)
+    const merged: ClientDescription = {
+      ...record.client,
+      ...client,
+      description: client.description ?? record.client.description,
+    }
+    return this.sessions.createFromGrant(
+      merged,
+      locale,
+      principal,
+      record,
+      conversation,
+      newConversation,
+      resumeSessionId
+    )
+  }
+
   public async createSession(
     client: ClientDescription,
     locale?: string,

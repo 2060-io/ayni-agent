@@ -116,7 +116,7 @@ export function platformOf(platform: string | undefined): 'web' | 'ios' | 'andro
 
 export function clientDescriptionOf(session: Session): { description: string; platform: 'web' | 'ios' | 'android' } {
   const c = session.client
-  return { description: `${c.name} ${c.version}`.trim(), platform: platformOf(c.platform) }
+  return { description: c.description ?? `${c.name} ${c.version}`.trim(), platform: platformOf(c.platform) }
 }
 
 export class FlowService {

@@ -54,16 +54,26 @@ export function contextualMenuFor(
   return items
 }
 
+/** "Ayni on iPhone" when the client described itself, else "name on platform" (CHAN-BIND-015). */
+export function describeClient(client: { name: string; platform: string; description?: string }): string {
+  return client.description ? `${client.description} (${client.platform})` : `${client.name} on ${client.platform}`
+}
+
 /** The Principal's paired devices, numbered for the "unlink <n>" reply (INTX-MENU-007). */
 export function describeDevices(
-  devices: { handle: string; client: { name: string; platform: string }; createdAt: string; lastUsedAt?: string }[]
+  devices: {
+    handle: string
+    client: { name: string; platform: string; description?: string }
+    createdAt: string
+    lastUsedAt?: string
+  }[]
 ): string {
   if (devices.length === 0) return 'No linked devices.'
   const when = (iso?: string) => (iso ? iso.slice(0, 16).replace('T', ' ') : '?')
   return devices
     .map(
       (d, i) =>
-        `${i + 1}. ${d.client.name} on ${d.client.platform}, linked ${when(d.createdAt)}, last used ${when(d.lastUsedAt ?? d.createdAt)}`
+        `${i + 1}. ${describeClient(d.client)}, linked ${when(d.createdAt)}, last used ${when(d.lastUsedAt ?? d.createdAt)}`
     )
     .join('\n')
 }
@@ -72,7 +82,9 @@ export function describeSessions(sessions: Session[], current: Session): string 
   if (sessions.length === 0) return 'No open sessions.'
   return sessions
     .map((s, i) => {
-      const client = `${s.client.name} ${s.client.version} (${s.client.platform})`.trim()
+      const client = s.client.description
+        ? `${s.client.description} (${s.client.platform})`
+        : `${s.client.name} ${s.client.version} (${s.client.platform})`.trim()
       const channel = s.channelType === 'ag-ui' ? 'web' : s.channelType === 'a2a' ? 'agent' : 'phone'
       const self = s.id === current.id ? ', this one' : ''
       return `${i + 1}. ${channel}: ${client}${self}, since ${s.boundAt?.slice(0, 16).replace('T', ' ') ?? '?'}, last activity ${s.lastActivityAt.slice(0, 16).replace('T', ' ')}`

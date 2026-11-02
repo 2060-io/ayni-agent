@@ -139,7 +139,11 @@ export async function buildAgent(
       onBindingRefreshed: async () => {},
     },
     logger,
-    { idleTimeoutSeconds: env.sessionIdleTimeoutSeconds, bindingExpirySeconds: env.bindingExpirySeconds }
+    {
+      idleTimeoutSeconds: env.sessionIdleTimeoutSeconds,
+      bindingExpirySeconds: env.bindingExpirySeconds,
+      grantExpirySeconds: env.grantExpirySeconds,
+    }
   )
 
   let agentRef: AyniAgent | undefined

@@ -18,7 +18,7 @@ import addFormats from 'ajv-formats'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type { AyniAgent } from '../../core/agent.js'
 import type { TurnEvent, TurnSink } from '../../core/orchestrator.js'
-import { SessionError } from '../../core/sessions.js'
+import { normalizeClient, SessionError } from '../../core/sessions.js'
 import type { ClientDescription, Session } from '../../core/types.js'
 import { mimeAllowed } from '../../media/service.js'
 import { prefixedId } from '../../util/ids.js'
@@ -29,8 +29,8 @@ import { attachmentActivity, entryToMessages } from './mapping.js'
 import type { SessionStreams } from './streams.js'
 
 /**
- * The profile revision this agent implements: 3.1 (flows and `ayni.flow`, `flowId` on routed capabilities, client
- * platform). `features.sessionGrant` is declared only once the grant is answered (D56).
+ * The profile revision this agent implements: 3.1 (session grant, flows and `ayni.flow`, `flowId` on routed
+ * capabilities, client platform and description).
  */
 const AGENT_PROFILE_VERSION = '3.1'
 
@@ -94,7 +94,7 @@ export class AgUiRoutes {
         uploads: f.voiceNotes || f.inboundImages ? this.uploads : false,
         // flows on flow-capable wallets (D54, D55); the session grant comes with D56
         flows: true,
-        sessionGrant: false,
+        sessionGrant: true,
       },
       locales: [this.agent.pack.language.agent],
     }
@@ -130,6 +130,8 @@ export class AgUiRoutes {
         conflict: 409,
         'pairing-expired': 409,
         'pairing-invalid': 409,
+        'grant-used': 409,
+        'grant-expired': 409,
         final: 409,
         closed: 410,
         forbidden: 403,
@@ -159,10 +161,40 @@ export class AgUiRoutes {
         resumeSessionId?: string
         conversationId?: string
         newConversation?: boolean
+        grant?: string
       }
       if (!validateCreate(body))
         return reply.code(400).send({ error: 'bad-request', message: ajv.errorsText(validateCreate.errors) })
-      const client = body.client as ClientDescription
+      const client = normalizeClient(body.client as ClientDescription)
+      // PROF-SESS-013: a grant obtained on DIDComm binds the session at creation, nothing asked on the channel
+      if (body.grant) {
+        try {
+          const { session, token: newToken } = await this.agent.createSessionFromGrant(
+            client,
+            body.locale,
+            body.grant,
+            body.conversationId,
+            body.newConversation === true,
+            body.resumeSessionId
+          )
+          const principal = await this.agent.principalOf(session)
+          if (!session.lineage?.length) await this.agent.welcome(session)
+          return reply.code(201).send({
+            sessionId: session.id,
+            sessionToken: newToken,
+            state: session.state,
+            agent: { did, name: this.agent.pack.metadata.displayName },
+            principal: principal ? this.agent.principalDisplay(principal) : undefined,
+            deviceHandle: session.deviceHandle,
+            deviceSecret: session.deviceSecret,
+            conversationId: session.conversationId,
+            resumedFromSessionId: session.resumedFromSessionId,
+            idleTimeoutSeconds: this.agent.sessions.idleTimeoutSeconds,
+          })
+        } catch (error) {
+          return this.sendError(reply, error)
+        }
+      }
       const token = this.token(request)
       if (token) {
         try {

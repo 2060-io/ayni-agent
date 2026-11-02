@@ -118,5 +118,10 @@ docker run --rm -p 3010:3010 --env-file .env io2060/ayni-agent:local
   card and updated in place at its close; `presentation-request` and `credential-offer` take `parentThreadId`
   (VS Agent branch `feat/ayni-plugin-loader`). Face-match calls and NFC reads still go out as v3 messages until
   the OWF `calls` and `mrtd` modules carry a parent thread (CC-EXT-002).
+- The Ayni app binds its own sessions through the session grant (`didcomm.session-grant.state-changed` →
+  `POST /v2/didcomm/session-grant/:threadId/grant`, then `POST /agui/v3/sessions` with `grant`): single use,
+  `GRANT_EXPIRY_SECONDS` (default and maximum 60), issued only on a connection whose peer is a resolved Principal
+  (ayni-spec D56, CHAN-BIND-014). `client.platform` is `web`, `ios` or `android` and `client.description` is what the
+  phone shows for the session (CHAN-BIND-015).
 - wallet app presenting an ECS-UserAgent credential (ayni-spec `CC-APP-001`); until then run
   with `userAgentGate: optional`.
