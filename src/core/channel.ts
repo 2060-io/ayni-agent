@@ -26,6 +26,20 @@ export interface ChannelAdapter {
   /** The profile for one session's peer when it differs from the channel's (DIDComm: per peer, CHAN-PROF-006). */
   capabilitiesFor?(session: Session): Promise<ReadonlySet<Capability>>
   render(session: Session, event: CapabilityEvent): Promise<RenderResult>
+  /** Whether someone is listening on the session right now (AG-UI: an attached event stream), for wake-ups (D57). */
+  isLive?(session: Session): boolean
+  /** A wake-up on the capability channel (`notify`, D57); false when the peer cannot receive one. */
+  notify?(connectionId: string, notification: WakeUp): Promise<boolean>
+}
+
+/** The `notify/1.0` notification (flow profile §6.10, INTX-NOTIFY-001). */
+export interface WakeUp {
+  conversationId: string
+  sessionId?: string
+  title: string
+  preview?: string
+  collapseKey: string
+  priority: 'normal' | 'low'
 }
 
 export const AGUI_CAPABILITIES: ReadonlySet<Capability> = new Set([
@@ -54,6 +68,8 @@ export const DIDCOMM_CAPABILITIES: ReadonlySet<Capability> = new Set([
 export const DIDCOMM_FLOW_MODE_CAPABILITIES: ReadonlySet<Capability> = new Set([
   'credential-exchange',
   'auth-challenge',
+  // an attested approval reaches a flow-capable approver as an `authorize` flow (D58)
+  'approval',
 ])
 
 export function capabilityOf(event: CapabilityEvent): Capability {
@@ -134,6 +150,10 @@ export class CapabilityRouter {
 
   public session(id: string): Promise<Session | undefined> {
     return this.store.sessions.get(id)
+  }
+
+  public isLive(session: Session): boolean {
+    return this.adapters.get(session.channelType)?.isLive?.(session) ?? false
   }
 
   /** The Principal's capability channel: its bound DIDComm session, when live (D3). */

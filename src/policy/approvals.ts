@@ -3,7 +3,7 @@
  * elevation approvals (out-of-role, purpose-declared) through one mechanism.
  */
 import type { AgentPack, ApprovalPolicy, ApprovalRule, ElevationRule } from '../config/packTypes.js'
-import type { ApprovalRecord, ElevationGrant, Principal } from '../core/types.js'
+import type { ApprovalDecision, ApprovalRecord, ElevationGrant, Principal } from '../core/types.js'
 import type { Store } from '../store/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
 
@@ -74,6 +74,7 @@ export class ApprovalService {
       policy: this.policyOf(opts.rule),
       eligibleRoles: opts.rule.approvers,
       approverConnectionType: opts.rule.approverConnectionType,
+      attested: opts.rule.attested === true,
       decisions: [],
       status: 'PENDING',
       vetoed: false,
@@ -108,6 +109,7 @@ export class ApprovalService {
     const record: ApprovalRecord = {
       id: prefixedId('apr'),
       kind: 'elevation',
+      attested: opts.rule.attested === true,
       serverName: opts.serverName,
       toolName: opts.toolName,
       requesterId: opts.principal.id,
@@ -163,7 +165,8 @@ export class ApprovalService {
     approvalId: string,
     approver: Principal,
     decision: 'approve' | 'reject',
-    note?: string
+    note?: string,
+    attestation?: ApprovalDecision['attestation']
   ): Promise<ApprovalRecord> {
     const record = await this.store.approvals.get(approvalId)
     if (!record) throw new ApprovalError('approval not found', 'not-found')
@@ -180,6 +183,7 @@ export class ApprovalService {
       decision,
       reason: note,
       ts: nowIso(),
+      ...(attestation ? { attestation } : {}),
     })
     record.status = await this.evaluate(record)
     record.updatedAt = nowIso()

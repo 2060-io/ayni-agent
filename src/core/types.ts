@@ -294,6 +294,8 @@ export interface ApprovalDecision {
   decision: 'approve' | 'reject'
   reason?: string
   ts: string
+  /** how the approver authenticated on the device when the decision came through an `authorize` flow (D58) */
+  attestation?: { method: 'biometric' | 'passcode' | 'none'; at: string }
 }
 
 export interface ApprovalRecord {
@@ -309,6 +311,8 @@ export interface ApprovalRecord {
   policy: { type: 'count' | 'percentage'; value: number; vetoOnRefusal: boolean }
   eligibleRoles: string[]
   approverConnectionType?: ConnectionType
+  /** the rule asks for a device-authenticated decision (INTX-APPR-011) */
+  attested?: boolean
   purpose?: string
   justification?: string
   decisions: ApprovalDecision[]

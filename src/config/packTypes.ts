@@ -86,6 +86,8 @@ export interface ApprovalRule {
   timeoutMinutes?: number
   policy?: ApprovalPolicy
   approverConnectionType?: ConnectionType
+  /** the decision must be device-authenticated: an `authorize` flow on a flow-capable approver (D58, INTX-APPR-011) */
+  attested?: boolean
 }
 
 export interface ElevationRule extends Omit<ApprovalRule, 'approverConnectionType'> {

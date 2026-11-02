@@ -849,6 +849,10 @@
           "minimum": 1,
           "default": 480,
           "description": "Default duration of an elevation grant."
+        },
+        "attested": {
+          "type": "boolean",
+          "description": "The decision must be device-authenticated (INTX-APPR-011)."
         }
       }
     },
@@ -1432,6 +1436,10 @@
                 "type": "string",
                 "enum": ["verifiable-user-agent", "verifiable-service"],
                 "description": "Optionally restrict who may approve by connection type."
+              },
+              "attested": {
+                "type": "boolean",
+                "description": "The decision must be device-authenticated: an authorize flow on a flow-capable approver's wallet (INTX-APPR-011)."
               }
             }
           }
