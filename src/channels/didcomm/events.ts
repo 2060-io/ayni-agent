@@ -423,7 +423,7 @@ export class DidcommEvents {
   /** `authorize/1.0/response`: an approver's attested decision (D58, INTX-APPR-011). */
   private async onAuthorizeStateChanged(exchange: CarrierExchange & { previousState?: string }): Promise<void> {
     if (exchange.state !== 'response-received' && exchange.state !== 'failed') return
-    const tracked = this.adapter.takeAuthorize(exchange.connectionId, exchange.threadId)
+    const tracked = await this.adapter.takeAuthorize(exchange.connectionId, exchange.flowId)
     if (!tracked) return
     const bound = await this.agent.didcommSession(exchange.connectionId)
     if (exchange.state === 'failed' || !bound) {

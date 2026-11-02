@@ -31,6 +31,8 @@ import type { PeerProfiles } from './peerProfiles.js'
 import type { VsAgentClient } from './vsAgentClient.js'
 
 export const BINDING_GOAL_CODE = 'ayni.bind-session'
+/** kv index of the open `authorize` flow per approval and phone: `<prefix><approvalId>:<connectionId>` → flow id */
+const AUTHORIZE_INDEX = 'authorize:'
 
 /** Short-lived media links for the wallet: the agent streams decrypted bytes, keyed by a random token. */
 export class MediaLinks {
@@ -57,9 +59,6 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
   public readonly capabilities = DIDCOMM_CAPABILITIES
   private agent?: AyniAgent
   private flows?: FlowService
-  /** `authorize` flows sent to approvers' phones, by approval and connection, and by connection and request id */
-  private readonly authorizeByApproval = new Map<string, { flowId: string; threadId: string }>()
-  private readonly authorizeByThread = new Map<string, { flowId: string; approvalId: string }>()
 
   public constructor(
     private readonly client: VsAgentClient,
@@ -300,32 +299,30 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
    * is decided from the approver's own conversations (the AG-UI card). A later change closes the flow.
    */
   private async renderApprovalAsFlow(connectionId: string, a: ApprovalRecord, update: boolean): Promise<RenderResult> {
-    const key = `${a.id}:${connectionId}`
-    const open = this.authorizeByApproval.get(key)
+    // the open flow per approval and phone is kept in the store, so a restart still closes or answers it
+    const key = `${AUTHORIZE_INDEX}${a.id}:${connectionId}`
+    const kv = this.agent?.store.kv
+    const open = kv ? await kv.get(key) : undefined
     if (update || a.status !== 'PENDING') {
-      if (open && this.flows) {
-        this.authorizeByApproval.delete(key)
-        this.authorizeByThread.delete(`${connectionId}:${open.threadId}`)
-        await this.flows.close(
-          open.flowId,
-          a.status === 'APPROVED' || a.status === 'REJECTED' ? 'completed' : 'cancelled',
-          {
-            reason:
-              a.status === 'APPROVED' || a.status === 'REJECTED'
-                ? undefined
-                : `The request is ${a.status.toLowerCase()}.`,
-          }
-        )
+      if (open && this.flows && kv) {
+        await kv.set(key, '')
+        await this.flows.close(open, a.status === 'APPROVED' || a.status === 'REJECTED' ? 'completed' : 'cancelled', {
+          reason:
+            a.status === 'APPROVED' || a.status === 'REJECTED'
+              ? undefined
+              : `The request is ${a.status.toLowerCase()}.`,
+        })
       }
       return 'ok'
     }
-    if (!a.attested || !this.flows || open) return 'ok'
+    if (!a.attested || !this.flows || !kv || open) return 'ok'
     const flow = await this.flows.open({
       connectionId,
       kind: 'authorize',
       title: `${a.requesterName} asks to run ${a.toolName}`,
       description: a.justification ?? a.purpose,
       expiresAt: a.expiresAt,
+      ref: { type: 'approval', id: a.id },
     })
     try {
       const exchange = await this.client.sendAuthorizeRequest({
@@ -340,8 +337,8 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
           attested: true,
         },
       })
-      this.authorizeByApproval.set(key, { flowId: flow.flowId, threadId: exchange.threadId })
-      this.authorizeByThread.set(`${connectionId}:${exchange.threadId}`, { flowId: flow.flowId, approvalId: a.id })
+      void exchange
+      await kv.set(key, flow.flowId)
       return 'ok'
     } catch (error) {
       await this.flows.close(flow.flowId, 'failed', { reason: 'The authorization request could not be sent.' })
@@ -349,15 +346,16 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
     }
   }
 
-  /** The approval an `authorize` response answers, consumed once. */
-  public takeAuthorize(connectionId: string, threadId: string): { flowId: string; approvalId: string } | undefined {
-    const key = `${connectionId}:${threadId}`
-    const found = this.authorizeByThread.get(key)
-    if (found) {
-      this.authorizeByThread.delete(key)
-      this.authorizeByApproval.delete(`${found.approvalId}:${connectionId}`)
-    }
-    return found
+  /** The approval an `authorize` response answers (from the flow's persisted handle), consumed once. */
+  public async takeAuthorize(
+    connectionId: string,
+    flowId: string | undefined
+  ): Promise<{ flowId: string; approvalId: string } | undefined> {
+    if (!flowId || !this.flows || !this.agent) return undefined
+    const handle = await this.flows.handle(flowId)
+    if (handle?.ref?.type !== 'approval' || handle.connectionId !== connectionId) return undefined
+    await this.agent.store.kv.set(`${AUTHORIZE_INDEX}${handle.ref.id}:${connectionId}`, '')
+    return { flowId, approvalId: handle.ref.id }
   }
 
   /** `notify` on a flow-capable wallet that disclosed the protocol (INTX-NOTIFY-001); nothing otherwise. */
