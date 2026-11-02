@@ -13,6 +13,7 @@ import { DidcommAdapter, MediaLinks } from './channels/didcomm/adapter.js'
 import { registerDidcommCallbacks } from './channels/didcomm/callbacks.js'
 import { DidcommEvents } from './channels/didcomm/events.js'
 import { IdentityFlow, TrustResolver } from './channels/didcomm/identity.js'
+import { PeerProfiles } from './channels/didcomm/peerProfiles.js'
 import { VsAgentClient } from './channels/didcomm/vsAgentClient.js'
 import { type Env, loadEnv } from './config/env.js'
 import { loadPack } from './config/pack.js'
@@ -105,11 +106,13 @@ export async function buildAgent(
   const resolver = new TrustResolver(env.veranaApiUrl, logger)
   const principals = new PrincipalService(store, pack, resolver, logger, env.credentialCheckTtlSeconds)
   const mediaLinks = new MediaLinks(env.presignedUrlTtlSeconds * 1000)
+  const peerProfiles = new PeerProfiles(store.kv, logger)
   const didcomm = new DidcommAdapter(
     vsAgent,
     env.publicBaseUrl,
     mediaLinks,
     env.webrtcServerUrl ?? pack.media?.faceVerification?.webrtcServerUrl,
+    peerProfiles,
     logger
   )
   const streams = new SessionStreams(store, logger)
@@ -253,7 +256,15 @@ export async function buildAgent(
   aguiRoutes.register(app, did)
   if (did !== 'did:unknown') await declareAgUiService(vsAgent, did, env.publicBaseUrl, logger)
   const identity = new IdentityFlow(pack, vsAgent, resolver, env.devAllowUnidentifiedPrincipals, logger)
-  const didcommEvents = new DidcommEvents(agent, vsAgent, identity, didcomm, env.vsAgentEventsApiKey, logger)
+  const didcommEvents = new DidcommEvents(
+    agent,
+    vsAgent,
+    identity,
+    didcomm,
+    peerProfiles,
+    env.vsAgentEventsApiKey,
+    logger
+  )
   didcommEvents.register(app)
   agent.rebindOffer = (session, principal) => didcommEvents.offerRebind(session, principal)
   registerDidcommCallbacks(app, agent, mediaLinks, logger)

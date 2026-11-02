@@ -1,7 +1,8 @@
 /**
  * Events from the DIDComm agent (webhook): connection lifecycle, invitation acceptance and handshake
  * reuse (binding), question answers (binding confirmation, device challenges, approvals), messages
- * (conversation on DIDComm), reactions, receipts, calls and documents (challenges), presentations.
+ * (conversation on DIDComm), reactions, receipts, calls and documents (challenges), presentations,
+ * discover-features disclosures (per-peer capability profile, D54).
  */
 import type { FastifyInstance } from 'fastify'
 import type { AyniAgent } from '../../core/agent.js'
@@ -10,6 +11,7 @@ import type { MessageAttachment, Principal, Session } from '../../core/types.js'
 import type { Logger } from '../../util/logger.js'
 import { clientOfConnection, DidcommAdapter } from './adapter.js'
 import type { IdentityFlow } from './identity.js'
+import type { PeerProfiles } from './peerProfiles.js'
 import type { ConnectionRecord, PresentationRecord, VsAgentClient } from './vsAgentClient.js'
 
 interface Envelope {
@@ -23,6 +25,11 @@ const CODE_PATTERN = /^\/?(?:link\s+)?([a-z0-9]{2})-?([a-z0-9]{2})$/i
 const LINK_ATTEMPTS = 5
 const LINK_WINDOW_MS = 10 * 60_000
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+/** How long the serving-mode decision waits for a disclosure the DIDComm agent announced (D54). */
+export const DISCLOSURE_WAIT_MS = 3_000
+
+/** The connection event as the DIDComm agent forwards it: state changes and, in state `updated`, disclosed features. */
+type ConnectionEvent = ConnectionRecord & { previousState?: string; metadata?: Record<string, string> }
 
 function decoyCode(): string {
   const pick = () => CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)]
@@ -42,8 +49,10 @@ export class DidcommEvents {
     private readonly client: VsAgentClient,
     private readonly identity: IdentityFlow,
     private readonly adapter: DidcommAdapter,
+    private readonly peers: PeerProfiles,
     private readonly apiKey: string | undefined,
-    private readonly logger: Logger
+    private readonly logger: Logger,
+    private readonly disclosureWaitMs = DISCLOSURE_WAIT_MS
   ) {}
 
   public register(app: FastifyInstance): void {
@@ -64,7 +73,7 @@ export class DidcommEvents {
     this.logger.debug({ type }, 'didcomm event')
     switch (type) {
       case 'didcomm.connections.state-updated':
-        return this.onConnection(data as unknown as ConnectionRecord & { previousState?: string })
+        return this.onConnection(data as unknown as ConnectionEvent)
       case 'didcomm.out-of-band.handshake-reused':
         return this.onInvitationAccepted(
           String(data.outOfBandId ?? ''),
@@ -115,9 +124,14 @@ export class DidcommEvents {
     }
   }
 
-  // ---- connections (IDENT-TRUST-002, IDENT-SESS-002/003) -----------------------------------------
+  // ---- connections (IDENT-TRUST-002, IDENT-SESS-002/003, CHAN-PROF-006) --------------------------------
 
-  private async onConnection(record: ConnectionRecord & { previousState?: string }): Promise<void> {
+  private async onConnection(record: ConnectionEvent): Promise<void> {
+    if (record.state === 'updated') {
+      // a discover-features disclosure: the peer's capability profile (FLOW-CAP-002)
+      if (record.metadata && Object.keys(record.metadata).length) await this.peers.record(record.id, record.metadata)
+      return
+    }
     if (record.state === 'completed' && record.previousState !== 'completed') {
       if (this.identifying.has(record.id)) return
       this.identifying.add(record.id)
@@ -133,7 +147,16 @@ export class DidcommEvents {
           await this.client.deleteConnection(record.id).catch(() => undefined)
           return
         }
-        await this.agent.onPeerConnected(facts, record.id, clientOfConnection(record.theirLabel))
+        // the DIDComm agent announces a features query with an (empty) metadata object: the disclosure usually
+        // lands during identity establishment; otherwise wait a moment before choosing the serving mode (D54)
+        const profile =
+          (await this.peers.get(record.id)) ??
+          (record.metadata ? await this.peers.awaitDisclosure(record.id, this.disclosureWaitMs) : undefined)
+        const flowMode = !!profile && (await this.peers.isFlowCapable(record.id))
+        await this.agent.onPeerConnected(facts, record.id, clientOfConnection(record.theirLabel), {
+          welcome: !flowMode,
+        })
+        if (flowMode) this.logger.info({ connectionId: record.id }, 'peer served in flow mode')
         // a connection created from a binding invitation: ask the confirmation question (CHAN-BIND-009)
         if (record.outOfBandId) await this.onInvitationAccepted(record.outOfBandId, '', record.id)
       } finally {
@@ -141,6 +164,7 @@ export class DidcommEvents {
       }
     } else if (record.state === 'terminated' || record.state === 'abandoned') {
       await this.agent.onPeerDisconnected(record.id)
+      await this.peers.forget(record.id)
     }
   }
 
@@ -377,6 +401,7 @@ export class DidcommEvents {
   /** Message states for what the person sent (INTX-STATE-001): received at once, viewed when the agent reads it. */
   private async receipt(connectionId: string, messageId: string, state: 'received' | 'viewed'): Promise<void> {
     if (!messageId || !this.agent.features.receipts) return
+    if (await this.adapter.flowMode(connectionId)) return // no receipts in flow mode (D54)
     await this.client
       .sendReceipts(connectionId, [{ messageId, state, timestamp: new Date().toISOString() }])
       .catch((err) => this.logger.debug({ err, messageId, state }, 'receipt not sent'))
@@ -391,12 +416,17 @@ export class DidcommEvents {
     if ((awaiting && awaiting > Date.now()) || /^\/link\b/i.test(content.trim())) {
       if (await this.linkByCode(connectionId, content.replace(/^\/link\s*/i, ''))) return
     }
+    if (await this.adapter.flowMode(connectionId)) {
+      // no chat on a flow-mode connection (D54): the wallet talks through its own sessions
+      this.logger.debug({ connectionId }, 'basic message ignored in flow mode')
+      return
+    }
     await this.turn(bound.session, content)
   }
 
   private async onContextualSelect(connectionId: string, itemId: string): Promise<void> {
     const bound = await this.agent.didcommSession(connectionId)
-    if (!bound) return
+    if (!bound || (await this.adapter.flowMode(connectionId))) return
     const result = await this.agent.action(
       bound.session,
       { kind: 'contextual.select', itemId },
@@ -410,7 +440,7 @@ export class DidcommEvents {
 
   private async onMenuRequest(connectionId: string): Promise<void> {
     const bound = await this.agent.didcommSession(connectionId)
-    if (!bound) return
+    if (!bound || (await this.adapter.flowMode(connectionId))) return
     await this.agent.router.deliver(bound.session, { kind: 'contextual-menu', sessionId: bound.session.id })
   }
 
@@ -419,7 +449,7 @@ export class DidcommEvents {
     reactions: { messageId: string; emoji: string; action: 'add' | 'remove' }[]
   ): Promise<void> {
     const bound = await this.agent.didcommSession(connectionId)
-    if (!bound) return
+    if (!bound || (await this.adapter.flowMode(connectionId))) return
     for (const r of reactions) {
       const entry = await this.agent.memory.findByExternalId(bound.session.id, r.messageId)
       await this.agent.action(
@@ -433,7 +463,7 @@ export class DidcommEvents {
 
   private async onReceipts(connectionId: string, receipts: { messageId: string; state: string }[]): Promise<void> {
     const bound = await this.agent.didcommSession(connectionId)
-    if (!bound) return
+    if (!bound || (await this.adapter.flowMode(connectionId))) return
     const viewed = receipts.filter((r) => r.state === 'viewed').map((r) => r.messageId)
     if (viewed.length)
       await this.agent.action(

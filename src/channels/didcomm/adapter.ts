@@ -1,12 +1,20 @@
 /**
  * The DIDComm channel adapter: renders canonical entries and capability events as DIDComm messages
  * through the DIDComm agent, mints binding invitations, serves the trust-bound capability events
- * (CHAN-ADP-001/002, CHAN-ROUTE-001/003, CHAN-PROF-001/002, CHAN-BIND-008/009, INTX-AUTH-007/009).
+ * (CHAN-ADP-001/002, CHAN-ROUTE-001/003, CHAN-PROF-001/002/006, CHAN-BIND-008/009, INTX-AUTH-007/009).
+ * The profile is per peer (D54): a flow-capable wallet is served in flow mode, with no chat, menus,
+ * receipts or reactions on its connection.
  */
 import { randomBytes } from 'node:crypto'
 import type { AyniAgent } from '../../core/agent.js'
 import type { CapabilityChannelOps } from '../../core/challenges.js'
-import { type ChannelAdapter, DIDCOMM_CAPABILITIES, type RenderResult } from '../../core/channel.js'
+import {
+  type Capability,
+  type ChannelAdapter,
+  DIDCOMM_CAPABILITIES,
+  DIDCOMM_FLOW_MODE_CAPABILITIES,
+  type RenderResult,
+} from '../../core/channel.js'
 import type { InvitationMinter } from '../../core/sessions.js'
 import type {
   AuthChallengeRecord,
@@ -16,6 +24,7 @@ import type {
   Session,
 } from '../../core/types.js'
 import type { Logger } from '../../util/logger.js'
+import type { PeerProfiles } from './peerProfiles.js'
 import type { VsAgentClient } from './vsAgentClient.js'
 
 export const BINDING_GOAL_CODE = 'ayni.bind-session'
@@ -50,11 +59,23 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
     private readonly publicBaseUrl: string,
     private readonly mediaLinks: MediaLinks,
     private readonly webrtcServerUrl: string | undefined,
+    private readonly peers: PeerProfiles,
     readonly _logger: Logger
   ) {}
 
   public attach(agent: AyniAgent): void {
     this.agent = agent
+  }
+
+  // ---- per-peer profile (CHAN-PROF-006) ---------------------------------------------------------------
+
+  public async capabilitiesFor(session: Session): Promise<ReadonlySet<Capability>> {
+    return (await this.flowMode(session.externalRef)) ? DIDCOMM_FLOW_MODE_CAPABILITIES : DIDCOMM_CAPABILITIES
+  }
+
+  /** Whether the connection's peer disclosed `ayni-flow/1.0` and is therefore served in flow mode (D54). */
+  public flowMode(connectionId: string): Promise<boolean> {
+    return this.peers.isFlowCapable(connectionId)
   }
 
   // ---- InvitationMinter (CHAN-BIND-008) -----------------------------------------------------------
@@ -186,6 +207,7 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
   /** The wallet keeps the last contextual menu it received: every message re-sends the current one (INTX-MENU-002). */
   public async sendContextualMenu(session: Session): Promise<void> {
     if (!this.agent) return
+    if (await this.flowMode(session.externalRef)) return // no menus in flow mode (D54)
     const state = await this.agent.ayniState(session)
     const options = state.contextualMenu.items.map((i) => ({
       name: i.id,
@@ -200,6 +222,11 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
   public async sendText(session: Session, text: string): Promise<void> {
     if (text.trim()) await this.client.sendText(session.externalRef, text)
     await this.sendContextualMenu(session).catch(() => undefined)
+  }
+
+  /** A notice: the one use of basic messages on a flow-mode connection (D54). */
+  public async notice(connectionId: string, text: string): Promise<void> {
+    if (text.trim()) await this.client.sendText(connectionId, text)
   }
 }
 

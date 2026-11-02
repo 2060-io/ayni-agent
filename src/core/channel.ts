@@ -23,6 +23,8 @@ export type RenderResult = 'ok' | 'unsupported'
 export interface ChannelAdapter {
   readonly type: ChannelType
   readonly capabilities: ReadonlySet<Capability>
+  /** The profile for one session's peer when it differs from the channel's (DIDComm: per peer, CHAN-PROF-006). */
+  capabilitiesFor?(session: Session): Promise<ReadonlySet<Capability>>
   render(session: Session, event: CapabilityEvent): Promise<RenderResult>
 }
 
@@ -42,6 +44,14 @@ export const DIDCOMM_CAPABILITIES: ReadonlySet<Capability> = new Set([
   'reaction',
   'receipt',
   'approval',
+  'credential-exchange',
+  'auth-challenge',
+])
+/**
+ * Flow mode (D54): a wallet that discloses `ayni-flow/1.0` gets no chat, menus, receipts or reactions on
+ * its connection; the trust-bound capabilities are served as flows (INTX-FLOW-001).
+ */
+export const DIDCOMM_FLOW_MODE_CAPABILITIES: ReadonlySet<Capability> = new Set([
   'credential-exchange',
   'auth-challenge',
 ])
@@ -88,7 +98,8 @@ export class CapabilityRouter {
     const adapter = this.adapters.get(session.channelType)
     if (!adapter) return 'unsupported'
     const capability = capabilityOf(event)
-    if (!adapter.capabilities.has(capability)) return 'unsupported'
+    const capabilities = adapter.capabilitiesFor ? await adapter.capabilitiesFor(session) : adapter.capabilities
+    if (!capabilities.has(capability)) return 'unsupported'
     try {
       return await adapter.render(session, event)
     } catch (error) {
