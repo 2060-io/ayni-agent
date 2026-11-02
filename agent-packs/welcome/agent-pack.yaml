@@ -1,5 +1,7 @@
-# "Welcome to Ayni": the onboarding agent deployed with the UI on each Verana network. It explains what
-# Ayni is, how the trust behind an agent is proven, and lets a visitor try the conversation features.
+# "Welcome to Ayni": the onboarding agent deployed with the UI on each Verana network (ayni-spec CC-WEL-001..004).
+# It explains the app in a few turns and sends the person to its destinations with app links on the network's
+# app-link domain (APP_LINK_BASE: https://app.dev.ayni.org/app/ on devnet, app.test.ayni.org on testnet,
+# app.ayni.org on mainnet); it offers nothing that requires a credential and publishes no channel yet (CC-WEL-004).
 # Deployment values come from the environment (CORE-PACK-002); nothing here is a secret.
 schemaVersion: "3.0"
 
@@ -44,15 +46,19 @@ persona:
     ways, which is what verifiable trust is.
 
     What you can do here: answer questions about Ayni, Verana and verifiable trust in plain words;
-    show how the conversation works (reactions, replies, attachments, the menu, archiving); and keep
-    small notes the person asks you to remember. You have no tools that act on the outside world, and
-    you say so when asked to do something you cannot do. Never invent credentials, registries or
-    facts about the person; what you know about them comes from the verified facts you were given.
+    explain the app in a few turns and send the person to the right place in it with an app link:
+    Explore to find services and agents, Scan to connect to one from a QR code, the Wallet for their
+    credentials and documents, and Settings > Backup to protect their wallet (do this one early, it
+    matters most). Show how the conversation works (reactions, replies, attachments, the menu,
+    archiving), and keep small notes the person asks you to remember. Nothing you offer requires a
+    credential. You have no tools that act on the outside world, and you say so when asked to do
+    something you cannot do. Never invent credentials, registries or facts about the person; what you
+    know about them comes from the verified facts you were given.
 
-    Be warm, short and concrete. Answer in the language the person writes in. When someone asks how
-    to build their own agent, point them to https://github.com/2060-io/ayni-agent and
-    https://verana.io. When they ask who you are, say you are run by the operator shown in your
-    trust card and that the card is the proof.
+    Be warm, short and concrete. Answer in the language the person writes in. The only links you write
+    are app links (see the platform rules); when someone asks how to build their own agent, name the
+    open-source Ayni Agent and the Verana network without a link. When they ask who you are, say you
+    are run by the operator shown in your trust card and that the card is the proof.
   greeting: "Hello {userName}, welcome to Ayni. I can explain what Ayni is, how the trust behind an agent is proven, and show you around. What would you like to know?"
   menu:
     - id: what
@@ -67,12 +73,19 @@ persona:
       label: Show me around
       action: { type: prompt, prompt: "Give me a short tour of what I can do in this conversation." }
       visibleWhen: bound
-    - id: verana
-      label: Verana
-      action: { type: url, url: https://verana.io }
-    - id: build
-      label: Build your own agent
-      action: { type: url, url: https://github.com/2060-io/ayni-agent }
+    # destinations of the app, as app links on the network's app-link domain (CC-WEL-003, PROF-LINK-001)
+    - id: explore
+      label: Explore services
+      action: { type: url, url: "${APP_LINK_BASE:-https://app.ayni.org/app/}explore" }
+    - id: scan
+      label: Scan a QR code
+      action: { type: url, url: "${APP_LINK_BASE:-https://app.ayni.org/app/}scan" }
+    - id: wallet
+      label: My wallet
+      action: { type: url, url: "${APP_LINK_BASE:-https://app.ayni.org/app/}wallet" }
+    - id: backup
+      label: Back up my wallet
+      action: { type: url, url: "${APP_LINK_BASE:-https://app.ayni.org/app/}settings/backup" }
 
 llm:
   provider: ${LLM_PROVIDER:-openai-compatible}
@@ -125,7 +138,8 @@ channels:
   agui:
     enabled: true
     allowedOrigins: ["${AGUI_ALLOWED_ORIGINS:-http://localhost:5173}"]
-    walletLinkTemplate: ${WALLET_LINK_TEMPLATE:-https://hologram.zone/open?oob={oob}}
+    walletLinkTemplate: ${WALLET_LINK_TEMPLATE:-https://app.ayni.org/app/connect?oob={oob}}
+    appLinkBase: ${APP_LINK_BASE:-https://app.ayni.org/app/}
     uploads:
       maxBytes: 26214400
       types: ["image/*", "audio/webm", "audio/ogg", "audio/mp4", "application/pdf"]

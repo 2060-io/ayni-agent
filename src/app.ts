@@ -61,6 +61,8 @@ export async function buildAgent(
   const { pack, dir: packDir } = loadPack(env.agentPackPath)
   if (env.userAgentGate) pack.identity.userAgentGate = env.userAgentGate
   if (env.unidentifiedPeers) pack.identity.unidentifiedPeers = env.unidentifiedPeers
+  if (env.appLinkBase)
+    pack.channels = { ...pack.channels, agui: { ...pack.channels?.agui, appLinkBase: env.appLinkBase } }
   if (pack.identity.unidentifiedPeers === 'admit')
     logger.warn(
       'identity: user agents without a valid identity credential are admitted as unidentified Principals (D53)'

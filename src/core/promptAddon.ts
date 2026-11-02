@@ -5,7 +5,7 @@
 import type { Features } from '../config/packTypes.js'
 import { estimateTokens } from '../util/tokens.js'
 
-export const PROMPT_ADDON_VERSION = '3.0.0'
+export const PROMPT_ADDON_VERSION = '3.1.0'
 export const PROMPT_ADDON_TOKEN_BUDGET = 500
 
 export interface AddonContext {
@@ -14,7 +14,25 @@ export interface AddonContext {
   hasTools: boolean
   hasRequestableTools: boolean
   challengesConfigured: boolean
+  /** when set, the model may send the person to places in the app with links on this base (PROF-LINK-001) */
+  appLinkBase?: string
 }
+
+/** The destinations of the AG-UI profile §10 the model may link to (relative to the app-link base). */
+export const APP_LINK_PATHS = [
+  'home',
+  'recent',
+  'scan',
+  'explore',
+  'explore?q={text}',
+  'wallet',
+  'wallet/documents',
+  'wallet/history',
+  'service/{did}',
+  'settings',
+  'settings/backup',
+  'settings/devices',
+] as const
 
 export function renderPromptAddon(ctx: AddonContext): string {
   const lines: string[] = [
@@ -61,6 +79,10 @@ export function renderPromptAddon(ctx: AddonContext): string {
   if (ctx.features.imageGeneration)
     lines.push(
       'generate_image creates an image in the background; tell the person it is on its way, the image arrives as a separate message.'
+    )
+  if (ctx.appLinkBase)
+    lines.push(
+      `App links: to send the person to a place in the Ayni app, write a plain link ${ctx.appLinkBase}<path> with one of these paths: ${APP_LINK_PATHS.join(', ')}. Links navigate, never act. Never write any other link, domain or custom scheme.`
     )
   return lines.join('\n')
 }

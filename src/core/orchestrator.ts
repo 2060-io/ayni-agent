@@ -86,6 +86,7 @@ export class Orchestrator {
         (pack.tools?.access?.elevation?.length ?? 0) > 0 ||
         (pack.mcp?.servers ?? []).some((s) => (s.toolAccess?.elevation?.length ?? 0) > 0),
       challengesConfigured: Object.values(pack.actions ?? {}).some((a) => a.authChallenge),
+      appLinkBase: pack.channels?.agui?.appLinkBase,
     })
     const tokens = addonTokenCount(this.addon)
     if (tokens > 500) logger.warn({ tokens }, 'system-prompt add-on exceeds its 500-token target (CORE-PROMPT-004)')

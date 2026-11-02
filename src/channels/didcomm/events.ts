@@ -139,6 +139,8 @@ export class DidcommEvents {
         return this.onSessionGrantStateChanged(data as unknown as CarrierExchange & { previousState?: string })
       case 'didcomm.authorize.state-changed':
         return this.onAuthorizeStateChanged(data as unknown as CarrierExchange & { previousState?: string })
+      case 'didcomm.reissue.state-changed':
+        return this.onReissueStateChanged(data as unknown as CarrierExchange & { previousState?: string })
       default:
         return
     }
@@ -418,6 +420,29 @@ export class DidcommEvents {
       await this.agent.flows.close(exchange.flowId, ok ? 'completed' : 'failed', {
         reason: ok ? undefined : 'Not confirmed.',
       })
+  }
+
+  /**
+   * `reissue/1.0/request` after a wallet restore (INTX-FLOW-006, FLOW-REISSUE-001): the agent answers with an `issue`
+   * flow under the pack's issuance policy, or `not-eligible` / `unknown-reference`. This agent issues no credential,
+   * so every reference is unknown to it; an issuing agent plugs its policy in here.
+   */
+  private async onReissueStateChanged(exchange: CarrierExchange & { previousState?: string }): Promise<void> {
+    if (exchange.state !== 'request-received') return
+    const reference = (exchange.request as { reference?: { credentialId?: string; schemaId?: string } }).reference
+    this.logger.info(
+      { connectionId: exchange.connectionId, credentialId: reference?.credentialId, schemaId: reference?.schemaId },
+      'reissue requested for a credential this agent did not issue'
+    )
+    if (exchange.flowId)
+      await this.agent.flows.problemReport(
+        exchange.flowId,
+        'unknown-reference',
+        'This agent did not issue that credential.'
+      )
+    await this.client
+      .markReissueAnswered(exchange.threadId)
+      .catch((err) => this.logger.debug({ err, threadId: exchange.threadId }, 'reissue request not marked answered'))
   }
 
   /** `authorize/1.0/response`: an approver's attested decision (D58, INTX-APPR-011). */

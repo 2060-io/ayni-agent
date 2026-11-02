@@ -365,6 +365,11 @@ export class VsAgentClient {
     return this.request('POST', '/didcomm/notify', body)
   }
 
+  /** Records that a holder's `reissue/1.0/request` was answered (by an issue flow or a flow problem report). */
+  public markReissueAnswered(threadId: string): Promise<CarrierExchange> {
+    return this.request('POST', `/didcomm/reissue/${encodeURIComponent(threadId)}/answered`)
+  }
+
   /** `session-grant/1.0/grant`: the answer to a holder's request (flow profile §6.8, CHAN-BIND-014). */
   public grantSession(
     threadId: string,
