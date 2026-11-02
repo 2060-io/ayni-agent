@@ -97,7 +97,10 @@ export type ClosureReason =
 export interface ClientDescription {
   name: string
   version: string
+  /** `web`, `ios` or `android` (PROF-SESS-014); a 3.0 client's free text is moved to `description` */
   platform: string
+  /** what the phone shows when it links this session: "Firefox on Linux", "Ayni on iPhone" (CHAN-BIND-015) */
+  description?: string
 }
 
 export interface BindingState {

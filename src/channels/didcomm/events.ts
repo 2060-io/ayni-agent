@@ -135,6 +135,8 @@ export class DidcommEvents {
         return this.onConfirmStateChanged(data as unknown as CarrierExchange & { previousState?: string })
       case 'didcomm.link-session.state-changed':
         return this.onLinkSessionStateChanged(data as unknown as CarrierExchange & { previousState?: string })
+      case 'didcomm.session-grant.state-changed':
+        return this.onSessionGrantStateChanged(data as unknown as CarrierExchange & { previousState?: string })
       default:
         return
     }
@@ -414,6 +416,50 @@ export class DidcommEvents {
       await this.agent.flows.close(exchange.flowId, ok ? 'completed' : 'failed', {
         reason: ok ? undefined : 'Not confirmed.',
       })
+  }
+
+  /**
+   * `session-grant/1.0/request` (D56, CHAN-BIND-014): a single-use grant for the connection's resolved Principal,
+   * with the sessions URL; refused on a connection without a Principal.
+   */
+  private async onSessionGrantStateChanged(exchange: CarrierExchange & { previousState?: string }): Promise<void> {
+    if (exchange.state !== 'request-received') return
+    const bound = await this.agent.didcommSession(exchange.connectionId)
+    if (!bound) {
+      this.logger.warn(
+        { connectionId: exchange.connectionId },
+        'session grant requested before the principal was resolved'
+      )
+      if (exchange.flowId)
+        await this.agent.flows.problemReport(
+          exchange.flowId,
+          'not-eligible',
+          'This connection has no resolved principal.'
+        )
+      return
+    }
+    const request = exchange.request as {
+      conversationId?: string | null
+      newConversation?: boolean
+      client?: { description?: string; platform?: string; appVersion?: string }
+    }
+    const { grant, expiresAt } = await this.agent.sessions.issueGrant({
+      principalId: bound.principal.id,
+      connectionId: exchange.connectionId,
+      client: {
+        name: 'Ayni',
+        version: request.client?.appVersion ?? '',
+        platform: request.client?.platform ?? 'web',
+        description: request.client?.description,
+      },
+      conversationId: request.conversationId ?? undefined,
+      newConversation: request.newConversation === true,
+    })
+    await this.client.grantSession(exchange.threadId, {
+      grant,
+      sessionsUrl: `${this.agent.env.publicBaseUrl}/agui/v3/sessions`,
+      expiresAt,
+    })
   }
 
   /** `link-session/1.0/response`: the binding answer of a flow-capable wallet (CHAN-BIND-009/012). */
