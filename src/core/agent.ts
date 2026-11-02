@@ -626,10 +626,12 @@ export class AyniAgent {
   // ---- DIDComm-side lifecycle (CHAN-BIND, IDENT-SESS) -------------------------------------------
 
   /** A peer completed identity on a DIDComm connection: Principal resolved, capability channel set, supersede applied. */
+  // `welcome: false` serves the connection in flow mode: the wallet will open its own sessions and flows.
   public async onPeerConnected(
     facts: VerifiedFacts,
     connectionId: string,
-    client: ClientDescription
+    client: ClientDescription,
+    options: { welcome?: boolean } = {}
   ): Promise<{ principal: Principal; session: Session }> {
     const principal = await this.principals.resolve(facts)
     await this.sessions.supersede(principal, connectionId)
@@ -637,7 +639,8 @@ export class AyniAgent {
     await this.principals.save(principal)
     const existing = await this.store.sessions.findByExternalRef('didcomm', connectionId)
     const session = existing ?? (await this.sessions.createBound('didcomm', connectionId, principal, client)).session
-    if (!existing) await this.welcome(session)
+    // a flow-capable wallet gets no welcome text and no menu on its connection (D54, CHAN-PROF-006)
+    if (!existing && options.welcome !== false) await this.welcome(session)
     this.stats.emit('peer-connected', 1, { connectionType: facts.connectionType })
     return { principal, session }
   }
