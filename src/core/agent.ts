@@ -2,6 +2,7 @@
  * The agent facade: wires the channel-agnostic core and exposes the operations channels call.
  * Channels never reach persistence or the model directly (architecture section 4).
  */
+
 import type { AyniAction, AyniState, PrincipalDisplay, SessionStatus } from '@ayni.org/ayni-agui-profile'
 import type { Env } from '../config/env.js'
 import type { AgentPack, Features } from '../config/packTypes.js'
@@ -18,6 +19,7 @@ import { nowIso } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import type { ChallengeService } from './challenges.js'
 import type { CapabilityRouter } from './channel.js'
+import type { FlowService } from './flows.js'
 import { contextualMenuFor, describeDevices, describeSessions, greetingFor, PLATFORM_MENU } from './interaction.js'
 import type { Orchestrator, TurnInput, TurnResult, TurnSink } from './orchestrator.js'
 import type { PrincipalService, VerifiedFacts } from './principals.js'
@@ -36,6 +38,7 @@ export interface AgentParts {
   router: CapabilityRouter
   registry: ToolRegistry
   approvals: ApprovalService
+  flows: FlowService
   challenges: ChallengeService
   orchestrator: Orchestrator
   llm: ChatModel
@@ -68,6 +71,9 @@ export class AyniAgent {
   public readonly router: CapabilityRouter
   public readonly registry: ToolRegistry
   public readonly approvals: ApprovalService
+  public readonly flows: FlowService
+  /** the agent's own DID, read from the DIDComm agent at start (IDENT-SELF-001) */
+  public did = 'did:unknown'
   public readonly challenges: ChallengeService
   public readonly orchestrator: Orchestrator
   public readonly llm: ChatModel
@@ -87,6 +93,7 @@ export class AyniAgent {
     this.router = parts.router
     this.registry = parts.registry
     this.approvals = parts.approvals
+    this.flows = parts.flows
     this.challenges = parts.challenges
     this.orchestrator = parts.orchestrator
     this.llm = parts.llm

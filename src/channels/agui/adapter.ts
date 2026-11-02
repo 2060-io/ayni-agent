@@ -137,8 +137,18 @@ export class AgUiAdapter implements ChannelAdapter {
             originSessionId: event.originSessionId,
             expiresAt: event.expiresAt,
             message: event.message,
+            flowId: event.flowId,
           })
         )
+        return 'ok'
+      case 'flow':
+        // the card, new or replaced in place under the same message id (PROF-MAP-007)
+        await this.serverRun(session, async () => {
+          await s.publish(
+            session.id,
+            ev.activitySnapshot(event.entry.id, ACTIVITY.flow, event.card as unknown as Record<string, unknown>)
+          )
+        })
         return 'ok'
     }
   }

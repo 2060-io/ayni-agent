@@ -29,11 +29,10 @@ import { attachmentActivity, entryToMessages } from './mapping.js'
 import type { SessionStreams } from './streams.js'
 
 /**
- * The profile revision this agent implements. The package is at 3.1 (session grant, flows, app links); the agent
- * advertises 3.0 until the v4 channel work lands (spec v4/ayni-agent D54-D60), so that a UI never reads 3.1 features
- * into a descriptor that does not declare them.
+ * The profile revision this agent implements: 3.1 (flows and `ayni.flow`, `flowId` on routed capabilities, client
+ * platform). `features.sessionGrant` is declared only once the grant is answered (D56).
  */
-const AGENT_PROFILE_VERSION = '3.0'
+const AGENT_PROFILE_VERSION = '3.1'
 
 const require = createRequire(import.meta.url)
 const loadSchema = (name: string) =>
@@ -93,6 +92,9 @@ export class AgUiRoutes {
         history: f.history,
         voiceNotes: f.voiceNotes && this.agent.media.canTranscribe,
         uploads: f.voiceNotes || f.inboundImages ? this.uploads : false,
+        // flows on flow-capable wallets (D54, D55); the session grant comes with D56
+        flows: true,
+        sessionGrant: false,
       },
       locales: [this.agent.pack.language.agent],
     }

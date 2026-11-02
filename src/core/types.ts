@@ -109,7 +109,10 @@ export interface BindingState {
   expiresAt: string
   /** set once a connection accepted the invitation and the confirmation question was sent */
   connectionId?: string
+  /** the question-answer thread, or the link-session request id on a flow-capable wallet */
   questionThreadId?: string
+  /** the `link-session` flow carrying the question (D54, CHAN-BIND-009) */
+  flowId?: string
   used: boolean
 }
 
@@ -157,6 +160,8 @@ export type SourceType =
   | 'auth-challenge'
   | 'reaction'
   | 'state-update'
+  /** a flow of the flow profile opened from this conversation, one entry updated in place at its close (D55) */
+  | 'flow'
 export const SOURCE_TYPES: readonly SourceType[] = [
   'text',
   'voice',
@@ -167,7 +172,32 @@ export const SOURCE_TYPES: readonly SourceType[] = [
   'auth-challenge',
   'reaction',
   'state-update',
+  'flow',
 ]
+
+// ---------------------------------------------------------------------------------------------
+// Flows (D55, INTX-FLOW-001..005): the agent's view of a flow of the flow profile.
+
+export type FlowState = 'pending' | 'active' | 'completed' | 'declined' | 'cancelled' | 'failed' | 'expired'
+export type FlowOutcome = 'completed' | 'declined' | 'cancelled' | 'failed' | 'expired'
+export interface FlowReference {
+  type: string
+  id: string
+}
+/** The flow card as the UIs render it (`ayni.flow`, AG-UI profile 3.1 §6); kept in the flow entry's payload. */
+export interface FlowCard {
+  flowId: string
+  kind: string
+  state: FlowState
+  title: string
+  openedAt: string
+  closedAt?: string
+  outcome?: FlowOutcome
+  reason?: string
+  references?: FlowReference[]
+  /** only what the person received or disclosed (PROF-MAP-007) */
+  preview?: Record<string, unknown>
+}
 
 export type AttachmentType = 'image' | 'voice' | 'video' | 'file' | 'credential'
 
@@ -367,7 +397,14 @@ export interface StatEvent {
 // ---------------------------------------------------------------------------------------------
 // Capability events (D40): core-emitted requests that need channel rendering.
 
-export type TrustBoundKind = 'authentication' | 'credential-exchange' | 'auth-challenge'
+export type TrustBoundKind =
+  | 'authentication'
+  | 'credential-exchange'
+  | 'auth-challenge'
+  | 'authorization'
+  | 'confirmation'
+  | 'signature'
+  | 'link-session'
 
 export type CapabilityEvent =
   | { kind: 'text'; entry: MessageEntry }
@@ -400,6 +437,18 @@ export type CapabilityEvent =
       originSessionId: string
       expiresAt?: string
       message?: string
+      /** the flow serving the capability, when the peer is flow-capable (INTX-FLOW-003) */
+      flowId?: string
     }
+  /** a flow card, new or updated in place (D55, PROF-MAP-007) */
+  | { kind: 'flow'; entry: MessageEntry; card: FlowCard }
 
-export const TRUST_BOUND_KINDS: readonly string[] = ['authentication', 'credential-exchange', 'auth-challenge']
+export const TRUST_BOUND_KINDS: readonly string[] = [
+  'authentication',
+  'credential-exchange',
+  'auth-challenge',
+  'authorization',
+  'confirmation',
+  'signature',
+  'link-session',
+]

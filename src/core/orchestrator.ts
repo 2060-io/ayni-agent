@@ -144,6 +144,7 @@ export class Orchestrator {
       entry.sourceType === 'approval' ||
       entry.sourceType === 'refusal' ||
       entry.sourceType === 'auth-challenge' ||
+      entry.sourceType === 'flow' ||
       entry.role === 'system'
     ) {
       return [{ role: 'assistant', content: `[note] ${entry.text}` }]
@@ -384,7 +385,14 @@ export class Orchestrator {
         sourceType: 'auth-challenge',
         text: `Identity check (${policy.authChallenge.type}) for ${rawName}: ${outcome}`,
         backingIdentity: principal.backingIdentity,
-        payload: { challengeId: record?.id, type: policy.authChallenge.type, outcome, toolName: rawName },
+        payload: {
+          challengeId: record?.id,
+          type: policy.authChallenge.type,
+          outcome,
+          toolName: rawName,
+          // served as a `confirm` flow: the flow card is the UI record, this note is for the model (D55)
+          ...(typeof record?.details?.flowId === 'string' ? { flowId: record.details.flowId } : {}),
+        },
       })
       if (outcome !== 'completed' && outcome !== 'degraded')
         return `The action ${rawName} did not run: the identity check ${outcome === 'failed' ? 'failed' : outcome === 'expired' ? 'timed out' : 'was not possible'}.`

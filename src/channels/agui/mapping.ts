@@ -112,7 +112,19 @@ export function entryToMessages(entry: MessageEntry): Record<string, unknown>[] 
           metadata: meta,
         },
       ]
+    case 'flow':
+      return [
+        {
+          id: entry.id,
+          role: 'activity',
+          activityType: ACTIVITY.flow,
+          content: entry.payload ?? {},
+          metadata: { ...meta, flowId: entry.payload?.flowId },
+        },
+      ]
     case 'auth-challenge':
+      // a challenge served as a `confirm` flow is shown by its flow card; the note stays for the model (D55)
+      if (entry.payload?.flowId) return []
       return [
         {
           id: entry.id,

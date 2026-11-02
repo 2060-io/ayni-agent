@@ -1,5 +1,5 @@
 /** Memory schema versions (CORE-VER-001/002). Each migration is applied once, in order. */
-export const MEMORY_SCHEMA_VERSION = '3.0.0'
+export const MEMORY_SCHEMA_VERSION = '3.2.0'
 
 export const MIGRATIONS: { version: string; sql: string }[] = [
   {
@@ -166,6 +166,15 @@ CREATE TABLE IF NOT EXISTS conversations (
   data JSONB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS conversations_principal ON conversations (principal_id, state, last_activity_at DESC);
+`,
+  },
+  {
+    // v4: a flow of the flow profile is one entry updated in place at its close (D55, INTX-FLOW-002)
+    version: '3.2.0',
+    sql: `
+ALTER TABLE entries DROP CONSTRAINT IF EXISTS entries_source_type_check;
+ALTER TABLE entries ADD CONSTRAINT entries_source_type_check
+  CHECK (source_type IN ('text','voice','media','tool-call','approval','refusal','auth-challenge','reaction','state-update','flow'));
 `,
   },
 ]

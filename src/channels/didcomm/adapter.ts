@@ -7,7 +7,7 @@
  */
 import { randomBytes } from 'node:crypto'
 import type { AyniAgent } from '../../core/agent.js'
-import type { CapabilityChannelOps } from '../../core/challenges.js'
+import { type CapabilityChannelOps, challengeCode, confirmationText } from '../../core/challenges.js'
 import {
   type Capability,
   type ChannelAdapter,
@@ -15,6 +15,7 @@ import {
   DIDCOMM_FLOW_MODE_CAPABILITIES,
   type RenderResult,
 } from '../../core/channel.js'
+import { clientDescriptionOf, type FlowService } from '../../core/flows.js'
 import type { InvitationMinter } from '../../core/sessions.js'
 import type {
   AuthChallengeRecord,
@@ -53,6 +54,7 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
   public readonly type = 'didcomm' as const
   public readonly capabilities = DIDCOMM_CAPABILITIES
   private agent?: AyniAgent
+  private flows?: FlowService
 
   public constructor(
     private readonly client: VsAgentClient,
@@ -65,6 +67,10 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
 
   public attach(agent: AyniAgent): void {
     this.agent = agent
+  }
+
+  public setFlows(flows: FlowService): void {
+    this.flows = flows
   }
 
   // ---- per-peer profile (CHAN-PROF-006) ---------------------------------------------------------------
@@ -101,6 +107,87 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
   ): Promise<string> {
     const { id } = await this.client.sendQuestion(connectionId, question, answers, detail)
     return id
+  }
+
+  /** INTX-AUTH-009: a `confirm` flow on a flow-capable wallet, a question-answer message otherwise. */
+  public async askConfirmation(
+    connectionId: string,
+    challenge: AuthChallengeRecord,
+    purpose: string,
+    originSession: Session
+  ): Promise<{ threadId: string; flowId?: string }> {
+    const text = confirmationText(purpose)
+    const code = challengeCode(challenge)
+    const name = this.agent?.pack.metadata.displayName ?? 'The agent'
+    if (this.flows && (await this.flowMode(connectionId))) {
+      const flow = await this.flows.open({
+        connectionId,
+        kind: 'confirm',
+        title: text,
+        description: `${name} asks you to confirm this action.`,
+        origin: originSession,
+        expiresAt: challenge.expiresAt,
+      })
+      try {
+        const exchange = await this.client.sendConfirmRequest({
+          connectionId,
+          flowId: flow.flowId,
+          request: { text, code, attested: true },
+        })
+        return { threadId: exchange.threadId, flowId: flow.flowId }
+      } catch (error) {
+        await this.flows.close(flow.flowId, 'failed', { reason: 'The confirmation request could not be sent.' })
+        throw error
+      }
+    }
+    const threadId = await this.askQuestion(
+      connectionId,
+      text,
+      `${name} asks you to confirm this action on your phone. Code ${code}.`,
+      ['Yes', 'No']
+    )
+    return { threadId }
+  }
+
+  /**
+   * The binding question on a flow-capable wallet (CHAN-BIND-009/012, FLOW-LINK-001/003): a `link-session` flow
+   * naming the agent, the browser, the web origin, the start time and the invitation id; `codes` when the person
+   * must pick the code the screen shows. Returns the request id (the correlation thread) and the flow id.
+   */
+  public async askLinkSession(
+    connectionId: string,
+    session: Session,
+    codes?: string[]
+  ): Promise<{ threadId: string; flowId: string }> {
+    if (!this.flows || !this.agent) throw new Error('flows are not available')
+    if (!session.binding) throw new Error('session has no binding material')
+    const env = this.agent.env
+    const flow = await this.flows.open({
+      connectionId,
+      kind: 'link-session',
+      title: `Link ${session.client.name} on ${session.client.platform}`,
+      origin: session,
+      card: false,
+      expiresAt: session.binding.expiresAt,
+    })
+    try {
+      const exchange = await this.client.sendLinkSessionRequest({
+        connectionId,
+        flowId: flow.flowId,
+        request: {
+          agent: { did: this.agent.did ?? 'did:unknown', name: this.agent.pack.metadata.displayName },
+          browser: clientDescriptionOf(session),
+          webOrigin: env.aguiAllowedOrigins.find((o) => o !== '*') ?? env.publicBaseUrl,
+          startedAt: session.createdAt,
+          invitationId: session.binding.nonce,
+          codes: codes ?? null,
+        },
+      })
+      return { threadId: exchange.threadId, flowId: flow.flowId }
+    } catch (error) {
+      await this.flows.close(flow.flowId, 'failed', { reason: 'The link request could not be sent.' })
+      throw error
+    }
   }
 
   public async offerFaceMatchCall(
@@ -191,11 +278,12 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
       case 'generating':
         await this.client.sendText(connectionId, 'Working on your image, it will arrive shortly.')
         return 'ok'
-      case 'routed': {
+      case 'routed':
         // the capability channel serves the event itself; a status mirror is not needed here
-        if (event.status === 'pending') return 'ok'
         return 'ok'
-      }
+      case 'flow':
+        // the flow card belongs to the conversation; on the capability channel the flow itself is the record
+        return 'ok'
     }
   }
 

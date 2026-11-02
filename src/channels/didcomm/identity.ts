@@ -2,9 +2,12 @@
  * Identity on DIDComm connect (D31, D38; IDENT-RES-001..006; IDENT-TRUST-002/004):
  * the ECS-UserAgent gate, then the ECS-Badge (persons) or ECS-Service plus Org/Persona (services),
  * requested through the DIDComm agent; the backing identity of a person is obtained by trust-resolving
- * the badge issuer through the Verifiable Trust resolution service (the indexer).
+ * the badge issuer through the Verifiable Trust resolution service (the indexer). On a flow-capable
+ * wallet each request is a flow (`identify-ua` for the user-agent credential, `present` for the badge,
+ * D54); a holder that answers `unsupported-kind` is treated as having no such credential (IDENT-RES-003).
  */
 import type { AgentPack, CredentialRef } from '../../config/packTypes.js'
+import type { FlowService } from '../../core/flows.js'
 import type { LivenessChecker, VerifiedFacts } from '../../core/principals.js'
 import type { BackingIdentity, ConnectionType, LivenessVerdict, Principal } from '../../core/types.js'
 import { Deferred } from '../../util/async.js'
@@ -71,6 +74,7 @@ interface PendingProof {
 
 export class IdentityFlow {
   private readonly pending = new Map<string, PendingProof>()
+  private flows?: FlowService
 
   public constructor(
     private readonly pack: AgentPack,
@@ -79,6 +83,10 @@ export class IdentityFlow {
     private readonly devAllowUnidentified: boolean,
     private readonly logger: Logger
   ) {}
+
+  public setFlows(flows: FlowService): void {
+    this.flows = flows
+  }
 
   /** Called by the webhook when a presentation record reaches a final state. */
   public onPresentation(record: PresentationRecord): void {
@@ -94,9 +102,15 @@ export class IdentityFlow {
   private async request(
     connectionId: string,
     credentials: CredentialRef[],
-    timeoutMs = 120_000
+    timeoutMs = 120_000,
+    flow?: { kind: string; title: string }
   ): Promise<PresentationRecord> {
+    if (flow && this.flows) return this.requestInFlow(connectionId, credentials, timeoutMs, flow)
     const { proofExchangeId } = await this.client.requestPresentation(connectionId, credentials)
+    return this.awaitPresentation(proofExchangeId, timeoutMs)
+  }
+
+  private awaitPresentation(proofExchangeId: string, timeoutMs: number): Promise<PresentationRecord> {
     const deferred = new Deferred<PresentationRecord>()
     const timer = setTimeout(() => {
       this.pending.delete(proofExchangeId)
@@ -107,13 +121,65 @@ export class IdentityFlow {
   }
 
   /**
+   * The request as a flow (origin `none`, FLOW-CORE-001): `open`, then `request-presentation` with the flow id as
+   * parent thread; whichever ends first settles it, the presentation (the agent closes the flow) or the holder's
+   * close or problem report (the presentation is abandoned with the flow's code as error).
+   */
+  private async requestInFlow(
+    connectionId: string,
+    credentials: CredentialRef[],
+    timeoutMs: number,
+    flow: { kind: string; title: string }
+  ): Promise<PresentationRecord> {
+    const flows = this.flows as FlowService
+    const handle = await flows.open({ connectionId, kind: flow.kind, title: flow.title, expiresInMs: timeoutMs })
+    let proofExchangeId: string
+    try {
+      proofExchangeId = (await this.client.requestPresentation(connectionId, credentials, true, handle.flowId))
+        .proofExchangeId
+    } catch (error) {
+      await flows.close(handle.flowId, 'failed', { reason: 'The presentation request could not be sent.' })
+      throw error
+    }
+    const presentation = this.awaitPresentation(proofExchangeId, timeoutMs)
+    const closed = flows.waitForClose(handle.flowId).then((c) => ({ closed: c }))
+    const first = await Promise.race([presentation.then((record) => ({ record })), closed])
+    if ('record' in first) {
+      const ok = first.record.verified && first.record.state !== 'declined' && first.record.state !== 'abandoned'
+      await flows.close(handle.flowId, ok ? 'completed' : 'failed', {
+        reason: ok ? undefined : (first.record.errorMessage ?? 'The presentation was not verified.'),
+        references: ok ? [{ type: 'presentation', id: proofExchangeId }] : undefined,
+      })
+      return first.record
+    }
+    // the holder closed first: declined, expired, or a problem report (unsupported-kind for a deferred kind)
+    const pending = this.pending.get(proofExchangeId)
+    if (pending) {
+      clearTimeout(pending.timer)
+      this.pending.delete(proofExchangeId)
+    }
+    const c = first.closed
+    return {
+      proofExchangeId,
+      state: c.outcome === 'declined' ? 'declined' : 'abandoned',
+      claims: [],
+      verified: false,
+      errorMessage: c.errorCode ?? c.outcome,
+    }
+  }
+
+  /**
    * Establishes the verified facts of a peer, or returns undefined when it must be refused
    * (IDENT-TRUST-001). Services: public DID trust-resolved; persons: user-agent gate, then badge.
    */
-  public async establish(connectionId: string, theirDid: string | undefined): Promise<VerifiedFacts | undefined> {
+  public async establish(
+    connectionId: string,
+    theirDid: string | undefined,
+    options: { flowMode?: boolean } = {}
+  ): Promise<VerifiedFacts | undefined> {
     const isService = !!theirDid && !theirDid.startsWith('did:peer:') && !theirDid.startsWith('did:key:')
     if (isService && theirDid) return this.establishService(connectionId, theirDid)
-    return this.establishPerson(connectionId, theirDid ?? connectionId)
+    return this.establishPerson(connectionId, theirDid ?? connectionId, options.flowMode === true)
   }
 
   private async establishService(connectionId: string, did: string): Promise<VerifiedFacts | undefined> {
@@ -137,23 +203,41 @@ export class IdentityFlow {
     }
   }
 
-  private async establishPerson(connectionId: string, peerId: string): Promise<VerifiedFacts | undefined> {
+  private async establishPerson(
+    connectionId: string,
+    peerId: string,
+    flowMode: boolean
+  ): Promise<VerifiedFacts | undefined> {
     const creds = this.pack.identity.credentials
     const gate = this.pack.identity.userAgentGate ?? 'required'
+    const name = this.pack.metadata?.displayName ?? 'The agent'
     let userAgentVerified = false
     if (creds?.userAgent) {
-      const record = await this.request(connectionId, [creds.userAgent]).catch((err) => {
+      const record = await this.request(
+        connectionId,
+        [creds.userAgent],
+        undefined,
+        flowMode ? { kind: 'identify-ua', title: `${name} checks your wallet` } : undefined
+      ).catch((err) => {
         this.logger.warn({ err, connectionId }, 'user-agent presentation request failed')
         return undefined
       })
       userAgentVerified = record?.verified === true
+      // a flow-capable holder that does not implement the kind has no such credential (IDENT-RES-003)
+      if (record?.errorMessage === 'unsupported-kind')
+        this.logger.info({ connectionId }, 'user-agent credential not supported by the wallet: treated as absent')
     }
     if (!userAgentVerified && gate === 'required' && creds?.userAgent) {
       this.logger.warn({ connectionId }, 'user-agent gate failed: refused (IDENT-RES-003)')
       return undefined
     }
     if (creds?.badge?.length) {
-      const record = await this.request(connectionId, creds.badge).catch((err) => {
+      const record = await this.request(
+        connectionId,
+        creds.badge,
+        undefined,
+        flowMode ? { kind: 'present', title: `Prove your identity to ${name}` } : undefined
+      ).catch((err) => {
         this.logger.warn({ err, connectionId }, 'badge presentation request failed')
         return undefined
       })

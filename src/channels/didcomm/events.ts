@@ -2,7 +2,8 @@
  * Events from the DIDComm agent (webhook): connection lifecycle, invitation acceptance and handshake
  * reuse (binding), question answers (binding confirmation, device challenges, approvals), messages
  * (conversation on DIDComm), reactions, receipts, calls and documents (challenges), presentations,
- * discover-features disclosures (per-peer capability profile, D54).
+ * discover-features disclosures (per-peer capability profile, D54), and on flow-capable wallets the
+ * flows: `link-session` answers (binding), `confirm` answers (device challenges), flow closures (D55).
  */
 import type { FastifyInstance } from 'fastify'
 import type { AyniAgent } from '../../core/agent.js'
@@ -12,7 +13,13 @@ import type { Logger } from '../../util/logger.js'
 import { clientOfConnection, DidcommAdapter } from './adapter.js'
 import type { IdentityFlow } from './identity.js'
 import type { PeerProfiles } from './peerProfiles.js'
-import type { ConnectionRecord, PresentationRecord, VsAgentClient } from './vsAgentClient.js'
+import type {
+  CarrierExchange,
+  ConnectionRecord,
+  FlowRecord,
+  PresentationRecord,
+  VsAgentClient,
+} from './vsAgentClient.js'
 
 interface Envelope {
   id: string
@@ -43,6 +50,8 @@ export class DidcommEvents {
   /** re-link questions sent to a known device's phone, by connection and question thread */
   private readonly rebinds = new Map<string, { sessionId: string; stage: 'ask' | 'code'; codes: string[] }>()
   private readonly linkAttempts = new Map<string, { count: number; since: number }>()
+  /** flow ids of re-link requests sent as `link-session`, by connection and request id */
+  private readonly linkFlows = new Map<string, string>()
 
   public constructor(
     private readonly agent: AyniAgent,
@@ -119,6 +128,13 @@ export class DidcommEvents {
       case 'didcomm.presentations.state-updated':
         this.identity.onPresentation(data as unknown as PresentationRecord)
         return
+      // ---- flows (plugin events, CC-VSA-005) ----
+      case 'didcomm.ayni-flow.state-changed':
+        return this.onFlowStateChanged(data as unknown as FlowRecord & { previousState?: string })
+      case 'didcomm.confirm.state-changed':
+        return this.onConfirmStateChanged(data as unknown as CarrierExchange & { previousState?: string })
+      case 'didcomm.link-session.state-changed':
+        return this.onLinkSessionStateChanged(data as unknown as CarrierExchange & { previousState?: string })
       default:
         return
     }
@@ -136,7 +152,14 @@ export class DidcommEvents {
       if (this.identifying.has(record.id)) return
       this.identifying.add(record.id)
       try {
-        const facts = await this.identity.establish(record.id, record.theirDid)
+        // the DIDComm agent announces a features query with an (empty) metadata object: wait a moment for the
+        // disclosure, since identity itself is requested in the peer's mode (flows or v3 messages, D54)
+        const profile =
+          (await this.peers.get(record.id)) ??
+          (record.metadata ? await this.peers.awaitDisclosure(record.id, this.disclosureWaitMs) : undefined)
+        const flowMode = !!profile && (await this.peers.isFlowCapable(record.id))
+        if (flowMode) this.logger.info({ connectionId: record.id }, 'peer served in flow mode')
+        const facts = await this.identity.establish(record.id, record.theirDid, { flowMode })
         if (!facts) {
           await this.client
             .sendText(
@@ -147,16 +170,9 @@ export class DidcommEvents {
           await this.client.deleteConnection(record.id).catch(() => undefined)
           return
         }
-        // the DIDComm agent announces a features query with an (empty) metadata object: the disclosure usually
-        // lands during identity establishment; otherwise wait a moment before choosing the serving mode (D54)
-        const profile =
-          (await this.peers.get(record.id)) ??
-          (record.metadata ? await this.peers.awaitDisclosure(record.id, this.disclosureWaitMs) : undefined)
-        const flowMode = !!profile && (await this.peers.isFlowCapable(record.id))
         await this.agent.onPeerConnected(facts, record.id, clientOfConnection(record.theirLabel), {
           welcome: !flowMode,
         })
-        if (flowMode) this.logger.info({ connectionId: record.id }, 'peer served in flow mode')
         // a connection created from a binding invitation: ask the confirmation question (CHAN-BIND-009)
         if (record.outOfBandId) await this.onInvitationAccepted(record.outOfBandId, '', record.id)
       } finally {
@@ -188,10 +204,18 @@ export class DidcommEvents {
     await this.askBindingConfirmation(session, connectionId)
   }
 
-  /** The confirmation question names the agent, the code and the client (CHAN-BIND-009, PROF-BIND-004). */
+  /**
+   * The confirmation question names the agent, the code and the client (CHAN-BIND-009, PROF-BIND-004); on a
+   * flow-capable wallet it is a `link-session` flow correlated to the invitation id (FLOW-LINK-001).
+   */
   private async askBindingConfirmation(session: Session, connectionId: string): Promise<void> {
     if (session.binding && Date.parse(session.binding.expiresAt) < Date.now()) {
       await this.client.sendText(connectionId, 'This link code has expired. Ask the web page for a new one.')
+      return
+    }
+    if (await this.adapter.flowMode(connectionId)) {
+      const { threadId, flowId } = await this.adapter.askLinkSession(connectionId, session)
+      await this.agent.sessions.markConfirmationSent(session, connectionId, threadId, flowId)
       return
     }
     const client = session.client
@@ -212,6 +236,14 @@ export class DidcommEvents {
     const capability = await this.agent.router.capabilitySession(principal)
     if (!capability || !session.binding) return false
     const connectionId = capability.externalRef
+    if (await this.adapter.flowMode(connectionId)) {
+      // one request carrying the real code and two decoys (FLOW-LINK-003, CHAN-BIND-012)
+      const codes = this.codesAround(session.binding.bindingCode)
+      const { threadId, flowId } = await this.adapter.askLinkSession(connectionId, session, codes)
+      this.rebinds.set(`${connectionId}:${threadId}`, { sessionId: session.id, stage: 'code', codes })
+      this.linkFlows.set(`${connectionId}:${threadId}`, flowId)
+      return true
+    }
     const threadId = await this.adapter.askQuestion(
       connectionId,
       `Link a new web session (${session.client.name} on ${session.client.platform})?`,
@@ -235,10 +267,7 @@ export class DidcommEvents {
     if (pending.stage === 'ask') {
       if (!/^(yes|y)$/i.test(response.trim())) return true
       // the real code and two decoys, shuffled: picking the one on the screen is the nonce confirmation
-      const real = session.binding.bindingCode
-      const codes = new Set<string>([real])
-      while (codes.size < 3) codes.add(decoyCode())
-      const options = [...codes].sort(() => Math.random() - 0.5)
+      const options = this.codesAround(session.binding.bindingCode)
       const next = await this.adapter.askQuestion(
         connectionId,
         'Which code is shown on the screen?',
@@ -346,6 +375,110 @@ export class DidcommEvents {
     }
     // an inline menu answered on DIDComm
     await this.turn(bound.session, response)
+  }
+
+  private codesAround(real: string): string[] {
+    const codes = new Set<string>([real])
+    while (codes.size < 3) codes.add(decoyCode())
+    return [...codes].sort(() => Math.random() - 0.5)
+  }
+
+  // ---- flows on a flow-capable wallet (D54, D55) --------------------------------------------------------
+
+  /** A flow closed by the holder or by expiry ends the capability event it served (INTX-FLOW-004). */
+  private async onFlowStateChanged(record: FlowRecord & { previousState?: string }): Promise<void> {
+    const closed = await this.agent.flows.onFlowEvent(record)
+    if (!closed || closed.closedBy === 'me') return
+    const challenge = (await this.agent.store.challenges.listPending()).find((c) => c.details?.flowId === closed.flowId)
+    if (challenge) {
+      await this.agent.challenges.complete(challenge.id, closed.outcome === 'expired' ? 'expired' : 'failed', {
+        reason: closed.errorCode ?? closed.outcome,
+      })
+    }
+  }
+
+  /** `confirm/1.0/response`: the device challenge's answer (INTX-AUTH-009). */
+  private async onConfirmStateChanged(exchange: CarrierExchange & { previousState?: string }): Promise<void> {
+    if (exchange.state !== 'response-received' && exchange.state !== 'failed') return
+    const challenge = await this.agent.challenges.findPendingByThread(exchange.connectionId, exchange.threadId)
+    if (!challenge) return
+    const response = (exchange.response ?? {}) as { confirmed?: boolean; attestation?: unknown }
+    const ok = exchange.state === 'response-received' && response.confirmed === true
+    await this.agent.challenges.complete(challenge.id, ok ? 'completed' : 'failed', {
+      response: response.confirmed,
+      attestation: response.attestation,
+      ...(exchange.errorCode ? { reason: exchange.errorCode } : {}),
+    })
+    // the opener closes the flow when the carrier protocol ends (flow profile §5.2)
+    if (exchange.flowId)
+      await this.agent.flows.close(exchange.flowId, ok ? 'completed' : 'failed', {
+        reason: ok ? undefined : 'Not confirmed.',
+      })
+  }
+
+  /** `link-session/1.0/response`: the binding answer of a flow-capable wallet (CHAN-BIND-009/012). */
+  private async onLinkSessionStateChanged(exchange: CarrierExchange & { previousState?: string }): Promise<void> {
+    if (exchange.state !== 'response-received' && exchange.state !== 'failed') return
+    const connectionId = exchange.connectionId
+    const key = `${connectionId}:${exchange.threadId}`
+    const response = (exchange.response ?? {}) as { link?: boolean; code?: string | null }
+    const linked = exchange.state === 'response-received' && response.link === true
+    const settle = async (flowId: string | undefined, bound: boolean, sessionId?: string) => {
+      if (!flowId) return
+      await this.agent.flows.close(flowId, bound ? 'completed' : 'cancelled', {
+        reason: bound ? undefined : 'Not linked.',
+        references: bound && sessionId ? [{ type: 'session', id: sessionId }] : undefined,
+      })
+    }
+    // a re-link of a known device: the right code binds (CHAN-BIND-012)
+    const rebind = this.rebinds.get(key)
+    if (rebind) {
+      this.rebinds.delete(key)
+      const flowId = this.linkFlows.get(key)
+      this.linkFlows.delete(key)
+      const session = await this.agent.sessions.get(rebind.sessionId)
+      const bound = await this.agent.didcommSession(connectionId)
+      const codeOk = (response.code ?? '').replace(/\s+/g, '').toUpperCase() === session?.binding?.bindingCode
+      if (
+        !linked ||
+        !codeOk ||
+        !session ||
+        !bound ||
+        session.state !== 'provisional' ||
+        !session.binding ||
+        Date.parse(session.binding.expiresAt) < Date.now()
+      ) {
+        await settle(flowId, false)
+        return
+      }
+      try {
+        await this.agent.sessions.bind(session, bound.principal, session.binding.nonce)
+        await settle(flowId, true, session.id)
+        await this.agent.welcome(session)
+      } catch (error) {
+        this.logger.warn({ err: error, sessionId: session.id }, 'rebind refused')
+        await settle(flowId, false)
+      }
+      return
+    }
+    // the binding question of a provisional session (CHAN-BIND-009)
+    const binding = await this.agent.sessions.findByConfirmation(connectionId, exchange.threadId)
+    if (!binding?.binding) return
+    const flowId = binding.binding.flowId ?? exchange.flowId
+    if (binding.state !== 'provisional' || !linked) {
+      await settle(flowId, false)
+      return
+    }
+    const bound = await this.agent.didcommSession(connectionId)
+    if (!bound) return
+    try {
+      await this.agent.sessions.bind(binding, bound.principal, binding.binding.nonce)
+      await settle(flowId, true, binding.id)
+      await this.agent.welcome(binding)
+    } catch (error) {
+      this.logger.warn({ err: error, sessionId: binding.id }, 'binding refused')
+      await settle(flowId, false)
+    }
   }
 
   // ---- conversation on DIDComm (CHAN-ROUTE-003) ---------------------------------------------------------

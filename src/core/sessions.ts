@@ -491,10 +491,16 @@ export class SessionService {
   }
 
   /** Records that the invitation was accepted on a connection and the confirmation question was sent. */
-  public async markConfirmationSent(session: Session, connectionId: string, questionThreadId: string): Promise<void> {
+  public async markConfirmationSent(
+    session: Session,
+    connectionId: string,
+    questionThreadId: string,
+    flowId?: string
+  ): Promise<void> {
     if (!session.binding) return
     session.binding.connectionId = connectionId
     session.binding.questionThreadId = questionThreadId
+    if (flowId) session.binding.flowId = flowId
     session.lastActivityAt = nowIso()
     await this.store.sessions.save(session)
   }
