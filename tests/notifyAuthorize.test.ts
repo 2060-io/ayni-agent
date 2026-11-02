@@ -301,6 +301,70 @@ describe('attested approvals as authorize flows (D58, INTX-APPR-011)', () => {
     expect((close[0].args[1] as { outcome: string }).outcome).toBe('completed')
   })
 
+  it('still answers an authorize response after a restart (the flow reference is persisted)', async () => {
+    const ana = await running.agent.didcommSession('conn-ana')
+    if (!ana) throw new Error('peer not connected')
+    const record = await running.agent.approvals.requestSensitivity({
+      principal: ana.principal,
+      role: 'guest',
+      originSessionId: ana.session.id,
+      toolName: 'echo',
+      args: {},
+      rule: { tools: ['echo'], approvers: ['manager'], attested: true },
+    })
+    await settle()
+    const request = callsOf('sendAuthorizeRequest').at(-1)
+    if (!request) throw new Error('no authorize request')
+    const body = request.args[0] as { flowId: string }
+    // a fresh process: new adapter, flow service and event handler over the same store and DIDComm agent
+    const logger = createLogger('silent')
+    const client = stubClient(calls)
+    const peers = new PeerProfiles(running.agent.store.kv, logger)
+    const flows = new FlowService(
+      client as never,
+      running.agent.memory,
+      running.agent.router,
+      running.agent.store.kv,
+      logger
+    )
+    const adapter = new DidcommAdapter(
+      client as never,
+      'https://welcome.test',
+      new MediaLinks(1000),
+      undefined,
+      peers,
+      logger
+    )
+    adapter.attach(running.agent)
+    adapter.setFlows(flows)
+    Object.assign(running.agent, { flows })
+    const restarted = new DidcommEvents(
+      running.agent,
+      client as never,
+      {} as never,
+      adapter,
+      peers,
+      undefined,
+      logger,
+      100
+    )
+    await restarted.handle(
+      envelope('didcomm.authorize.state-changed', {
+        threadId: (request.result as { threadId: string }).threadId,
+        flowId: body.flowId,
+        connectionId: 'conn-manager',
+        state: 'response-received',
+        response: { decision: 'rejected', attestation: { method: 'passcode', at: new Date().toISOString() } },
+      })
+    )
+    await settle()
+    const decided = await running.agent.store.approvals.get(record.id)
+    expect(decided?.status).toBe('REJECTED')
+    expect(decided?.decisions[0]?.attestation).toMatchObject({ method: 'passcode' })
+    const close = callsOf('closeFlow').filter((c) => c.args[0] === body.flowId)
+    expect(close).toHaveLength(1)
+  })
+
   it('does not open a flow for a non-attested rule', async () => {
     const ana = await running.agent.didcommSession('conn-ana')
     if (!ana) throw new Error('peer not connected')

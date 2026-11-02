@@ -84,6 +84,13 @@ export interface FlowOpenOptions {
   expiresAt?: string
   expiresInMs?: number
   requires?: string[]
+  /** what the flow serves on the agent's side (an approval, a challenge), persisted with the handle */
+  ref?: FlowRef
+}
+
+export interface FlowRef {
+  type: 'approval' | 'challenge' | 'session'
+  id: string
 }
 
 export interface FlowHandle {
@@ -93,6 +100,7 @@ export interface FlowHandle {
   entryId?: string
   sessionId?: string
   expiresAt: string
+  ref?: FlowRef
 }
 
 export interface FlowClosed {
@@ -175,6 +183,7 @@ export class FlowService {
       connectionId: opts.connectionId,
       kind: opts.kind,
       expiresAt: record.expiresTime ?? expiresAt,
+      ...(opts.ref ? { ref: opts.ref } : {}),
     }
     const card = opts.card ?? (!!opts.origin && opts.origin.state === 'bound')
     if (card && opts.origin) {
