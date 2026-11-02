@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.6.0](https://github.com/2060-io/ayni-agent/compare/v0.5.0...v0.6.0) (2026-11-02)
+
+
+### Features
+
+* **agui-profile:** profile 3.1 (session grant, flows, client platform, ayni.flow, app links) and npm publishing ([2b23e50](https://github.com/2060-io/ayni-agent/commit/2b23e50d2fb5712c0ffefdce60c1557d77ea2bc7))
+* **agui-profile:** profile 3.1 and npm publishing ([dd070a1](https://github.com/2060-io/ayni-agent/commit/dd070a1a64b75ec57addef32b635cf11add2202c))
+* **didcomm:** per-peer capability profile and flow mode for wallets that disclose ayni-flow/1.0 ([#21](https://github.com/2060-io/ayni-agent/issues/21)) ([702ff0c](https://github.com/2060-io/ayni-agent/commit/702ff0c7fc488472da496ed00d97736de2b8aaec))
+* **flows:** flows as entries on flow-capable wallets; identity, device challenge and binding as flows (D55) ([#22](https://github.com/2060-io/ayni-agent/issues/22)) ([c333987](https://github.com/2060-io/ayni-agent/commit/c33398731112684ff578a5074e9409ec557f7e3c))
+* **flows:** wake-ups through notify and attested approvals as authorize flows (D57, D58) ([#24](https://github.com/2060-io/ayni-agent/issues/24)) ([56b6a70](https://github.com/2060-io/ayni-agent/commit/56b6a70c98301c3ae260504903b812af33628203))
+* **sessions:** session grant for flow-capable wallets, client platform and description (D56) ([#23](https://github.com/2060-io/ayni-agent/issues/23)) ([6fb7b67](https://github.com/2060-io/ayni-agent/commit/6fb7b677512d3637d7a54d24dede171da2b28d53))
+* **welcome:** Welcome pack v4 with app links, APP_LINK_BASE platform rule, reissue answered (CC-WEL, D55) ([#26](https://github.com/2060-io/ayni-agent/issues/26)) ([7946cb6](https://github.com/2060-io/ayni-agent/commit/7946cb681590b0c082e2f4d8966210ea542c9d1f))
+
+
+### Bug Fixes
+
+* **flows:** persist the authorize flow reference so a restart still answers and closes it ([#25](https://github.com/2060-io/ayni-agent/issues/25)) ([0b1ed8a](https://github.com/2060-io/ayni-agent/commit/0b1ed8ac4df95d3578585106d28a17db34ece2df))
+
 ## [0.5.0](https://github.com/2060-io/ayni-agent/compare/v0.4.0...v0.5.0) (2026-10-16)
 
 
