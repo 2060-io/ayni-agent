@@ -19,12 +19,21 @@ export class AgUiAdapter implements ChannelAdapter {
     this.agent = agent
   }
 
-  /** Agent-initiated conversation is framed as a server-initiated run (PROF-STREAM-002). */
-  private async serverRun(session: Session, body: (runId: string) => Promise<void>): Promise<void> {
+  /** An attached session stream means a screen is showing the conversation (D57). */
+  public isLive(session: Session): boolean {
+    return this.streams.subscriberCount(session.id) > 0
+  }
+
+  /**
+   * Agent-initiated conversation is framed as a server-initiated run (PROF-STREAM-002); when it carries content and
+   * no screen of the conversation is live, the phone is woken up (INTX-NOTIFY-001).
+   */
+  private async serverRun(session: Session, body: (runId: string) => Promise<void>, preview?: string): Promise<void> {
     const runId = prefixedId('run')
     await this.streams.publish(session.id, ev.runStarted(session.id, runId))
     await body(runId)
     await this.streams.publish(session.id, ev.runFinished(session.id, runId, { type: 'success' }))
+    if (preview !== undefined && this.agent) await this.agent.notifyIfAway(session, preview).catch(() => undefined)
   }
 
   public async pushState(session: Session): Promise<void> {
@@ -37,38 +46,50 @@ export class AgUiAdapter implements ChannelAdapter {
     const s = this.streams
     switch (event.kind) {
       case 'text':
-        await this.serverRun(session, async () => {
-          await s.publish(session.id, ev.textStart(event.entry.id))
-          await s.publish(session.id, ev.textContent(event.entry.id, event.entry.text))
-          await s.publish(session.id, ev.textEnd(event.entry.id))
-        })
+        await this.serverRun(
+          session,
+          async () => {
+            await s.publish(session.id, ev.textStart(event.entry.id))
+            await s.publish(session.id, ev.textContent(event.entry.id, event.entry.text))
+            await s.publish(session.id, ev.textEnd(event.entry.id))
+          },
+          event.entry.text
+        )
         return 'ok'
       case 'menu':
-        await this.serverRun(session, async () => {
-          await s.publish(
-            session.id,
-            ev.activitySnapshot(event.entry.id, ACTIVITY.menu, {
-              menuId: event.menuId,
-              prompt: event.prompt,
-              items: event.items,
-            })
-          )
-        })
+        await this.serverRun(
+          session,
+          async () => {
+            await s.publish(
+              session.id,
+              ev.activitySnapshot(event.entry.id, ACTIVITY.menu, {
+                menuId: event.menuId,
+                prompt: event.prompt,
+                items: event.items,
+              })
+            )
+          },
+          event.prompt
+        )
         return 'ok'
       case 'media':
         // a late artifact: its own run, message id = the entry ordered by initiation time (PROF-MAP-004)
-        await this.serverRun(session, async () => {
-          for (const a of event.entry.attachments) {
-            await s.publish(
-              session.id,
-              ev.activitySnapshot(a.id, ACTIVITY.attachment, {
-                ...attachmentActivity(a, event.entry.role === 'agent' ? 'assistant' : 'user'),
-                entryId: event.entry.id,
-                initiatedAt: event.entry.initiatedAt,
-              })
-            )
-          }
-        })
+        await this.serverRun(
+          session,
+          async () => {
+            for (const a of event.entry.attachments) {
+              await s.publish(
+                session.id,
+                ev.activitySnapshot(a.id, ACTIVITY.attachment, {
+                  ...attachmentActivity(a, event.entry.role === 'agent' ? 'assistant' : 'user'),
+                  entryId: event.entry.id,
+                  initiatedAt: event.entry.initiatedAt,
+                })
+              )
+            }
+          },
+          event.entry.text || 'Sent you a file'
+        )
         await this.pushState(session)
         return 'ok'
       case 'approval': {
@@ -90,12 +111,16 @@ export class AgUiAdapter implements ChannelAdapter {
             })
           )
         else await s.publish(session.id, ev.custom(CUSTOM_EVENT.approvalRequest, value))
-        await this.serverRun(session, async () => {
-          await s.publish(
-            session.id,
-            ev.activitySnapshot(event.entry.id, ACTIVITY.approval, value as unknown as Record<string, unknown>)
-          )
-        })
+        await this.serverRun(
+          session,
+          async () => {
+            await s.publish(
+              session.id,
+              ev.activitySnapshot(event.entry.id, ACTIVITY.approval, value as unknown as Record<string, unknown>)
+            )
+          },
+          event.update ? undefined : `${event.approval.requesterName} asks for an approval: ${event.approval.toolName}`
+        )
         return 'ok'
       }
       case 'reaction':

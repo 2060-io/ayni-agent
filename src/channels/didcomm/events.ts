@@ -137,6 +137,8 @@ export class DidcommEvents {
         return this.onLinkSessionStateChanged(data as unknown as CarrierExchange & { previousState?: string })
       case 'didcomm.session-grant.state-changed':
         return this.onSessionGrantStateChanged(data as unknown as CarrierExchange & { previousState?: string })
+      case 'didcomm.authorize.state-changed':
+        return this.onAuthorizeStateChanged(data as unknown as CarrierExchange & { previousState?: string })
       default:
         return
     }
@@ -416,6 +418,36 @@ export class DidcommEvents {
       await this.agent.flows.close(exchange.flowId, ok ? 'completed' : 'failed', {
         reason: ok ? undefined : 'Not confirmed.',
       })
+  }
+
+  /** `authorize/1.0/response`: an approver's attested decision (D58, INTX-APPR-011). */
+  private async onAuthorizeStateChanged(exchange: CarrierExchange & { previousState?: string }): Promise<void> {
+    if (exchange.state !== 'response-received' && exchange.state !== 'failed') return
+    const tracked = this.adapter.takeAuthorize(exchange.connectionId, exchange.threadId)
+    if (!tracked) return
+    const bound = await this.agent.didcommSession(exchange.connectionId)
+    if (exchange.state === 'failed' || !bound) {
+      await this.agent.flows.close(tracked.flowId, 'failed', { reason: exchange.errorCode ?? 'No decision.' })
+      return
+    }
+    const response = (exchange.response ?? {}) as {
+      decision?: 'approved' | 'rejected'
+      attestation?: { method: 'biometric' | 'passcode' | 'none'; at: string }
+      comment?: string | null
+    }
+    try {
+      await this.agent.approvals.decide(
+        tracked.approvalId,
+        bound.principal,
+        response.decision === 'approved' ? 'approve' : 'reject',
+        response.comment ?? undefined,
+        response.attestation
+      )
+      await this.agent.flows.close(tracked.flowId, 'completed')
+    } catch (error) {
+      this.logger.warn({ err: error, approvalId: tracked.approvalId }, 'authorize decision refused')
+      await this.agent.flows.close(tracked.flowId, 'failed', { reason: (error as Error).message })
+    }
   }
 
   /**

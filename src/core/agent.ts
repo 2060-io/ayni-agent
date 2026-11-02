@@ -326,8 +326,42 @@ export class AyniAgent {
     await this.sessions.touch(session)
     await this.sessions.noteActivity(session, input.entry.text, { title: true })
     const result = await this.orchestrator.run(session, principal, input, sink, signal)
-    if (result.reply?.text) await this.sessions.noteActivity(session, result.reply.text)
+    if (result.reply?.text) {
+      await this.sessions.noteActivity(session, result.reply.text)
+      await this.notifyIfAway(session, result.reply.text).catch((err) =>
+        this.logger.warn({ err, sessionId: session.id }, 'wake-up not sent')
+      )
+    }
     return result
+  }
+
+  /**
+   * A wake-up on the capability channel (D57, INTX-NOTIFY-001): when a reply or an agent-initiated run lands while
+   * no screen of the Principal shows the conversation, a flow-capable phone receives one `notify` naming the
+   * conversation. Never for a flow (the flow is its own notification); nothing is sent to any push service.
+   */
+  public async notifyIfAway(session: Session, preview: string): Promise<boolean> {
+    if (session.channelType !== 'ag-ui') return false
+    const principal = await this.principalOf(session)
+    if (!principal) return false
+    const capability = await this.router.capabilitySession(principal)
+    if (!capability) return false
+    const adapter = this.router.adapter('didcomm')
+    if (!adapter?.notify) return false
+    const conversationId = session.conversationId ?? session.id
+    const screens = (await this.sessions.listOpen(principal.id)).filter(
+      (s) => s.channelType === 'ag-ui' && (s.conversationId ?? s.id) === conversationId
+    )
+    if (screens.some((s) => this.router.isLive(s))) return false
+    const text = preview.replace(/\s+/g, ' ').trim()
+    return adapter.notify(capability.externalRef, {
+      conversationId,
+      sessionId: session.id,
+      title: this.pack.metadata.displayName,
+      preview: text.length > 140 ? `${text.slice(0, 139).trimEnd()}…` : text || undefined,
+      collapseKey: conversationId,
+      priority: 'normal',
+    })
   }
 
   /** Structured actions of a turn (profile section 6; INTX-MENU, INTX-APPR, INTX-REACT, INTX-STATE). */

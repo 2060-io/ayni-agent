@@ -123,5 +123,10 @@ docker run --rm -p 3010:3010 --env-file .env io2060/ayni-agent:local
   `GRANT_EXPIRY_SECONDS` (default and maximum 60), issued only on a connection whose peer is a resolved Principal
   (ayni-spec D56, CHAN-BIND-014). `client.platform` is `web`, `ios` or `android` and `client.description` is what the
   phone shows for the session (CHAN-BIND-015).
+- Wake-ups: a reply or an agent-initiated run that lands while no screen of the Principal shows the conversation
+  sends one `notify/1.0` on a flow-capable phone (`POST /v2/didcomm/notify`; conversation id, title, preview,
+  collapse key), never for a flow; the agent holds no push token (ayni-spec D57, INTX-NOTIFY-001/002). An approval
+  rule with `attested: true` reaches a flow-capable approver as an `authorize` flow and the decision's attestation
+  method is recorded on the approval (D58, INTX-APPR-011).
 - wallet app presenting an ECS-UserAgent credential (ayni-spec `CC-APP-001`); until then run
   with `userAgentGate: optional`.

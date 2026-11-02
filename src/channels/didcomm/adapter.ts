@@ -14,10 +14,12 @@ import {
   DIDCOMM_CAPABILITIES,
   DIDCOMM_FLOW_MODE_CAPABILITIES,
   type RenderResult,
+  type WakeUp,
 } from '../../core/channel.js'
 import { clientDescriptionOf, type FlowService } from '../../core/flows.js'
 import type { InvitationMinter } from '../../core/sessions.js'
 import type {
+  ApprovalRecord,
   AuthChallengeRecord,
   CapabilityEvent,
   ClientDescription,
@@ -55,6 +57,9 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
   public readonly capabilities = DIDCOMM_CAPABILITIES
   private agent?: AyniAgent
   private flows?: FlowService
+  /** `authorize` flows sent to approvers' phones, by approval and connection, and by connection and request id */
+  private readonly authorizeByApproval = new Map<string, { flowId: string; threadId: string }>()
+  private readonly authorizeByThread = new Map<string, { flowId: string; approvalId: string }>()
 
   public constructor(
     private readonly client: VsAgentClient,
@@ -250,6 +255,7 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
       }
       case 'approval': {
         const a = event.approval
+        if (await this.flowMode(connectionId)) return this.renderApprovalAsFlow(connectionId, a, event.update === true)
         const text = event.update
           ? `Approval for ${a.toolName} requested by ${a.requesterName}: ${a.status}.`
           : `${a.requesterName} asks to run ${a.toolName}${a.purpose ? ` for "${a.purpose}"` : ''}${a.justification ? `: ${a.justification}` : ''}.`
@@ -285,6 +291,81 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
         // the flow card belongs to the conversation; on the capability channel the flow itself is the record
         return 'ok'
     }
+  }
+
+  // ---- approvals and wake-ups on a flow-capable wallet (D57, D58) -----------------------------------
+
+  /**
+   * An attested approval reaches the approver's phone as an `authorize` flow (INTX-APPR-011); a non-attested one
+   * is decided from the approver's own conversations (the AG-UI card). A later change closes the flow.
+   */
+  private async renderApprovalAsFlow(connectionId: string, a: ApprovalRecord, update: boolean): Promise<RenderResult> {
+    const key = `${a.id}:${connectionId}`
+    const open = this.authorizeByApproval.get(key)
+    if (update || a.status !== 'PENDING') {
+      if (open && this.flows) {
+        this.authorizeByApproval.delete(key)
+        this.authorizeByThread.delete(`${connectionId}:${open.threadId}`)
+        await this.flows.close(
+          open.flowId,
+          a.status === 'APPROVED' || a.status === 'REJECTED' ? 'completed' : 'cancelled',
+          {
+            reason:
+              a.status === 'APPROVED' || a.status === 'REJECTED'
+                ? undefined
+                : `The request is ${a.status.toLowerCase()}.`,
+          }
+        )
+      }
+      return 'ok'
+    }
+    if (!a.attested || !this.flows || open) return 'ok'
+    const flow = await this.flows.open({
+      connectionId,
+      kind: 'authorize',
+      title: `${a.requesterName} asks to run ${a.toolName}`,
+      description: a.justification ?? a.purpose,
+      expiresAt: a.expiresAt,
+    })
+    try {
+      const exchange = await this.client.sendAuthorizeRequest({
+        connectionId,
+        flowId: flow.flowId,
+        request: {
+          requester: { name: a.requesterName, role: a.requesterRole || null, did: null },
+          purpose: { id: a.purpose ?? a.toolName, label: a.purpose ?? a.toolName },
+          justification: a.justification ?? '',
+          scope: [`tool:${a.serverName ? `${a.serverName}.` : ''}${a.toolName}`],
+          expiresAt: a.expiresAt,
+          attested: true,
+        },
+      })
+      this.authorizeByApproval.set(key, { flowId: flow.flowId, threadId: exchange.threadId })
+      this.authorizeByThread.set(`${connectionId}:${exchange.threadId}`, { flowId: flow.flowId, approvalId: a.id })
+      return 'ok'
+    } catch (error) {
+      await this.flows.close(flow.flowId, 'failed', { reason: 'The authorization request could not be sent.' })
+      throw error
+    }
+  }
+
+  /** The approval an `authorize` response answers, consumed once. */
+  public takeAuthorize(connectionId: string, threadId: string): { flowId: string; approvalId: string } | undefined {
+    const key = `${connectionId}:${threadId}`
+    const found = this.authorizeByThread.get(key)
+    if (found) {
+      this.authorizeByThread.delete(key)
+      this.authorizeByApproval.delete(`${found.approvalId}:${connectionId}`)
+    }
+    return found
+  }
+
+  /** `notify` on a flow-capable wallet that disclosed the protocol (INTX-NOTIFY-001); nothing otherwise. */
+  public async notify(connectionId: string, notification: WakeUp): Promise<boolean> {
+    if (!(await this.flowMode(connectionId))) return false
+    if (!(await this.peers.supports(connectionId, 'https://didcomm.org/notify/1.0'))) return false
+    await this.client.sendNotification({ connectionId, notification })
+    return true
   }
 
   private async sendEntryText(connectionId: string, entry: MessageEntry): Promise<void> {

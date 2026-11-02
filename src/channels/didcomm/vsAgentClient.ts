@@ -334,6 +334,37 @@ export class VsAgentClient {
     return this.request('POST', '/didcomm/confirm', body)
   }
 
+  /** `authorize/1.0/request` inside a flow (flow profile §6.5, INTX-APPR-011). */
+  public sendAuthorizeRequest(body: {
+    connectionId: string
+    flowId: string
+    request: {
+      requester: { name: string; role?: string | null; did?: string | null }
+      purpose: { id: string; label: string }
+      justification: string
+      scope: string[]
+      expiresAt: string
+      attested: boolean
+    }
+  }): Promise<CarrierExchange> {
+    return this.request('POST', '/didcomm/authorize', body)
+  }
+
+  /** `notify/1.0/notification`: a wake-up, never for a flow (flow profile §6.10, INTX-NOTIFY-001). */
+  public sendNotification(body: {
+    connectionId: string
+    notification: {
+      conversationId: string
+      sessionId?: string | null
+      title: string
+      preview?: string | null
+      collapseKey: string
+      priority: 'normal' | 'low'
+    }
+  }): Promise<{ id: string }> {
+    return this.request('POST', '/didcomm/notify', body)
+  }
+
   /** `session-grant/1.0/grant`: the answer to a holder's request (flow profile §6.8, CHAN-BIND-014). */
   public grantSession(
     threadId: string,
