@@ -127,6 +127,13 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     the transcriber is configured, and the note's language hint is the session's presentation locale. A
     self-hosted `openai-compatible` endpoint is one `baseUrl` away when audio must stay in the cluster.
 
+26. **An upload's type is canonical before it is checked** (2026-11-03; PROF-HIST-005). React Native on iOS
+    replaces a multipart part's content type with the file's own MIME type, so a voice note recorded as AAC in
+    MP4 reaches the agent as `audio/x-m4a` whatever the app declared, and a literal comparison with the
+    descriptor's `audio/mp4` refused it. The agent now maps the m4a and aac aliases to `audio/mp4` (and
+    `image/jpg` to `image/jpeg`) before the check and keeps the canonical type on the stored object; the
+    descriptor keeps listing one type per container.
+
 ## Not done in this iteration
 
 - Database row-level security, consent management, PII redaction, external IAM (v4 per spec).

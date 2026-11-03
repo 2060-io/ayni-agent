@@ -36,6 +36,18 @@ export function attachmentTypeOf(mimeType: string): MessageAttachment['type'] {
   return 'file'
 }
 
+/**
+ * The canonical type of an upload (PROF-HIST-005): an iPhone names an AAC-in-MP4 note `audio/x-m4a` (its file
+ * type, whatever the client asked for), browsers and Android say `audio/mp4`; the descriptor lists one type and the
+ * check and the stored object use it.
+ */
+export function canonicalMime(mimeType: string): string {
+  const base = mimeType.split(';')[0]?.trim().toLowerCase() ?? ''
+  if (base === 'audio/x-m4a' || base === 'audio/m4a' || base === 'audio/aac') return 'audio/mp4'
+  if (base === 'image/jpg') return 'image/jpeg'
+  return base
+}
+
 export function mimeAllowed(mimeType: string, allowed: string[]): boolean {
   return allowed.some((pattern) =>
     pattern.endsWith('/*') ? mimeType.startsWith(pattern.slice(0, -1)) : pattern === mimeType

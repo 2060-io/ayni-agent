@@ -20,7 +20,7 @@ import type { AyniAgent } from '../../core/agent.js'
 import type { TurnEvent, TurnSink } from '../../core/orchestrator.js'
 import { normalizeClient, SessionError } from '../../core/sessions.js'
 import type { ClientDescription, Session } from '../../core/types.js'
-import { mimeAllowed } from '../../media/service.js'
+import { canonicalMime, mimeAllowed } from '../../media/service.js'
 import { prefixedId } from '../../util/ids.js'
 import type { Logger } from '../../util/logger.js'
 import type { AgUiAdapter } from './adapter.js'
@@ -481,7 +481,8 @@ export class AgUiRoutes {
       if (!session) return
       const file = await request.file({ limits: { fileSize: this.uploads.maxBytes } }).catch(() => undefined)
       if (!file) return reply.code(400).send({ error: 'bad-request', message: 'multipart file expected' })
-      if (!mimeAllowed(file.mimetype, this.uploads.types))
+      const mimeType = canonicalMime(file.mimetype)
+      if (!mimeAllowed(mimeType, this.uploads.types))
         return reply.code(415).send({ error: 'bad-request', message: 'type not accepted' })
       let bytes: Buffer
       try {
@@ -493,7 +494,7 @@ export class AgUiRoutes {
       const attachment = await this.agent.media.ingest(
         session,
         bytes,
-        file.mimetype,
+        mimeType,
         file.filename,
         session.locale ?? this.agent.pack.language.agent
       )
