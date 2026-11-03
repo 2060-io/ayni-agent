@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/2060-io/ayni-agent/compare/v0.6.0...v0.6.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* **binding:** wait for the disclosure on a handshake reuse and ask again as a flow when it arrives late ([#28](https://github.com/2060-io/ayni-agent/issues/28)) ([42ecf13](https://github.com/2060-io/ayni-agent/commit/42ecf13a8c23c4f46aa392be0d9f8e6b230beeec)), closes [#27](https://github.com/2060-io/ayni-agent/issues/27)
+
 ## [0.6.0](https://github.com/2060-io/ayni-agent/compare/v0.5.0...v0.6.0) (2026-11-02)
 
 
