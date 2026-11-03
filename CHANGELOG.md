@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/2060-io/ayni-agent/compare/v0.7.0...v0.7.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* **uploads:** map the m4a and aac aliases an iPhone sends to audio/mp4 before the descriptor check ([#32](https://github.com/2060-io/ayni-agent/issues/32)) ([4ff57f0](https://github.com/2060-io/ayni-agent/commit/4ff57f00638f3ae2a16cdf10bf8edf6d8ab7cdc3))
+
 ## [0.7.0](https://github.com/2060-io/ayni-agent/compare/v0.6.1...v0.7.0) (2026-11-03)
 
 
