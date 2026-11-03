@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/2060-io/ayni-agent/compare/v0.6.1...v0.7.0) (2026-11-03)
+
+
+### Features
+
+* **welcome:** transcribe voice notes with OpenAI (STT_API_KEY from the deployment, whisper-1 unless STT_MODEL) ([#30](https://github.com/2060-io/ayni-agent/issues/30)) ([a1f6054](https://github.com/2060-io/ayni-agent/commit/a1f6054624651d0d24388f4be169d52b8fdb6174))
+
 ## [0.6.1](https://github.com/2060-io/ayni-agent/compare/v0.6.0...v0.6.1) (2026-11-03)
 
 
