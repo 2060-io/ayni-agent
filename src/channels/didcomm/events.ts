@@ -87,7 +87,8 @@ export class DidcommEvents {
         return this.onInvitationAccepted(
           String(data.outOfBandId ?? ''),
           String(data.invitationId ?? ''),
-          String(data.connectionId ?? '')
+          String(data.connectionId ?? ''),
+          { reused: true }
         )
       case 'didcomm.basic-messages.message-received':
         // the record's thread id is the DIDComm message id when the message carries no thread decorator
@@ -151,7 +152,11 @@ export class DidcommEvents {
   private async onConnection(record: ConnectionEvent): Promise<void> {
     if (record.state === 'updated') {
       // a discover-features disclosure: the peer's capability profile (FLOW-CAP-002)
-      if (record.metadata && Object.keys(record.metadata).length) await this.peers.record(record.id, record.metadata)
+      if (!record.metadata || !Object.keys(record.metadata).length) return
+      const wasFlowCapable = await this.peers.isFlowCapable(record.id)
+      await this.peers.record(record.id, record.metadata)
+      // a disclosure that arrives after a binding question went out as in v3 (FLOW-CAP-002, decision 24)
+      if (!wasFlowCapable && (await this.peers.isFlowCapable(record.id))) await this.reaskInFlowMode(record.id)
       return
     }
     if (record.state === 'completed' && record.previousState !== 'completed') {
@@ -192,7 +197,12 @@ export class DidcommEvents {
 
   // ---- binding (CHAN-BIND-003/009, PROF-BIND-002/004/005) -------------------------------------------
 
-  private async onInvitationAccepted(outOfBandId: string, invitationId: string, connectionId: string): Promise<void> {
+  private async onInvitationAccepted(
+    outOfBandId: string,
+    invitationId: string,
+    connectionId: string,
+    options: { reused?: boolean } = {}
+  ): Promise<void> {
     const session =
       (outOfBandId && (await this.agent.sessions.findProvisionalByOutOfBandId(outOfBandId))) ||
       (invitationId && (await this.agent.sessions.findProvisionalByNonce(invitationId))) ||
@@ -207,7 +217,51 @@ export class DidcommEvents {
       )
       return
     }
+    // the DIDComm agent queries a reusing peer's features again: a connection with no recorded disclosure
+    // waits for it before the serving mode of the binding question is chosen (FLOW-CAP-002, decision 24)
+    if (options.reused && !(await this.peers.get(connectionId))) {
+      const profile = await this.peers.awaitDisclosure(connectionId, this.disclosureWaitMs)
+      if (!profile)
+        this.logger.info(
+          { connectionId, sessionId: session.id },
+          'no disclosure after a handshake reuse: binding question asked as in v3'
+        )
+    }
     await this.askBindingConfirmation(session, connectionId)
+  }
+
+  /**
+   * A wallet that disclosed `ayni-flow/1.0` after its binding questions went out as in v3 cannot answer
+   * them: each still-open question on the connection is asked again as a `link-session` flow, which takes
+   * over the session's confirmation thread (decision 24, FLOW-LINK-001, FLOW-LINK-003).
+   */
+  private async reaskInFlowMode(connectionId: string): Promise<void> {
+    for (const session of await this.agent.sessions.listAwaitingConfirmation(connectionId)) {
+      try {
+        const { threadId, flowId } = await this.adapter.askLinkSession(connectionId, session)
+        await this.agent.sessions.markConfirmationSent(session, connectionId, threadId, flowId)
+        this.logger.info({ connectionId, sessionId: session.id }, 'binding question asked again as a flow')
+      } catch (err) {
+        this.logger.warn({ err, connectionId, sessionId: session.id }, 'binding question not asked again')
+      }
+    }
+    // re-link questions to a known device, still in their question-answer form
+    for (const [key, pending] of [...this.rebinds]) {
+      if (!key.startsWith(`${connectionId}:`) || this.linkFlows.has(key)) continue
+      this.rebinds.delete(key)
+      const session = await this.agent.sessions.get(pending.sessionId)
+      if (session?.state !== 'provisional' || !session.binding || Date.parse(session.binding.expiresAt) < Date.now())
+        continue
+      try {
+        const codes = this.codesAround(session.binding.bindingCode)
+        const { threadId, flowId } = await this.adapter.askLinkSession(connectionId, session, codes)
+        this.rebinds.set(`${connectionId}:${threadId}`, { sessionId: session.id, stage: 'code', codes })
+        this.linkFlows.set(`${connectionId}:${threadId}`, flowId)
+        this.logger.info({ connectionId, sessionId: session.id }, 're-link question asked again as a flow')
+      } catch (err) {
+        this.logger.warn({ err, connectionId, sessionId: session.id }, 're-link question not asked again')
+      }
+    }
   }
 
   /**

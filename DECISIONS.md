@@ -108,6 +108,17 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     `unrecognized` relation and `public` visibility. The welcome pack admits them: it exists for
     people without a credential. `DEV_ALLOW_UNIDENTIFIED_PRINCIPALS` keeps its development-only
     meaning and is still refused in production. The agent says at boot when it admits them.
+24. **The binding question waits for the disclosure on a reuse, and is asked again when it arrives late**
+    (2026-11-02; FLOW-CAP-002, FLOW-LINK-001, CHAN-BIND-009; issue #27). A wallet that already holds a
+    connection answers a binding invitation with a handshake reuse; the DIDComm agent queries its features
+    again, but the binding question was sent at once, so a connection without a recorded disclosure got the
+    question-answer form, which a flow-only wallet rejects (with a problem report this agent never sees: the
+    DIDComm agent drops generic problem reports). On a reuse the agent now waits for the disclosure as it
+    does after a new connection (`DISCLOSURE_WAIT_MS`). When a disclosure naming `ayni-flow/1.0` arrives
+    after binding or re-link questions went out in question-answer form, each still-open one is asked again
+    as a `link-session` flow that takes over the session's confirmation thread; an answer on the old
+    question thread is then ignored. Both depend on the DIDComm agent forwarding disclosures as connection
+    events in state `updated`.
 
 ## Not done in this iteration
 

@@ -253,6 +253,129 @@ describe('link-session binding (CHAN-BIND-009, FLOW-LINK-001)', () => {
   })
 })
 
+describe('binding after a handshake reuse (decision 24, issue #27)', () => {
+  /** A connection that completed with no disclosure on record (served as in v3 so far). */
+  async function connectUndisclosed(connectionId: string) {
+    await events.handle(
+      envelope('didcomm.connections.state-updated', {
+        id: connectionId,
+        state: 'completed',
+        theirDid: `did:peer:${connectionId}`,
+        theirLabel: 'Ayni',
+        outOfBandId: null,
+      })
+    )
+    await settle()
+  }
+  const reuse = (connectionId: string, session: Session) =>
+    events.handle(
+      envelope('didcomm.out-of-band.handshake-reused', {
+        outOfBandId: session.binding?.outOfBandId,
+        invitationId: session.binding?.nonce,
+        connectionId,
+        reuseThreadId: `reuse-${connectionId}`,
+      })
+    )
+  const disclose = (connectionId: string) =>
+    events.handle(
+      envelope('didcomm.connections.state-updated', {
+        id: connectionId,
+        state: 'updated',
+        metadata: {
+          [AYNI_FLOW_PROTOCOL]: feature(AYNI_FLOW_PROTOCOL),
+          'https://didcomm.org/link-session/1.0': feature('https://didcomm.org/link-session/1.0'),
+        },
+      })
+    )
+
+  it('waits for the disclosure the reuse triggers and asks through a link-session flow', async () => {
+    const connectionId = 'conn-reuse'
+    await connectUndisclosed(connectionId)
+    const created = await createUiSession()
+    const session = (await running.agent.sessions.get(created.sessionId)) as Session
+    const questions = callsOf('sendQuestion').length
+    const links = callsOf('sendLinkSessionRequest').length
+
+    const reused = reuse(connectionId, session)
+    await settle()
+    await disclose(connectionId)
+    await reused
+
+    expect(callsOf('sendQuestion')).toHaveLength(questions)
+    expect(callsOf('sendLinkSessionRequest')).toHaveLength(links + 1)
+    const link = last<[{ connectionId: string; request: { invitationId: string } }]>('sendLinkSessionRequest')[0]
+    expect(link.connectionId).toBe(connectionId)
+    expect(link.request.invitationId).toBe(session.binding?.nonce)
+  })
+
+  it('asks again as a flow when the disclosure arrives after the question went out, and binds on its answer', async () => {
+    const connectionId = 'conn-reuse-late'
+    await connectUndisclosed(connectionId)
+    const created = await createUiSession()
+    const session = (await running.agent.sessions.get(created.sessionId)) as Session
+    const questions = callsOf('sendQuestion').length
+    const links = callsOf('sendLinkSessionRequest').length
+
+    await reuse(connectionId, session) // no disclosure within the wait: question-answer form
+    expect(callsOf('sendQuestion')).toHaveLength(questions + 1)
+    const questionThread = (await running.agent.sessions.get(session.id))?.binding?.questionThreadId
+    expect(questionThread).toBeTruthy()
+
+    await disclose(connectionId)
+    await settle()
+    expect(callsOf('sendLinkSessionRequest')).toHaveLength(links + 1)
+    const link = last<[{ flowId: string; request: { invitationId: string; codes: null } }]>('sendLinkSessionRequest')[0]
+    expect(link.request.invitationId).toBe(session.binding?.nonce)
+    expect(link.request.codes).toBeNull()
+    const asked = (await running.agent.sessions.get(session.id))?.binding
+    const threadId = (callsOf('sendLinkSessionRequest').at(-1)?.result as { threadId: string } | undefined)?.threadId
+    expect(asked?.questionThreadId).toBe(threadId)
+    expect(asked?.flowId).toBe(link.flowId)
+
+    // a second disclosure does not ask again
+    await disclose(connectionId)
+    await settle()
+    expect(callsOf('sendLinkSessionRequest')).toHaveLength(links + 1)
+
+    // the old question thread no longer binds; the flow's answer does
+    await events.handle(
+      envelope('didcomm.question-answer.answer-received', { connectionId, threadId: questionThread, response: 'Yes' })
+    )
+    await settle()
+    expect((await running.agent.sessions.get(session.id))?.state).toBe('provisional')
+    await events.handle(
+      envelope('didcomm.link-session.state-changed', {
+        threadId,
+        flowId: link.flowId,
+        connectionId,
+        state: 'response-received',
+        response: { link: true, code: null },
+      })
+    )
+    await settle()
+    expect((await running.agent.sessions.get(session.id))?.state).toBe('bound')
+  })
+
+  it('does not ask again for a disclosure without ayni-flow', async () => {
+    const connectionId = 'conn-reuse-v3'
+    await connectUndisclosed(connectionId)
+    const created = await createUiSession()
+    const session = (await running.agent.sessions.get(created.sessionId)) as Session
+    const links = callsOf('sendLinkSessionRequest').length
+    await reuse(connectionId, session)
+    await events.handle(
+      envelope('didcomm.connections.state-updated', {
+        id: connectionId,
+        state: 'updated',
+        metadata: { 'https://didcomm.org/questionanswer/1.0': feature('https://didcomm.org/questionanswer/1.0') },
+      })
+    )
+    await settle()
+    expect(callsOf('sendLinkSessionRequest')).toHaveLength(links)
+    expect((await running.agent.sessions.get(session.id))?.binding?.flowId).toBeUndefined()
+  })
+})
+
 describe('device challenge as a confirm flow (INTX-AUTH-009, D55)', () => {
   it('opens a confirm flow with a card in the conversation, completes on confirmed: true and closes it', async () => {
     const created = await createUiSession()

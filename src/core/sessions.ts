@@ -603,6 +603,23 @@ export class SessionService {
     await this.store.sessions.save(session)
   }
 
+  /**
+   * Provisional sessions whose binding question went to the connection in its question-answer form (no flow)
+   * and is still open: unused, unexpired binding material.
+   */
+  public async listAwaitingConfirmation(connectionId: string): Promise<Session[]> {
+    const now = Date.now()
+    return (await this.store.sessions.listByState('provisional')).filter(
+      (s) =>
+        !!s.binding &&
+        s.binding.connectionId === connectionId &&
+        !!s.binding.questionThreadId &&
+        !s.binding.flowId &&
+        !s.binding.used &&
+        Date.parse(s.binding.expiresAt) > now
+    )
+  }
+
   public async findByConfirmation(connectionId: string, threadId: string): Promise<Session | undefined> {
     return this.store.sessions.findByQuestionThread(connectionId, threadId)
   }
