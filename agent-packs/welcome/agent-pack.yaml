@@ -156,10 +156,13 @@ privacy:
   erasureRequests: true
 
 media:
+  # voice notes are transcribed by OpenAI (whisper-1 unless STT_MODEL says otherwise); the key is STT_API_KEY
+  # from the deployment, never in the pack; the person's presentation language is the hint per note
   speechToText:
-    enabled: false
-    provider: openai-compatible
-    model: stub
+    enabled: true
+    provider: openai
+    model: ${STT_MODEL:-whisper-1}
+    apiKeyEnv: STT_API_KEY
   vision:
     enabled: true
     provider: llm

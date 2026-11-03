@@ -120,6 +120,13 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     question thread is then ignored. Both depend on the DIDComm agent forwarding disclosures as connection
     events in state `updated`.
 
+25. **The Welcome agent transcribes voice notes with OpenAI** (2026-11-03; MEDIA-STT-001/002, pack rule 7).
+    The Welcome pack had `media.speechToText` disabled on the stub model, so its descriptor advertised
+    `voiceNotes: false` and the app hid the microphone. It now names OpenAI (`whisper-1`, overridable with
+    `STT_MODEL`) with the key in `STT_API_KEY` from the deployment; the agent only advertises voice notes when
+    the transcriber is configured, and the note's language hint is the session's presentation locale. A
+    self-hosted `openai-compatible` endpoint is one `baseUrl` away when audio must stay in the cluster.
+
 ## Not done in this iteration
 
 - Database row-level security, consent management, PII redaction, external IAM (v4 per spec).
