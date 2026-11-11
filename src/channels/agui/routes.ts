@@ -178,7 +178,7 @@ export class AgUiRoutes {
             body.resumeSessionId
           )
           const principal = await this.agent.principalOf(session)
-          if (!session.lineage?.length) await this.agent.welcome(session)
+          await this.agent.welcome(session)
           return reply.code(201).send({
             sessionId: session.id,
             sessionToken: newToken,
@@ -209,7 +209,7 @@ export class AgUiRoutes {
             body.newConversation === true
           )
           const principal = await this.agent.principalOf(session)
-          if (!session.lineage?.length) await this.agent.welcome(session)
+          await this.agent.welcome(session)
           return reply.code(201).send({
             sessionId: session.id,
             sessionToken: newToken,
@@ -243,7 +243,7 @@ export class AgUiRoutes {
         if (session.state === 'bound') {
           // a paired device: bound at once, no phone round trip (PROF-SESS-010)
           const principal = await this.agent.principalOf(session)
-          if (!session.lineage?.length) await this.agent.welcome(session)
+          await this.agent.welcome(session)
           return reply.code(201).send({
             sessionId: session.id,
             sessionToken: newToken,

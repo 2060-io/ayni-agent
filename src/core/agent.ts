@@ -300,8 +300,13 @@ export class AyniAgent {
     await this.sessions.close(session, reason)
   }
 
-  /** Personalized welcome on connection and on every new conversation (INTX-MENU-001). */
+  /**
+   * Personalized welcome on connection and on every new conversation (INTX-MENU-001). A session that continues a
+   * conversation (it has a lineage) gets none, whichever way it was bound: by a grant, a device proof, a sibling
+   * token, or the phone confirming a link.
+   */
   public async welcome(session: Session): Promise<void> {
+    if (session.lineage?.length) return
     const principal = await this.principalOf(session)
     if (!principal) return
     const entry = await this.memory.append({

@@ -12,6 +12,7 @@ import { AYNI_FLOW_PROTOCOL, PeerProfiles } from '../src/channels/didcomm/peerPr
 import type { FlowRecord } from '../src/channels/didcomm/vsAgentClient.js'
 import type { AgentPack } from '../src/config/packTypes.js'
 import { FlowService } from '../src/core/flows.js'
+import { greetingFor } from '../src/core/interaction.js'
 import type { Session } from '../src/core/types.js'
 import { createLogger } from '../src/util/logger.js'
 import { startTestAgent } from './helpers.js'
@@ -250,6 +251,60 @@ describe('link-session binding (CHAN-BIND-009, FLOW-LINK-001)', () => {
     await settle()
     expect((await running.agent.sessions.get(session.id))?.state).toBe('provisional')
     expect(last<[string, { outcome: string }]>('closeFlow')[1].outcome).toBe('cancelled')
+  })
+})
+
+describe('the greeting of a linked session (INTX-MENU-001, PROF-CONV-006)', () => {
+  const reuse = (connectionId: string, session: Session) =>
+    events.handle(
+      envelope('didcomm.out-of-band.handshake-reused', {
+        outOfBandId: session.binding?.outOfBandId,
+        invitationId: session.binding?.nonce,
+        connectionId,
+        reuseThreadId: `reuse-${connectionId}-${session.id}`,
+      })
+    )
+  const answerLink = async (connectionId: string, session: Session) => {
+    const link = last<[{ flowId: string }]>('sendLinkSessionRequest')[0]
+    await events.handle(
+      envelope('didcomm.link-session.state-changed', {
+        threadId: (await running.agent.sessions.get(session.id))?.binding?.questionThreadId,
+        flowId: link.flowId,
+        connectionId,
+        state: 'response-received',
+        response: { link: true, code: null },
+      })
+    )
+    await settle()
+  }
+
+  it('greets the session that starts a conversation, not the one linked later that continues it', async () => {
+    const connectionId = 'conn-greet'
+    const first = await createUiSession()
+    const started = (await running.agent.sessions.get(first.sessionId)) as Session
+    await connectFlowCapable(connectionId, started.binding?.outOfBandId)
+    await settle()
+    await answerLink(connectionId, started)
+    const bound = (await running.agent.sessions.get(started.id)) as Session
+    expect(bound.state).toBe('bound')
+    const greeting = greetingFor(running.agent.pack, (await running.agent.principalOf(bound)) ?? null)
+    const greetings = async (sessionId: string, token: string) =>
+      (await history(sessionId, token)).filter((m) => m.content === greeting).length
+    expect(await greetings(first.sessionId, first.sessionToken)).toBe(1)
+
+    // the person reconnects the browser: a new session, linked by the same phone, continues the conversation
+    const second = await createUiSession()
+    const later = (await running.agent.sessions.get(second.sessionId)) as Session
+    const links = callsOf('sendLinkSessionRequest').length
+    await reuse(connectionId, later)
+    await settle()
+    expect(callsOf('sendLinkSessionRequest')).toHaveLength(links + 1)
+    await answerLink(connectionId, later)
+    const continued = (await running.agent.sessions.get(later.id)) as Session
+    expect(continued.state).toBe('bound')
+    expect(continued.conversationId).toBe(bound.conversationId)
+    // its history holds the conversation's one greeting; no second one was written
+    expect(await greetings(second.sessionId, second.sessionToken)).toBe(1)
   })
 })
 

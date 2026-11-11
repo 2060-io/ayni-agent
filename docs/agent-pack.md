@@ -103,7 +103,8 @@ identity:
 
 - `systemPrompt` is the author's prompt. The platform appends its own system-prompt add-on (working
   memory rules, scoped retrieval, challenges, reaction policy, tools); the persona never overrides it.
-- `greeting` is sent on first contact and on every new conversation; `{userName}` is replaced.
+- `greeting` is sent on first contact and on every new conversation, never to a session that continues a
+  conversation (a reconnection, another device linked to it); `{userName}` is replaced.
 - `menu` items are the author's contextual menu. Platform items (sessions, approvals with badge) are
   added automatically. An item's `action` is `prompt` (sends a text as the user's turn), `tool` (calls
   a tool directly, subject to the same access tiers) or `url`. `visibleWhen` is `always`, `bound`
