@@ -137,6 +137,13 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     `image/jpg` to `image/jpeg`) before the check and keeps the canonical type on the stored object; the
     descriptor keeps listing one type per container.
 
+27. **The greeting belongs to the conversation, not to the session** (2026-11-11; INTX-MENU-001, PROF-CONV-006).
+    The greeting and the menu that follows it go to the session that starts a conversation. A session that
+    continues one (it has a lineage: a reconnection after the idle timeout, another device linked to the
+    conversation) gets none. The rule lives in `Agent.welcome`, so every way of binding follows it; it used to
+    be checked only where a session is created already bound, and a browser session linked by the phone was
+    greeted again at every reconnection.
+
 ## Not done in this iteration
 
 - Database row-level security, consent management, PII redaction, external IAM (v4 per spec).
