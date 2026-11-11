@@ -26,6 +26,7 @@ import type { Logger } from '../../util/logger.js'
 import type { AgUiAdapter } from './adapter.js'
 import { type AgUiEvent, ev, sse } from './events.js'
 import { attachmentActivity, entryToMessages } from './mapping.js'
+import { RunMirror } from './mirror.js'
 import type { SessionStreams } from './streams.js'
 
 /**
@@ -555,6 +556,19 @@ export class AgUiRoutes {
     const write = (event: AgUiEvent) => {
       if (!reply.raw.writableEnded) reply.raw.write(sse(event))
     }
+    // the person's other devices on this conversation see the run as it happens (PROF-STREAM-005)
+    const peers = await this.agent.sessions.conversationPeers(session)
+    const mirror = new RunMirror(
+      this.streams,
+      peers.map((p) => p.id),
+      runId,
+      this.logger
+    )
+    /** to the session that runs, and to the conversation's other sessions */
+    const emit = (event: AgUiEvent) => {
+      write(event)
+      mirror.event(event)
+    }
     // the client closing the run stream cancels the run (PROF-RUN-008)
     request.raw.on('close', () => {
       if (!reply.raw.writableEnded) controller.abort()
@@ -564,18 +578,20 @@ export class AgUiRoutes {
       emit: (event: TurnEvent) => {
         switch (event.type) {
           case 'text-start':
-            return write(ev.textStart(event.messageId))
+            return emit(ev.textStart(event.messageId))
           case 'text-delta':
-            return write(ev.textContent(event.messageId, event.delta))
+            return emit(ev.textContent(event.messageId, event.delta))
           case 'text-end':
-            return write(ev.textEnd(event.messageId))
+            return emit(ev.textEnd(event.messageId))
           case 'step-started':
-            return write(ev.stepStarted(event.label))
+            return emit(ev.stepStarted(event.label))
           case 'step-finished':
-            return write(ev.stepFinished(event.label))
+            return emit(ev.stepFinished(event.label))
           case 'activity':
-            return write(ev.activitySnapshot(event.messageId, event.activityType, event.content))
+            return emit(ev.activitySnapshot(event.messageId, event.activityType, event.content))
           case 'inbound':
+            // the other devices get the person's message whole; the device that sent it already shows it
+            mirror.inbound(event.entry)
             // echo of the inbound entry for voice notes: the transcription under the note (PROF-MAP-006)
             for (const a of event.entry.attachments)
               write(
@@ -632,27 +648,36 @@ export class AgUiRoutes {
         result = await this.agent.action(session, action, sink, controller.signal)
         if (result && 'text' in result && result.text) {
           const id = prefixedId('msg')
-          write(ev.textStart(id))
-          write(ev.textContent(id, result.text))
-          write(ev.textEnd(id))
+          emit(ev.textStart(id))
+          emit(ev.textContent(id, result.text))
+          emit(ev.textEnd(id))
         }
       }
       if (result && 'cancelled' in result && result.cancelled) {
         write(ev.runError('cancelled', RUN_ERROR_CODE.cancelled))
+        mirror.finish({ message: 'cancelled', code: RUN_ERROR_CODE.cancelled })
       } else {
         write(ev.runFinished(session.id, runId, { type: 'success' }))
+        mirror.finish()
       }
       await this.streams.publish(session.id, ev.stateSnapshot({ ayni: await this.agent.ayniState(session) }))
+      // the state a run changes (what is being generated, what waits) is the conversation's on every device
+      for (const peer of peers) await this.adapter.pushState(peer).catch(() => undefined)
     } catch (error) {
+      const failed = (message: string, code: string) => {
+        write(ev.runError(message, code))
+        mirror.finish({ message, code })
+      }
       if (error instanceof SessionError && error.code === 'not-bound')
         write(ev.runError(error.message, RUN_ERROR_CODE.notBound))
-      else if (controller.signal.aborted) write(ev.runError('cancelled', RUN_ERROR_CODE.cancelled))
+      else if (controller.signal.aborted) failed('cancelled', RUN_ERROR_CODE.cancelled)
       else {
         this.logger.error({ err: error, runId }, 'run failed')
-        write(ev.runError(error instanceof Error ? error.message : 'internal error', RUN_ERROR_CODE.internal))
+        failed(error instanceof Error ? error.message : 'internal error', RUN_ERROR_CODE.internal)
       }
     } finally {
       this.runs.delete(runId)
+      await mirror.settled()
       if (!reply.raw.writableEnded) reply.raw.end()
     }
   }

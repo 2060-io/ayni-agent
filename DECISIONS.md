@@ -144,6 +144,27 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     be checked only where a session is created already bound, and a browser session linked by the phone was
     greeted again at every reconnection.
 
+28. **One conversation, every device** (2026-11-11; D61, IDENT-SESS-016, PROF-STREAM-005/006, PROF-HIST-007).
+    Found live: with a conversation open in the browser and in the app, a message typed on one and its reply
+    did not show on the other. A run's events went to the run's own response and nowhere else, and a session
+    read its history through the sessions that existed when it was created, so a device opened first never
+    read what a device opened later carried.
+    - **The mirror of a run** (`channels/agui/mirror.ts`). What a run adds is sent, as it happens, to the other
+      bound sessions of the conversation on their streams, inside a server-initiated run: the person's message
+      as history will give it (under the agent's id, on the person's side, attachments as activities), then
+      the run's own events with their message ids. Text deltas are grouped over 120 ms: one stream write per
+      token on every device would be a database write each. A run that adds nothing mirrors nothing. A session
+      bound while a run is in flight gets that run from history.
+    - **Conversation events** (`CapabilityRouter.deliver`). A message, a menu, a late file, a flow card, a
+      reaction or a generating notice served to one session is shown on the conversation's other sessions
+      too, quietly: the wake-up goes once, with the session that was served. Approvals keep their own
+      delivery (each eligible session gets its own shape), as do a session's state and receipts.
+    - **History.** When a session attaches to a conversation, the sessions already open on it take it into
+      their lineage, as it takes them: history, the model's window, the quote of a reply and the target of a
+      reaction then cover the conversation whichever device carried a message.
+    - **State.** After a run the conversation's other sessions get their state again (what is being
+      generated, what waits).
+
 ## Not done in this iteration
 
 - Database row-level security, consent management, PII redaction, external IAM (v4 per spec).
