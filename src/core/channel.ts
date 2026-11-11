@@ -25,7 +25,8 @@ export interface ChannelAdapter {
   readonly capabilities: ReadonlySet<Capability>
   /** The profile for one session's peer when it differs from the channel's (DIDComm: per peer, CHAN-PROF-006). */
   capabilitiesFor?(session: Session): Promise<ReadonlySet<Capability>>
-  render(session: Session, event: CapabilityEvent): Promise<RenderResult>
+  /** `mirror`: the event was served on another session of the conversation; this one only shows it (PROF-STREAM-006). */
+  render(session: Session, event: CapabilityEvent, options?: { mirror?: boolean }): Promise<RenderResult>
   /** Whether someone is listening on the session right now (AG-UI: an attached event stream), for wake-ups (D57). */
   isLive?(session: Session): boolean
   /** A wake-up on the capability channel (`notify`, D57); false when the peer cannot receive one. */
@@ -96,6 +97,20 @@ export function capabilityOf(event: CapabilityEvent): Capability {
   }
 }
 
+/**
+ * The events that are part of a conversation's transcript: every session of the conversation shows them. The
+ * others (a session's own state, a receipt, the status of a routed capability, an approval sent to each eligible
+ * session in its own shape) stay with the session they were made for.
+ */
+const CONVERSATION_EVENTS: ReadonlySet<CapabilityEvent['kind']> = new Set([
+  'text',
+  'menu',
+  'media',
+  'reaction',
+  'generating',
+  'flow',
+])
+
 export class CapabilityRouter {
   private readonly adapters = new Map<ChannelType, ChannelAdapter>()
 
@@ -112,19 +127,44 @@ export class CapabilityRouter {
     return this.adapters.get(type)
   }
 
-  /** Delivers an ordinary event on the session's own channel (served in place). */
-  public async deliver(session: Session, event: CapabilityEvent): Promise<RenderResult> {
+  /**
+   * Delivers an ordinary event on the session's own channel (served in place). What belongs to the conversation
+   * (a message, a card, a reaction) is shown as well on the other sessions of that conversation, the person's
+   * other devices (IDENT-SESS-016, PROF-STREAM-006); `peers: false` when the caller already reaches every session.
+   */
+  public async deliver(
+    session: Session,
+    event: CapabilityEvent,
+    options: { peers?: boolean } = {}
+  ): Promise<RenderResult> {
+    const result = await this.render(session, event, false)
+    if (options.peers !== false && CONVERSATION_EVENTS.has(event.kind)) {
+      for (const peer of await this.conversationPeers(session)) await this.render(peer, event, true)
+    }
+    return result
+  }
+
+  private async render(session: Session, event: CapabilityEvent, mirror: boolean): Promise<RenderResult> {
     const adapter = this.adapters.get(session.channelType)
     if (!adapter) return 'unsupported'
     const capability = capabilityOf(event)
     const capabilities = adapter.capabilitiesFor ? await adapter.capabilitiesFor(session) : adapter.capabilities
     if (!capabilities.has(capability)) return 'unsupported'
     try {
-      return await adapter.render(session, event)
+      return await adapter.render(session, event, mirror ? { mirror: true } : undefined)
     } catch (error) {
       this.logger.error({ err: error, sessionId: session.id, kind: event.kind }, 'render failed')
       return 'unsupported'
     }
+  }
+
+  /** The other bound AG-UI sessions on the conversation of this one. */
+  private async conversationPeers(session: Session): Promise<Session[]> {
+    if (session.channelType !== 'ag-ui' || !session.conversationId || !session.principalId) return []
+    const open = await this.store.sessions.listByPrincipal(session.principalId, ['bound'])
+    return open.filter(
+      (s) => s.id !== session.id && s.channelType === 'ag-ui' && s.conversationId === session.conversationId
+    )
   }
 
   /** Status of a trust-bound event mirrored to the originating session (CHAN-ROUTE-005). */
@@ -144,7 +184,7 @@ export class CapabilityRouter {
     const sessions = await this.store.sessions.listByPrincipal(principal.id, ['bound'])
     for (const session of sessions) {
       if (only && !only(session)) continue
-      await this.deliver(session, event)
+      await this.deliver(session, event, { peers: false })
     }
   }
 

@@ -222,6 +222,128 @@ describe('device pairing (PROF-SESS-010..012, PROF-BIND-010, IDENT-DEV-001..005)
       payload: { client, locale: 'en', deviceHandle, deviceProof, ...(resumeSessionId ? { resumeSessionId } : {}) },
     })
 
+  /** Everything a session's stream carried so far. */
+  const received = (sessionId: string) => {
+    const chunks: string[] = []
+    running.streams.attach(sessionId, { write: (c) => chunks.push(c), end: () => undefined }, 0)()
+    return parseSse(chunks.join('')).map((e) => e.event)
+  }
+  /** A second device of the same person: its session, bound by the phone, continues the conversation. */
+  async function secondDevice(actor: string) {
+    const { body } = await createSession()
+    await bindViaPhone(body.sessionId, actor)
+    return body
+  }
+  const historyOf = async (s: { sessionId: string; sessionToken: string }) =>
+    (
+      await running.app.inject({
+        method: 'GET',
+        url: `/agui/v3/sessions/${s.sessionId}/messages?limit=50`,
+        headers: { authorization: `Bearer ${s.sessionToken}` },
+      })
+    ).json().messages as { id: string; role: string; content: unknown; metadata: Record<string, unknown> }[]
+
+  it("shows a message and its reply on the person's other device as they happen (PROF-STREAM-005, IDENT-SESS-016)", async () => {
+    const { first: laptop } = await pair('did:peer:olga')
+    const phone = await secondDevice('did:peer:olga')
+    const [a, b] = await Promise.all([
+      running.agent.sessions.get(laptop.sessionId),
+      running.agent.sessions.get(phone.sessionId),
+    ])
+    expect(b?.conversationId).toBe(a?.conversationId)
+    const before = received(phone.sessionId).length
+    const laptopBefore = received(laptop.sessionId).length
+
+    const said = await run(laptop.sessionId, laptop.sessionToken, 'what is Ayni?')
+    expect(said.status).toBe(200)
+    const reply = said.events.find((e) => e.type === 'TEXT_MESSAGE_START' && e.role === 'assistant')
+    const replyText = said.events
+      .filter((e) => e.type === 'TEXT_MESSAGE_CONTENT' && e.messageId === reply?.messageId)
+      .map((e) => e.delta)
+      .join('')
+
+    const mirrored = received(phone.sessionId).slice(before)
+    // a server-initiated run on the phone's own thread
+    expect(mirrored[0]).toMatchObject({ type: 'RUN_STARTED', threadId: phone.sessionId })
+    expect(mirrored.some((e) => e.type === 'RUN_FINISHED' && e.threadId === phone.sessionId)).toBe(true)
+    // the person's message, on the person's side, under the id history gives it
+    const user = mirrored.find((e) => e.type === 'TEXT_MESSAGE_START' && e.role === 'user')
+    const history = await historyOf(phone)
+    const inHistory = history.find((m) => m.role === 'user' && m.content === 'what is Ayni?')
+    expect(user?.messageId).toBe(inHistory?.id)
+    expect(inHistory?.metadata.externalId).toBe('u1')
+    expect(
+      mirrored
+        .filter((e) => e.type === 'TEXT_MESSAGE_CONTENT' && e.messageId === user?.messageId)
+        .map((e) => e.delta)
+        .join('')
+    ).toBe('what is Ayni?')
+    // the reply, under the message id of the laptop's run, with the same text
+    expect(mirrored.some((e) => e.type === 'TEXT_MESSAGE_START' && e.messageId === reply?.messageId)).toBe(true)
+    expect(
+      mirrored
+        .filter((e) => e.type === 'TEXT_MESSAGE_CONTENT' && e.messageId === reply?.messageId)
+        .map((e) => e.delta)
+        .join('')
+    ).toBe(replyText)
+    expect(mirrored.some((e) => e.type === 'TEXT_MESSAGE_END' && e.messageId === reply?.messageId)).toBe(true)
+    // the laptop's own stream carries no mirror of its own run
+    const own = received(laptop.sessionId).slice(laptopBefore)
+    expect(own.filter((e) => /^(TEXT_MESSAGE|RUN_)/.test(String(e.type)))).toEqual([])
+
+    // and the other way round: the phone writes, the laptop sees it
+    const laptopSeen = received(laptop.sessionId).length
+    await run(phone.sessionId, phone.sessionToken, 'and who runs it?')
+    const back = received(laptop.sessionId).slice(laptopSeen)
+    const backUser = back.find((e) => e.type === 'TEXT_MESSAGE_START' && e.role === 'user')
+    expect(
+      back
+        .filter((e) => e.type === 'TEXT_MESSAGE_CONTENT' && e.messageId === backUser?.messageId)
+        .map((e) => e.delta)
+        .join('')
+    ).toBe('and who runs it?')
+  })
+
+  it('gives every device the whole conversation in its history, whichever device carried a message (PROF-HIST-007)', async () => {
+    const { first: laptop } = await pair('did:peer:pia')
+    await run(laptop.sessionId, laptop.sessionToken, 'from the laptop, before the phone')
+    const phone = await secondDevice('did:peer:pia')
+    await run(phone.sessionId, phone.sessionToken, 'from the phone')
+    await run(laptop.sessionId, laptop.sessionToken, 'from the laptop again')
+    const said = (messages: { role: string; content: unknown }[]) =>
+      messages.filter((m) => m.role === 'user').map((m) => m.content)
+    const all = ['from the laptop, before the phone', 'from the phone', 'from the laptop again']
+    // the laptop's session was opened first: it reads what the phone's later session carried
+    expect(said(await historyOf(laptop))).toEqual(all)
+    expect(said(await historyOf(phone))).toEqual(all)
+    // another person's conversation stays out
+    const other = await pair('did:peer:quentin')
+    await run(other.first.sessionId, other.first.sessionToken, 'mine alone')
+    expect(said(await historyOf(laptop))).toEqual(all)
+  })
+
+  it("shows a reaction on the person's other device (PROF-STREAM-006, PROF-RUN-010)", async () => {
+    const { first: laptop } = await pair('did:peer:rita')
+    const phone = await secondDevice('did:peer:rita')
+    const said = await run(laptop.sessionId, laptop.sessionToken, 'hello')
+    const messageId = String(
+      said.events.find((e) => e.type === 'TEXT_MESSAGE_START' && e.role === 'assistant')?.messageId
+    )
+    const seen = received(laptop.sessionId).length
+    // the phone reacts to the reply it saw arrive from the laptop's run
+    const reacted = await run(phone.sessionId, phone.sessionToken, '', {
+      kind: 'reaction',
+      messageId,
+      emoji: '👍',
+      action: 'add',
+    })
+    expect(reacted.status).toBe(200)
+    const onLaptop = received(laptop.sessionId)
+      .slice(seen)
+      .find((e) => e.type === 'CUSTOM' && e.name === 'ayni.reaction')
+    expect(onLaptop?.value).toMatchObject({ messageId, emoji: '👍', action: 'add' })
+  })
+
   it('keeps a reaction on a message of an earlier session of the conversation (INTX-REACT-004, IDENT-SESS-009)', async () => {
     const { first, deviceHandle, deviceSecret } = await pair('did:peer:mona')
     const said = await run(first.sessionId, first.sessionToken, 'hello there')

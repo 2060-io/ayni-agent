@@ -73,6 +73,8 @@ export interface SessionGrant {
   used: boolean
 }
 
+/** how many sessions of its conversation a session reads besides its own, newest first */
+const LINEAGE_LIMIT = 30
 const GRANT_PREFIX = 'session-grant:'
 const MAX_GRANT_SECONDS = 60
 
@@ -488,10 +490,30 @@ export class SessionService {
     }
     session.conversationId = conversation.id
     const earlier = conversation.sessionIds.filter((id) => id !== session.id)
-    if (earlier.length) session.lineage = earlier.slice(0, 20)
+    if (earlier.length) session.lineage = earlier.slice(0, LINEAGE_LIMIT)
+    // one transcript for every session of the conversation (IDENT-SESS-016): the sessions already open on it,
+    // those of the person's other devices, read what this one will carry as this one reads what they carried
+    for (const id of earlier) {
+      const other = await this.store.sessions.get(id)
+      if (other?.state !== 'bound' || other.lineage?.includes(session.id)) continue
+      other.lineage = [session.id, ...(other.lineage ?? [])].slice(0, LINEAGE_LIMIT)
+      await this.store.sessions.save(other)
+    }
     conversation.sessionIds = [session.id, ...earlier]
     conversation.lastActivityAt = now
     await this.store.conversations.save(conversation)
+  }
+
+  /**
+   * The other sessions showing the conversation of this one: the person's other devices on it (IDENT-SESS-016).
+   * What this session adds to the conversation is sent to them as it happens (PROF-STREAM-005).
+   */
+  public async conversationPeers(session: Session): Promise<Session[]> {
+    if (session.channelType !== 'ag-ui' || !session.conversationId || !session.principalId) return []
+    const open = await this.store.sessions.listByPrincipal(session.principalId, ['bound'])
+    return open.filter(
+      (s) => s.id !== session.id && s.channelType === 'ag-ui' && s.conversationId === session.conversationId
+    )
   }
 
   /** The Principal's conversations, active and archived, newest activity first (PROF-CONV-001). */

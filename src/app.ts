@@ -51,6 +51,8 @@ import { createLogger, type Logger } from './util/logger.js'
 export interface RunningAgent {
   app: FastifyInstance
   agent: AyniAgent
+  /** the session streams of the AG-UI channel, for the tests that read what a session received */
+  streams: SessionStreams
   stop(): Promise<void>
 }
 
@@ -357,6 +359,7 @@ export async function buildAgent(
   return {
     app,
     agent,
+    streams,
     stop: async () => {
       for (const stop of stops) stop()
       await app.close()

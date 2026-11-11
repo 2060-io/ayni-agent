@@ -42,7 +42,13 @@ export class AgUiAdapter implements ChannelAdapter {
     await this.streams.publish(session.id, ev.stateSnapshot({ ayni: state }))
   }
 
-  public async render(session: Session, event: CapabilityEvent): Promise<RenderResult> {
+  public async render(
+    session: Session,
+    event: CapabilityEvent,
+    options: { mirror?: boolean } = {}
+  ): Promise<RenderResult> {
+    // a mirror is shown, never announced: the wake-up of the conversation went with the session that was served
+    const quiet = options.mirror === true
     const s = this.streams
     switch (event.kind) {
       case 'text':
@@ -53,7 +59,7 @@ export class AgUiAdapter implements ChannelAdapter {
             await s.publish(session.id, ev.textContent(event.entry.id, event.entry.text))
             await s.publish(session.id, ev.textEnd(event.entry.id))
           },
-          event.entry.text
+          quiet ? undefined : event.entry.text
         )
         return 'ok'
       case 'menu':
@@ -69,7 +75,7 @@ export class AgUiAdapter implements ChannelAdapter {
               })
             )
           },
-          event.prompt
+          quiet ? undefined : event.prompt
         )
         return 'ok'
       case 'media':
@@ -88,7 +94,7 @@ export class AgUiAdapter implements ChannelAdapter {
               )
             }
           },
-          event.entry.text || 'Sent you a file'
+          quiet ? undefined : event.entry.text || 'Sent you a file'
         )
         await this.pushState(session)
         return 'ok'
