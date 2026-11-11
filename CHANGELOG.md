@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/2060-io/ayni-agent/compare/v0.7.3...v0.8.0) (2026-11-11)
+
+
+### Features
+
+* **conversations:** a conversation is one transcript on every device (mirror of a run, shared history) ([#39](https://github.com/2060-io/ayni-agent/issues/39)) ([c29d8dd](https://github.com/2060-io/ayni-agent/commit/c29d8dd1431a9aa885343d17f7ba7b6b098675c5))
+
 ## [0.7.3](https://github.com/2060-io/ayni-agent/compare/v0.7.2...v0.7.3) (2026-11-11)
 
 
