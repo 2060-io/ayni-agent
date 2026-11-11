@@ -165,6 +165,17 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     - **State.** After a run the conversation's other sessions get their state again (what is being
       generated, what waits).
 
+29. **A change to a conversation is announced to every device** (2026-11-11; PROF-CONV-008, PROF-CONV-002).
+    Found live: a conversation renamed in the app kept its old title in the browser. The rename was stored,
+    but nothing told the other devices; each showed the new title only after its next read of the list. The
+    agent now sends the `Custom` event `ayni.conversation.changed` (`{ conversationId, title, state }`) on
+    the stream of every bound AG-UI session of the Principal, whichever conversation that session serves,
+    when a conversation is renamed, archived, unarchived or closed for good, and when its first message names
+    it or a new message unarchives it. Archiving and closing announce before they close the conversation's
+    sessions, so a device that had it open learns why. The profile package lists the event (3.1.2). The
+    preview and the time of the last activity are not announced: a client that shows a conversation has them
+    from its own stream, and a list is read again when it is opened.
+
 ## Not done in this iteration
 
 - Database row-level security, consent management, PII redaction, external IAM (v4 per spec).

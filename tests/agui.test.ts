@@ -262,7 +262,10 @@ describe('device pairing (PROF-SESS-010..012, PROF-BIND-010, IDENT-DEV-001..005)
       .map((e) => e.delta)
       .join('')
 
-    const mirrored = received(phone.sessionId).slice(before)
+    // (the first message also names the conversation: that announcement is not part of the mirrored run)
+    const mirrored = received(phone.sessionId)
+      .slice(before)
+      .filter((e) => !(e.type === 'CUSTOM' && e.name === 'ayni.conversation.changed'))
     // a server-initiated run on the phone's own thread
     expect(mirrored[0]).toMatchObject({ type: 'RUN_STARTED', threadId: phone.sessionId })
     expect(mirrored.some((e) => e.type === 'RUN_FINISHED' && e.threadId === phone.sessionId)).toBe(true)
@@ -342,6 +345,70 @@ describe('device pairing (PROF-SESS-010..012, PROF-BIND-010, IDENT-DEV-001..005)
       .slice(seen)
       .find((e) => e.type === 'CUSTOM' && e.name === 'ayni.reaction')
     expect(onLaptop?.value).toMatchObject({ messageId, emoji: '👍', action: 'add' })
+  })
+
+  it('tells every device of the person that a conversation was renamed, archived or closed (PROF-CONV-008)', async () => {
+    const { first: phone } = await pair('did:peer:sven')
+    await run(phone.sessionId, phone.sessionToken, 'first words')
+    const laptop = await secondDevice('did:peer:sven')
+    const conversationId = (await running.agent.sessions.get(phone.sessionId))?.conversationId as string
+    const changes = (sessionId: string, from: number) =>
+      received(sessionId)
+        .slice(from)
+        .filter((e) => e.type === 'CUSTOM' && e.name === 'ayni.conversation.changed')
+        .map((e) => e.value)
+    const patch = (body: Record<string, unknown>) =>
+      running.app.inject({
+        method: 'PATCH',
+        url: `/agui/v3/sessions/conversations/${conversationId}`,
+        headers: { authorization: `Bearer ${phone.sessionToken}` },
+        payload: body,
+      })
+    // renamed on the phone: the laptop hears of it, and so does the phone's own stream (its other screens)
+    const seen = received(laptop.sessionId).length
+    const own = received(phone.sessionId).length
+    expect((await patch({ title: 'Renamed on the phone' })).statusCode).toBe(200)
+    expect(changes(laptop.sessionId, seen)).toEqual([
+      { conversationId, title: 'Renamed on the phone', state: 'active' },
+    ])
+    expect(changes(phone.sessionId, own)).toHaveLength(1)
+    // another person hears nothing
+    const other = await pair('did:peer:tara')
+    const theirs = received(other.first.sessionId).length
+    // archiving closes the conversation's sessions and their streams: the laptop is told before it is closed
+    const live: string[] = []
+    running.streams.attach(laptop.sessionId, { write: (c) => live.push(c), end: () => undefined })
+    expect((await patch({ state: 'archived' })).statusCode).toBe(200)
+    const told = parseSse(live.join('')).map((e) => e.event)
+    const change = told.findIndex((e) => e.type === 'CUSTOM' && e.name === 'ayni.conversation.changed')
+    const closed = told.findIndex(
+      (e) =>
+        e.type === 'CUSTOM' && e.name === 'ayni.session.state' && (e.value as { state?: string }).state === 'closed'
+    )
+    expect(told[change]?.value).toEqual({ conversationId, title: 'Renamed on the phone', state: 'archived' })
+    expect(change).toBeGreaterThanOrEqual(0)
+    expect(closed).toBeGreaterThan(change)
+    expect(changes(other.first.sessionId, theirs)).toEqual([])
+  })
+
+  it('names a conversation from its first message for the other devices too (IDENT-SESS-013, PROF-CONV-008)', async () => {
+    const { first: phone } = await pair('did:peer:uma')
+    const laptop = await secondDevice('did:peer:uma')
+    const seen = received(laptop.sessionId).length
+    await run(phone.sessionId, phone.sessionToken, 'How do I get a credential?')
+    const named = received(laptop.sessionId)
+      .slice(seen)
+      .filter((e) => e.type === 'CUSTOM' && e.name === 'ayni.conversation.changed')
+    expect(named).toHaveLength(1)
+    expect(named[0]?.value).toMatchObject({ title: 'How do I get a credential?', state: 'active' })
+    // a second message changes neither the title nor the state: nothing more is announced
+    const after = received(laptop.sessionId).length
+    await run(phone.sessionId, phone.sessionToken, 'And then?')
+    expect(
+      received(laptop.sessionId)
+        .slice(after)
+        .filter((e) => e.type === 'CUSTOM' && e.name === 'ayni.conversation.changed')
+    ).toEqual([])
   })
 
   it('keeps a reaction on a message of an earlier session of the conversation (INTX-REACT-004, IDENT-SESS-009)', async () => {
