@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.3](https://github.com/2060-io/ayni-agent/compare/v0.7.2...v0.7.3) (2026-11-11)
+
+
+### Bug Fixes
+
+* **welcome:** greet the session that starts a conversation, never one that continues it ([#37](https://github.com/2060-io/ayni-agent/issues/37)) ([933533f](https://github.com/2060-io/ayni-agent/commit/933533fcdeed4534fc0480e40c1741d09d7fab00))
+
 ## [0.7.2](https://github.com/2060-io/ayni-agent/compare/v0.7.1...v0.7.2) (2026-11-11)
 
 
