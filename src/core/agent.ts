@@ -435,8 +435,11 @@ export class AyniAgent {
         await this.memory.append(
           entryBase(`Reaction ${action.action} ${action.emoji} on ${action.messageId}`, 'reaction', { ...action })
         )
-        // one reaction per person per message (INTX-REACT-004): the current one lives on the target entry
-        if (target && target.sessionId === session.id) {
+        // one reaction per person per message (INTX-REACT-004): the current one lives on the target entry.
+        // The target is a message of this conversation: of this session or of an earlier one it continues
+        // (IDENT-SESS-009), as for the quote of a reply. Checking this session alone dropped, without a
+        // word, every reaction on a message older than the last idle timeout
+        if (target && [session.id, ...(session.lineage ?? [])].includes(target.sessionId)) {
           const reactions = { ...((target.payload?.reactions as Record<string, unknown> | undefined) ?? {}) }
           if (action.action === 'add')
             reactions[principal.id] = { emoji: action.emoji, by: displayName(principal), at: new Date().toISOString() }

@@ -60,7 +60,10 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     it in `metadata.reactions`; an `add` replaces the previous one, a `remove` clears it. The
     reaction entry is still appended as the audit record. The Principal's own reaction is mirrored
     to the session's channel with `origin: 'principal'`; the DIDComm adapter never echoes it to the
-    phone (the app already shows what its user did).
+    phone (the app already shows what its user did). The target may be any message of the
+    conversation the session continues (this session or one of its lineage, IDENT-SESS-009), as for the
+    quote of a reply: a reaction on a message older than the last idle timeout used to be dropped silently
+    (fixed 2026-11-11).
 18. **Replies** (PROF-RUN-009). A `text` or `attachments` action may carry `replyTo`, the id of a
     message of the same conversation (or its resume lineage). The turn entry stores a short quote
     in `payload.replyTo`, history exposes it in `metadata.replyTo`, and the model receives the

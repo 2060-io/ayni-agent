@@ -222,6 +222,58 @@ describe('device pairing (PROF-SESS-010..012, PROF-BIND-010, IDENT-DEV-001..005)
       payload: { client, locale: 'en', deviceHandle, deviceProof, ...(resumeSessionId ? { resumeSessionId } : {}) },
     })
 
+  it('keeps a reaction on a message of an earlier session of the conversation (INTX-REACT-004, IDENT-SESS-009)', async () => {
+    const { first, deviceHandle, deviceSecret } = await pair('did:peer:mona')
+    const said = await run(first.sessionId, first.sessionToken, 'hello there')
+    const reply = said.events.find((e) => e.type === 'TEXT_MESSAGE_START' && e.role === 'assistant')
+    const messageId = String(reply?.messageId)
+    // the idle timeout closes the session; the device opens a new one, which continues the conversation
+    await running.agent.sessions.close((await running.agent.sessions.get(first.sessionId)) as never, 'idle-timeout')
+    const second = (await createWithProof(deviceHandle, deviceSecret)).json() as {
+      sessionId: string
+      sessionToken: string
+      state: string
+    }
+    expect(second.state).toBe('bound')
+    expect(second.sessionId).not.toBe(first.sessionId)
+    const reacted = await run(second.sessionId, second.sessionToken, '', {
+      kind: 'reaction',
+      messageId,
+      emoji: '👍',
+      action: 'add',
+    })
+    expect(reacted.status).toBe(200)
+    const history = await running.app.inject({
+      method: 'GET',
+      url: `/agui/v3/sessions/${second.sessionId}/messages?limit=50`,
+      headers: { authorization: `Bearer ${second.sessionToken}` },
+    })
+    const messages = history.json().messages as { id: string; metadata: { reactions?: { emoji: string }[] } }[]
+    // the earlier message is part of this session's history, and it carries the reaction
+    expect(messages.find((m) => m.id === messageId)?.metadata.reactions).toEqual([
+      { emoji: '👍', by: expect.any(String) },
+    ])
+    // a message of another person's conversation takes no reaction from here
+    const other = await pair('did:peer:nora')
+    const theirs = await run(other.first.sessionId, other.first.sessionToken, 'hi')
+    const foreign = String(
+      theirs.events.find((e) => e.type === 'TEXT_MESSAGE_START' && e.role === 'assistant')?.messageId
+    )
+    await run(second.sessionId, second.sessionToken, '', {
+      kind: 'reaction',
+      messageId: foreign,
+      emoji: '👎',
+      action: 'add',
+    })
+    const theirHistory = await running.app.inject({
+      method: 'GET',
+      url: `/agui/v3/sessions/${other.first.sessionId}/messages?limit=50`,
+      headers: { authorization: `Bearer ${other.first.sessionToken}` },
+    })
+    const theirMessages = theirHistory.json().messages as typeof messages
+    expect(theirMessages.find((m) => m.id === foreign)?.metadata.reactions).toBeUndefined()
+  })
+
   it('hands a device secret at the phone binding, binds the next session from it and rotates it', async () => {
     const { first, deviceHandle, deviceSecret } = await pair('did:peer:judy')
     expect(deviceHandle).toMatch(/^dev_/)
