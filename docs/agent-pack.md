@@ -196,6 +196,13 @@ the device secret; a stale secret revokes the pairing (D51, IDENT-DEV).
 allowed by CORS, the wallet link template (an HTTPS app link with `{oob}`, never `didcomm://`) and the
 upload limits published in the descriptor. DIDComm is always on.
 
+A person can have the same conversation open on several devices at once (the phone and a laptop, two
+browsers). Nothing in the pack turns this on or off: each device holds its own session on the
+conversation, the agent sends each of them what the others add as it happens, and history gives every
+one of them the whole conversation (D61, IDENT-SESS-016). The idle timeout still applies to each session
+on its own; a device whose session was closed opens a new one on the same conversation and reads what it
+missed.
+
 ## privacy
 
 `processingActivities` enumerates the personal-data processing this agent performs and declares, for
