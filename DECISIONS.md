@@ -165,7 +165,7 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     - **State.** After a run the conversation's other sessions get their state again (what is being
       generated, what waits).
 
-29. **A change to a conversation is announced to every device** (2026-11-11; PROF-CONV-008, PROF-CONV-002).
+29. **A change to a conversation is announced to every device** (2026-11-11; PROF-CONV-007, PROF-CONV-002).
     Found live: a conversation renamed in the app kept its old title in the browser. The rename was stored,
     but nothing told the other devices; each showed the new title only after its next read of the list. The
     agent now sends the `Custom` event `ayni.conversation.changed` (`{ conversationId, title, state }`) on

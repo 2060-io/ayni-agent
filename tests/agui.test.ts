@@ -347,7 +347,7 @@ describe('device pairing (PROF-SESS-010..012, PROF-BIND-010, IDENT-DEV-001..005)
     expect(onLaptop?.value).toMatchObject({ messageId, emoji: '👍', action: 'add' })
   })
 
-  it('tells every device of the person that a conversation was renamed, archived or closed (PROF-CONV-008)', async () => {
+  it('tells every device of the person that a conversation was renamed, archived or closed (PROF-CONV-007)', async () => {
     const { first: phone } = await pair('did:peer:sven')
     await run(phone.sessionId, phone.sessionToken, 'first words')
     const laptop = await secondDevice('did:peer:sven')
@@ -391,7 +391,7 @@ describe('device pairing (PROF-SESS-010..012, PROF-BIND-010, IDENT-DEV-001..005)
     expect(changes(other.first.sessionId, theirs)).toEqual([])
   })
 
-  it('names a conversation from its first message for the other devices too (IDENT-SESS-013, PROF-CONV-008)', async () => {
+  it('names a conversation from its first message for the other devices too (IDENT-SESS-013, PROF-CONV-007)', async () => {
     const { first: phone } = await pair('did:peer:uma')
     const laptop = await secondDevice('did:peer:uma')
     const seen = received(laptop.sessionId).length

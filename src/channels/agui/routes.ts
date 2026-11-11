@@ -685,7 +685,7 @@ export class AgUiRoutes {
   /**
    * A conversation changed (its title, archived or not, closed for good): every bound session of its Principal
    * hears of it on its stream, whichever conversation that session serves, so each device's list follows the
-   * change made on another (PROF-CONV-008).
+   * change made on another (PROF-CONV-007).
    */
   public async announceConversation(conversation: Conversation): Promise<void> {
     const sessions = await this.agent.store.sessions.listByPrincipal(conversation.principalId, ['bound'])

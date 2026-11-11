@@ -550,7 +550,7 @@ export class SessionService {
     return conversation
   }
 
-  /** Tells the Principal's sessions that their list of conversations changed (PROF-CONV-008); never fails a call. */
+  /** Tells the Principal's sessions that their list of conversations changed (PROF-CONV-007); never fails a call. */
   private async conversationChanged(conversation: Conversation): Promise<void> {
     await this.events
       .onConversationChanged?.(conversation)
