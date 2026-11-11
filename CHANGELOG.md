@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.2](https://github.com/2060-io/ayni-agent/compare/v0.7.1...v0.7.2) (2026-11-11)
+
+
+### Bug Fixes
+
+* **reactions:** a reaction on a message of an earlier session of the conversation is kept ([#35](https://github.com/2060-io/ayni-agent/issues/35)) ([ad7e9cc](https://github.com/2060-io/ayni-agent/commit/ad7e9cce51e4b0c683747f4f90e1756cc4e49791))
+
 ## [0.7.1](https://github.com/2060-io/ayni-agent/compare/v0.7.0...v0.7.1) (2026-11-03)
 
 
