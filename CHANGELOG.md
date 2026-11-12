@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.10.0](https://github.com/2060-io/ayni-agent/compare/v0.9.1...v0.10.0) (2026-11-12)
+
+
+### Features
+
+* **sessions:** a bound session or none (silent creation) ([#47](https://github.com/2060-io/ayni-agent/issues/47)) ([0b8096d](https://github.com/2060-io/ayni-agent/commit/0b8096dda635af67a4349bbba984c80f511d4bc0))
+
+
+### Bug Fixes
+
+* **conversations:** opening a conversation is not activity in it ([#46](https://github.com/2060-io/ayni-agent/issues/46)) ([0cec54f](https://github.com/2060-io/ayni-agent/commit/0cec54f057d7f5c68895bc76043e08991bbd328e))
+
 ## [0.9.1](https://github.com/2060-io/ayni-agent/compare/v0.9.0...v0.9.1) (2026-11-12)
 
 
