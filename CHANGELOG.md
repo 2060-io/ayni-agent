@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/2060-io/ayni-agent/compare/v0.10.0...v0.11.0) (2026-11-12)
+
+
+### Features
+
+* **conversations:** shared read state, one marker per conversation ([#49](https://github.com/2060-io/ayni-agent/issues/49)) ([d764b14](https://github.com/2060-io/ayni-agent/commit/d764b14b0b9cedb2392b2355748bb9756aff538f))
+
 ## [0.10.0](https://github.com/2060-io/ayni-agent/compare/v0.9.1...v0.10.0) (2026-11-12)
 
 
