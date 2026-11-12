@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/2060-io/ayni-agent/compare/v0.9.0...v0.9.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* **sessions:** a phone is never asked to link the session of its own app ([#44](https://github.com/2060-io/ayni-agent/issues/44)) ([f8c02cd](https://github.com/2060-io/ayni-agent/commit/f8c02cdd0a429119f5a6b10741d5eacfaa49b1e6))
+
 ## [0.9.0](https://github.com/2060-io/ayni-agent/compare/v0.8.0...v0.9.0) (2026-11-12)
 
 
