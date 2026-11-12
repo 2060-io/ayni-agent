@@ -527,6 +527,40 @@ describe('conversations (PROF-CONV-001..005, IDENT-SESS-010..013)', () => {
     (await running.app.inject({ method: 'GET', url: '/agui/v3/sessions/conversations', headers: auth(token) })).json()
       .conversations as { id: string; title: string; state: string; open: boolean; lastPreview?: string }[]
 
+  it('opening a conversation is not activity in it: its time and its place in the list move with a message (IDENT-SESS-013)', async () => {
+    const times = async (token: string) =>
+      (
+        (
+          await running.app.inject({ method: 'GET', url: '/agui/v3/sessions/conversations', headers: auth(token) })
+        ).json().conversations as { id: string; lastActivityAt: string }[]
+      ).map((c) => ({ id: c.id, at: c.lastActivityAt }))
+    const { body } = await createSession()
+    await bindViaPhone(body.sessionId, 'did:peer:nora')
+    await run(body.sessionId, body.sessionToken, 'first conversation')
+    const second = (await createSession(body.sessionToken)).body
+    await run(second.sessionId, second.sessionToken, 'second conversation')
+    const before = await times(body.sessionToken)
+    expect(before).toHaveLength(2)
+    const older = before[1] as { id: string; at: string }
+    await new Promise((resolve) => setTimeout(resolve, 15))
+    // the older conversation is opened again, and read; the session that held it is superseded, so the list is
+    // read through the other one from here on
+    const opened = await running.app.inject({
+      method: 'POST',
+      url: '/agui/v3/sessions',
+      headers: auth(body.sessionToken),
+      payload: { client, locale: 'en', conversationId: older.id },
+    })
+    expect(opened.json().conversationId).toBe(older.id)
+    expect(await times(second.sessionToken)).toEqual(before)
+    // a message in it is activity: it takes the time of the message and the top of the list
+    const reopened = opened.json() as { sessionId: string; sessionToken: string }
+    await run(reopened.sessionId, reopened.sessionToken, 'back to the first')
+    const after = await times(second.sessionToken)
+    expect(after[0]?.id).toBe(older.id)
+    expect((after[0]?.at ?? '') > older.at).toBe(true)
+  })
+
   it('creates the conversation at binding, titles it from the first message, renames, archives and unarchives', async () => {
     const { body } = await createSession()
     await bindViaPhone(body.sessionId, 'did:peer:mia')
