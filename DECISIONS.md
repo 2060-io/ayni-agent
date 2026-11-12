@@ -201,6 +201,25 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     `silent: true`: the agent binds from the device proof, or answers 409 (`pairing-expired`,
     `pairing-invalid`), keeps no session and asks the phone nothing. A stale proof still ends the pairing.
     The profile package carries the field (3.1.3).
+33. **Shared read state** (2026-11-12, decided by Fabrice: a marker per conversation for the devices, the
+    viewing entries kept for audit; D62, IDENT-SESS-017, INTX-STATE-004, PROF-CONV-008, PROF-DESC-005). Each
+    device counted unread by itself, so a conversation read in the browser stayed unread on the phone.
+    - **The marker.** A conversation carries `readUpTo`, the newest message the person has seen on any device,
+      and `unread`, the agent messages after it, kept beside it so that listing costs nothing. One value,
+      overwritten, with no time.
+    - **What moves it.** The `viewed` receipt a device already sends (to the newest message it names that
+      belongs to the conversation), and the message the person writes. Never backwards. A receipt that names
+      a reply before it is stored (a client may report it as its text ends, and the entry is written just
+      after) is held and applied when the reply is stored.
+    - **What counts.** After a turn, and when the agent adds a message by itself (a greeting, a late artifact,
+      the result of an approved action), the count is taken again from the entries: text, voice and media
+      entries of the agent after the marker, up to 99.
+    - **Telling the devices.** The list carries `unread` and `readUpTo`; `ayni.conversation.changed` carries
+      them and is sent to every bound session of the person when the count changes. A marker that moves
+      under the same count is saved and not announced. The descriptor declares `features.readState`.
+    - **The audit trail stays.** Every `viewed` receipt is still recorded as a `state-update` entry with the
+      message ids and its time, when receipts are enabled; the marker never replaces these entries and the
+      model never sees them. Profile package 3.1.4.
 
 ## Not done in this iteration
 

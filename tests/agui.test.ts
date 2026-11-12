@@ -368,7 +368,7 @@ describe('device pairing (PROF-SESS-010..012, PROF-BIND-010, IDENT-DEV-001..005)
     const seen = received(laptop.sessionId).length
     const own = received(phone.sessionId).length
     expect((await patch({ title: 'Renamed on the phone' })).statusCode).toBe(200)
-    expect(changes(laptop.sessionId, seen)).toEqual([
+    expect(changes(laptop.sessionId, seen)).toMatchObject([
       { conversationId, title: 'Renamed on the phone', state: 'active' },
     ])
     expect(changes(phone.sessionId, own)).toHaveLength(1)
@@ -385,7 +385,7 @@ describe('device pairing (PROF-SESS-010..012, PROF-BIND-010, IDENT-DEV-001..005)
       (e) =>
         e.type === 'CUSTOM' && e.name === 'ayni.session.state' && (e.value as { state?: string }).state === 'closed'
     )
-    expect(told[change]?.value).toEqual({ conversationId, title: 'Renamed on the phone', state: 'archived' })
+    expect(told[change]?.value).toMatchObject({ conversationId, title: 'Renamed on the phone', state: 'archived' })
     expect(change).toBeGreaterThanOrEqual(0)
     expect(closed).toBeGreaterThan(change)
     expect(changes(other.first.sessionId, theirs)).toEqual([])
@@ -399,9 +399,12 @@ describe('device pairing (PROF-SESS-010..012, PROF-BIND-010, IDENT-DEV-001..005)
     const named = received(laptop.sessionId)
       .slice(seen)
       .filter((e) => e.type === 'CUSTOM' && e.name === 'ayni.conversation.changed')
-    expect(named).toHaveLength(1)
-    expect(named[0]?.value).toMatchObject({ title: 'How do I get a credential?', state: 'active' })
-    // a second message changes neither the title nor the state: nothing more is announced
+    // the title when the message arrives, then the reply that nobody has reported viewed yet (PROF-CONV-008)
+    expect(named.map((e) => e.value)).toMatchObject([
+      { title: 'How do I get a credential?', state: 'active', unread: 0 },
+      { title: 'How do I get a credential?', state: 'active', unread: 1 },
+    ])
+    // a second message changes neither the title, nor the state, nor the count: nothing more is announced
     const after = received(laptop.sessionId).length
     await run(phone.sessionId, phone.sessionToken, 'And then?')
     expect(
@@ -409,6 +412,94 @@ describe('device pairing (PROF-SESS-010..012, PROF-BIND-010, IDENT-DEV-001..005)
         .slice(after)
         .filter((e) => e.type === 'CUSTOM' && e.name === 'ayni.conversation.changed')
     ).toEqual([])
+  })
+
+  it('keeps one read marker per conversation: what one device shows is read on every device (D62, PROF-CONV-008)', async () => {
+    const { first: phone } = await pair('did:peer:rea')
+    const laptop = await secondDevice('did:peer:rea')
+    const listed = async (token: string) => {
+      const response = await running.app.inject({
+        method: 'GET',
+        url: '/agui/v3/sessions/conversations',
+        headers: { authorization: `Bearer ${token}` },
+      })
+      const [c] = response.json().conversations as { id: string; unread: number; readUpTo: string | null }[]
+      return { unread: c?.unread, readUpTo: c?.readUpTo }
+    }
+    const counts = (sessionId: string, from: number) =>
+      received(sessionId)
+        .slice(from)
+        .filter((e) => e.type === 'CUSTOM' && e.name === 'ayni.conversation.changed')
+        .map((e) => (e.value as { unread: number }).unread)
+    const viewed = (session: { sessionId: string; sessionToken: string }, messageIds: string[]) =>
+      run(session.sessionId, session.sessionToken, '', { kind: 'receipt', messageIds, state: 'viewed' })
+    expect(
+      (await running.app.inject({ method: 'GET', url: '/.well-known/ayni-agent.json' })).json().features
+    ).toMatchObject({
+      readState: true,
+    })
+
+    // a reply lands: one unread message, the same number for both devices, the person's own message read up to
+    const said = await run(phone.sessionId, phone.sessionToken, 'hello there')
+    const reply = String(said.events.find((e) => e.type === 'TEXT_MESSAGE_START' && e.role === 'assistant')?.messageId)
+    expect((await listed(phone.sessionToken)).unread).toBe(1)
+    expect((await listed(laptop.sessionToken)).unread).toBe(1)
+    expect((await listed(phone.sessionToken)).readUpTo).not.toBe(reply)
+
+    // the laptop shows it: read for the phone too, which is told on its stream without opening anything
+    const before = received(phone.sessionId).length
+    await viewed(laptop, [reply])
+    expect(await listed(phone.sessionToken)).toEqual({ unread: 0, readUpTo: reply })
+    expect(counts(phone.sessionId, before)).toEqual([0])
+
+    // a second reply, then the same old receipt sent late by the phone: the marker never moves backwards
+    const again = await run(laptop.sessionId, laptop.sessionToken, 'one more thing')
+    const second = String(
+      again.events.find((e) => e.type === 'TEXT_MESSAGE_START' && e.role === 'assistant')?.messageId
+    )
+    expect((await listed(phone.sessionToken)).unread).toBe(1)
+    await viewed(phone, [reply])
+    expect((await listed(phone.sessionToken)).unread).toBe(1)
+    await viewed(phone, [reply, second, 'msg_unknown'])
+    expect(await listed(laptop.sessionToken)).toEqual({ unread: 0, readUpTo: second })
+
+    // every viewing is kept, with its time and the messages named, beside the one marker (INTX-STATE-004)
+    const phoneSession = await running.agent.sessions.get(phone.sessionId)
+    const principal = await running.agent.principalOf(phoneSession as never)
+    const trail = (
+      await running.agent.memory.history(principal as never, phoneSession as never, {
+        limit: 50,
+        sourceTypes: ['state-update'],
+      })
+    ).filter((e) => e.text.startsWith('Messages viewed'))
+    expect(trail).toHaveLength(3)
+    expect(trail.every((e) => !!e.createdAt && Array.isArray(e.payload?.messageIds))).toBe(true)
+    const stored = await running.agent.store.conversations.get(String(phoneSession?.conversationId))
+    expect(stored).toMatchObject({ readUpTo: second, unread: 0 })
+    expect(Object.keys(stored ?? {}).filter((k) => /read.*at|seenAt/i.test(k))).toEqual([])
+  })
+
+  it('a receipt that arrives before its reply is stored still counts (PROF-CONV-008)', async () => {
+    const { first: phone } = await pair('did:peer:ear')
+    const session = (await running.agent.sessions.get(phone.sessionId)) as never
+    // what a client does when it reports a reply the moment its text ends, a moment before the agent stores it
+    await running.agent.sessions.markViewed(session, ['msg_not_stored_yet'])
+    const principal = await running.agent.principalOf(session)
+    await running.agent.memory.append({
+      id: 'msg_not_stored_yet',
+      sessionId: phone.sessionId,
+      principalId: (principal as { id: string }).id,
+      role: 'agent',
+      sourceType: 'text',
+      text: 'Here is your answer',
+      backingIdentity: null,
+    })
+    await running.agent.sessions.agentMessageAdded(session)
+    const conversationId = String((await running.agent.sessions.get(phone.sessionId))?.conversationId)
+    expect(await running.agent.store.conversations.get(conversationId)).toMatchObject({
+      readUpTo: 'msg_not_stored_yet',
+      unread: 0,
+    })
   })
 
   it('keeps a reaction on a message of an earlier session of the conversation (INTX-REACT-004, IDENT-SESS-009)', async () => {

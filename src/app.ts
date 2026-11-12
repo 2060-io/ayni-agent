@@ -153,6 +153,9 @@ export async function buildAgent(
     }
   )
 
+  // a message the agent adds outside a turn counts as unread until a device reports it viewed (IDENT-SESS-017)
+  router.onAgentMessage = (session) => sessions.agentMessageAdded(session)
+
   let agentRef: AyniAgent | undefined
   const approvals = new ApprovalService(store, pack, {
     onChange: (record, change) => agentRef?.onApprovalChange(record, change) ?? Promise.resolve(),
