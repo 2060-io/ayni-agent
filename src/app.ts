@@ -141,6 +141,9 @@ export async function buildAgent(
         if (session.channelType === 'ag-ui') await aguiRoutes?.announceState(session)
       },
       onBindingRefreshed: async () => {},
+      onConversationChanged: async (conversation) => {
+        await aguiRoutes?.announceConversation(conversation)
+      },
     },
     logger,
     {

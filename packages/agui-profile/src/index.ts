@@ -209,6 +209,8 @@ export const CUSTOM_EVENT = {
   approvalUpdate: 'ayni.approval.update',
   reaction: 'ayni.reaction',
   receipt: 'ayni.receipt',
+  /** a conversation of the Principal was renamed, archived, unarchived or closed for good (PROF-CONV-007) */
+  conversationChanged: 'ayni.conversation.changed',
 } as const
 
 export type CustomEventName = (typeof CUSTOM_EVENT)[keyof typeof CUSTOM_EVENT]

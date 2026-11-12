@@ -22,6 +22,8 @@ export interface SessionEvents {
   onBound(session: Session, principal: Principal): Promise<void>
   onClosed(session: Session, reason: ClosureReason): Promise<void>
   onBindingRefreshed(session: Session): Promise<void>
+  /** a conversation was renamed, archived, unarchived or closed for good: every device of the person learns it */
+  onConversationChanged?(conversation: Conversation): Promise<void>
 }
 
 export class SessionError extends Error {
@@ -544,7 +546,15 @@ export class SessionService {
   public async renameConversation(conversation: Conversation, title: string): Promise<Conversation> {
     conversation.title = title.trim().slice(0, 120)
     await this.store.conversations.save(conversation)
+    await this.conversationChanged(conversation)
     return conversation
+  }
+
+  /** Tells the Principal's sessions that their list of conversations changed (PROF-CONV-007); never fails a call. */
+  private async conversationChanged(conversation: Conversation): Promise<void> {
+    await this.events
+      .onConversationChanged?.(conversation)
+      .catch((err) => this.logger.warn({ err, conversationId: conversation.id }, 'conversation change not announced'))
   }
 
   /** Archiving closes the conversation's open sessions (PROF-CONV-003); unarchiving only flips the state. */
@@ -552,6 +562,8 @@ export class SessionService {
     if (conversation.state === 'final') throw new SessionError('conversation is final', 'final')
     conversation.state = state
     await this.store.conversations.save(conversation)
+    // announced before its sessions close, so the devices that had it open learn why
+    await this.conversationChanged(conversation)
     if (state === 'archived') await this.closeConversationSessions(conversation)
     return conversation
   }
@@ -560,6 +572,7 @@ export class SessionService {
   public async finalizeConversation(conversation: Conversation): Promise<Conversation> {
     conversation.state = 'final'
     await this.store.conversations.save(conversation)
+    await this.conversationChanged(conversation)
     await this.closeConversationSessions(conversation)
     this.logger.info({ conversationId: conversation.id }, 'conversation closed for good')
     return conversation
@@ -577,11 +590,15 @@ export class SessionService {
     if (!session.conversationId) return
     const conversation = await this.store.conversations.get(session.conversationId)
     if (!conversation || conversation.state === 'final') return
+    const before = { title: conversation.title, state: conversation.state }
     if (conversation.state === 'archived') conversation.state = 'active' // writing unarchives (UI-SESS-012)
     if (opts.title && !conversation.title) conversation.title = text.trim().slice(0, 60)
     if (text.trim()) conversation.lastPreview = text.trim().slice(0, 120)
     conversation.lastActivityAt = nowIso()
     await this.store.conversations.save(conversation)
+    // the first message names the conversation, a message unarchives it: the other devices' lists follow
+    if (conversation.title !== before.title || conversation.state !== before.state)
+      await this.conversationChanged(conversation)
   }
 
   // ---- binding (D5, CHAN-BIND-003/009, PROF-BIND-002/004) ---------------------------------------

@@ -19,7 +19,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type { AyniAgent } from '../../core/agent.js'
 import type { TurnEvent, TurnSink } from '../../core/orchestrator.js'
 import { normalizeClient, SessionError } from '../../core/sessions.js'
-import type { ClientDescription, Session } from '../../core/types.js'
+import type { ClientDescription, Conversation, Session } from '../../core/types.js'
 import { canonicalMime, mimeAllowed } from '../../media/service.js'
 import { prefixedId } from '../../util/ids.js'
 import type { Logger } from '../../util/logger.js'
@@ -679,6 +679,26 @@ export class AgUiRoutes {
       this.runs.delete(runId)
       await mirror.settled()
       if (!reply.raw.writableEnded) reply.raw.end()
+    }
+  }
+
+  /**
+   * A conversation changed (its title, archived or not, closed for good): every bound session of its Principal
+   * hears of it on its stream, whichever conversation that session serves, so each device's list follows the
+   * change made on another (PROF-CONV-007).
+   */
+  public async announceConversation(conversation: Conversation): Promise<void> {
+    const sessions = await this.agent.store.sessions.listByPrincipal(conversation.principalId, ['bound'])
+    for (const session of sessions) {
+      if (session.channelType !== 'ag-ui') continue
+      await this.streams.publish(
+        session.id,
+        ev.custom(CUSTOM_EVENT.conversationChanged, {
+          conversationId: conversation.id,
+          title: conversation.title,
+          state: conversation.state,
+        })
+      )
     }
   }
 
