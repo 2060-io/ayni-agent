@@ -214,6 +214,8 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     - **What counts.** After a turn, and when the agent adds a message by itself (a greeting, a late artifact,
       the result of an approved action), the count is taken again from the entries: text, voice and media
       entries of the agent after the marker, up to 99.
+    - **A conversation older than the marker** starts from the last message the person wrote, so its whole
+      history does not turn up as unread at the first count.
     - **Telling the devices.** The list carries `unread` and `readUpTo`; `ayni.conversation.changed` carries
       them and is sent to every bound session of the person when the count changes. A marker that moves
       under the same count is saved and not announced. The descriptor declares `features.readState`.

@@ -479,6 +479,31 @@ describe('device pairing (PROF-SESS-010..012, PROF-BIND-010, IDENT-DEV-001..005)
     expect(Object.keys(stored ?? {}).filter((k) => /read.*at|seenAt/i.test(k))).toEqual([])
   })
 
+  it('a conversation older than the marker starts from the last message the person wrote (IDENT-SESS-017)', async () => {
+    const { first: phone } = await pair('did:peer:old')
+    await run(phone.sessionId, phone.sessionToken, 'first question')
+    await run(phone.sessionId, phone.sessionToken, 'second question')
+    const session = (await running.agent.sessions.get(phone.sessionId)) as never
+    const conversationId = String((await running.agent.sessions.get(phone.sessionId))?.conversationId)
+    // as it was stored before the marker existed
+    const held = await running.agent.store.conversations.get(conversationId)
+    if (!held) throw new Error('no conversation')
+    const { readUpTo: _marker, unread: _count, ...legacy } = held
+    await running.agent.store.conversations.save(legacy)
+    // the agent adds a message by itself: the last reply and this one are unread, not the whole history
+    const principal = await running.agent.principalOf(session)
+    await running.agent.memory.append({
+      sessionId: phone.sessionId,
+      principalId: (principal as { id: string }).id,
+      role: 'agent',
+      sourceType: 'text',
+      text: 'A reminder',
+      backingIdentity: null,
+    })
+    await running.agent.sessions.agentMessageAdded(session)
+    expect((await running.agent.store.conversations.get(conversationId))?.unread).toBe(2)
+  })
+
   it('a receipt that arrives before its reply is stored still counts (PROF-CONV-008)', async () => {
     const { first: phone } = await pair('did:peer:ear')
     const session = (await running.agent.sessions.get(phone.sessionId)) as never

@@ -647,6 +647,9 @@ export class SessionService {
     const held = await this.store.conversations.get(conversationId)
     if (!held || held.state === 'final') return
     let marker = held.readUpTo ? await this.store.entries.get(held.readUpTo) : undefined
+    // a conversation older than the marker starts from the last message the person wrote: what precedes it they
+    // have read, and its whole history does not turn up as unread
+    if (held.readUpTo === undefined) marker = await this.lastWritten(held)
     if (seen && (!marker || seen.createdAt > marker.createdAt)) marker = await this.store.entries.get(seen.id)
     // a reply reported viewed before it was stored is stored now
     const early = stored ? this.viewedEarly.get(conversationId) : undefined
@@ -671,9 +674,9 @@ export class SessionService {
     if (counted) await this.conversationChanged(conversation)
   }
 
-  /** The messages from the agent in the transcript after a time; counted up to a ceiling. */
-  private async countUnread(conversation: Conversation, after?: string): Promise<number> {
-    const scope = buildScope({
+  /** What the conversation's own sessions hold, and nothing else (PRIV-SCOPE-001). */
+  private scopeOf(conversation: Conversation) {
+    return buildScope({
       principalId: conversation.principalId,
       sessionIds: conversation.sessionIds,
       backingIdentity: null,
@@ -681,6 +684,22 @@ export class SessionService {
       recognizedPartners: [],
       crossSession: 'own-sessions',
     })
+  }
+
+  /** The newest message the person wrote in the conversation. */
+  private async lastWritten(conversation: Conversation) {
+    const [row] = await this.store.entries.query(this.scopeOf(conversation), {
+      sessionIds: conversation.sessionIds,
+      roles: ['principal'],
+      sourceTypes: TRANSCRIPT_MESSAGE_TYPES,
+      limit: 1,
+    })
+    return row
+  }
+
+  /** The messages from the agent in the transcript after a time; counted up to a ceiling. */
+  private async countUnread(conversation: Conversation, after?: string): Promise<number> {
+    const scope = this.scopeOf(conversation)
     const rows = await this.store.entries.query(scope, {
       sessionIds: conversation.sessionIds,
       roles: ['agent'],
