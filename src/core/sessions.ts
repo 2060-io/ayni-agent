@@ -502,7 +502,8 @@ export class SessionService {
       await this.store.sessions.save(other)
     }
     conversation.sessionIds = [session.id, ...earlier]
-    conversation.lastActivityAt = now
+    // opening a conversation is not activity in it: its time and its place in the person's lists move with a
+    // message (IDENT-SESS-013), where a device that merely opened one sent it to the top on every other device
     await this.store.conversations.save(conversation)
   }
 
