@@ -163,6 +163,7 @@ export class AgUiRoutes {
         conversationId?: string
         newConversation?: boolean
         grant?: string
+        silent?: boolean
       }
       if (!validateCreate(body))
         return reply.code(400).send({ error: 'bad-request', message: ajv.errorsText(validateCreate.errors) })
@@ -239,7 +240,8 @@ export class AgUiRoutes {
           body.resumeSessionId,
           body.deviceProof,
           body.conversationId,
-          body.newConversation === true
+          body.newConversation === true,
+          body.silent === true
         )
         if (session.state === 'bound') {
           // a paired device: bound at once, no phone round trip (PROF-SESS-010)

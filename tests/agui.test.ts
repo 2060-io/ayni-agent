@@ -489,6 +489,43 @@ describe('device pairing (PROF-SESS-010..012, PROF-BIND-010, IDENT-DEV-001..005)
     expect(afterRevoke.json().pairing).toBe('invalid')
   })
 
+  it('silent: a bound session or none, and the phone is asked nothing (PROF-SESS-015)', async () => {
+    const { first, deviceHandle, deviceSecret } = await pair('did:peer:sil')
+    await running.agent.sessions.close((await running.agent.sessions.get(first.sessionId)) as never, 'idle-timeout')
+    const silently = (payload: Record<string, unknown>) =>
+      running.app.inject({
+        method: 'POST',
+        url: '/agui/v3/sessions',
+        payload: { client, locale: 'en', silent: true, ...payload },
+      })
+    const offers: string[] = []
+    const original = running.agent.rebindOffer
+    running.agent.rebindOffer = async (session) => {
+      offers.push(session.id)
+      return true
+    }
+    try {
+      // the proof holds: bound at once, as without the flag
+      const bound = await silently({ deviceHandle, deviceProof: deviceSecret })
+      expect(bound.statusCode).toBe(201)
+      expect(bound.json().state).toBe('bound')
+      // a known device with no proof would be proposed to the phone: asked silently, it gets no session
+      const noProof = await silently({ deviceHandle })
+      expect(noProof.statusCode).toBe(409)
+      expect(noProof.json().error).toBe('pairing-invalid')
+      expect(noProof.json().sessionId).toBeUndefined()
+      // a stale proof ends the pairing, as always, and leaves nothing waiting
+      const stale = await silently({ deviceHandle, deviceProof: deviceSecret })
+      expect(stale.statusCode).toBe(409)
+      expect(stale.json().error).toBe('pairing-invalid')
+      // a browser that was never linked gets none either
+      expect((await silently({})).statusCode).toBe(409)
+      expect(offers).toEqual([])
+    } finally {
+      running.agent.rebindOffer = original
+    }
+  })
+
   it('lists devices with a bound token and revokes one with the device proof alone', async () => {
     const { first, deviceHandle, deviceSecret } = await pair('did:peer:kim')
     const list = await running.app.inject({

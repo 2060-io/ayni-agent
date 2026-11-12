@@ -134,6 +134,11 @@ export interface CreateSessionRequest {
   newConversation?: boolean
   /** the single-use grant the `session-grant` flow returned (§4.1, PROF-SESS-013): the session is created bound */
   grant?: string
+  /**
+   * a bound session or none (PROF-SESS-015): the agent binds from the device proof or answers 409
+   * `pairing-expired` / `pairing-invalid`, creates no session and asks the phone nothing
+   */
+  silent?: boolean
 }
 
 export interface BindingMaterial {

@@ -57,6 +57,10 @@
       "type": "string",
       "maxLength": 256,
       "description": "the single-use grant the session-grant flow returned (section 4.1, PROF-SESS-013)"
+    },
+    "silent": {
+      "type": "boolean",
+      "description": "a bound session or none (PROF-SESS-015): bound from the device proof, else 409 with no session created and nothing asked on the phone"
     }
   }
 }
