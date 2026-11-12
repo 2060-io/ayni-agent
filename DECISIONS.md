@@ -175,6 +175,15 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     sessions, so a device that had it open learns why. The profile package lists the event (3.1.2). The
     preview and the time of the last activity are not announced: a client that shows a conversation has them
     from its own stream, and a list is read again when it is opened.
+30. **A phone is never asked to link its own app** (2026-11-12, Fabrice: "I receive a notification in the
+    handset for pairing a device, but I do not know from where it comes"; PROF-BIND-009, IDENT-DEV-003).
+    Found in the devnet log: the phone's app opened two sessions 3 ms apart with the same device secret. The
+    first bound and rotated the secret; the second presented the stale one, so the pairing was revoked, as
+    it must be, and the agent then asked the phone whether to link "Ayni on Android": the session of the app
+    the person was holding. The re-link question is for a session opened somewhere else. It is now asked only
+    for a session whose client platform is `web`; a session of a phone app (`ios`, `android`) gets
+    `rebind: "unavailable"` and binds again with a session grant. The same holds when an app's pairing
+    expires. The double opening itself is fixed in the app.
 
 ## Not done in this iteration
 
