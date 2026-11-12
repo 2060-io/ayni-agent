@@ -214,6 +214,61 @@ describe('session grant (D56, CHAN-BIND-014, PROF-SESS-013)', () => {
     expect((report.args[1] as { code: string }).code).toBe('not-eligible')
   })
 
+  it('never asks a phone to link the session of its own app; a browser is still proposed (PROF-BIND-009)', async () => {
+    const app = { name: 'ayni-app', version: '1.0.0', platform: 'ios' }
+    const create = (payload: Record<string, unknown>) =>
+      running.app.inject({ method: 'POST', url: '/agui/v3/sessions', payload: { locale: 'en', ...payload } })
+    await requestGrant('conn-grant', 'sg-req-9')
+    const paired = (await createWithGrant(lastGrant().grant)).json() as { deviceHandle: string; deviceSecret: string }
+    const offers: string[] = []
+    const original = running.agent.rebindOffer
+    running.agent.rebindOffer = async (session) => {
+      offers.push(session.client.platform)
+      return true
+    }
+    // this harness has no DIDComm agent to ask: the invitation of a provisional session is minted here, and the
+    // identity credential is not re-checked
+    const sessions = running.agent.sessions as unknown as { minter: { mint: (id: string) => Promise<unknown> } }
+    const minter = sessions.minter
+    sessions.minter = {
+      mint: async (id: string) => ({
+        invitationId: `inv-${id}`,
+        outOfBandId: `oob-${id}`,
+        url: `http://agent.test?oob=${Buffer.from(`{"@id":"inv-${id}"}`).toString('base64url')}`,
+      }),
+    }
+    const principals = running.agent.principals as unknown as { ensureLive: () => Promise<{ ok: boolean }> }
+    const ensureLive = principals.ensureLive
+    principals.ensureLive = async () => ({ ok: true })
+    try {
+      // the app opens two sessions at once with the secret it holds: the first rotates it, the second is stale
+      const proof = { client: app, deviceHandle: paired.deviceHandle, deviceProof: paired.deviceSecret }
+      const first = (await create(proof)).json() as Record<string, unknown>
+      expect(first.state).toBe('bound')
+      const stale = (await create(proof)).json() as Record<string, unknown>
+      expect(stale.state).toBe('provisional')
+      expect(stale.pairing).toBe('invalid')
+      // nothing is sent to the phone: the session is the phone's own, it binds again with a grant
+      expect(stale.rebind).toBe('unavailable')
+      expect(offers).toEqual([])
+      // a browser that names a device the person linked before is proposed to the phone, as before
+      await requestGrant('conn-grant', 'sg-req-10')
+      const known = (await createWithGrant(lastGrant().grant)).json() as { deviceHandle: string }
+      const browser = { name: 'ayni-ui', version: '3.1.0', platform: 'web', description: 'Firefox on Linux' }
+      const asked = (await create({ client: browser, deviceHandle: known.deviceHandle })).json() as Record<
+        string,
+        unknown
+      >
+      expect(asked.state).toBe('provisional')
+      expect(asked.rebind).toBe('asked')
+      expect(offers).toEqual(['web'])
+    } finally {
+      running.agent.rebindOffer = original
+      principals.ensureLive = ensureLive
+      sessions.minter = minter
+    }
+  })
+
   it('declares features.sessionGrant in the descriptor (PROF-DESC-004)', async () => {
     const response = await running.app.inject({ method: 'GET', url: '/.well-known/ayni-agent.json' })
     expect(response.json().features).toMatchObject({ sessionGrant: true, flows: true })

@@ -254,7 +254,11 @@ export class AyniAgent {
         }
       } else if (deviceProof) pairing = principal ? 'expired' : 'invalid'
       rebind = 'unavailable'
-      if (principal && capability && this.rebindOffer) {
+      // the phone is asked about a session opened somewhere else, in a browser. The phone's own app runs on that
+      // phone and binds with a session grant: asking would show the person a request to link the device they hold
+      // (PROF-BIND-009)
+      const elsewhere = client.platform === 'web'
+      if (elsewhere && principal && capability && this.rebindOffer) {
         rebind = (await this.rebindOffer(created.session, principal).catch(() => false)) ? 'asked' : 'unavailable'
       }
     }
