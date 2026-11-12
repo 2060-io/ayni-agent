@@ -184,7 +184,16 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     for a session whose client platform is `web`; a session of a phone app (`ios`, `android`) gets
     `rebind: "unavailable"` and binds again with a session grant. The same holds when an app's pairing
     expires. The double opening itself is fixed in the app.
-31. **A bound session or none** (2026-11-12; PROF-SESS-015, PROF-BIND-009). A linked browser whose sessions
+31. **Opening a conversation is not activity in it** (2026-11-12, Fabrice: "the latest message is not the same
+    in all devices"; IDENT-SESS-013, PROF-CONV-001). Found on devnet: three conversations whose last messages
+    were hours or a day old all carried a last activity of the minute the phone had opened them. Attaching a
+    session to a conversation set its `lastActivityAt`, so a device that merely opened a conversation changed
+    its time and sent it to the top of the list on every other device, and the phone showed that time where
+    the browser showed the time of the last message. The time now moves with a message only (and is the
+    creation time of a conversation with none). A new pairing still continues the most recent conversation
+    (PROF-CONV-006), which is now the one last written in. Times already moved by an opening stay as they are
+    until the next message.
+32. **A bound session or none** (2026-11-12; PROF-SESS-015, PROF-BIND-009). A linked browser whose sessions
     closed while idle showed a list and a conversation that other devices had moved on from, and could not
     refresh them without opening a session. Opening one by itself, at page load, was not safe: a creation
     that names a known device and cannot bind leaves a provisional session and asks the phone to link it,
