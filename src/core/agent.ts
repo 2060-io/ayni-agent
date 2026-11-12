@@ -348,6 +348,10 @@ export class AyniAgent {
     await this.sessions.touch(session)
     await this.sessions.noteActivity(session, input.entry.text, { title: true })
     const result = await this.orchestrator.run(session, principal, input, sink, signal)
+    // the person's message is read up to, the reply counts until a device reports it viewed (IDENT-SESS-017)
+    await this.sessions
+      .readAfterTurn(session, result.inbound?.id)
+      .catch((err) => this.logger.warn({ err, sessionId: session.id }, 'read state not updated'))
     if (result.reply?.text) {
       await this.sessions.noteActivity(session, result.reply.text)
       await this.notifyIfAway(session, result.reply.text).catch((err) =>
@@ -495,10 +499,14 @@ export class AyniAgent {
         return undefined
       }
       case 'receipt': {
-        if (this.features.receipts && action.state === 'viewed') {
-          await this.memory.append(
-            entryBase(`Messages ${action.state}: ${action.messageIds.length}`, 'state-update', { ...action })
-          )
+        if (action.state === 'viewed') {
+          // the audit trail of what the person saw and when (INTX-STATE-004): never replaced by the marker
+          if (this.features.receipts)
+            await this.memory.append(
+              entryBase(`Messages ${action.state}: ${action.messageIds.length}`, 'state-update', { ...action })
+            )
+          // and the conversation's read marker, the same for every device (IDENT-SESS-017)
+          await this.sessions.markViewed(session, action.messageIds)
         }
         return undefined
       }

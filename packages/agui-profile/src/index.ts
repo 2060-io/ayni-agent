@@ -54,6 +54,8 @@ export interface DescriptorFeatures {
   sessionGrant?: boolean
   /** the agent opens flows through the flow profile rather than question-answer and chat (PROF-DESC-004) */
   flows?: boolean
+  /** the agent keeps the shared read state: `unread` and `readUpTo` on a conversation (PROF-DESC-005, PROF-CONV-008) */
+  readState?: boolean
 }
 
 export type BindingMode = 'cross-device' | 'same-device'
@@ -522,6 +524,19 @@ export interface ConversationInfo {
   lastPreview?: string
   /** a session is open on it somewhere */
   open: boolean
+  /** the messages from the agent after the read marker, the same on every device (PROF-CONV-008) */
+  unread?: number
+  /** the read marker: the newest message the person has seen on any device, null while none */
+  readUpTo?: string | null
+}
+
+/** The value of `ayni.conversation.changed` (PROF-CONV-007). */
+export interface ConversationChangedValue {
+  conversationId: string
+  title: string
+  state: ConversationState | 'final'
+  unread?: number
+  readUpTo?: string | null
 }
 
 export interface ConversationsResponse {

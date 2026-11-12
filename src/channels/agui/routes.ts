@@ -96,6 +96,8 @@ export class AgUiRoutes {
         // flows on flow-capable wallets (D54, D55); the session grant comes with D56
         flows: true,
         sessionGrant: true,
+        // the unread count is the agent's, the same on every device (D62, PROF-DESC-005)
+        readState: true,
       },
       locales: [this.agent.pack.language.agent],
     }
@@ -289,6 +291,8 @@ export class AgUiRoutes {
           lastActivityAt: c.lastActivityAt,
           lastPreview: c.lastPreview,
           open: c.open,
+          unread: c.unread ?? 0,
+          readUpTo: c.readUpTo ?? null,
         })),
       }
     })
@@ -685,7 +689,7 @@ export class AgUiRoutes {
   }
 
   /**
-   * A conversation changed (its title, archived or not, closed for good): every bound session of its Principal
+   * A conversation changed (its title, archived or not, closed for good, what is unread in it): every bound session of its Principal
    * hears of it on its stream, whichever conversation that session serves, so each device's list follows the
    * change made on another (PROF-CONV-007).
    */
@@ -699,6 +703,8 @@ export class AgUiRoutes {
           conversationId: conversation.id,
           title: conversation.title,
           state: conversation.state,
+          unread: conversation.unread ?? 0,
+          readUpTo: conversation.readUpTo ?? null,
         })
       )
     }

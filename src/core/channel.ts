@@ -113,6 +113,8 @@ const CONVERSATION_EVENTS: ReadonlySet<CapabilityEvent['kind']> = new Set([
 
 export class CapabilityRouter {
   private readonly adapters = new Map<ChannelType, ChannelAdapter>()
+  /** told when the agent adds a message to a conversation outside a turn; set where the services are wired */
+  public onAgentMessage?: (session: Session) => Promise<void>
 
   public constructor(
     private readonly store: Store,
@@ -141,6 +143,11 @@ export class CapabilityRouter {
     if (options.peers !== false && CONVERSATION_EVENTS.has(event.kind)) {
       for (const peer of await this.conversationPeers(session)) await this.render(peer, event, true)
     }
+    // a message the agent adds by itself is unread until a device shows it (IDENT-SESS-017)
+    if ((event.kind === 'text' || event.kind === 'media') && event.entry.role === 'agent')
+      await this.onAgentMessage?.(session).catch((error) =>
+        this.logger.warn({ err: error, sessionId: session.id }, 'read state not updated')
+      )
     return result
   }
 

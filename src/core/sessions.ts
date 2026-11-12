@@ -3,8 +3,10 @@
  * provisional sessions with one-time binding nonces, binding on a yes answer, sibling sessions,
  * supersede and channel-level closures, idle and binding-window reapers, opaque session tokens.
  */
+
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import type { AgentPack } from '../config/packTypes.js'
+import { buildScope } from '../memory/scope.js'
 import type { Store } from '../store/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
@@ -77,6 +79,12 @@ export interface SessionGrant {
 
 /** how many sessions of its conversation a session reads besides its own, newest first */
 const LINEAGE_LIMIT = 30
+/** how many message ids one `viewed` receipt is read for, and how many are kept while a reply is being stored */
+const READ_RECEIPT_LIMIT = 200
+/** the unread count stops here: beyond it a list shows the ceiling */
+const UNREAD_CEILING = 99
+/** the entries a transcript shows as messages (the others are steps, cards and bookkeeping) */
+const TRANSCRIPT_MESSAGE_TYPES = ['text', 'voice', 'media']
 const GRANT_PREFIX = 'session-grant:'
 const MAX_GRANT_SECONDS = 60
 
@@ -584,6 +592,126 @@ export class SessionService {
       const s = await this.store.sessions.get(id)
       if (s && s.state !== 'closed') await this.close(s, 'user')
     }
+  }
+
+  // ---- shared read state (D62, IDENT-SESS-017, PROF-CONV-008) ------------------------------------------------
+
+  /** `viewed` receipts that named a reply not stored yet (a client may report it as its stream ends) */
+  private readonly viewedEarly = new Map<string, Set<string>>()
+
+  /** A device showed these messages to the person: the marker moves to the newest of them. */
+  public async markViewed(session: Session, messageIds: string[]): Promise<void> {
+    if (!session.conversationId) return
+    const conversation = await this.store.conversations.get(session.conversationId)
+    if (!conversation || conversation.state === 'final') return
+    let newest: { id: string; createdAt: string } | undefined
+    for (const id of messageIds.slice(0, READ_RECEIPT_LIMIT)) {
+      const entry = await this.store.entries.get(id)
+      if (!entry) {
+        const early = this.viewedEarly.get(conversation.id) ?? new Set<string>()
+        if (early.size < READ_RECEIPT_LIMIT) early.add(id)
+        this.viewedEarly.set(conversation.id, early)
+        continue
+      }
+      if (!conversation.sessionIds.includes(entry.sessionId)) continue
+      if (!newest || entry.createdAt > newest.createdAt) newest = { id: entry.id, createdAt: entry.createdAt }
+    }
+    await this.moveRead(conversation.id, newest)
+  }
+
+  /**
+   * A turn ended: the message the person wrote is read up to (writing is having read what precedes), and what
+   * the agent answered counts until a device reports it viewed.
+   */
+  public async readAfterTurn(session: Session, writtenId?: string): Promise<void> {
+    if (!session.conversationId) return
+    const written = writtenId ? await this.store.entries.get(writtenId) : undefined
+    await this.moveRead(
+      session.conversationId,
+      written ? { id: written.id, createdAt: written.createdAt } : undefined,
+      true
+    )
+  }
+
+  /** The agent added a message to the conversation outside a turn (a greeting, a late artifact, a notice). */
+  public async agentMessageAdded(session: Session): Promise<void> {
+    if (session.conversationId) await this.moveRead(session.conversationId, undefined, true)
+  }
+
+  /** Moves the marker forward to `seen` when it is newer, counts what follows it, and announces a change. */
+  private async moveRead(
+    conversationId: string,
+    seen?: { id: string; createdAt: string },
+    stored = false
+  ): Promise<void> {
+    const held = await this.store.conversations.get(conversationId)
+    if (!held || held.state === 'final') return
+    let marker = held.readUpTo ? await this.store.entries.get(held.readUpTo) : undefined
+    // a conversation older than the marker starts from the last message the person wrote: what precedes it they
+    // have read, and its whole history does not turn up as unread
+    if (held.readUpTo === undefined) marker = await this.lastWritten(held)
+    if (seen && (!marker || seen.createdAt > marker.createdAt)) marker = await this.store.entries.get(seen.id)
+    // a reply reported viewed before it was stored is stored now
+    const early = stored ? this.viewedEarly.get(conversationId) : undefined
+    if (early) {
+      this.viewedEarly.delete(conversationId)
+      for (const id of early) {
+        const entry = await this.store.entries.get(id)
+        if (entry && held.sessionIds.includes(entry.sessionId) && (!marker || entry.createdAt > marker.createdAt))
+          marker = entry
+      }
+    }
+    const unread = await this.countUnread(held, marker?.createdAt)
+    // read again at the last moment: a rename or a message may have been written meanwhile
+    const conversation = (await this.store.conversations.get(conversationId)) ?? held
+    const readUpTo = marker?.id ?? null
+    const counted = (conversation.unread ?? 0) !== unread
+    if ((conversation.readUpTo ?? null) === readUpTo && !counted) return
+    conversation.readUpTo = readUpTo
+    conversation.unread = unread
+    await this.store.conversations.save(conversation)
+    // the devices are told when the count changes; a marker that moves under the same count changes nothing they show
+    if (counted) await this.conversationChanged(conversation)
+  }
+
+  /** What the conversation's own sessions hold, and nothing else (PRIV-SCOPE-001). */
+  private scopeOf(conversation: Conversation) {
+    return buildScope({
+      principalId: conversation.principalId,
+      sessionIds: conversation.sessionIds,
+      backingIdentity: null,
+      homeBackingIdentity: '',
+      recognizedPartners: [],
+      crossSession: 'own-sessions',
+    })
+  }
+
+  /** The newest message the person wrote in the conversation. */
+  private async lastWritten(conversation: Conversation) {
+    const [row] = await this.store.entries.query(this.scopeOf(conversation), {
+      sessionIds: conversation.sessionIds,
+      roles: ['principal'],
+      sourceTypes: TRANSCRIPT_MESSAGE_TYPES,
+      limit: 1,
+    })
+    return row
+  }
+
+  /** The messages from the agent in the transcript after a time; counted up to a ceiling. */
+  private async countUnread(conversation: Conversation, after?: string): Promise<number> {
+    const scope = this.scopeOf(conversation)
+    const rows = await this.store.entries.query(scope, {
+      sessionIds: conversation.sessionIds,
+      roles: ['agent'],
+      sourceTypes: TRANSCRIPT_MESSAGE_TYPES,
+      limit: UNREAD_CEILING,
+    })
+    let n = 0
+    for (const row of rows) {
+      if (after && row.createdAt <= after) break
+      n++
+    }
+    return n
   }
 
   /** A turn on a conversation keeps its title, preview and activity current (IDENT-SESS-013). */

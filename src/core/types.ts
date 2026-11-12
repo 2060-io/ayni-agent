@@ -83,6 +83,13 @@ export interface Conversation {
   lastActivityAt: string
   /** every session that served it, newest first; the lineage of the next one */
   sessionIds: string[]
+  /**
+   * the read marker (D62, IDENT-SESS-017): the newest transcript message the Principal has seen, on any device.
+   * One value, overwritten, with no time: when each message was seen is in the viewing entries (INTX-STATE-004)
+   */
+  readUpTo?: string | null
+  /** the agent messages after the marker, kept beside it so that listing costs nothing */
+  unread?: number
 }
 export type SessionState = 'provisional' | 'bound' | 'closed'
 export type ClosureReason =
