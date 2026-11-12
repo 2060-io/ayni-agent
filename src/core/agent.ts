@@ -221,7 +221,8 @@ export class AyniAgent {
     resumeSessionId?: string,
     deviceProof?: string,
     conversationId?: string,
-    newConversation = false
+    newConversation = false,
+    silent = false
   ) {
     const conversation = await this.sessions.requireOpenable(conversationId, resumeSessionId)
     const created = await this.sessions.createProvisional(
@@ -253,6 +254,9 @@ export class AyniAgent {
           }
         }
       } else if (deviceProof) pairing = principal ? 'expired' : 'invalid'
+      // a client that asked for a bound session or none gets none: no session is left waiting for the phone and
+      // the phone is asked nothing (PROF-SESS-015). A client refreshing itself in the background asks this way
+      if (silent) await this.refuseSilent(created.session, pairing)
       rebind = 'unavailable'
       // the phone is asked about a session opened somewhere else, in a browser. The phone's own app runs on that
       // phone and binds with a session grant: asking would show the person a request to link the device they hold
@@ -262,7 +266,16 @@ export class AyniAgent {
         rebind = (await this.rebindOffer(created.session, principal).catch(() => false)) ? 'asked' : 'unavailable'
       }
     }
+    if (silent) await this.refuseSilent(created.session, pairing)
     return { ...created, rebind, pairing }
+  }
+
+  private async refuseSilent(session: Session, pairing: 'expired' | 'invalid' | undefined): Promise<never> {
+    await this.sessions.close(session, 'user')
+    throw new SessionError(
+      'no session without the phone',
+      pairing === 'expired' ? 'pairing-expired' : 'pairing-invalid'
+    )
   }
 
   private async principalOfDevice(handle: string): Promise<Principal | undefined> {
