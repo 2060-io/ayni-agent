@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/2060-io/ayni-agent/compare/v0.8.0...v0.9.0) (2026-11-12)
+
+
+### Features
+
+* **conversations:** a rename, an archive or a closure is announced to every device of the person ([#42](https://github.com/2060-io/ayni-agent/issues/42)) ([c7d8a39](https://github.com/2060-io/ayni-agent/commit/c7d8a399ecac4afc304eab98f5852441c995272a))
+
 ## [0.8.0](https://github.com/2060-io/ayni-agent/compare/v0.7.3...v0.8.0) (2026-11-11)
 
 

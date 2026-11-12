@@ -1,6 +1,6 @@
 {
   "name": "ayni-agent",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "private": true,
   "type": "module",
   "description": "Ayni Agent: a Verifiable Service that holds conversations, keeps memory and performs trust-bound actions (ayni-spec v3)",
