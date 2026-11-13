@@ -36,6 +36,37 @@ export function approvalValue(record: ApprovalRecord, viewerId: string, canDecid
   }
 }
 
+/**
+ * The reference a reply keeps to the message it answers (PROF-RUN-009). A media message is quoted by what it is:
+ * `text` is its own words (a caption, the transcription of a voice note) and is empty when it has none, where it
+ * used to be the placeholder that stands for the attachment (`[file photo.jpg]`). `about` is what the model is
+ * told of it; a UI does not show it.
+ */
+export function replyReference(entry: MessageEntry) {
+  const first = entry.attachments[0]
+  const placeholder = entry.attachments.map((a) => a.textRepr).join('\n')
+  const words = first && first.type !== 'voice' && entry.text === placeholder ? '' : entry.text
+  return {
+    id: entry.id,
+    text: words.slice(0, 200),
+    role: entry.role === 'agent' ? ('assistant' as const) : ('user' as const),
+    ...(first
+      ? {
+          media: first.type === 'credential' ? ('file' as const) : first.type,
+          ...(first.filename ? { filename: first.filename } : {}),
+          ...(words ? {} : { about: entry.text.slice(0, 200) }),
+        }
+      : {}),
+  }
+}
+
+/** The reference as a UI gets it: what the model is told of a media message stays on the agent. */
+function wireReply(reference: unknown): unknown {
+  if (!reference || typeof reference !== 'object') return reference
+  const { about: _about, ...shown } = reference as Record<string, unknown>
+  return shown
+}
+
 /** The wire caption: a file's extracted text stays on the agent, the UI gets the name and a short excerpt. */
 function caption(a: MessageAttachment): string {
   if (a.type !== 'file' || a.textRepr.length <= 200) return a.textRepr
@@ -53,7 +84,7 @@ export function entryToMessages(entry: MessageEntry): Record<string, unknown>[] 
     sourceType: entry.sourceType,
     completion: entry.completion,
     reactions: reactions.length ? reactions : undefined,
-    replyTo: entry.payload?.replyTo,
+    replyTo: wireReply(entry.payload?.replyTo),
     externalId: entry.externalId,
   }
   switch (entry.sourceType) {

@@ -222,6 +222,13 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     - **The audit trail stays.** Every `viewed` receipt is still recorded as a `state-update` entry with the
       message ids and its time, when receipts are enabled; the marker never replaces these entries and the
       model never sees them. Profile package 3.1.4.
+34. **A reply quotes a media message by what it is** (2026-11-13, decided by Fabrice: reactions and replies on
+    media now; PROF-RUN-009, D46 of the app). A reaction already reached a media message when a client named
+    its entry. A reply to one quoted the placeholder that stands for its attachment (`[file photo.jpg]`). The
+    reference now says what the message is (`media`: image, voice, video, file; `filename`) and carries as
+    `text` only the words the message has of its own: a caption, the transcription of a voice note. A UI
+    names the rest ("Photo", the file's name). The model is still told what the quoted media holds; that
+    part stays on the agent. Profile package 3.1.5.
 
 ## Not done in this iteration
 

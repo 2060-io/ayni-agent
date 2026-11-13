@@ -401,12 +401,15 @@ export const AYNI_ACTION_KINDS: readonly AyniActionKind[] = [
   'attachments',
 ]
 
-/** A message the turn answers: the id of a transcript message of the same session (PROF-RUN-009). */
+/** A message the turn answers: the id of a transcript message of the same conversation (PROF-RUN-009). */
 export interface ReplyReference {
   id: string
-  /** short excerpt of the quoted message, for rendering */
+  /** short excerpt of the quoted message, for rendering; empty for a media message that carries no words of its own */
   text: string
   role: 'user' | 'assistant'
+  /** what the quoted message is, when it is a media message: a UI names it ("Photo", "Voice note", the file's name) */
+  media?: 'image' | 'voice' | 'video' | 'file'
+  filename?: string
 }
 
 export type AyniAction =
