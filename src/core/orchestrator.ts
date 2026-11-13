@@ -436,8 +436,11 @@ export class Orchestrator {
 
 /** A reply carries the quoted message as context, in the user's voice (INTX-REPLY-001). */
 function withReplyContext(entry: MessageEntry): string {
-  const r = entry.payload?.replyTo as { text?: string; role?: string } | undefined
-  if (!r?.text) return entry.text
-  const who = r.role === 'assistant' ? 'your message' : 'my earlier message'
-  return `[replying to ${who}: "${r.text}"]\n${entry.text}`
+  const r = entry.payload?.replyTo as { text?: string; role?: string; media?: string; about?: string } | undefined
+  // a media message with no words of its own is told by what it holds (its description, its file's name)
+  const quoted = r?.text || r?.about
+  if (!quoted) return entry.text
+  const what = r?.media ? { image: 'picture', voice: 'voice note', video: 'video', file: 'file' }[r.media] : 'message'
+  const who = r?.role === 'assistant' ? `your ${what}` : `my earlier ${what}`
+  return `[replying to ${who}: "${quoted}"]\n${entry.text}`
 }

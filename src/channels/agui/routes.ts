@@ -25,7 +25,7 @@ import { prefixedId } from '../../util/ids.js'
 import type { Logger } from '../../util/logger.js'
 import type { AgUiAdapter } from './adapter.js'
 import { type AgUiEvent, ev, sse } from './events.js'
-import { attachmentActivity, entryToMessages } from './mapping.js'
+import { attachmentActivity, entryToMessages, replyReference } from './mapping.js'
 import { RunMirror } from './mirror.js'
 import type { SessionStreams } from './streams.js'
 
@@ -624,11 +624,7 @@ export class AgUiRoutes {
         const quoted = action.replyTo ? await this.agent.memory.get(action.replyTo) : undefined
         const replyTo =
           quoted && [session.id, ...(session.lineage ?? [])].includes(quoted.sessionId)
-            ? {
-                id: quoted.id,
-                text: quoted.text.slice(0, 200),
-                role: quoted.role === 'agent' ? 'assistant' : 'user',
-              }
+            ? replyReference(quoted)
             : undefined
         result = await this.agent.turn(
           session,
