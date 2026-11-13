@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/2060-io/ayni-agent/compare/v0.11.0...v0.12.0) (2026-11-13)
+
+
+### Features
+
+* **replies:** a reply quotes a media message by what it is ([#51](https://github.com/2060-io/ayni-agent/issues/51)) ([3d36d4e](https://github.com/2060-io/ayni-agent/commit/3d36d4e3e8cdf938fef415d245b0fef881d8e0d0))
+
 ## [0.11.0](https://github.com/2060-io/ayni-agent/compare/v0.10.0...v0.11.0) (2026-11-12)
 
 
