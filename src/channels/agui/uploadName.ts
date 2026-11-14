@@ -27,7 +27,7 @@ export function cleanFileName(name: string | undefined): string | undefined {
 }
 
 /** The text of a multipart field, when it is one. */
-function fieldText(field: unknown): string | undefined {
+export function fieldText(field: unknown): string | undefined {
   const one = Array.isArray(field) ? field[0] : field
   if (!one || typeof one !== 'object') return undefined
   const { type, value } = one as { type?: unknown; value?: unknown }

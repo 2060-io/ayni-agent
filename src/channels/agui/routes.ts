@@ -30,6 +30,7 @@ import { type AgUiEvent, ev, sse } from './events.js'
 import { attachmentActivity, entryToMessages, replyReference } from './mapping.js'
 import { RunMirror } from './mirror.js'
 import type { SessionStreams } from './streams.js'
+import { uploadMeasures } from './uploadMeasures.js'
 import { uploadName } from './uploadName.js'
 
 /**
@@ -522,7 +523,9 @@ export class AgUiRoutes {
         mimeType,
         // the name the client gave in a field of its own, else the part's (PROF-HIST-008)
         uploadName(file),
-        session.locale ?? this.agent.pack.language.agent
+        session.locale ?? this.agent.pack.language.agent,
+        // what the recorder measured of a voice note (PROF-HIST-009)
+        uploadMeasures(file)
       )
       return reply.code(201).send({
         attachmentId: attachment.id,
@@ -530,6 +533,8 @@ export class AgUiRoutes {
         mimeType: attachment.mimeType,
         size: attachment.size,
         textRepr: attachment.textRepr,
+        duration: attachment.duration,
+        waveform: attachment.waveform,
       })
     })
 

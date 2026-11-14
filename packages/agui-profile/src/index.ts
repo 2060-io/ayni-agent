@@ -479,7 +479,13 @@ export interface AttachmentActivity {
   size?: number
   width?: number
   height?: number
+  /** the length of a voice note or a video, in seconds */
   duration?: number
+  /**
+   * The shape of a voice note's sound, as its recorder measured it: up to 64 levels, each a whole number from 0
+   * (silence) to 100 (the loudest of the note), from its start to its end (PROF-HIST-009).
+   */
+  waveform?: number[]
   filename?: string
   thumbnailId?: string
 }
@@ -626,6 +632,9 @@ export interface UploadResponse {
   type: AttachmentType
   mimeType: string
   size: number
+  /** what the agent kept of the measures the sender gave of a voice note (PROF-HIST-009) */
+  duration?: number
+  waveform?: number[]
 }
 
 // ---------------------------------------------------------------------------------------------

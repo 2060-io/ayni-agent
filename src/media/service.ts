@@ -77,7 +77,9 @@ export class MediaService {
     bytes: Buffer,
     mimeType: string,
     filename: string | undefined,
-    language: string
+    language: string,
+    /** what the sender measured of a voice note: kept as given, the audio is not opened for it (PROF-HIST-009) */
+    measures: { duration?: number; waveform?: number[] } = {}
   ): Promise<MessageAttachment> {
     const type = attachmentTypeOf(mimeType)
     const stored = await this.objects.put(`sessions/${session.id}`, bytes, mimeType)
@@ -91,6 +93,10 @@ export class MediaService {
       textRepr: filename ? `[file ${filename}]` : `[${type}]`,
       objectKeyRef: stored.objectKeyRef,
       refDigest: stored.refDigest,
+    }
+    if (type === 'voice') {
+      if (measures.duration !== undefined) attachment.duration = measures.duration
+      if (measures.waveform) attachment.waveform = measures.waveform
     }
     try {
       if (type === 'voice' && this.transcriber) {

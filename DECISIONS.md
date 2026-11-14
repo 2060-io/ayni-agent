@@ -325,3 +325,14 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     are still a text of their own, and a note whose audio is gone (retention) still reads as a text. The
     mirror to the other devices is built from the same mapping. Nothing stored changes: the entry keeps the
     transcription as its text, for the model, the search and the previews.
+40. **A voice note keeps the length and the waveform its recorder measured** (2026-11-14, Fabrice: "how to
+    show the duration? BTW I want to see the waveform of the voicenote in the bubble, too", then "go" on my
+    proposal; PROF-HIST-009). A voice note showed "0:00" until played: the attachment had a `duration` that
+    nothing filled, and no shape of its sound. The device that records a note knows both. An upload may now
+    carry the text fields `duration` (seconds) and `waveform` (a JSON array of 1 to 64 whole levels from 0 to
+    100), read by `uploadMeasures` beside the `filename` field; the agent keeps them on the attachment and
+    gives them back in `ayni.attachment`, live, to the other devices and in history, and in the answer to
+    the upload. A value that does not read is left out and never refuses an upload; the fields count for a
+    voice note only. The agent does not open the audio to measure it: that needs a decoder in the image, and
+    a note without the fields (an older client, a note already stored) simply has neither. The profile
+    package (3.1.7) types `waveform`.
