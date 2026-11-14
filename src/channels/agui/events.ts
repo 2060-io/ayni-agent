@@ -7,16 +7,14 @@ const ts = () => ({ timestamp: Date.now() })
 
 export const ev = {
   /**
-   * `noTurn`: the run gets no turn of its own (PROF-RUN-012/013): another's turn answers it (`mergedInto` names
-   * that run), it was withdrawn while it waited, or it was refused. A UI gives such a response no effect on the
-   * run it shows in progress.
+   * `noTurn`: the run gets no turn (PROF-RUN-011/013): its message waits, it was refused, or its caller gave up
+   * while it waited. A UI gives such a response no effect on the run it shows in progress.
    */
-  runStarted: (threadId: string, runId: string, noTurn?: NoTurn, mergedInto?: string): AgUiEvent => ({
+  runStarted: (threadId: string, runId: string, noTurn?: NoTurn): AgUiEvent => ({
     type: 'RUN_STARTED',
     threadId,
     runId,
     ...(noTurn ? { noTurn } : {}),
-    ...(mergedInto ? { mergedInto } : {}),
     ...ts(),
   }),
   runFinished: (threadId: string, runId: string, outcome?: Record<string, unknown>, result?: unknown): AgUiEvent => ({

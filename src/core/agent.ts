@@ -21,10 +21,19 @@ import type { ChallengeService } from './challenges.js'
 import type { CapabilityRouter } from './channel.js'
 import type { FlowService } from './flows.js'
 import { contextualMenuFor, describeDevices, describeSessions, greetingFor, PLATFORM_MENU } from './interaction.js'
-import type { Orchestrator, TurnInput, TurnResult, TurnSink } from './orchestrator.js'
+import {
+  conversationKey,
+  type Orchestrator,
+  type TurnContext,
+  type TurnInput,
+  type TurnResult,
+  type TurnSink,
+} from './orchestrator.js'
 import type { PrincipalService, VerifiedFacts } from './principals.js'
 import { SessionError, type SessionService } from './sessions.js'
+import { TurnLock } from './turnLock.js'
 import type { ApprovalRecord, ClientDescription, ClosureReason, MessageEntry, Principal, Session } from './types.js'
+import { TooManyWaiting, type WaitingItem, WaitingList } from './waiting.js'
 
 export interface AgentParts {
   env: Env
@@ -56,6 +65,27 @@ export class RouterSink implements TurnSink {
   public async text(entry: MessageEntry): Promise<void> {
     await this.agent.router.deliver(this.session, { kind: 'text', entry })
   }
+}
+
+/** A message that waits, as a device shows it (PROF-RUN-011). */
+export interface WaitingView {
+  /** the agent's id for the message */
+  id: string
+  sessionId: string
+  /** the id the client gave it */
+  messageId?: string
+  text: string
+  attachments: number
+  at: string
+}
+
+/** Where the reply to what waited goes, for a turn the agent starts itself (PROF-RUN-012). */
+export interface QueuedRun {
+  sink: TurnSink
+  /** aborted when the person stops the reply */
+  signal: AbortSignal
+  /** the turn has ended, well or not */
+  finish(result?: TurnResult, error?: unknown): Promise<void>
 }
 
 export class AyniAgent {
@@ -167,7 +197,7 @@ export class AyniAgent {
         .generatingFor(session.id)
         .map((g) => ({ entryId: g.entryId, kind: g.kind, startedAt: g.startedAt })),
       // the person's messages that wait for the turn in progress to end (D63, PROF-RUN-011)
-      waiting: this.orchestrator.waiting(session),
+      waiting: await this.waitingOf(session),
       principal: principal ? this.principalDisplay(principal) : null,
       purposes: this.features.elevation
         ? (this.pack.purposes ?? []).map((p) => ({ id: p.id, label: p.label, description: p.description }))
@@ -343,22 +373,61 @@ export class AyniAgent {
 
   // ---- turns and actions --------------------------------------------------------------------------
 
+  // ---- one turn at a time; what is sent meanwhile waits (D63, CORE-MSG-010) ------------------------
+
+  /** the lock a turn holds while it runs: one per conversation, in the memory of the process */
+  private readonly turns = new TurnLock()
+  /** the messages that wait, kept in the store: created with the agent's parts */
+  private waitingList?: WaitingList
+  /** the waiting messages a turn is answering now: still listed in the store until it ends, waiting no more */
+  private readonly inTurn = new Set<string>()
+  /** what waits in the conversation of this session changed: set by the channel that shows it */
+  public waitingChanged?: (session: Session) => void
+  /**
+   * Where the reply to what waited goes: no request carries it, the agent starts that turn itself. Set by the
+   * channel that serves the conversation; without it the reply is recorded and read from history.
+   */
+  public queuedRun?: (session: Session) => Promise<QueuedRun>
+
+  private get waitingMessages(): WaitingList {
+    this.waitingList ??= new WaitingList(this.store.kv)
+    return this.waitingList
+  }
+
+  /**
+   * A turn for a message of the Principal. One turn runs at a time in a conversation: a message that may wait
+   * and arrives during one is recorded, listed as waiting and answered when it ends (`waiting` in the result);
+   * any other caller waits for its turn.
+   */
   public async turn(session: Session, input: TurnInput, sink: TurnSink, signal: AbortSignal): Promise<TurnResult> {
     this.sessions.requireBound(session)
     const principal = await this.principalOf(session)
     if (!principal) throw new Error('principal missing')
     await this.sessions.touch(session)
-    // the message counts as the conversation's activity when its turn starts: until then it waits, and may be
-    // withdrawn without a trace (D63)
-    const started: TurnSink = {
-      emit: async (event) => {
-        if (event.type === 'turn-start') await this.sessions.noteActivity(session, input.entry.text, { title: true })
-        await sink.emit(event)
-      },
+    const key = conversationKey(session)
+    if (input.mayWait && this.turns.busy(key)) return this.wait(key, session, principal, input)
+    return this.exclusive(session, signal, async () => {
+      await sink.emit({ type: 'turn-start' })
+      await this.sessions.noteActivity(session, input.entry.text, { title: true })
+      const result = await this.orchestrator.run(session, principal, input, sink, signal, this.turnContext(key))
+      await this.afterTurn(session, result)
+      return result
+    })
+  }
+
+  /** Runs one thing at a time in the conversation of a session; a caller that gives up while it waits ran nothing. */
+  private async exclusive(session: Session, signal: AbortSignal, work: () => Promise<TurnResult>): Promise<TurnResult> {
+    const release = await this.turns.acquire(conversationKey(session), signal)
+    if (!release) return { cancelled: true, withdrawn: true }
+    try {
+      return await work()
+    } finally {
+      release()
     }
-    const result = await this.orchestrator.run(session, principal, input, started, signal)
-    // no turn ran for this message: another's turn answers it, or it was withdrawn
-    if (result.merged || result.withdrawn) return result
+  }
+
+  /** What follows a turn: the read marker, the conversation's activity, a wake-up when no screen shows it. */
+  private async afterTurn(session: Session, result: TurnResult): Promise<void> {
     // the person's message is read up to, the reply counts until a device reports it viewed (IDENT-SESS-017)
     await this.sessions
       .readAfterTurn(session, result.inbound?.id)
@@ -369,7 +438,141 @@ export class AyniAgent {
         this.logger.warn({ err, sessionId: session.id }, 'wake-up not sent')
       )
     }
-    return result
+  }
+
+  /** What a turn is told of the messages that wait in its conversation. */
+  private turnContext(key: string): TurnContext {
+    const since = new Date().toISOString()
+    const stillWaiting = async () =>
+      (await this.waitingMessages.list(key)).filter((item) => !this.inTurn.has(item.entryId))
+    return {
+      // recorded, and not this turn's to answer: out of what the model reads
+      notYet: async () => new Set((await stillWaiting()).map((item) => item.entryId)),
+      // the reply stands before the first message that arrived while it was written: it does not answer it
+      replyAt: async () => {
+        const first = (await stillWaiting()).find((item) => item.at > since)
+        return first ? new Date(Date.parse(first.at) - 1).toISOString() : undefined
+      },
+    }
+  }
+
+  /** A message that arrives during a turn: recorded, listed in the store as waiting, and answered next. */
+  private async wait(key: string, session: Session, principal: Principal, input: TurnInput): Promise<TurnResult> {
+    await this.orchestrator.live(principal)
+    // refused before anything of it is recorded (PROF-RUN-011)
+    if (!(await this.waitingMessages.room(key))) throw new TooManyWaiting()
+    const entry = await this.orchestrator.record(session, input)
+    await this.waitingMessages.add(key, {
+      entryId: entry.id,
+      sessionId: session.id,
+      messageId: entry.externalId,
+      at: entry.initiatedAt,
+    })
+    this.waitingChanged?.(session)
+    // answered when the turn in progress has ended: this takes its place in line behind it
+    void this.answerWaiting(key, session)
+    return { cancelled: false, waiting: true, inbound: entry }
+  }
+
+  /**
+   * Answers what waits in a conversation, in one turn, once the conversation is free. Called for each message that
+   * comes to wait, and when the agent starts: whoever comes first answers everything, the others find nothing.
+   */
+  private async answerWaiting(key: string, witness: Session): Promise<void> {
+    const release = await this.turns.acquire(key)
+    if (!release) return
+    try {
+      const items = await this.waitingMessages.list(key)
+      if (items.length) await this.turnForWaiting(key, witness, items)
+    } catch (err) {
+      this.logger.error({ err, conversation: key }, 'the messages that waited were not answered')
+    } finally {
+      release()
+    }
+  }
+
+  private async turnForWaiting(key: string, witness: Session, items: WaitingItem[]): Promise<void> {
+    const ids = items.map((item) => item.entryId)
+    const entries = (await Promise.all(ids.map((id) => this.memory.get(id)))).filter((e): e is MessageEntry => !!e)
+    // the turn runs on the session the latest message came through, whatever became of it since
+    const last = items[items.length - 1] as WaitingItem
+    const session = (await this.sessions.get(last.sessionId)) ?? witness
+    const principal = await this.principalOf(session)
+    const latest = entries[entries.length - 1]
+    if (!principal || !latest) {
+      await this.waitingMessages.remove(key, ids)
+      this.waitingChanged?.(session)
+      return
+    }
+    for (const id of ids) this.inTurn.add(id)
+    this.waitingChanged?.(session)
+    const queued = await this.queuedRun?.(session).catch((err) => {
+      this.logger.warn({ err, sessionId: session.id }, 'no channel for the reply to what waited: it is recorded')
+      return undefined
+    })
+    const sink: TurnSink = queued?.sink ?? { emit: () => undefined }
+    let result: TurnResult | undefined
+    let failure: unknown
+    try {
+      await sink.emit({ type: 'turn-start' })
+      await this.sessions.noteActivity(session, latest.text, { title: true })
+      result = await this.orchestrator.answer(
+        session,
+        principal,
+        entries,
+        sink,
+        queued?.signal ?? new AbortController().signal,
+        this.turnContext(key)
+      )
+      await this.afterTurn(session, result)
+    } catch (err) {
+      failure = err
+      this.logger.error({ err, sessionId: session.id }, 'the turn for what waited failed')
+    } finally {
+      // off the list once the turn has ended: one cut short by a restart is run again when the agent starts
+      await this.waitingMessages.remove(key, ids)
+      for (const id of ids) this.inTurn.delete(id)
+      this.waitingChanged?.(session)
+      await queued?.finish(result, failure)
+    }
+  }
+
+  /** The messages that wait in the conversation of a session, as its devices show them (PROF-RUN-011). */
+  public async waitingOf(session: Pick<Session, 'id' | 'conversationId'>): Promise<WaitingView[]> {
+    const items = (await this.waitingMessages.list(conversationKey(session))).filter(
+      (item) => !this.inTurn.has(item.entryId)
+    )
+    const views: WaitingView[] = []
+    for (const item of items) {
+      const entry = await this.memory.get(item.entryId)
+      if (!entry) continue
+      views.push({
+        id: entry.id,
+        sessionId: item.sessionId,
+        messageId: item.messageId,
+        text: entry.text,
+        attachments: entry.attachments.length,
+        at: item.at,
+      })
+    }
+    return views
+  }
+
+  /** What a restart left waiting is answered: called once the channels are up (CORE-MSG-010). */
+  public async resumeWaiting(): Promise<void> {
+    for (const key of await this.waitingMessages.conversations()) {
+      const items = await this.waitingMessages.list(key)
+      const last = items[items.length - 1]
+      const session = last ? await this.sessions.get(last.sessionId) : undefined
+      if (!session) {
+        await this.waitingMessages.remove(
+          key,
+          items.map((item) => item.entryId)
+        )
+        continue
+      }
+      void this.answerWaiting(key, session)
+    }
   }
 
   /**
@@ -436,12 +639,15 @@ export class AyniAgent {
             ...menuEntry,
             payload: { ...(menuEntry.payload ?? {}), selectedItemId: action.itemId },
           })
-        return this.orchestrator.run(
-          session,
-          principal,
-          { entry: entryBase(text, 'text', { menuId: action.menuId, itemId: action.itemId }) },
-          sink,
-          signal
+        return this.exclusive(session, signal, () =>
+          this.orchestrator.run(
+            session,
+            principal,
+            { entry: entryBase(text, 'text', { menuId: action.menuId, itemId: action.itemId }) },
+            sink,
+            signal,
+            this.turnContext(conversationKey(session))
+          )
         )
       }
       case 'contextual.select':
@@ -494,17 +700,20 @@ export class AyniAgent {
         const policy = target?.reactionPolicy ?? 'historize'
         const notify = policy === 'notify' || (typeof policy === 'object' && policy.notifyOn.includes(action.emoji))
         if (notify && action.action === 'add') {
-          return this.orchestrator.run(
-            session,
-            principal,
-            {
-              entry: entryBase(
-                `(reacted with ${action.emoji} to your message: "${target?.text.slice(0, 120) ?? ''}")`,
-                'text'
-              ),
-            },
-            sink,
-            signal
+          return this.exclusive(session, signal, () =>
+            this.orchestrator.run(
+              session,
+              principal,
+              {
+                entry: entryBase(
+                  `(reacted with ${action.emoji} to your message: "${target?.text.slice(0, 120) ?? ''}")`,
+                  'text'
+                ),
+              },
+              sink,
+              signal,
+              this.turnContext(conversationKey(session))
+            )
           )
         }
         return undefined
@@ -576,22 +785,26 @@ export class AyniAgent {
     const item = (this.pack.persona.menu ?? []).find((m) => m.id === itemId)
     if (!item) return { text: 'Unknown menu item.' }
     if (item.action.type === 'prompt' && item.action.prompt) {
-      return this.orchestrator.run(
-        session,
-        principal,
-        {
-          entry: {
-            sessionId: session.id,
-            principalId: principal.id,
-            role: 'principal',
-            sourceType: 'text',
-            text: item.action.prompt,
-            backingIdentity: principal.backingIdentity,
-            payload: { menuItemId: itemId },
+      const prompt = item.action.prompt
+      return this.exclusive(session, signal, () =>
+        this.orchestrator.run(
+          session,
+          principal,
+          {
+            entry: {
+              sessionId: session.id,
+              principalId: principal.id,
+              role: 'principal',
+              sourceType: 'text',
+              text: prompt,
+              backingIdentity: principal.backingIdentity,
+              payload: { menuItemId: itemId },
+            },
           },
-        },
-        sink,
-        signal
+          sink,
+          signal,
+          this.turnContext(conversationKey(session))
+        )
       )
     }
     if (item.action.type === 'tool' && item.action.tool) {

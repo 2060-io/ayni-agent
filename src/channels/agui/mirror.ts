@@ -59,6 +59,11 @@ export class RunMirror {
     })
   }
 
+  /** Opens the run on the targets now: a run the agent starts shows as in progress before its first word. */
+  public begin(): void {
+    if (this.targets.length) this.open()
+  }
+
   /** The run is opened on the targets with the first thing to show: a run that adds nothing mirrors nothing. */
   private open(): void {
     if (this.started) return

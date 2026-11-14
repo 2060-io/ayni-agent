@@ -18,7 +18,6 @@ import { estimateTokens } from '../util/tokens.js'
 import type { ChallengeService } from './challenges.js'
 import type { PrincipalService } from './principals.js'
 import { addonTokenCount, renderPromptAddon } from './promptAddon.js'
-import { TurnGate } from './turnGate.js'
 import type { ApprovalRecord, MessageEntry, Principal, ReactionPolicy, Session } from './types.js'
 
 export type TurnEvent =
@@ -29,8 +28,8 @@ export type TurnEvent =
   | { type: 'step-finished'; label: string }
   | { type: 'activity'; messageId: string; activityType: string; content: Record<string, unknown> }
   | { type: 'inbound'; entry: MessageEntry }
-  /** the turn starts: until then it may have waited for another to end (D63); `merged` names what it answers too */
-  | { type: 'turn-start'; merged: string[] }
+  /** the turn starts: until then it may have waited for another to end (D63) */
+  | { type: 'turn-start' }
 
 export interface TurnSink {
   emit(event: TurnEvent): Promise<void> | void
@@ -40,8 +39,11 @@ export interface TurnInput {
   entry: NewEntry
   /** bytes of image attachments for multimodal models, keyed by attachment id (never persisted) */
   imageBytes?: Map<string, Buffer>
-  /** what the channel calls this turn (the run of an AG-UI client): how a waiting message is named and withdrawn */
-  runId?: string
+  /**
+   * the message may wait: when a turn of its conversation is in progress it is recorded, listed as waiting and
+   * answered when that turn ends, and the caller is told at once (D63). Without it the caller waits for its turn.
+   */
+  mayWait?: boolean
 }
 
 export interface TurnResult {
@@ -51,32 +53,24 @@ export interface TurnResult {
   cancelled: boolean
   /** every message this turn answered, in the order they arrived */
   inbounds?: MessageEntry[]
-  /** no turn ran for this message: another's turn answers it (D63). Its run id, when the channel gave one. */
-  merged?: { into?: string }
-  /** the message was withdrawn while it waited: nothing was recorded */
+  /** no turn ran: the message is recorded and waits for the turn in progress to end (D63) */
+  waiting?: boolean
+  /** no turn ran: the caller gave up while it waited for its turn */
   withdrawn?: boolean
 }
 
-/** A message that waits for the turn in progress of its conversation to end (PROF-RUN-011). */
-export interface WaitingMessage {
-  runId?: string
-  sessionId: string
-  /** the id the client gave the message */
-  messageId?: string
-  text: string
-  attachments: number
-  at: string
+/** What a turn is told of the conversation it runs in, beyond its own messages (D63). */
+export interface TurnContext {
+  /** the entries recorded while a turn ran and not answered yet: out of the model's context until their turn */
+  notYet?: () => Promise<ReadonlySet<string>>
+  /**
+   * where the reply stands in the conversation, when not at the time it ends: before the first message that
+   * arrived to wait while it was written
+   */
+  replyAt?: () => Promise<string | undefined>
 }
 
-/** What waits at the gate of a conversation: a turn's input and the session it came through. */
-interface PendingTurn {
-  session: Session
-  input: TurnInput
-  /** when the message arrived */
-  arrivedAt: string
-}
-
-/** The conversation a turn belongs to: the gate is the conversation's, whatever the session or the device. */
+/** The conversation a turn belongs to: one turn at a time in it, whatever the session or the device. */
 export function conversationKey(session: Pick<Session, 'id' | 'conversationId'>): string {
   return session.conversationId ? `conv:${session.conversationId}` : `ses:${session.id}`
 }
@@ -86,8 +80,6 @@ export interface OrchestratorHooks {
   onCredentialInvalid(principal: Principal): Promise<void>
   /** an approval is pending for a tool call started in this session */
   onApprovalPending(session: Session, principal: Principal, record: ApprovalRecord, entry: MessageEntry): Promise<void>
-  /** what waits in the conversation of this session changed (D63): its devices are told */
-  onWaitingChanged?(session: Session): void
 }
 
 export class TurnCancelled extends Error {
@@ -97,17 +89,10 @@ export class TurnCancelled extends Error {
   }
 }
 
-/** How many messages may wait in one conversation (PROF-RUN-011). */
-const MAX_WAITING = 10
-
 export class Orchestrator {
   private readonly reactionPolicies = new Map<string, ReactionPolicy>()
   private readonly addon: string
   private readonly maxToolRounds = 8
-  /** one turn at a time per conversation; what arrives meanwhile waits (D63, CORE-MSG-010) */
-  private readonly gate: TurnGate<PendingTurn>
-  /** a session of each conversation that has a turn in progress, to tell its devices what waits */
-  private readonly witnesses = new Map<string, Session>()
 
   public constructor(
     private readonly pack: AgentPack,
@@ -122,10 +107,6 @@ export class Orchestrator {
     private readonly hooks: OrchestratorHooks,
     private readonly logger: Logger
   ) {
-    this.gate = new TurnGate<PendingTurn>(MAX_WAITING, (key) => {
-      const witness = this.witnesses.get(key)
-      if (witness) this.hooks.onWaitingChanged?.(witness)
-    })
     const features = featuresOf(pack)
     this.addon = renderPromptAddon({
       features,
@@ -233,8 +214,8 @@ export class Orchestrator {
    * together, in the order they arrived. One user message whatever their number: providers that want user and
    * assistant messages to alternate take it as it is.
    */
-  private async userTurn(inbounds: MessageEntry[], inputs: TurnInput[]): Promise<ChatMessage> {
-    const built = await Promise.all(inbounds.map((entry, i) => this.userMessage(entry, inputs[i]?.imageBytes)))
+  private async userTurn(inbounds: MessageEntry[], imageBytes?: Map<string, Buffer>): Promise<ChatMessage> {
+    const built = await Promise.all(inbounds.map((entry) => this.userMessage(entry, imageBytes)))
     if (built.length === 1) return built[0] as ChatMessage
     const parts: ContentPart[] = []
     for (const message of built) {
@@ -248,78 +229,54 @@ export class Orchestrator {
 
   // ---- the turn -------------------------------------------------------------------------------
 
-  /** The messages that wait in the conversation of a session, in the order they arrived. */
-  public waiting(session: Pick<Session, 'id' | 'conversationId'>): WaitingMessage[] {
-    return this.gate.waiting(conversationKey(session)).map(({ session: from, input, arrivedAt }) => ({
-      runId: input.runId,
-      sessionId: from.id,
-      messageId: input.entry.externalId,
-      text: input.entry.text,
-      attachments: input.entry.attachments?.length ?? 0,
-      at: arrivedAt,
-    }))
-  }
-
-  /**
-   * A turn for a message of the Principal. One turn runs at a time in a conversation (D63, CORE-MSG-010): a
-   * message that arrives during one waits here, and is answered with the others that wait when it ends, by the
-   * turn of the last of them. A message withdrawn while it waits is never recorded.
-   */
+  /** A turn for a message of the Principal: the message is recorded, then answered. */
   public async run(
     session: Session,
     principal: Principal,
     input: TurnInput,
     sink: TurnSink,
-    signal: AbortSignal
+    signal: AbortSignal,
+    context: TurnContext = {}
   ): Promise<TurnResult> {
-    const key = conversationKey(session)
-    const arrivedAt = new Date().toISOString()
-    // a message that waits is recorded when its turn starts, after the reply in progress: that is its place in
-    // the conversation. The time it was sent is kept with it.
-    const waits = this.gate.busy(key)
-    const arrived: TurnInput = waits
-      ? { ...input, entry: { ...input.entry, payload: { ...(input.entry.payload ?? {}), sentAt: arrivedAt } } }
-      : input
-    this.witnesses.set(key, session)
-    const entered = await this.gate.enter(key, { session, input: arrived, arrivedAt }, signal)
-    if (entered.kind === 'withdrawn') return { cancelled: true, withdrawn: true }
-    if (entered.kind === 'merged') return { cancelled: false, merged: { into: entered.into.input.runId } }
-    try {
-      const inputs = entered.items.map((item) => item.input)
-      await sink.emit({
-        type: 'turn-start',
-        merged: inputs.slice(0, -1).flatMap((other) => (other.runId ? [other.runId] : [])),
-      })
-      return await this.turn(session, principal, inputs, sink, signal)
-    } finally {
-      entered.release()
-      if (!this.gate.busy(key)) this.witnesses.delete(key)
-    }
+    await this.live(principal)
+    const inbound = await this.record(session, input)
+    return this.answer(session, principal, [inbound], sink, signal, context, input.imageBytes)
   }
 
-  /** The turn itself, for one message or for several that waited together. */
-  private async turn(
-    session: Session,
-    principal: Principal,
-    inputs: TurnInput[],
-    sink: TurnSink,
-    signal: AbortSignal
-  ): Promise<TurnResult> {
+  /** The Principal's credential still holds (IDENT-LIVE): checked before anything of a message is taken. */
+  public async live(principal: Principal): Promise<void> {
     const liveness = await this.principals.ensureLive(principal)
     if (!liveness.ok && liveness.reason !== 'unavailable') {
       await this.hooks.onCredentialInvalid(principal)
       throw new Error('identity credential is no longer valid')
     }
-    const inbounds: MessageEntry[] = []
-    for (const input of inputs) {
-      const entry = await this.memory.append(input.entry)
-      this.stats.emit('message-in', 1, { channel: session.channelType, sourceType: entry.sourceType })
-      await sink.emit({ type: 'inbound', entry })
-      inbounds.push(entry)
-    }
+  }
+
+  /** Records a message of the Principal: now for a turn that starts, or for one that waits (D63). */
+  public async record(session: Session, input: TurnInput): Promise<MessageEntry> {
+    const inbound = await this.memory.append(input.entry)
+    this.stats.emit('message-in', 1, { channel: session.channelType, sourceType: inbound.sourceType })
+    return inbound
+  }
+
+  /**
+   * The turn itself, for messages already recorded: one, or several that waited together (D63, CORE-MSG-010),
+   * which the model reads in the order they arrived and answers by one reply.
+   */
+  public async answer(
+    session: Session,
+    principal: Principal,
+    inbounds: MessageEntry[],
+    sink: TurnSink,
+    signal: AbortSignal,
+    context: TurnContext = {},
+    imageBytes?: Map<string, Buffer>
+  ): Promise<TurnResult> {
+    for (const entry of inbounds) await sink.emit({ type: 'inbound', entry })
     // tools, the reply's language and what is recalled follow the latest message
     const inbound = inbounds[inbounds.length - 1] as MessageEntry
     const answered = new Set(inbounds.map((e) => e.id))
+    const notYet = (await context.notYet?.()) ?? new Set<string>()
 
     const features = featuresOf(this.pack)
     const budget = this.pack.memory?.contextWindowTokens ?? 12000
@@ -327,7 +284,7 @@ export class Orchestrator {
     const systemTokens = system.reduce((n, m) => n + estimateTokens(m.role === 'system' ? m.content : ''), 0)
     const windowEntries = (
       await this.memory.window(principal, session, Math.max(1000, budget - systemTokens - 1500))
-    ).filter((e) => !answered.has(e.id))
+    ).filter((e) => !answered.has(e.id) && !notYet.has(e.id))
     const recalled = features.semanticRecall
       ? await this.memory.recall(
           principal,
@@ -344,7 +301,7 @@ export class Orchestrator {
       })
     }
     for (const e of windowEntries) messages.push(...this.entryToMessages(e))
-    messages.push(await this.userTurn(inbounds, inputs))
+    messages.push(await this.userTurn(inbounds, imageBytes))
 
     const grants = await this.approvals.activeGrants(principal.id)
     const visible = await this.registry.visible(principal.roles, grants)
@@ -410,6 +367,8 @@ export class Orchestrator {
 
     const reply = await this.memory.append({
       id: messageId,
+      // after the messages it answers, and before one that arrived to wait while it was written (D63)
+      initiatedAt: await context.replyAt?.(),
       sessionId: session.id,
       principalId: principal.id,
       role: 'agent',

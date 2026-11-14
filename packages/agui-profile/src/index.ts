@@ -366,8 +366,8 @@ export interface GeneratingEntry {
 
 /** A message of the person that waits for the turn in progress of its conversation to end (PROF-RUN-011). */
 export interface WaitingMessage {
-  /** the run that carries it: cancelling that run withdraws the message (PROF-RUN-013) */
-  runId?: string
+  /** the agent's id for the message: the one history gives it */
+  id: string
   /** the session it came through */
   sessionId: string
   /** the id the client gave the message */
@@ -540,18 +540,25 @@ export interface MergedRunOutcome {
 }
 
 /**
- * Why a run gets no turn of its own (PROF-RUN-012/013): another's turn answers its message, the message was
- * withdrawn while it waited, or the agent refused it. Carried by the run's `RunStarted` as `noTurn`.
+ * Why a run gets no turn (PROF-RUN-011): its message was recorded and waits for the turn in progress to end, the
+ * agent refused it (too many wait), or the caller gave up while its action waited for its turn. Carried by the
+ * run's `RunStarted` as `noTurn`.
  */
-export type NoTurn = 'merged' | 'withdrawn' | 'refused'
+export type NoTurn = 'waiting' | 'refused' | 'withdrawn'
+
+/** The outcome of a run whose message waits: the agent's id for it (PROF-RUN-011). */
+export interface WaitingRunOutcome {
+  type: 'waiting'
+  messageId: string
+}
 
 /**
- * What a `RunStarted` says of a run that gets no turn of its own, undefined for any other event. A UI gives the
- * events of such a response no effect on the run it shows in progress.
+ * What a `RunStarted` says of a run that gets no turn, undefined for any other event. A UI gives the events of
+ * such a response no effect on the run it shows in progress (PROF-RUN-013).
  */
 export function noTurnOf(event: { type?: unknown; noTurn?: unknown }): NoTurn | undefined {
   if (event.type !== 'RUN_STARTED') return undefined
-  return event.noTurn === 'merged' || event.noTurn === 'withdrawn' || event.noTurn === 'refused'
+  return event.noTurn === 'waiting' || event.noTurn === 'refused' || event.noTurn === 'withdrawn'
     ? event.noTurn
     : undefined
 }
