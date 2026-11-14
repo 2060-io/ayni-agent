@@ -1055,3 +1055,259 @@ describe('session stream (PROF-STREAM-001..004)', () => {
     expect(after).toBeGreaterThan(before)
   })
 })
+
+describe('a message sent while the agent answers (D63, CORE-MSG-010, PROF-RUN-011/012/013)', () => {
+  // the stub answers a word every 15 ms: this takes it about half a second
+  const LONG = Array.from({ length: 34 }, (_, i) => `word${i}`).join(' ')
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+  type Device = { sessionId: string; sessionToken: string }
+  type Event = Record<string, unknown>
+  const device = async (actor: string): Promise<Device> => {
+    const { body } = await createSession()
+    await bindViaPhone(body.sessionId, actor)
+    return body
+  }
+  const post = (d: Device, runId: string, text: string) =>
+    running.app
+      .inject({
+        method: 'POST',
+        url: `/agui/v3/sessions/${d.sessionId}/runs`,
+        headers: { authorization: `Bearer ${d.sessionToken}` },
+        payload: {
+          threadId: d.sessionId,
+          runId,
+          messages: [{ id: `u_${runId}`, role: 'user', content: text }],
+          tools: [],
+          context: [],
+        },
+      })
+      .then((response) => parseSse(response.body).map((e) => e.event))
+  const cancel = (d: Device, runId: string) =>
+    running.app.inject({
+      method: 'POST',
+      url: `/agui/v3/sessions/${d.sessionId}/runs/${runId}/cancel`,
+      headers: { authorization: `Bearer ${d.sessionToken}` },
+    })
+  const historyOf = async (d: Device) =>
+    (
+      await running.app.inject({
+        method: 'GET',
+        url: `/agui/v3/sessions/${d.sessionId}/messages?limit=50`,
+        headers: { authorization: `Bearer ${d.sessionToken}` },
+      })
+    ).json().messages as { id: string; role: string; content: string; metadata: Record<string, unknown> }[]
+  const waitingOf = async (d: Device) => {
+    const session = await running.agent.sessions.get(d.sessionId)
+    return (await running.agent.ayniState(session as never)).waiting ?? []
+  }
+  /** Everything a device's stream carried so far. */
+  const received = (d: Device): Event[] => {
+    const chunks: string[] = []
+    running.streams.attach(d.sessionId, { write: (c) => chunks.push(c), end: () => undefined }, 0)()
+    return parseSse(chunks.join('')).map((e) => e.event)
+  }
+  const until = async (what: () => Promise<boolean> | boolean, ms = 4000) => {
+    const end = Date.now() + ms
+    while (Date.now() < end) {
+      if (await what()) return
+      await pause(20)
+    }
+    throw new Error('not reached in time')
+  }
+  const replies = async (d: Device) => (await historyOf(d)).filter((m) => m.role === 'assistant')
+  const textOf = (events: Event[], messageId?: unknown) =>
+    events
+      .filter((e) => e.type === 'TEXT_MESSAGE_CONTENT' && (messageId === undefined || e.messageId === messageId))
+      .map((e) => String(e.delta))
+      .join('')
+  const types = (events: Event[]) => events.map((e) => e.type)
+
+  it('declares that it takes one (PROF-DESC-006)', async () => {
+    const descriptor = (await running.app.inject({ method: 'GET', url: '/.well-known/ayni-agent.json' })).json()
+    expect(descriptor.features.queue).toBe(true)
+  })
+
+  it('records it and makes it wait, then answers what waited together, in one reply it starts itself', async () => {
+    const d = await device('did:peer:queue-one')
+    const first = post(d, 'q-1', LONG)
+    await pause(120)
+    // the two runs end at once: no turn for them, their messages wait
+    const second = await post(d, 'q-2', 'the second thing')
+    const third = await post(d, 'q-3', 'and a third')
+    expect(types(second)).toEqual(['RUN_STARTED', 'RUN_FINISHED'])
+    expect(second[0]?.noTurn).toBe('waiting')
+    const outcome = (second[1]?.outcome ?? {}) as { type?: string; messageId?: string }
+    expect(outcome.type).toBe('waiting')
+    expect(third[0]?.noTurn).toBe('waiting')
+
+    // both are recorded and listed, in the order they came, under the agent's id and the client's
+    const waiting = await waitingOf(d)
+    expect(waiting.map((w) => [w.messageId, w.text, w.sessionId])).toEqual([
+      ['u_q-2', 'the second thing', d.sessionId],
+      ['u_q-3', 'and a third', d.sessionId],
+    ])
+    expect(waiting[0]?.id).toBe(outcome.messageId)
+
+    // the reply in progress is not disturbed, and what waits is not in what it answered
+    const firstEvents = await first
+    expect(firstEvents[0]?.noTurn).toBeUndefined()
+    expect(firstEvents[firstEvents.length - 1]?.type).toBe('RUN_FINISHED')
+    expect(textOf(firstEvents)).toContain('word33')
+    expect(textOf(firstEvents)).not.toContain('the second thing')
+
+    // the agent starts one turn for what waited, on the device's stream: one reply, to both
+    await until(async () => (await replies(d)).length === 2)
+    expect(await waitingOf(d)).toEqual([])
+    const stream = received(d)
+    const started = stream.filter((e) => e.type === 'RUN_STARTED')
+    const queued = started[started.length - 1]
+    expect(queued?.threadId).toBe(d.sessionId)
+    expect(['q-1', 'q-2', 'q-3']).not.toContain(queued?.runId)
+    const after = stream.slice(stream.indexOf(queued as Event))
+    // the device sent both messages: they are not sent back to it
+    expect(after.some((e) => e.type === 'TEXT_MESSAGE_START' && e.role === 'user')).toBe(false)
+    expect(textOf(after)).toContain('the second thing')
+    expect(textOf(after)).toContain('and a third')
+    expect(after.some((e) => e.type === 'RUN_FINISHED' && e.runId === queued?.runId)).toBe(true)
+
+    // history: each reply stands after what it answers
+    const history = await historyOf(d)
+    expect(history.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'user', 'assistant'])
+    expect(history.filter((m) => m.role === 'user').map((m) => m.content)).toEqual([
+      LONG,
+      'the second thing',
+      'and a third',
+    ])
+    expect(history[2]?.metadata.externalId).toBe('u_q-2')
+  })
+
+  it('answers what a restart left waiting: the list is in the store, not in the process', async () => {
+    const d = await device('did:peer:queue-two')
+    await post(d, 'r-1', 'hello')
+    const session = (await running.agent.sessions.get(d.sessionId)) as NonNullable<
+      Awaited<ReturnType<typeof running.agent.sessions.get>>
+    >
+    const principal = await running.agent.principalOf(session)
+    // (entries are ordered by their time, to the millisecond: the next one is not of the same instant as the reply)
+    await pause(5)
+    // what an agent that stopped mid-turn leaves: a recorded message, listed as waiting, and no turn in progress
+    const entry = await running.agent.memory.append({
+      sessionId: session.id,
+      principalId: principal?.id ?? null,
+      role: 'principal',
+      sourceType: 'text',
+      text: 'sent just before the restart',
+      externalId: 'u_r-2',
+      backingIdentity: principal?.backingIdentity ?? null,
+    } as never)
+    const key = session.conversationId ? `conv:${session.conversationId}` : `ses:${session.id}`
+    const raw = await running.agent.store.kv.get(`turn.waiting:${key}`)
+    expect(raw === undefined || JSON.parse(raw).length === 0).toBe(true)
+    await running.agent.store.kv.set(
+      `turn.waiting:${key}`,
+      JSON.stringify([{ entryId: entry.id, sessionId: session.id, messageId: 'u_r-2', at: entry.initiatedAt }])
+    )
+    await running.agent.store.kv.set('turn.waiting-index', JSON.stringify([key]))
+    expect((await waitingOf(d)).map((w) => w.text)).toEqual(['sent just before the restart'])
+
+    await running.agent.resumeWaiting()
+    await until(async () => (await replies(d)).length === 2)
+    expect(await waitingOf(d)).toEqual([])
+    const history = await historyOf(d)
+    expect(history.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant'])
+    expect(history[3]?.content).toContain('sent just before the restart')
+    expect(JSON.parse((await running.agent.store.kv.get('turn.waiting-index')) ?? '[]')).not.toContain(key)
+  })
+
+  it('takes what waits next when the reply in progress is stopped', async () => {
+    const d = await device('did:peer:queue-three')
+    const first = post(d, 's-1', LONG)
+    await pause(120)
+    await post(d, 's-2', 'answer this instead')
+    expect((await cancel(d, 's-1')).statusCode).toBe(202)
+    const firstEvents = await first
+    expect(firstEvents[firstEvents.length - 1]?.code).toBe('cancelled')
+    await until(async () => (await replies(d)).length === 2)
+    const history = await historyOf(d)
+    expect(history.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant'])
+    expect(history[3]?.content).toContain('answer this instead')
+  })
+
+  it('across devices: it waits on both, every device gets the reply, and each the messages it did not send', async () => {
+    const laptop = await device('did:peer:queue-four')
+    const phone = await device('did:peer:queue-four')
+    const first = post(laptop, 'x-1', LONG)
+    await pause(120)
+    const fromPhone = await post(phone, 'x-2', 'typed on the phone')
+    expect(fromPhone[0]?.noTurn).toBe('waiting')
+    expect((await waitingOf(laptop)).map((w) => [w.text, w.sessionId])).toEqual([
+      ['typed on the phone', phone.sessionId],
+    ])
+    expect((await waitingOf(phone)).map((w) => w.text)).toEqual(['typed on the phone'])
+    await first
+    await until(async () => (await replies(laptop)).length === 2)
+
+    const tail = (d: Device) => {
+      const stream = received(d)
+      const started = stream.filter((e) => e.type === 'RUN_STARTED')
+      const queued = started[started.length - 1] as Event
+      return { queued, events: stream.slice(stream.indexOf(queued)) }
+    }
+    const onLaptop = tail(laptop)
+    const onPhone = tail(phone)
+    // one run, the agent's, on each device's own thread
+    expect(onLaptop.queued.runId).toBe(onPhone.queued.runId)
+    expect(onLaptop.queued.threadId).toBe(laptop.sessionId)
+    expect(onPhone.queued.threadId).toBe(phone.sessionId)
+    // the laptop did not send the phone's message: it gets it, on the person's side; the phone does not
+    const brought = onLaptop.events.find((e) => e.type === 'TEXT_MESSAGE_START' && e.role === 'user')
+    expect(textOf(onLaptop.events, brought?.messageId)).toBe('typed on the phone')
+    expect(onPhone.events.some((e) => e.type === 'TEXT_MESSAGE_START' && e.role === 'user')).toBe(false)
+    // both get the reply
+    const reply = onPhone.events.find((e) => e.type === 'TEXT_MESSAGE_START' && e.role !== 'user')
+    expect(textOf(onPhone.events, reply?.messageId)).toContain('typed on the phone')
+    expect(textOf(onLaptop.events, reply?.messageId)).toContain('typed on the phone')
+    // the second turn came after the first reply: it is not beside it
+    expect((await historyOf(laptop)).map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant'])
+  })
+
+  it('lets any device of the conversation stop the reply the agent started', async () => {
+    const laptop = await device('did:peer:queue-five')
+    const phone = await device('did:peer:queue-five')
+    const first = post(laptop, 'c-1', 'short one')
+    await pause(40)
+    await post(laptop, 'c-2', LONG)
+    await first
+    // the agent's run is in progress: the phone, which sent nothing, stops it
+    let runId = ''
+    await until(() => {
+      const started = received(phone).filter((e) => e.type === 'RUN_STARTED')
+      runId = String(started[started.length - 1]?.runId ?? '')
+      return received(phone).some((e) => e.type === 'TEXT_MESSAGE_CONTENT' && String(e.delta).includes('word3'))
+    })
+    expect((await cancel(phone, runId)).statusCode).toBe(202)
+    await until(() => received(phone).some((e) => e.type === 'RUN_ERROR' && e.code === 'cancelled'))
+    await until(async () => (await replies(laptop)).length === 2)
+    const last = (await historyOf(laptop)).pop()
+    expect(last?.metadata.completion).toBe('interrupted')
+    // a run of another conversation is not this device's to stop
+    const stranger = await device('did:peer:queue-stranger')
+    expect((await cancel(stranger, runId)).statusCode).toBe(409)
+  })
+
+  it('refuses beyond the number it lets wait, and records nothing of it (PROF-RUN-011)', async () => {
+    const d = await device('did:peer:queue-six')
+    const first = post(d, 'm-0', LONG)
+    await pause(100)
+    for (let i = 1; i <= 10; i++) expect((await post(d, `m-${i}`, `message ${i}`))[0]?.noTurn).toBe('waiting')
+    const refused = await post(d, 'm-11', 'one too many')
+    expect(types(refused)).toEqual(['RUN_STARTED', 'RUN_ERROR'])
+    expect(refused[0]?.noTurn).toBe('refused')
+    expect(refused[1]?.code).toBe('too-many-waiting')
+    await first
+    await until(async () => (await replies(d)).length === 2)
+    const history = await historyOf(d)
+    expect(history.some((m) => String(m.content).includes('one too many'))).toBe(false)
+    expect(history.filter((m) => m.role === 'user')).toHaveLength(11)
+  })
+})

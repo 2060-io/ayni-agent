@@ -54,6 +54,8 @@ export interface DescriptorFeatures {
   sessionGrant?: boolean
   /** the agent opens flows through the flow profile rather than question-answer and chat (PROF-DESC-004) */
   flows?: boolean
+  /** the agent takes a message sent while a turn is in progress: it waits (PROF-DESC-006, PROF-RUN-011) */
+  queue?: boolean
   /** the agent keeps the shared read state: `unread` and `readUpTo` on a conversation (PROF-DESC-005, PROF-CONV-008) */
   readState?: boolean
 }
@@ -362,10 +364,27 @@ export interface GeneratingEntry {
   startedAt: string
 }
 
+/** A message of the person that waits for the turn in progress of its conversation to end (PROF-RUN-011). */
+export interface WaitingMessage {
+  /** the agent's id for the message: the one history gives it */
+  id: string
+  /** the session it came through */
+  sessionId: string
+  /** the id the client gave the message */
+  messageId?: string
+  text: string
+  /** how many attachments it has */
+  attachments: number
+  /** when it was sent */
+  at: string
+}
+
 export interface AyniState {
   contextualMenu: { items: ContextualMenuItem[] }
   pendingApprovals: number
   generating: GeneratingEntry[]
+  /** what waits, in the order it arrived, the same on every session of the conversation; absent on an agent without `features.queue` */
+  waiting?: WaitingMessage[]
   principal: PrincipalDisplay | null
   /** purposes a human may declare on an elevation request (PROF-RUN-005) */
   purposes?: { id: string; label: string; description?: string }[]
@@ -510,7 +529,39 @@ export const RUN_ERROR_CODE = {
   notBound: 'not-bound',
   closed: 'closed',
   internal: 'internal',
+  /** more messages wait in the conversation than the agent lets wait (PROF-RUN-011) */
+  tooManyWaiting: 'too-many-waiting',
 } as const
+
+/** The outcome of a run that ended without a turn of its own: the run named answers its message (PROF-RUN-012). */
+export interface MergedRunOutcome {
+  type: 'merged'
+  runId: string
+}
+
+/**
+ * Why a run gets no turn (PROF-RUN-011): its message was recorded and waits for the turn in progress to end, the
+ * agent refused it (too many wait), or the caller gave up while its action waited for its turn. Carried by the
+ * run's `RunStarted` as `noTurn`.
+ */
+export type NoTurn = 'waiting' | 'refused' | 'withdrawn'
+
+/** The outcome of a run whose message waits: the agent's id for it (PROF-RUN-011). */
+export interface WaitingRunOutcome {
+  type: 'waiting'
+  messageId: string
+}
+
+/**
+ * What a `RunStarted` says of a run that gets no turn, undefined for any other event. A UI gives the events of
+ * such a response no effect on the run it shows in progress (PROF-RUN-013).
+ */
+export function noTurnOf(event: { type?: unknown; noTurn?: unknown }): NoTurn | undefined {
+  if (event.type !== 'RUN_STARTED') return undefined
+  return event.noTurn === 'waiting' || event.noTurn === 'refused' || event.noTurn === 'withdrawn'
+    ? event.noTurn
+    : undefined
+}
 
 // ---------------------------------------------------------------------------------------------
 // History (section 8)

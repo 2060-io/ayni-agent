@@ -28,6 +28,8 @@ export type TurnEvent =
   | { type: 'step-finished'; label: string }
   | { type: 'activity'; messageId: string; activityType: string; content: Record<string, unknown> }
   | { type: 'inbound'; entry: MessageEntry }
+  /** the turn starts: until then it may have waited for another to end (D63) */
+  | { type: 'turn-start' }
 
 export interface TurnSink {
   emit(event: TurnEvent): Promise<void> | void
@@ -37,12 +39,40 @@ export interface TurnInput {
   entry: NewEntry
   /** bytes of image attachments for multimodal models, keyed by attachment id (never persisted) */
   imageBytes?: Map<string, Buffer>
+  /**
+   * the message may wait: when a turn of its conversation is in progress it is recorded, listed as waiting and
+   * answered when that turn ends, and the caller is told at once (D63). Without it the caller waits for its turn.
+   */
+  mayWait?: boolean
 }
 
 export interface TurnResult {
-  inbound: MessageEntry
-  reply: MessageEntry
+  /** the person's message: the last one when several were answered together; none when no turn ran */
+  inbound?: MessageEntry
+  reply?: MessageEntry
   cancelled: boolean
+  /** every message this turn answered, in the order they arrived */
+  inbounds?: MessageEntry[]
+  /** no turn ran: the message is recorded and waits for the turn in progress to end (D63) */
+  waiting?: boolean
+  /** no turn ran: the caller gave up while it waited for its turn */
+  withdrawn?: boolean
+}
+
+/** What a turn is told of the conversation it runs in, beyond its own messages (D63). */
+export interface TurnContext {
+  /** the entries recorded while a turn ran and not answered yet: out of the model's context until their turn */
+  notYet?: () => Promise<ReadonlySet<string>>
+  /**
+   * where the reply stands in the conversation, when not at the time it ends: before the first message that
+   * arrived to wait while it was written
+   */
+  replyAt?: () => Promise<string | undefined>
+}
+
+/** The conversation a turn belongs to: one turn at a time in it, whatever the session or the device. */
+export function conversationKey(session: Pick<Session, 'id' | 'conversationId'>): string {
+  return session.conversationId ? `conv:${session.conversationId}` : `ses:${session.id}`
 }
 
 export interface OrchestratorHooks {
@@ -179,23 +209,74 @@ export class Orchestrator {
     return { role: 'user', content: parts.length === 1 ? text : parts }
   }
 
+  /**
+   * What the person said, as one message of the model's conversation: one message, or several that waited
+   * together, in the order they arrived. One user message whatever their number: providers that want user and
+   * assistant messages to alternate take it as it is.
+   */
+  private async userTurn(inbounds: MessageEntry[], imageBytes?: Map<string, Buffer>): Promise<ChatMessage> {
+    const built = await Promise.all(inbounds.map((entry) => this.userMessage(entry, imageBytes)))
+    if (built.length === 1) return built[0] as ChatMessage
+    const parts: ContentPart[] = []
+    for (const message of built) {
+      if (message.role !== 'user') continue
+      if (typeof message.content === 'string') parts.push({ type: 'text', text: message.content })
+      else parts.push(...message.content)
+    }
+    const texts = parts.flatMap((part) => (part.type === 'text' ? [part.text] : []))
+    return { role: 'user', content: texts.length === parts.length ? texts.join('\n\n') : parts }
+  }
+
   // ---- the turn -------------------------------------------------------------------------------
 
+  /** A turn for a message of the Principal: the message is recorded, then answered. */
   public async run(
     session: Session,
     principal: Principal,
     input: TurnInput,
     sink: TurnSink,
-    signal: AbortSignal
+    signal: AbortSignal,
+    context: TurnContext = {}
   ): Promise<TurnResult> {
+    await this.live(principal)
+    const inbound = await this.record(session, input)
+    return this.answer(session, principal, [inbound], sink, signal, context, input.imageBytes)
+  }
+
+  /** The Principal's credential still holds (IDENT-LIVE): checked before anything of a message is taken. */
+  public async live(principal: Principal): Promise<void> {
     const liveness = await this.principals.ensureLive(principal)
     if (!liveness.ok && liveness.reason !== 'unavailable') {
       await this.hooks.onCredentialInvalid(principal)
       throw new Error('identity credential is no longer valid')
     }
+  }
+
+  /** Records a message of the Principal: now for a turn that starts, or for one that waits (D63). */
+  public async record(session: Session, input: TurnInput): Promise<MessageEntry> {
     const inbound = await this.memory.append(input.entry)
     this.stats.emit('message-in', 1, { channel: session.channelType, sourceType: inbound.sourceType })
-    await sink.emit({ type: 'inbound', entry: inbound })
+    return inbound
+  }
+
+  /**
+   * The turn itself, for messages already recorded: one, or several that waited together (D63, CORE-MSG-010),
+   * which the model reads in the order they arrived and answers by one reply.
+   */
+  public async answer(
+    session: Session,
+    principal: Principal,
+    inbounds: MessageEntry[],
+    sink: TurnSink,
+    signal: AbortSignal,
+    context: TurnContext = {},
+    imageBytes?: Map<string, Buffer>
+  ): Promise<TurnResult> {
+    for (const entry of inbounds) await sink.emit({ type: 'inbound', entry })
+    // tools, the reply's language and what is recalled follow the latest message
+    const inbound = inbounds[inbounds.length - 1] as MessageEntry
+    const answered = new Set(inbounds.map((e) => e.id))
+    const notYet = (await context.notYet?.()) ?? new Set<string>()
 
     const features = featuresOf(this.pack)
     const budget = this.pack.memory?.contextWindowTokens ?? 12000
@@ -203,9 +284,14 @@ export class Orchestrator {
     const systemTokens = system.reduce((n, m) => n + estimateTokens(m.role === 'system' ? m.content : ''), 0)
     const windowEntries = (
       await this.memory.window(principal, session, Math.max(1000, budget - systemTokens - 1500))
-    ).filter((e) => e.id !== inbound.id)
+    ).filter((e) => !answered.has(e.id) && !notYet.has(e.id))
     const recalled = features.semanticRecall
-      ? await this.memory.recall(principal, session, inbound.text, this.pack.memory?.retrieval?.topK ?? 8)
+      ? await this.memory.recall(
+          principal,
+          session,
+          inbounds.map((e) => e.text).join('\n'),
+          this.pack.memory?.retrieval?.topK ?? 8
+        )
       : []
     const messages: ChatMessage[] = [...system]
     if (recalled.length) {
@@ -215,7 +301,7 @@ export class Orchestrator {
       })
     }
     for (const e of windowEntries) messages.push(...this.entryToMessages(e))
-    messages.push(await this.userMessage(inbound, input.imageBytes))
+    messages.push(await this.userTurn(inbounds, imageBytes))
 
     const grants = await this.approvals.activeGrants(principal.id)
     const visible = await this.registry.visible(principal.roles, grants)
@@ -281,6 +367,8 @@ export class Orchestrator {
 
     const reply = await this.memory.append({
       id: messageId,
+      // after the messages it answers, and before one that arrived to wait while it was written (D63)
+      initiatedAt: await context.replyAt?.(),
       sessionId: session.id,
       principalId: principal.id,
       role: 'agent',
@@ -292,7 +380,7 @@ export class Orchestrator {
     })
     this.reactionPolicies.delete(session.id)
     this.stats.emit('message-out', 1, { channel: session.channelType, cancelled: String(cancelled) })
-    return { inbound, reply, cancelled }
+    return { inbound, reply, cancelled, inbounds }
   }
 
   /** Runs a tool directly (contextual-menu tool items, approved actions) with the same gates. */

@@ -274,6 +274,20 @@ export async function buildAgent(
 
   aguiRoutes = new AgUiRoutes(agent, agui, streams, logger)
   aguiRoutes.register(app, did)
+  // what the person sends during a turn waits in the store and is answered next (D63): its devices are told what
+  // waits, and the turn the agent starts for it goes to their streams
+  agent.waitingChanged = (session) => {
+    if (session.channelType !== 'ag-ui') return
+    void (async () => {
+      for (const each of [session, ...(await sessions.conversationPeers(session))]) await agui.pushState(each)
+    })().catch((err) => logger.debug({ err, sessionId: session.id }, 'waiting messages not announced'))
+  }
+  agent.queuedRun = (session) => {
+    if (session.channelType !== 'ag-ui' || !aguiRoutes) throw new Error('no channel shows this conversation')
+    return aguiRoutes.queuedRun(session)
+  }
+  // what a restart left waiting is answered now
+  await agent.resumeWaiting()
   if (did !== 'did:unknown') await declareAgUiService(vsAgent, did, env.publicBaseUrl, logger)
   const identity = new IdentityFlow(pack, vsAgent, resolver, env.devAllowUnidentifiedPrincipals, logger)
   identity.setFlows(flows)

@@ -1,10 +1,22 @@
 /** AG-UI event construction (protocol 1.0 shapes), without a runtime dependency on the SDK. */
+import type { NoTurn } from '@ayni.org/ayni-agui-profile'
+
 export type AgUiEvent = Record<string, unknown> & { type: string; timestamp?: number }
 
 const ts = () => ({ timestamp: Date.now() })
 
 export const ev = {
-  runStarted: (threadId: string, runId: string): AgUiEvent => ({ type: 'RUN_STARTED', threadId, runId, ...ts() }),
+  /**
+   * `noTurn`: the run gets no turn (PROF-RUN-011/013): its message waits, it was refused, or its caller gave up
+   * while it waited. A UI gives such a response no effect on the run it shows in progress.
+   */
+  runStarted: (threadId: string, runId: string, noTurn?: NoTurn): AgUiEvent => ({
+    type: 'RUN_STARTED',
+    threadId,
+    runId,
+    ...(noTurn ? { noTurn } : {}),
+    ...ts(),
+  }),
   runFinished: (threadId: string, runId: string, outcome?: Record<string, unknown>, result?: unknown): AgUiEvent => ({
     type: 'RUN_FINISHED',
     threadId,

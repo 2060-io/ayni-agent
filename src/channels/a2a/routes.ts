@@ -146,7 +146,7 @@ export class A2aRoutes {
             { emit: () => undefined },
             new AbortController().signal
           )
-          reply_text = result.reply.text
+          reply_text = result.reply?.text ?? ''
         } catch (error) {
           this.logger.error({ err: error }, 'a2a turn failed')
           return fail(-32000, 'internal error', 500)

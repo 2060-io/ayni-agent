@@ -244,3 +244,38 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     before the part `file`; when it is there and not empty it is the attachment's name, with any path and
     control character removed, otherwise the part's name stands (`channels/agui/uploadName.ts`). Additive: a
     client that sends no field is served as before. Files already stored keep their name.
+36. **One turn at a time; what is sent meanwhile waits, in the store** (2026-11-14, Fabrice: "when I use for
+    example, claude, I still can type and send information while it is thinking. Is it possible to do that with
+    our ayni agent?"; then, on the first version, which kept the queue in memory: "why don't you put that
+    directly to the store", "why do you want a withdraw?", and "ok go" on: the queue in the store, no withdraw,
+    what waits answered together, a message sent before closing the app answered while the person is away;
+    D63, CORE-MSG-010, PROF-RUN-011/012/013, PROF-DESC-006).
+    - **Before.** Nothing held a second message back: one that arrived during a turn (a second device could
+      send one, the UIs only closed Send on the device that was waiting) started a second turn beside the
+      first, which did not see the first reply.
+    - **One turn at a time.** A turn holds the lock of its conversation while it runs (`core/turnLock.ts`, in
+      the agent, so every path that reaches the model passes it: a message, a menu choice, a reaction the
+      agent is told of, an A2A task, a DIDComm message). The lock is in the memory of the process, as the
+      turn in progress is.
+    - **What the person sends meanwhile** (a text or attachments on the AG-UI channel) is recorded at once as
+      an entry and listed as waiting in the store (`core/waiting.ts`, in the key-value store: which entries
+      wait, by conversation, in order). Its run ends at once and says so (`RunStarted{noTurn: 'waiting'}`): the
+      message depends on no open response and no open session.
+    - **The agent answers what waits.** Each message that comes to wait takes a place in line for the lock;
+      whoever gets it first takes everything that waits into one turn, which the model reads as one user
+      message, in order, and answers by one reply. No request carries that turn: the AG-UI channel sends it
+      to the stream of every session of the conversation, each device getting the messages it did not send
+      and then the reply. Any device of the conversation may stop it.
+    - **A restart.** An entry leaves the list when the turn that answered it has ended, so what a restart
+      left is still listed; the agent answers it when it starts (`resumeWaiting`). The reply being written
+      when the agent stops is lost, as before.
+    - **Order.** History is read by the time an entry was initiated. A waiting message is recorded when it
+      arrives, during the reply in progress; that reply is recorded when it ends, and is given a time just
+      before the first message that arrived to wait, so each reply stands after what it answers. What waits
+      is kept out of the context of the turn in progress.
+    - **No withdraw** (his decision): a message sent is sent. Stop ends the turn in progress, and what waits
+      is answered next.
+    - **Limits.** Ten messages wait at most in a conversation; the next is refused and nothing of it is
+      recorded (`too-many-waiting`). One replica serves a conversation: the lock is the process's. An action
+      other than a message (a menu choice) that arrives during a turn waits for its turn in memory.
+    - `features.queue` in the descriptor, `state.ayni.waiting`, profile package 3.1.6.
