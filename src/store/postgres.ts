@@ -4,7 +4,6 @@ import type {
   ApprovalRecord,
   AuthChallengeRecord,
   Conversation,
-  CredentialPresentation,
   DigestAnchor,
   ElevationGrant,
   LifecycleState,
@@ -20,7 +19,7 @@ import { type ScopePredicate, scopeToSql } from '../memory/scope.js'
 import { MemoryStore } from './memory.js'
 import { MIGRATIONS } from './migrations.js'
 import { holdProcessLock, type ProcessLockOptions } from './processLock.js'
-import type { EntryQuery, Store, StoredEntry, VectorHit } from './types.js'
+import type { EntryQuery, Store, StoredEntry, StoredEvidence, VectorHit } from './types.js'
 
 const vec = (v: number[]): string => `[${v.join(',')}]`
 
@@ -379,19 +378,36 @@ export class PostgresStore implements Store {
     },
   }
 
-  public credentials = {
-    list: (principalId: string) =>
-      this.many<CredentialPresentation>('SELECT data FROM credential_presentations WHERE principal_id = $1', [
-        principalId,
-      ]),
-    get: (id: string) =>
-      this.one<CredentialPresentation>('SELECT data FROM credential_presentations WHERE id = $1', [id]),
-    save: async (c: CredentialPresentation) => {
+  private evidenceOf = (r: Record<string, unknown>): StoredEvidence => ({
+    ...(r.data as Omit<StoredEvidence, 'cipher'>),
+    cipher: (r.cipher as Buffer | null) ?? null,
+  })
+
+  public evidence = {
+    list: async (principalId: string) =>
+      (
+        await this.rows('SELECT data, cipher FROM evidence WHERE principal_id = $1 ORDER BY verified_at', [principalId])
+      ).map(this.evidenceOf),
+    get: async (id: string) => {
+      const [row] = await this.rows('SELECT data, cipher FROM evidence WHERE id = $1', [id])
+      return row ? this.evidenceOf(row) : undefined
+    },
+    save: async (e: StoredEvidence) => {
+      const { cipher, ...data } = e
       await this.pool.query(
-        'INSERT INTO credential_presentations (id, principal_id, data) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET data = $3',
-        [c.id, c.principalId, c]
+        `INSERT INTO evidence (id, principal_id, state, verified_at, expires_at, data, cipher)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (id) DO UPDATE SET state = $3, expires_at = $5, data = $6, cipher = $7`,
+        [e.id, e.principalId, e.state, e.verifiedAt, e.expiresAt ?? null, data, cipher]
       )
     },
+    listExpired: async (nowIso: string) =>
+      (
+        await this.rows(
+          "SELECT data, cipher FROM evidence WHERE state = 'active' AND expires_at IS NOT NULL AND expires_at <= $1",
+          [nowIso]
+        )
+      ).map(this.evidenceOf),
   }
 
   public approvals = {

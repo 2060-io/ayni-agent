@@ -29,7 +29,19 @@ export interface CredentialRef {
   attributes?: string[]
 }
 
-export interface AuthenticationEntry {
+/** What is kept of a piece of evidence and what the model may read of it (D67, PRIV-EVID-003). */
+export interface EvidencePolicy {
+  /** the attributes whose values are kept, sealed, and for how long; none by default */
+  store?: {
+    attributes: string[]
+    /** days the values are kept (kept until erased when absent) and what happens then (`erase` by default) */
+    retention?: { days?: number; onExpiry?: 'archive' | 'erase' }
+  }
+  /** the stored attributes the model may read; none by default */
+  modelVisible?: string[]
+}
+
+export interface AuthenticationEntry extends EvidencePolicy {
   /** requested by its ecosystem schema, so that any accredited issuer satisfies the request */
   credential: { jsonSchemaCredentialId: string }
   /** the attributes that, with the issuer's organization and the schema, form the principal key */

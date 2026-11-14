@@ -3,7 +3,6 @@ import type {
   ApprovalRecord,
   AuthChallengeRecord,
   Conversation,
-  CredentialPresentation,
   DigestAnchor,
   ElevationGrant,
   LifecycleState,
@@ -16,7 +15,13 @@ import type {
   WorkingMemoryNote,
 } from '../core/types.js'
 import { matchesScope, type ScopePredicate } from '../memory/scope.js'
-import { cosine, type EntryQuery, type Store, type StoredEntry, type VectorHit } from './types.js'
+import { cosine, type EntryQuery, type Store, type StoredEntry, type StoredEvidence, type VectorHit } from './types.js'
+
+/** A copy that keeps the ciphertext a Buffer (a JSON clone would not). */
+const copyEvidence = (e: StoredEvidence): StoredEvidence => {
+  const { cipher, ...rest } = e
+  return { ...structuredClone(rest), cipher: cipher ? Buffer.from(cipher) : null }
+}
 
 const clone = <T>(v: T): T => (v === undefined ? v : (structuredClone(v) as T))
 
@@ -34,7 +39,7 @@ export class MemoryStore implements Store {
   private embeddings = new Map<string, number[]>()
   private noteRows = new Map<string, WorkingMemoryNote>()
   private prefRows = new Map<string, PrincipalPreference>()
-  private credRows = new Map<string, CredentialPresentation>()
+  private evidenceRows = new Map<string, StoredEvidence>()
   private approvalRows = new Map<string, ApprovalRecord>()
   private grantRows = new Map<string, ElevationGrant>()
   private challengeRows = new Map<string, AuthChallengeRecord>()
@@ -223,13 +228,23 @@ export class MemoryStore implements Store {
     },
   }
 
-  public credentials = {
+  public evidence = {
     list: async (principalId: string) =>
-      clone([...this.credRows.values()].filter((c) => c.principalId === principalId)),
-    get: async (id: string) => clone(this.credRows.get(id)),
-    save: async (c: CredentialPresentation) => {
-      this.credRows.set(c.id, clone(c))
+      [...this.evidenceRows.values()]
+        .filter((e) => e.principalId === principalId)
+        .sort((a, b) => a.verifiedAt.localeCompare(b.verifiedAt))
+        .map(copyEvidence),
+    get: async (id: string) => {
+      const row = this.evidenceRows.get(id)
+      return row ? copyEvidence(row) : undefined
     },
+    save: async (e: StoredEvidence) => {
+      this.evidenceRows.set(e.id, copyEvidence(e))
+    },
+    listExpired: async (nowIso: string) =>
+      [...this.evidenceRows.values()]
+        .filter((e) => e.state === 'active' && !!e.expiresAt && e.expiresAt <= nowIso)
+        .map(copyEvidence),
   }
 
   public approvals = {

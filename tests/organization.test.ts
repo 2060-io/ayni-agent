@@ -241,6 +241,16 @@ describe('the identity credential of a person (IDENT-RES-002/008/010/011/012)', 
     expect(facts?.claims.issuerDid).toBe('did:webvh:b')
     expect(facts?.claims.issuer).toBeUndefined()
     expect(facts?.actorIdentity).toBe(actorIdentityOf('org:CO:2', BADGE, ['42']))
+    // what is handed over as evidence: the verified issuer, and the values without the attribute that named another
+    expect(facts?.evidence).toMatchObject({
+      kind: 'presentation',
+      entry: 'authentication',
+      schema: BADGE,
+      issuerDid: 'did:webvh:b',
+      issuerOrganization: { key: 'org:CO:2', name: 'Org B' },
+      values: { badgeNumber: '42', name: 'Mallory' },
+    })
+    expect(facts?.evidence?.values.issuerDid).toBeUndefined()
   })
 
   it('keys a person on the organization of the issuer, the schema and the badge number', async () => {

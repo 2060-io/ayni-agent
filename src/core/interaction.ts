@@ -2,6 +2,7 @@
 
 import type { ContextualMenuItem } from '@ayni.org/ayni-agui-profile'
 import type { AgentPack, MenuItemDef } from '../config/packTypes.js'
+import { nameForModel } from './evidence.js'
 import type { Principal, Session } from './types.js'
 
 export const PLATFORM_MENU = {
@@ -13,7 +14,8 @@ export const PLATFORM_MENU = {
 } as const
 
 export function greetingFor(pack: AgentPack, principal: Principal | null): string {
-  const name = principal?.identityAttributes.userName ?? ''
+  // the greeting enters the conversation the model reads: it names the person only when the model may (D68)
+  const name = nameForModel(pack, principal) ?? ''
   const template = pack.persona.greeting ?? `Welcome{userName}.`
   const rendered = template.replace('{userName}', name ? (template.includes('{userName}') ? name : '') : '')
   return rendered

@@ -95,6 +95,12 @@
                   "type": "string",
                   "minLength": 1
                 }
+              },
+              "store": {
+                "$ref": "#/$defs/evidenceStore"
+              },
+              "modelVisible": {
+                "$ref": "#/$defs/evidenceModelVisible"
               }
             }
           }
@@ -1372,6 +1378,43 @@
     }
   },
   "$defs": {
+    "evidenceStore": {
+      "description": "The attributes of a piece of evidence whose values the agent keeps, sealed, and for how long (D67, PRIV-EVID-003). Omitted: no value is kept, only the audit fields.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attributes"],
+      "properties": {
+        "attributes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "retention": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "days": {
+              "description": "Days the values are kept after the verification; kept until erased when absent.",
+              "type": "integer",
+              "minimum": 0
+            },
+            "onExpiry": {
+              "description": "archive: hidden from the model and the tools, readable by the auditor; erase: the key of the record is destroyed, its audit fields and digest remain.",
+              "type": "string",
+              "enum": ["archive", "erase"],
+              "default": "erase"
+            }
+          }
+        }
+      }
+    },
+    "evidenceModelVisible": {
+      "description": "The stored attributes the model may read (D67, D68). Omitted: none.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
     "organizationMatch": {
       "description": "One value, or a list of which any matches.",
       "oneOf": [

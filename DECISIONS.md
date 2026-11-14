@@ -359,3 +359,22 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     entries written before keep the DID of the earlier model as backing identity, so shared tiers do not
     match them (no deployment used them); binding after connect (D66) comes with the presentation tools,
     since nothing presents an identity credential after the connection yet.
+42. **Evidence: one record per verification, audit fields in the clear, values sealed and governed per schema**
+    (2026-11-14, Fabrice: "this is a governance policy. We should be able to configure the agent to how we
+    want. What's important too is to be able to define what the LLM see and what it does not", then "Agree"
+    to the defaults, the two ends of a retention and one record with a key of its own; ayni-spec D67, D68;
+    PRIV-EVID-001..009, INTX-CRED-001). Before: the table of credential presentations was never written to,
+    so `principal_credentials` always answered that nothing was presented, while every attribute of the badge
+    was copied on the Principal for good and the name went to the model. Now `EvidenceService`
+    (`src/core/evidence.ts`) writes one record when a presentation identifies a peer: audit fields without
+    any value, and the values `store.attributes` names sealed with a key of the record (the mechanism of
+    entries: digest over the ciphertext, the key destroyed on erase). `store.retention` gives the days and
+    `onExpiry` (`erase` by default, or `archive`); the retention job applies it; a credential presented again
+    erases the values of the earlier record. A Principal keeps of its credential the stored attributes and
+    the issuer, and loses them when their retention ends; the subject key lives in the actor identity.
+    `modelVisible` decides what `principal_credentials` shows and whether the model, and the greeting it
+    reads, name the person. By default nothing is stored and nothing is visible: a pack must say so to keep
+    the name. Memory schema 3.3.0 adds the `evidence` table and drops the unused one. Not done here: the
+    document read, whose event carries the raw data groups and no parsed field, so its values need the
+    DIDComm agent to send them with the outcome of its verification; an interface for the auditor
+    (`EvidenceService.audit` is ready for it); evidence of catalog entries, which come with the request tool.

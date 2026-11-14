@@ -52,7 +52,7 @@ export function renderPromptAddon(ctx: AddonContext): string {
   }
   if (ctx.features.credentialTool)
     lines.push(
-      'principal_credentials lists the verified credentials the person presented; treat them as verified facts.'
+      'principal_credentials lists what was verified about the person and the attributes you may read; treat them as verified facts, and never ask the person to type what a credential should prove.'
     )
   if (ctx.features.semanticRecall)
     lines.push('Relevant earlier messages and notes may be supplied as context; cite them in your own words.')

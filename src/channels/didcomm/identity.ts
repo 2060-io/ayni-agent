@@ -7,6 +7,7 @@
  * D54); a holder that answers `unsupported-kind` is treated as having no such credential (IDENT-RES-003).
  */
 import type { AgentPack, AuthenticationEntry, CredentialRef } from '../../config/packTypes.js'
+import { AUTHENTICATION_ENTRY } from '../../core/evidence.js'
 import type { FlowService } from '../../core/flows.js'
 import { type OrganizationFacts, organizationFrom } from '../../core/organization.js'
 import type { LivenessChecker, VerifiedFacts } from '../../core/principals.js'
@@ -341,6 +342,18 @@ export class IdentityFlow {
       },
       userAgentVerified,
       identityCredentialRef: `badge:${record.proofExchangeId}`,
+      // what was verified, for the evidence record: the pack decides which values are kept (D67)
+      evidence: {
+        kind: 'presentation',
+        entry: AUTHENTICATION_ENTRY,
+        schema,
+        credentialDefinitionId: presented.credentialDefinitionId,
+        issuerDid: presented.issuerDid,
+        issuerOrganization: { key: organization.key, name: organization.name },
+        values: Object.fromEntries(Object.entries(facts).map(([name, value]) => [name, String(value)])),
+        unrevealed: [...(presented.unrevealed ?? [])],
+        requestRef: record.proofExchangeId,
+      },
     }
   }
 }

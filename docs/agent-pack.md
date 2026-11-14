@@ -61,6 +61,8 @@ identity:
     - credential: { jsonSchemaCredentialId: https://.../vt/schemas-badge-jsc.json }
       subjectKey: [badgeNumber]
       attributes: [badgeNumber, name, title, department]
+      store: { attributes: [name, title, department], retention: { days: 365, onExpiry: erase } }
+      modelVisible: [name]
   organizations:                              # patterns over the verified Organization credential (D64)
     - match: { countryCode: EE, registryId: "14000000" }
       relation: partner
@@ -106,6 +108,23 @@ identity:
   issued it. A presentation that leaves a `subjectKey` attribute unrevealed identifies nobody, so the
   subject key must be among the `attributes` asked. An agent that authenticates nobody omits
   `authentication` and must set `unidentifiedPeers: admit`.
+- **What is kept of a presented credential, and what the model reads of it** (D67, D68). Each verification
+  leaves one **evidence** record. Its audit fields are in the clear and hold no attribute value: when, which
+  Principal, which schema, the issuer and its organization, the outcome, the names of the attributes
+  revealed and of those left unrevealed, the request and the connection. Three lists govern the values:
+  `attributes` is what the agent asks of the wallet; `store.attributes` is what it keeps, sealed under a
+  key of the record, for `retention.days` (kept until erased when absent); `modelVisible` is what the model
+  may read. **By default nothing is stored and the model reads nothing**: an attribute that is asked and not
+  stored serves the decision it was presented for (the role rules, the principal key) and is dropped. At the
+  end of a retention `onExpiry: erase` (the default) destroys the key of the record, whose audit fields and
+  digest remain; `archive` hides the values from the model and the tools and leaves them to an auditor. A
+  credential presented again erases the values of the earlier record. A model-visible attribute must be
+  stored and a stored attribute must be asked, or the pack is refused. The agent warns at start-up when a
+  model-visible attribute is kept for less time than conversation memory, since what the model reads stays in
+  the conversation. The person's name reaches the model, the greeting and the lists shown to other people
+  only when `name` (or `userName`) is stored, and the model only when it is also visible; `photo` must be
+  stored to serve as the reference of a face-match challenge. The `principal_credentials` tool lists the
+  records with the visible attributes.
 
 - **Role assignment is rules over verified facts, never rosters** (D34). A rule's `when` matches on the
   Principal's `relation` to this agent (`home`, `partner`, `unrecognized`), its `connectionType`,

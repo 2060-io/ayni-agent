@@ -16,11 +16,12 @@ import { IdentityFlow, TrustResolver } from './channels/didcomm/identity.js'
 import { PeerProfiles } from './channels/didcomm/peerProfiles.js'
 import { VsAgentClient } from './channels/didcomm/vsAgentClient.js'
 import { type Env, loadEnv } from './config/env.js'
-import { authenticationError, loadPack } from './config/pack.js'
+import { authenticationError, evidenceWarnings, loadPack } from './config/pack.js'
 import { featuresOf } from './config/packTypes.js'
 import { AyniAgent } from './core/agent.js'
 import { ChallengeService } from './core/challenges.js'
 import { CapabilityRouter } from './core/channel.js'
+import { EvidenceService } from './core/evidence.js'
 import { FlowService } from './core/flows.js'
 import { Orchestrator } from './core/orchestrator.js'
 import { HomeOrganization } from './core/organization.js'
@@ -109,6 +110,8 @@ export async function buildAgent(
   const llm = createChatModel(pack.llm)
   const embeddings = createEmbeddings(pack.embeddings)
   const memory = new MemoryService(store, crypto, embeddings, pack, logger)
+  const evidence = new EvidenceService(store, pack, crypto, logger)
+  for (const warning of evidenceWarnings(pack)) logger.warn(`agent-pack: ${warning} (PRIV-EVID-006)`)
   const s3 = env.objectStore ? new S3ObjectStore(env.objectStore, crypto) : undefined
   const objects: ObjectStore = s3 ?? new MemoryObjectStore(crypto)
   if (!s3) logger.warn('OBJECT_STORE_ENDPOINT not set: media objects are kept in memory (development only)')
@@ -228,6 +231,7 @@ export async function buildAgent(
       pack,
       store,
       memory,
+      evidence,
       media,
       rag,
       stats,
@@ -264,6 +268,7 @@ export async function buildAgent(
     media,
     rag,
     principals,
+    evidence,
     sessions,
     router,
     registry,
@@ -388,7 +393,8 @@ export async function buildAgent(
     env.objectStore ? objects : undefined,
     env.retentionHistoryDays,
     env.retentionMediaGraceDays,
-    logger
+    logger,
+    evidence
   )
   const onJobError = (name: string, error: unknown) => logger.error({ err: error, job: name }, 'job failed')
   const stops = [
