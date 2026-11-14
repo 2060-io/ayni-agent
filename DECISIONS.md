@@ -236,3 +236,11 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
 - A2A streaming and push notifications; A2A task history beyond the queued replies.
 - Periodic re-presentation of credentials for revocation (see 7).
 - Reaction policies on DIDComm beyond recording the reaction entry.
+35. **An upload is named by the field the client sends** (2026-11-14, decided by Fabrice on my proposal: "go";
+    PROF-HIST-008). A file sent from the phone was stored, and shown on every device, as
+    `Terms%20of%20service.pdf`. React Native percent-encodes the name it writes on the multipart part and a
+    browser does not; the agent kept what the part declared. Decoding on receipt was set aside: nothing tells
+    an encoded name from one that holds a percent sign. An upload may now carry a text field `filename`
+    before the part `file`; when it is there and not empty it is the attachment's name, with any path and
+    control character removed, otherwise the part's name stands (`channels/agui/uploadName.ts`). Additive: a
+    client that sends no field is served as before. Files already stored keep their name.

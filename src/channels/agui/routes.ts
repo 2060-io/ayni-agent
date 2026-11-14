@@ -28,6 +28,7 @@ import { type AgUiEvent, ev, sse } from './events.js'
 import { attachmentActivity, entryToMessages, replyReference } from './mapping.js'
 import { RunMirror } from './mirror.js'
 import type { SessionStreams } from './streams.js'
+import { uploadName } from './uploadName.js'
 
 /**
  * The profile revision this agent implements: 3.1 (session grant, flows and `ayni.flow`, `flowId` on routed
@@ -502,7 +503,8 @@ export class AgUiRoutes {
         session,
         bytes,
         mimeType,
-        file.filename,
+        // the name the client gave in a field of its own, else the part's (PROF-HIST-008)
+        uploadName(file),
         session.locale ?? this.agent.pack.language.agent
       )
       return reply.code(201).send({
