@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.0](https://github.com/2060-io/ayni-agent/compare/v0.12.0...v0.13.0) (2026-11-14)
+
+
+### Features
+
+* **uploads:** an upload is named by the field the client sends ([#53](https://github.com/2060-io/ayni-agent/issues/53)) ([31b2df8](https://github.com/2060-io/ayni-agent/commit/31b2df86f14f34251be4e17edbce34f18c855ec2))
+
 ## [0.12.0](https://github.com/2060-io/ayni-agent/compare/v0.11.0...v0.12.0) (2026-11-13)
 
 
