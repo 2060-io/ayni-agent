@@ -100,7 +100,12 @@ export function entryToMessages(entry: MessageEntry): Record<string, unknown>[] 
           metadata: { entryId: entry.id, ...meta },
         })
       }
-      if (entry.sourceType !== 'media' || entry.role === 'agent' || entry.attachments.length === 0) {
+      // a voice note of the person is one message: its attachment, which carries the transcription (`textRepr`).
+      // The entry's text is that same transcription, and is not sent a second time as a text (PROF-MAP-006)
+      const voice = entry.attachments.find((a) => a.type === 'voice')
+      const onlyTheNote = entry.sourceType === 'voice' && !!voice && entry.text === voice.textRepr
+      const mediaOnly = entry.sourceType === 'media' || onlyTheNote
+      if (!mediaOnly || entry.role === 'agent' || entry.attachments.length === 0) {
         out.push({
           id: entry.id,
           role: entry.role === 'agent' ? 'assistant' : entry.role === 'system' ? 'system' : 'user',

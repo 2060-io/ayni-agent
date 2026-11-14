@@ -316,3 +316,12 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     - **Mine, for him to confirm:** the 20 seconds given to a reply in progress (a longer reply is cut and
       shows as interrupted); a message sent while the agent restarts waits and is answered by the next
       process instead of being refused.
+39. **A voice note is one message** (2026-11-14, Fabrice: "Voice notes show twice after reopening a
+    conversation … => fix it"; PROF-MAP-006). History gave a voice note of the person twice: its attachment,
+    with the transcription on it, and a text message with the same transcription, as PROF-MAP-006 read ("the
+    user message's text"). Live, the sender got the attachment only, so the note showed once until the
+    conversation was read again, then twice; the person's other devices got both at once. `entryToMessages`
+    now gives the attachment alone when the entry's text is the note's transcription; words the person added
+    are still a text of their own, and a note whose audio is gone (retention) still reads as a text. The
+    mirror to the other devices is built from the same mapping. Nothing stored changes: the entry keeps the
+    transcription as its text, for the model, the search and the previews.
