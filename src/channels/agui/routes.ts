@@ -11,6 +11,7 @@ import {
   type AyniAction,
   CUSTOM_EVENT,
   DESCRIPTOR_PATH,
+  type NoTurn,
   RUN_ERROR_CODE,
 } from '@ayni.org/ayni-agui-profile'
 import { Ajv2020 } from 'ajv/dist/2020.js'
@@ -576,10 +577,10 @@ export class AgUiRoutes {
       if (!reply.raw.writableEnded) reply.raw.write(': waiting\n\n')
     }, RUN_HEARTBEAT_MS)
     let started = false
-    const start = (mergedInto?: string) => {
+    const start = (noTurn?: NoTurn, mergedInto?: string) => {
       if (started) return
       started = true
-      write(ev.runStarted(session.id, runId, mergedInto))
+      write(ev.runStarted(session.id, runId, noTurn, mergedInto))
     }
     // the person's other devices on this conversation see the run as it happens (PROF-STREAM-005)
     const peers = await this.agent.sessions.conversationPeers(session)
@@ -694,11 +695,11 @@ export class AgUiRoutes {
       if (merged) {
         // no turn of its own: the run named answers this message, and this one ends at once (PROF-RUN-012)
         const into = merged.into ?? ''
-        start(into)
+        start('merged', into)
         write(ev.runFinished(session.id, runId, { type: 'merged', runId: into }))
       } else if (result && 'cancelled' in result && result.cancelled) {
         // stopped, or withdrawn while it waited (PROF-RUN-013): the same end, with nothing recorded for the second
-        start()
+        start('withdrawn' in result && result.withdrawn ? 'withdrawn' : undefined)
         write(ev.runError('cancelled', RUN_ERROR_CODE.cancelled))
         mirror.finish({ message: 'cancelled', code: RUN_ERROR_CODE.cancelled })
       } else {
@@ -710,7 +711,7 @@ export class AgUiRoutes {
       // the state a run changes (what is being generated, what waits) is the conversation's on every device
       for (const peer of peers) await this.adapter.pushState(peer).catch(() => undefined)
     } catch (error) {
-      start()
+      start(error instanceof TooManyWaiting ? 'refused' : undefined)
       const failed = (message: string, code: string) => {
         write(ev.runError(message, code))
         mirror.finish({ message, code })

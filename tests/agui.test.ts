@@ -1135,10 +1135,12 @@ describe('a message sent while the agent answers (D63, PROF-RUN-011/012/013)', (
     // the run of the last one carries the turn; the other ends at once, with no content, naming it
     const secondEvents = await second
     expect(types(secondEvents)).toEqual(['RUN_STARTED', 'RUN_FINISHED'])
+    expect(secondEvents[0]?.noTurn).toBe('merged')
     expect(secondEvents[0]?.mergedInto).toBe('q-3')
     expect(secondEvents[1]?.outcome).toEqual({ type: 'merged', runId: 'q-3' })
     const thirdEvents = await third
     expect(thirdEvents[0]?.type).toBe('RUN_STARTED')
+    expect(thirdEvents[0]?.noTurn).toBeUndefined()
     expect(thirdEvents[0]?.mergedInto).toBeUndefined()
     expect(thirdEvents[thirdEvents.length - 1]?.type).toBe('RUN_FINISHED')
     // one reply, to both
@@ -1167,6 +1169,7 @@ describe('a message sent while the agent answers (D63, PROF-RUN-011/012/013)', (
 
     const secondEvents = await second
     expect(types(secondEvents)).toEqual(['RUN_STARTED', 'RUN_ERROR'])
+    expect(secondEvents[0]?.noTurn).toBe('withdrawn')
     expect(secondEvents[1]?.code).toBe('cancelled')
     expect(await waitingOf(d)).toEqual([])
 
@@ -1187,6 +1190,8 @@ describe('a message sent while the agent answers (D63, PROF-RUN-011/012/013)', (
 
     const firstEvents = await first
     expect(firstEvents[firstEvents.length - 1]?.code).toBe('cancelled')
+    // a run that was running and is stopped had its turn: nothing marks it otherwise
+    expect(firstEvents[0]?.noTurn).toBeUndefined()
     const secondEvents = await second
     expect(secondEvents[0]?.type).toBe('RUN_STARTED')
     expect(textOf(secondEvents)).toContain('answer this instead')
@@ -1252,6 +1257,7 @@ describe('a message sent while the agent answers (D63, PROF-RUN-011/012/013)', (
     await pause(60)
     const refused = await post(d, 'm-11', 'one too many')
     expect(types(refused)).toEqual(['RUN_STARTED', 'RUN_ERROR'])
+    expect(refused[0]?.noTurn).toBe('refused')
     expect(refused[1]?.code).toBe('too-many-waiting')
     await first
     await Promise.all(waiting)

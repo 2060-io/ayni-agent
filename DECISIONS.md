@@ -263,8 +263,10 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       the reply that was in progress; the time it was sent is kept in its payload (`sentAt`). Withdrawn (the
       run cancelled, or its response closed), it leaves no entry (my choice too, not confirmed).
     - **On the wire.** A waiting run's response is open and silent, kept alive by a comment every 15 s;
-      `RunStarted` is written when a run starts, not when it arrives. A run answered by another's turn ends
-      with `RunStarted{mergedInto}` and `RunFinished{outcome: merged}`. `state.ayni.waiting` lists what waits
+      `RunStarted` is written when a run starts, not when it arrives. A run that gets no turn of its own says so in
+      its first event (`RunStarted{noTurn}`: merged, withdrawn or refused), so a client leaves the run it shows in
+      progress alone; one answered by another's turn names it (`mergedInto`) and ends with
+      `RunFinished{outcome: merged}`. `state.ayni.waiting` lists what waits
       and is pushed to every session of the conversation each time it changes. The mirror gives a message to
       every device but the one that sent it, and the run's own device gets a message that came through
       another. `features.queue` in the descriptor. Profile package 3.1.6.

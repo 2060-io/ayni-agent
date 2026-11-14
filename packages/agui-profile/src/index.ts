@@ -539,12 +539,21 @@ export interface MergedRunOutcome {
   runId: string
 }
 
-/** Whether a `RunStarted` or a `RunFinished` belongs to a run that was merged into another: a UI gives it no effect. */
-export function isMergedRunEvent(event: { type?: unknown; mergedInto?: unknown; outcome?: unknown }): boolean {
-  if (event.type === 'RUN_STARTED') return typeof event.mergedInto === 'string'
-  if (event.type !== 'RUN_FINISHED') return false
-  const outcome = event.outcome as { type?: unknown } | null | undefined
-  return !!outcome && typeof outcome === 'object' && outcome.type === 'merged'
+/**
+ * Why a run gets no turn of its own (PROF-RUN-012/013): another's turn answers its message, the message was
+ * withdrawn while it waited, or the agent refused it. Carried by the run's `RunStarted` as `noTurn`.
+ */
+export type NoTurn = 'merged' | 'withdrawn' | 'refused'
+
+/**
+ * What a `RunStarted` says of a run that gets no turn of its own, undefined for any other event. A UI gives the
+ * events of such a response no effect on the run it shows in progress.
+ */
+export function noTurnOf(event: { type?: unknown; noTurn?: unknown }): NoTurn | undefined {
+  if (event.type !== 'RUN_STARTED') return undefined
+  return event.noTurn === 'merged' || event.noTurn === 'withdrawn' || event.noTurn === 'refused'
+    ? event.noTurn
+    : undefined
 }
 
 // ---------------------------------------------------------------------------------------------
