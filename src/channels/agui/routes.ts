@@ -71,6 +71,9 @@ function attachmentEcho(entry: MessageEntry): AgUiEvent[] {
 export class AgUiRoutes {
   /** the runs in progress; `conversation` on the one the agent started for what waited (PROF-RUN-012) */
   private readonly runs = new Map<string, { sessionId: string; controller: AbortController; conversation?: string }>()
+  /** the run requests being answered, each until its response has ended; and who waits for none to be */
+  private answering = 0
+  private readonly whenQuiet: (() => void)[] = []
   private readonly uploads: { maxBytes: number; types: string[] }
 
   public constructor(
@@ -576,6 +579,8 @@ export class AgUiRoutes {
   ): Promise<void> {
     const controller = new AbortController()
     this.runs.set(runId, { sessionId: session.id, controller })
+    // counted until its response has ended: a process that ends lets it end first (PLAT-DEPLOY-005)
+    this.answering++
     reply.raw.writeHead(200, {
       'content-type': 'text/event-stream',
       'cache-control': 'no-cache, no-transform',
@@ -725,9 +730,30 @@ export class AgUiRoutes {
     } finally {
       clearInterval(heartbeat)
       this.runs.delete(runId)
-      await mirror.settled()
-      if (!reply.raw.writableEnded) reply.raw.end()
+      try {
+        await mirror.settled()
+        if (!reply.raw.writableEnded) reply.raw.end()
+      } finally {
+        this.answering--
+        if (!this.answering) for (const tell of this.whenQuiet.splice(0)) tell()
+      }
     }
+  }
+
+  /**
+   * Resolves when no run is being answered any more, or after `withinMs`. A process that ends waits here before it
+   * closes the connections: a turn that ended in time is told to its client as any other, with the end of its run
+   * (PLAT-DEPLOY-005), where closing at once cut the response between the reply and `RunFinished`.
+   */
+  public quiet(withinMs: number): Promise<boolean> {
+    if (!this.answering) return Promise.resolve(true)
+    return new Promise((resolve) => {
+      const late = setTimeout(() => resolve(false), withinMs)
+      this.whenQuiet.push(() => {
+        clearTimeout(late)
+        resolve(true)
+      })
+    })
   }
 
   /**
