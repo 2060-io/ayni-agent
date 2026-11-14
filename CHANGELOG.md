@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.1](https://github.com/2060-io/ayni-agent/compare/v0.14.0...v0.14.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* **chart:** one agent process at a time: the pod is replaced, not rolled ([#57](https://github.com/2060-io/ayni-agent/issues/57)) ([be0879a](https://github.com/2060-io/ayni-agent/commit/be0879aaed15fd5c2fd9e981d19c4690b053f594))
+
 ## [0.14.0](https://github.com/2060-io/ayni-agent/compare/v0.13.0...v0.14.0) (2026-11-14)
 
 
