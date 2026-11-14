@@ -287,7 +287,36 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     the process's (entry 36), so two processes are two locks. The deployment now uses `Recreate`: the old pod
     is gone before the new one starts. A turn in progress is given the grace period to end, as before; what
     waits is answered by whichever process is the only one there. More than one replica stays unsupported.
-38. **A voice note is one message** (2026-11-14, Fabrice: "Voice notes show twice after reopening a
+38. **The agent itself keeps to one process: a lock in the database, and an end that starts nothing**
+    (2026-11-14, decided by Fabrice on my proposal, after his question "what happens if a stale lock is in
+    the DB?": "It's a Postgres advisory lock => understood. Go."; PLAT-DEPLOY-004/005). `Recreate` (entry 37)
+    covers an update only: a pod deleted or evicted is replaced at once, while the old one lives on for its
+    grace period. Seen on devnet 0.14.1: the old pod ended its reply and answered the waiting message, the
+    new one answered it again at start.
+    - **The lock** (`store/processLock.ts`, `Store.exclusive`): before it touches the store, a process takes
+      a PostgreSQL advisory lock of the session, on a connection of its own, and keeps it for its life; a
+      second process waits there, serving nothing. Nothing is written: the server holds the lock in memory
+      and drops it when the connection closes, however the process ended, so none is ever left behind
+      (checked against PostgreSQL 16 with `scripts/check-process-lock.ts`: a second process waits, takes
+      over within a moment of a `kill -9` of the first, and is told when the database restarts under it).
+      The connection asks the server to probe it (10 s idle, 5 s apart, 3 times), so a holder whose machine
+      vanished is noticed in about 25 seconds; the holder checks every 10 seconds that its connection
+      answers, and a holder that lost it ends at once (`process.exit(1)`): it holds nothing any more. The
+      in-memory store has one process by nature. A pooler in transaction mode would break the lock: the
+      agent needs a direct connection.
+    - **The end of the process** (`AyniAgent.shutdown`, called first by `stop()`): no turn starts any more.
+      A message of the person is recorded and listed as waiting, as during a turn, whether its conversation
+      is busy or not, and the next process answers it at start; anything else is refused. The turns in
+      progress get 20 seconds to end as they would; one that still runs then is cut like a turn the person
+      stopped, and the waiting messages it was answering stay listed (a turn the person stops still takes
+      them off the list). The streams of the devices are closed, not waited for; the lock is given back
+      last; and the process ends within 27 seconds whatever happens, under the 30 an orchestrator gives.
+    - **The chart** gains a start-up probe: a pod that waits for the lock is given five minutes before it is
+      restarted. `Recreate` stays, it spares the wait on an update.
+    - **Mine, for him to confirm:** the 20 seconds given to a reply in progress (a longer reply is cut and
+      shows as interrupted); a message sent while the agent restarts waits and is answered by the next
+      process instead of being refused.
+39. **A voice note is one message** (2026-11-14, Fabrice: "Voice notes show twice after reopening a
     conversation … => fix it"; PROF-MAP-006). History gave a voice note of the person twice: its attachment,
     with the transcription on it, and a text message with the same transcription, as PROF-MAP-006 read ("the
     user message's text"). Live, the sender got the attachment only, so the note showed once until the
