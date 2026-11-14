@@ -24,6 +24,7 @@ import type {
   WorkingMemoryNote,
 } from '../core/types.js'
 import type { ScopePredicate } from '../memory/scope.js'
+import type { ProcessLockOptions } from './processLock.js'
 
 /** An entry as persisted: text and payload are sealed in `cipher` (null when crypto-erased). */
 export type StoredEntry = Omit<MessageEntry, 'text' | 'payload'> & { cipher: Buffer | null; textPreview: string }
@@ -160,6 +161,11 @@ export interface KvRepo {
 
 export interface Store {
   readonly kind: 'postgres' | 'memory'
+  /**
+   * Makes this process the one that serves the store (PLAT-DEPLOY-004): waits for as long as another holds it,
+   * and resolves with the way to give it back. Called before `init`, given back before `close`.
+   */
+  exclusive(options: ProcessLockOptions): Promise<() => Promise<void>>
   init(): Promise<void>
   close(): Promise<void>
   principals: PrincipalRepo

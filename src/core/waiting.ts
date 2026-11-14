@@ -26,6 +26,14 @@ export class TooManyWaiting extends Error {
   }
 }
 
+/** The process was told to end: no turn starts any more (PLAT-DEPLOY-004). */
+export class ProcessEnding extends Error {
+  public constructor() {
+    super('the agent is restarting: try again in a moment')
+    this.name = 'ProcessEnding'
+  }
+}
+
 const PREFIX = 'turn.waiting:'
 /** the conversations that have something waiting: the store reads one key at a time */
 const INDEX = 'turn.waiting-index'

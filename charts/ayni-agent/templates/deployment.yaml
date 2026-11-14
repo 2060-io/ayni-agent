@@ -48,6 +48,14 @@ spec:
             - name: http
               containerPort: {{ .Values.service.port }}
               protocol: TCP
+          # a starting agent waits for the one before it to give the store back (PLAT-DEPLOY-004): it is given
+          # five minutes before it is restarted, and serves nothing meanwhile
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60
           readinessProbe:
             httpGet:
               path: /health/ready
