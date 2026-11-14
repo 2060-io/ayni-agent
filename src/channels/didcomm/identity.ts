@@ -6,8 +6,9 @@
  * wallet each request is a flow (`identify-ua` for the user-agent credential, `present` for the badge,
  * D54); a holder that answers `unsupported-kind` is treated as having no such credential (IDENT-RES-003).
  */
-import type { AgentPack, CredentialRef } from '../../config/packTypes.js'
+import type { AgentPack, AuthenticationEntry, CredentialRef } from '../../config/packTypes.js'
 import type { FlowService } from '../../core/flows.js'
+import { type OrganizationFacts, organizationFrom } from '../../core/organization.js'
 import type { LivenessChecker, VerifiedFacts } from '../../core/principals.js'
 import type { BackingIdentity, ConnectionType, LivenessVerdict, Principal } from '../../core/types.js'
 import { Deferred } from '../../util/async.js'
@@ -47,14 +48,15 @@ export class TrustResolver implements LivenessChecker {
     return result
   }
 
-  /** The Org or Persona a DID is backed by, from its ECS credentials. */
-  public backingOf(result: ResolveResult): BackingIdentity | null {
+  /**
+   * The organization a trusted DID is backed by, from its verified ECS Organization credential (D64).
+   * A DID backed by a Persona, or by an Organization credential that carries no key, has none in this
+   * version (IDENT-RES-011).
+   */
+  public organizationOf(result: ResolveResult): OrganizationFacts | null {
     if (!result.trusted) return null
     const org = result.ecsCredentials?.find((c) => c.ecsSchema === 'OrganizationCredential')
-    if (org) return { kind: 'org', id: result.did, name: String(org.credentialSubject.name ?? result.did) }
-    const persona = result.ecsCredentials?.find((c) => c.ecsSchema === 'PersonaCredential')
-    if (persona) return { kind: 'persona', id: result.did, name: String(persona.credentialSubject.name ?? result.did) }
-    return null
+    return org ? organizationFrom(org.credentialSubject) : null
   }
 
   /** Re-walk of the issuer trust chain on liveness checks (IDENT-LIVE-002). */
@@ -193,10 +195,13 @@ export class IdentityFlow {
       ...(service?.credentialSubject ?? {}),
       userName: String(service?.credentialSubject.name ?? did),
     }
+    // a service is its own DID, behind its own organization (IDENT-RES-001); none when a Persona backs it
+    const organization = this.resolver.organizationOf(result)
     return {
       connectionType: 'verifiable-service',
       actorIdentity: did,
-      backingIdentity: this.resolver.backingOf(result),
+      backingIdentity: backingOf(organization),
+      organization,
       claims,
       userAgentVerified: true,
       identityCredentialRef: `ecs-service:${did}`,
@@ -231,18 +236,32 @@ export class IdentityFlow {
       this.logger.warn({ connectionId }, 'user-agent gate failed: refused (IDENT-RES-003)')
       return undefined
     }
-    if (creds?.badge?.length) {
+    // the one schema that authenticates a person, asked as one credential by its ecosystem schema (IDENT-RES-010)
+    const authentication = this.pack.identity.authentication?.[0]
+    if (authentication) {
       const record = await this.request(
         connectionId,
-        creds.badge,
+        [
+          {
+            jsonSchemaCredentialId: authentication.credential.jsonSchemaCredentialId,
+            ...(authentication.attributes ? { attributes: authentication.attributes } : {}),
+          },
+        ],
         undefined,
         flowMode ? { kind: 'present', title: `Prove your identity to ${name}` } : undefined
       ).catch((err) => {
-        this.logger.warn({ err, connectionId }, 'badge presentation request failed')
+        this.logger.warn({ err, connectionId }, 'identity presentation request failed')
         return undefined
       })
-      if (record?.verified) return this.factsFromBadge(connectionId, peerId, record, userAgentVerified)
-      this.logger.warn({ connectionId, state: record?.state, error: record?.errorMessage }, 'badge not presented')
+      if (record?.verified) {
+        const facts = await this.factsFromIdentityCredential(peerId, record, authentication, userAgentVerified)
+        if (facts) return facts
+      } else {
+        this.logger.warn(
+          { connectionId, state: record?.state, error: record?.errorMessage },
+          'identity credential not presented'
+        )
+      }
     }
     // the pack admits unidentified peers (D53, IDENT-RES-007), or the development flag does
     if (this.pack.identity.unidentifiedPeers === 'admit' || this.devAllowUnidentified) {
@@ -261,34 +280,76 @@ export class IdentityFlow {
     return undefined
   }
 
-  private async factsFromBadge(
-    connectionId: string,
+  /**
+   * The verified facts of a presented identity credential, or undefined when it identifies nobody
+   * (IDENT-RES-002/008/011/012): the issuer is the one the DIDComm agent verified in the proof, the
+   * organization is the issuer's, and the subject key must be revealed.
+   */
+  private async factsFromIdentityCredential(
     peerId: string,
     record: PresentationRecord,
+    authentication: AuthenticationEntry,
     userAgentVerified: boolean
-  ): Promise<VerifiedFacts> {
-    const claims: Record<string, unknown> = {}
-    for (const c of record.claims) claims[c.name] = c.value
-    const issuerDid = String(claims.issuerDid ?? claims.issuer ?? '')
-    let backing: BackingIdentity | null = null
-    if (issuerDid) {
-      try {
-        backing = this.resolver.backingOf(await this.resolver.resolve(issuerDid))
-      } catch (error) {
-        this.logger.warn(
-          { err: error, issuerDid },
-          'badge issuer trust resolution failed: no backing identity (IDENT-RES-004)'
-        )
-      }
+  ): Promise<VerifiedFacts | undefined> {
+    const where = { proofExchangeId: record.proofExchangeId }
+    const presented = record.credentials?.[0]
+    if (!presented?.issuerDid) {
+      this.logger.warn(where, 'the presentation record reports no issuer: not an identity (IDENT-RES-008)')
+      return undefined
     }
-    const subject = String(claims.id ?? claims.subject ?? `${peerId}#badge`)
+    const claims: Record<string, unknown> = {}
+    for (const c of presented.claims ?? []) claims[c.name] = c.value
+    const unrevealed = new Set(presented.unrevealed ?? [])
+    const subject: string[] = []
+    for (const attribute of authentication.subjectKey) {
+      const value = claims[attribute]
+      if (unrevealed.has(attribute) || value === undefined || value === null || String(value) === '') {
+        this.logger.warn({ ...where, attribute }, 'subject key attribute not revealed: not an identity (IDENT-RES-012)')
+        return undefined
+      }
+      subject.push(String(value))
+    }
+    let organization: OrganizationFacts | null = null
+    try {
+      organization = this.resolver.organizationOf(await this.resolver.resolve(presented.issuerDid))
+    } catch (error) {
+      this.logger.warn({ err: error, issuerDid: presented.issuerDid }, 'issuer trust resolution failed (IDENT-RES-004)')
+    }
+    if (!organization) {
+      // an issuer that is not trusted, or that no organization backs (a Persona, deferred): no identity (IDENT-RES-011)
+      this.logger.warn(
+        { ...where, issuerDid: presented.issuerDid },
+        'the issuer has no organization key: not an identity'
+      )
+      return undefined
+    }
+    const schema = authentication.credential.jsonSchemaCredentialId
+    const actorIdentity = actorIdentityOf(organization.key, schema, subject)
+    // the issuer and the name never come from an attribute that says so (IDENT-RES-004)
+    const { issuerDid: _claimedIssuer, issuer: _claimedIssuerAlias, ...facts } = claims
     return {
       connectionType: 'verifiable-user-agent' as ConnectionType,
-      actorIdentity: subject,
-      backingIdentity: backing,
-      claims: { ...claims, issuerDid, userName: claims.userName ?? claims.name ?? subject },
+      actorIdentity,
+      backingIdentity: backingOf(organization),
+      organization,
+      // what the earlier key was made of: the subject attribute alone
+      legacyActorIdentity: String(claims.id ?? claims.subject ?? `${peerId}#badge`),
+      claims: {
+        ...facts,
+        issuerDid: presented.issuerDid,
+        userName: claims.userName ?? claims.name ?? subject.join(' '),
+      },
       userAgentVerified,
       identityCredentialRef: `badge:${record.proofExchangeId}`,
     }
   }
+}
+
+/** The actor identity of a person: the organization of the issuer, the schema and the subject key (D59). */
+export function actorIdentityOf(organizationKey: string, schema: string, subject: string[]): string {
+  return [organizationKey, schema, ...subject.map((v) => encodeURIComponent(v))].join('|')
+}
+
+function backingOf(organization: OrganizationFacts | null): BackingIdentity | null {
+  return organization ? { kind: 'org', id: organization.key, name: organization.name } : null
 }

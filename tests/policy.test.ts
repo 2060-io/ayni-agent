@@ -1,16 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import type { AgentPack } from '../src/config/packTypes.js'
-import { assignRoles, relationOf } from '../src/core/principals.js'
+import { assignRoles, recognize, type VerifiedFacts } from '../src/core/principals.js'
 import { buildScope, matchesScope, scopeToSql } from '../src/memory/scope.js'
 import { resolveTier } from '../src/policy/rbac.js'
 
 const pack = {
   identity: {
-    homeBackingIdentity: 'did:webvh:x:home',
-    recognizedBackingIdentities: [
-      { identity: 'did:webvh:x:home', relation: 'home' },
-      { identity: 'did:webvh:x:partner', relation: 'partner' },
-    ],
+    homeBackingIdentity: 'did:webvh:x:agent',
+    organizations: [{ match: { countryCode: 'CO', registryId: 'partner' }, relation: 'partner' }],
     roles: { employee: {}, finance: {}, partner: {}, auditor: { auditor: true } },
     roleRules: [
       { when: { relation: 'home', claims: { department: ['Finance', 'Treasury'] } }, roles: ['employee', 'finance'] },
@@ -22,10 +19,20 @@ const pack = {
   },
 } as unknown as AgentPack
 
-const facts = (over: Record<string, unknown>) => ({
+const HOME = 'org:EE:home'
+const PARTNER = 'org:CO:partner'
+const organizationOf = (key: string) => {
+  const [, countryCode, registryId] = key.split(':')
+  return { key, attributes: { countryCode, registryId } }
+}
+/** Roles of the facts, their organization recognized as the agent whose own organization is HOME does. */
+const rolesOf = (f: VerifiedFacts) =>
+  assignRoles(pack, f, recognize(pack, f.backingIdentity ? organizationOf(f.backingIdentity.id) : null, HOME))
+
+const facts = (over: Record<string, unknown>): VerifiedFacts => ({
   connectionType: 'verifiable-user-agent' as const,
   actorIdentity: 'did:example:alice',
-  backingIdentity: { kind: 'org' as const, id: 'did:webvh:x:home' },
+  backingIdentity: { kind: 'org' as const, id: HOME },
   claims: {},
   userAgentVerified: true,
   identityCredentialRef: 'badge:1',
@@ -34,19 +41,17 @@ const facts = (over: Record<string, unknown>) => ({
 
 describe('role assignment (D34, IDENT-ROLE-001..006)', () => {
   it('maps verified facts through rules, first match wins', () => {
-    expect(assignRoles(pack, facts({ claims: { department: 'Treasury' } }))).toEqual(['employee', 'finance'])
-    expect(assignRoles(pack, facts({ claims: { department: 'Sales' } }))).toEqual(['employee'])
+    expect(rolesOf(facts({ claims: { department: 'Treasury' } }))).toEqual(['employee', 'finance'])
+    expect(rolesOf(facts({ claims: { department: 'Sales' } }))).toEqual(['employee'])
   })
   it('gives partners the baseline and unrecognized identities nothing', () => {
-    expect(assignRoles(pack, facts({ backingIdentity: { kind: 'org', id: 'did:webvh:x:partner' } }))).toEqual([
-      'partner',
-    ])
-    expect(assignRoles(pack, facts({ backingIdentity: { kind: 'org', id: 'did:webvh:x:stranger' } }))).toEqual([])
-    expect(relationOf(pack, { kind: 'org', id: 'did:webvh:x:stranger' })).toBe('unrecognized')
+    expect(rolesOf(facts({ backingIdentity: { kind: 'org', id: PARTNER } }))).toEqual(['partner'])
+    expect(rolesOf(facts({ backingIdentity: { kind: 'org', id: 'org:US:stranger' } }))).toEqual([])
+    expect(recognize(pack, organizationOf('org:US:stranger'), HOME).relation).toBe('unrecognized')
   })
   it('never trusts a self-asserted role; overrides apply by actor', () => {
-    expect(assignRoles(pack, facts({ claims: { role: 'admin', department: 'Sales' } }))).toEqual(['employee'])
-    expect(assignRoles(pack, facts({ actorIdentity: 'did:example:auditor' }))).toEqual(['auditor'])
+    expect(rolesOf(facts({ claims: { role: 'admin', department: 'Sales' } }))).toEqual(['employee'])
+    expect(rolesOf(facts({ actorIdentity: 'did:example:auditor' }))).toEqual(['auditor'])
   })
 })
 
@@ -73,9 +78,8 @@ describe('scope predicate (D12, PRIV-SCOPE, PRIV-CLS-005)', () => {
   const ctx = {
     principalId: 'p1',
     sessionIds: ['s1', 's0'],
-    backingIdentity: { kind: 'org' as const, id: 'did:webvh:x:home' },
-    homeBackingIdentity: 'did:webvh:x:home',
-    recognizedPartners: ['did:webvh:x:partner'],
+    backingIdentity: { kind: 'org' as const, id: HOME },
+    relation: 'home' as const,
     crossSession: 'own-sessions' as const,
   }
   it('authorizes by construction: state active, visibility terms keyed on session, principal, backing identity', () => {
@@ -97,19 +101,14 @@ describe('scope predicate (D12, PRIV-SCOPE, PRIV-CLS-005)', () => {
       true
     )
     expect(
-      matchesScope(
-        scope,
-        row({ visibility: 'partner-shared', backingIdentity: { kind: 'org', id: 'did:webvh:x:partner' } })
-      )
+      matchesScope(scope, row({ visibility: 'partner-shared', backingIdentity: { kind: 'org', id: PARTNER } }))
     ).toBe(false)
   })
   it('a partner sees partner-shared of its own backing identity only; an unrecognized identity sees public only', () => {
-    const partner = buildScope({ ...ctx, backingIdentity: { kind: 'org', id: 'did:webvh:x:partner' } })
-    expect(
-      partner.terms.some((t) => t.visibility === 'partner-shared' && t.backingIdentityId === 'did:webvh:x:partner')
-    ).toBe(true)
+    const partner = buildScope({ ...ctx, backingIdentity: { kind: 'org', id: PARTNER }, relation: 'partner' })
+    expect(partner.terms.some((t) => t.visibility === 'partner-shared' && t.backingIdentityId === PARTNER)).toBe(true)
     expect(partner.terms.some((t) => t.visibility === 'organization-shared')).toBe(false)
-    const stranger = buildScope({ ...ctx, backingIdentity: null })
+    const stranger = buildScope({ ...ctx, backingIdentity: null, relation: 'unrecognized' })
     expect(stranger.terms.map((t) => t.visibility)).toEqual(['public', 'session-private', 'principal-private'])
   })
   it('compiles to SQL over indexed columns with parameters', () => {
@@ -117,7 +116,7 @@ describe('scope predicate (D12, PRIV-SCOPE, PRIV-CLS-005)', () => {
     expect(sql).toMatch(/e\.state = \$\d+ AND/)
     expect(sql).toContain('e.visibility = $')
     expect(params).toContain('active')
-    expect(params).toContain('did:webvh:x:home')
+    expect(params).toContain(HOME)
     expect(scopeToSql({ state: 'active', terms: [] }, 'e', 1).sql).toBe('false')
   })
 })

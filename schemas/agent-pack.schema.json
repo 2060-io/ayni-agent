@@ -45,11 +45,11 @@
       "description": "Who this agent is and how it turns verified facts into roles (D30, D31, D34, D37, D38).",
       "type": "object",
       "additionalProperties": false,
-      "required": ["homeBackingIdentity", "recognizedBackingIdentities", "roleRules"],
+      "required": ["homeBackingIdentity", "roleRules"],
       "properties": {
         "homeBackingIdentity": {
           "$ref": "#/$defs/did",
-          "description": "DID of the organization or persona that operates this agent (D30, D37). Must appear in recognizedBackingIdentities with relation home."
+          "description": "DID of this agent, the Verifiable Service its operator runs (D30, D37). The organization of its own ECS Organization credential is the home organization, and no other is (D64, IDENT-ROLE-011)."
         },
         "userAgentGate": {
           "description": "Whether a connecting user agent must present an ECS-UserAgent credential (D38, IDENT-RES-003).",
@@ -57,21 +57,74 @@
           "enum": ["required", "optional"],
           "default": "required"
         },
-        "recognizedBackingIdentities": {
-          "description": "Organizations or personas whose actors get org/partner visibility and may be elevated by roleRules (D34, D35).",
+        "authentication": {
+          "description": "The one credential schema that authenticates a person, requested on DIDComm connect by its ecosystem schema so that any accredited issuer satisfies the request (D65, IDENT-RES-010). A list validated to one entry. Omitted only by an agent that authenticates nobody and admits unidentified peers.",
           "type": "array",
           "minItems": 1,
+          "maxItems": 1,
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["identity", "relation"],
+            "required": ["credential", "subjectKey"],
             "properties": {
-              "identity": {
-                "$ref": "#/$defs/did"
+              "credential": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["jsonSchemaCredentialId"],
+                "properties": {
+                  "jsonSchemaCredentialId": {
+                    "type": "string",
+                    "format": "uri"
+                  }
+                }
+              },
+              "subjectKey": {
+                "description": "The attributes that, with the organization of the issuer and the schema, form the principal key (D59): badgeNumber for the ECS-Badge.",
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "attributes": {
+                "description": "The attributes asked of the credential; every attribute of the schema when omitted.",
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        "organizations": {
+          "description": "Patterns over the verified attributes of an organization's ECS Organization credential, evaluated in order, first match wins; no match is unrecognized (D64, IDENT-ROLE-008). A pattern never sets home: home is the agent's own organization only (IDENT-ROLE-011).",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["match", "relation"],
+            "properties": {
+              "match": {
+                "type": "object",
+                "additionalProperties": false,
+                "minProperties": 1,
+                "properties": {
+                  "countryCode": { "$ref": "#/$defs/organizationMatch" },
+                  "registryId": { "$ref": "#/$defs/organizationMatch" },
+                  "legalJurisdiction": { "$ref": "#/$defs/organizationMatch" },
+                  "organizationKind": { "$ref": "#/$defs/organizationMatch" },
+                  "lei": { "$ref": "#/$defs/organizationMatch" }
+                }
               },
               "relation": {
                 "type": "string",
-                "enum": ["home", "partner"]
+                "enum": ["partner", "unrecognized"]
+              },
+              "roles": {
+                "$ref": "#/$defs/roleList"
               },
               "label": {
                 "type": "string",
@@ -186,7 +239,7 @@
           }
         },
         "credentials": {
-          "description": "Credentials the agent requests on DIDComm connect (IDENT-RES-001/002/003). userAgent: the ECS-UserAgent credential of the Verifiable User Agent gate; badge: ECS-Badge credentials accepted as a person's identity (one of them must be presented); service: credentials accepted from a verifiable-service peer. Each entry names a JSON Schema Credential or an AnonCreds credential definition the DIDComm agent can resolve. Without this section the agent accepts a connection only in development mode (DEV_ALLOW_UNIDENTIFIED_PRINCIPALS).",
+          "description": "Other credentials the agent requests on DIDComm connect (IDENT-RES-001/003). userAgent: the ECS-UserAgent credential of the Verifiable User Agent gate; service: credentials accepted from a verifiable-service peer. The credential that authenticates a person is identity.authentication.",
           "type": "object",
           "additionalProperties": false,
           "properties": {
@@ -205,29 +258,6 @@
                   "type": "array",
                   "items": {
                     "type": "string"
-                  }
-                }
-              }
-            },
-            "badge": {
-              "type": "array",
-              "minItems": 1,
-              "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "jsonSchemaCredentialId": {
-                    "type": "string",
-                    "format": "uri"
-                  },
-                  "credentialDefinitionId": {
-                    "type": "string"
-                  },
-                  "attributes": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
                   }
                 }
               }
@@ -1342,6 +1372,13 @@
     }
   },
   "$defs": {
+    "organizationMatch": {
+      "description": "One value, or a list of which any matches.",
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+      ]
+    },
     "did": {
       "type": "string",
       "pattern": "^did:[a-z0-9]+:.+$"

@@ -71,10 +71,7 @@ export class MemoryService {
       principalId: principal.id,
       sessionIds: [session.id, ...(session.lineage ?? [])],
       backingIdentity: principal.backingIdentity,
-      homeBackingIdentity: this.pack.identity.homeBackingIdentity,
-      recognizedPartners: this.pack.identity.recognizedBackingIdentities
-        .filter((r) => r.relation === 'partner')
-        .map((r) => r.identity),
+      relation: principal.backingRelation,
       crossSession,
     }
   }

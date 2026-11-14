@@ -16,13 +16,14 @@ import { IdentityFlow, TrustResolver } from './channels/didcomm/identity.js'
 import { PeerProfiles } from './channels/didcomm/peerProfiles.js'
 import { VsAgentClient } from './channels/didcomm/vsAgentClient.js'
 import { type Env, loadEnv } from './config/env.js'
-import { loadPack } from './config/pack.js'
+import { authenticationError, loadPack } from './config/pack.js'
 import { featuresOf } from './config/packTypes.js'
 import { AyniAgent } from './core/agent.js'
 import { ChallengeService } from './core/challenges.js'
 import { CapabilityRouter } from './core/channel.js'
 import { FlowService } from './core/flows.js'
 import { Orchestrator } from './core/orchestrator.js'
+import { HomeOrganization } from './core/organization.js'
 import { PrincipalService } from './core/principals.js'
 import { PROMPT_ADDON_VERSION } from './core/promptAddon.js'
 import { SessionService } from './core/sessions.js'
@@ -71,6 +72,11 @@ export async function buildAgent(
   if (env.unidentifiedPeers) pack.identity.unidentifiedPeers = env.unidentifiedPeers
   if (env.appLinkBase)
     pack.channels = { ...pack.channels, agui: { ...pack.channels?.agui, appLinkBase: env.appLinkBase } }
+  // the effective setting, after the environment's: an agent that authenticates nobody must admit unidentified peers
+  const authentication = authenticationError(pack)
+  // (the development flag admits everyone, so a development pack may name none)
+  if (authentication && !env.devAllowUnidentifiedPrincipals)
+    throw new Error(`agent-pack: ${authentication} (IDENT-RES-010)`)
   if (pack.identity.unidentifiedPeers === 'admit')
     logger.warn(
       'identity: user agents without a valid identity credential are admitted as unidentified Principals (D53)'
@@ -126,7 +132,20 @@ export async function buildAgent(
   const router = new CapabilityRouter(store, logger)
   const vsAgent = new VsAgentClient(env.vsAgentAdminUrl, logger)
   const resolver = new TrustResolver(env.veranaApiUrl, logger)
-  const principals = new PrincipalService(store, pack, resolver, logger, env.credentialCheckTtlSeconds)
+  // home is the agent's own organization and no other (IDENT-ROLE-011): the one of its own Organization
+  // credential, read through the DID the DIDComm agent reports, else the one the pack names
+  let ownDid: string | undefined
+  const home = new HomeOrganization(async () => {
+    const candidates = [ownDid, pack.identity.homeBackingIdentity].filter(
+      (d, i, all): d is string => !!d && !d.startsWith('did:example:') && all.indexOf(d) === i
+    )
+    for (const candidate of candidates) {
+      const organization = resolver.organizationOf(await resolver.resolve(candidate))
+      if (organization) return organization
+    }
+    return null
+  }, logger)
+  const principals = new PrincipalService(store, pack, resolver, logger, env.credentialCheckTtlSeconds, home)
   const mediaLinks = new MediaLinks(env.presignedUrlTtlSeconds * 1000)
   const peerProfiles = new PeerProfiles(store.kv, logger)
   const didcomm = new DidcommAdapter(
@@ -279,6 +298,7 @@ export async function buildAgent(
   try {
     const info = await vsAgent.info()
     did = info.did
+    ownDid = did
     agent.did = did
     flows.setAgentDid(did)
     logger.info({ did, vsAgent: info.version }, 'DIDComm agent reachable (IDENT-SELF-001)')

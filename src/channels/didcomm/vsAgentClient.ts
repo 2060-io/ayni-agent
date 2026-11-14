@@ -35,11 +35,27 @@ export interface RequestedCredential {
   attributes?: string[]
 }
 
+/** What the DIDComm agent verified of one requested credential (CC-VSA-011): the issuer comes from the proof. */
+export interface PresentedCredential {
+  credentialDefinitionId: string
+  issuerDid: string
+  credentialSchemaId?: number
+  ecosystemDid?: string
+  jsonSchemaCredentialId?: string
+  /** the claims of this credential alone */
+  claims: { name: string; value: string }[]
+  /** the requested attributes the holder left unrevealed */
+  unrevealed: string[]
+}
+
 export interface PresentationRecord {
   proofExchangeId: string
   state: string
   connectionId?: string
   claims: { name: string; value: string }[]
+  /** one entry per requested credential, in the order of the request, once the trust decision succeeded */
+  credentials?: PresentedCredential[]
+  /** true only once the proof verified and the trust decision on the issuer completed */
   verified: boolean
   threadId?: string
   errorMessage?: string

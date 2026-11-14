@@ -12,10 +12,11 @@ function packWith(identity: Partial<AgentPack['identity']>): AgentPack {
   return {
     identity: {
       homeBackingIdentity: 'did:webvh:x:home',
-      recognizedBackingIdentities: [],
       roleRules: [],
       userAgentGate: 'optional',
-      credentials: { badge: [{ schemaId: 'ecs-badge' }] },
+      authentication: [
+        { credential: { jsonSchemaCredentialId: 'https://ecs.example/badge.json' }, subjectKey: ['badgeNumber'] },
+      ],
       ...identity,
     },
   } as unknown as AgentPack

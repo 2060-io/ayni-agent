@@ -4,7 +4,7 @@
 services:
   vs-agent:
     # Published images are amd64-only; on arm64 hosts build one with ../tools/build-vs-agent-image.sh
-    image: ${VS_AGENT_IMAGE:-veranalabs/vs-agent:v2.0.0-dev.91}
+    image: ${VS_AGENT_IMAGE:-veranalabs/vs-agent:v2.0.0-dev.110}
     restart: unless-stopped
     env_file: .env
     environment:

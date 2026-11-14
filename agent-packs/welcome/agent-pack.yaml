@@ -11,15 +11,14 @@ metadata:
   description: ${AGENT_DESCRIPTION:-The first agent to talk to on Ayni. It explains what Ayni is and lets you try it.}
 
 identity:
-  # the DID of the VS Agent this instance controls (its operator's backing identity)
+  # the DID of the VS Agent this instance controls; its Organization credential names the home organization
   homeBackingIdentity: ${HOME_BACKING_IDENTITY:-did:example:unset}
   userAgentGate: ${USER_AGENT_GATE:-optional}
   # anyone may come and look: a visitor without a valid identity credential is admitted, unidentified
   unidentifiedPeers: ${UNIDENTIFIED_PEERS:-admit}
-  recognizedBackingIdentities:
-    - identity: ${HOME_BACKING_IDENTITY:-did:example:unset}
-      relation: home
-      label: ${HOME_BACKING_LABEL:-2060 OÜ}
+  # home is the organization of this agent's own Organization credential, and no other (D64): nothing to list.
+  # This agent authenticates nobody (it offers nothing that requires a credential), so it names no
+  # authentication schema and admits everyone unidentified.
   roles:
     team: { description: People of the operator organization. }
     visitor: { description: Anyone else with a verified identity. }
