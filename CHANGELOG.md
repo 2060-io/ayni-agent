@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/2060-io/ayni-agent/compare/v0.13.0...v0.14.0) (2026-11-14)
+
+
+### Features
+
+* **turns:** a message sent while the agent answers waits, and is answered next ([#55](https://github.com/2060-io/ayni-agent/issues/55)) ([7dd6385](https://github.com/2060-io/ayni-agent/commit/7dd6385b577cac7a37d2567b83b2663548421d0a))
+
 ## [0.13.0](https://github.com/2060-io/ayni-agent/compare/v0.12.0...v0.13.0) (2026-11-14)
 
 
