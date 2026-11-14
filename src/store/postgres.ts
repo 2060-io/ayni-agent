@@ -19,6 +19,7 @@ import type {
 import { type ScopePredicate, scopeToSql } from '../memory/scope.js'
 import { MemoryStore } from './memory.js'
 import { MIGRATIONS } from './migrations.js'
+import { holdProcessLock, type ProcessLockOptions } from './processLock.js'
 import type { EntryQuery, Store, StoredEntry, VectorHit } from './types.js'
 
 const vec = (v: number[]): string => `[${v.join(',')}]`
@@ -29,8 +30,18 @@ export class PostgresStore implements Store {
   public readonly kind = 'postgres' as const
   private readonly pool: pg.Pool
 
-  public constructor(databaseUrl: string) {
+  public constructor(private readonly databaseUrl: string) {
     this.pool = new pg.Pool({ connectionString: databaseUrl, max: 10 })
+  }
+
+  /** A connection of its own holds the lock for the life of the process: never one of the pool's. */
+  public exclusive(options: ProcessLockOptions): Promise<() => Promise<void>> {
+    const connection = new pg.Client({
+      connectionString: this.databaseUrl,
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 10_000,
+    })
+    return holdProcessLock(connection, options)
   }
 
   public async init(): Promise<void> {

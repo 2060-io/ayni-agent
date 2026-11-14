@@ -29,7 +29,8 @@ export function testEnv(over: Partial<Env> = {}): Env {
 }
 
 export async function startTestAgent(over: Partial<Env> = {}): Promise<RunningAgent> {
-  return buildAgent(testEnv(over), createLogger('silent'))
+  // a test that ends with a turn still in progress does not wait for it as a deployment does
+  return buildAgent(testEnv(over), createLogger('silent'), { drainMs: 200 })
 }
 
 /** Parses an SSE body into its events. */

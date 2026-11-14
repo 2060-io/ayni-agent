@@ -66,10 +66,9 @@ async function run(sessionId: string, token: string, text: string, ayni?: Record
   return { status: response.statusCode, events: parseSse(response.body).map((e) => e.event), body: response.body }
 }
 
-beforeAll(async () => {
-  running = await startTestAgent()
-  // the DIDComm agent is not reachable: mint invitations locally for the tests
-  const minter = running.agent.sessions as unknown as { minter: { mint: (id: string) => Promise<unknown> } }
+/** The DIDComm agent is not reachable: invitations are minted locally for the tests. */
+function mintLocally(agent: RunningAgent): void {
+  const minter = agent.agent.sessions as unknown as { minter: { mint: (id: string) => Promise<unknown> } }
   minter.minter = {
     mint: async (id: string) => ({
       invitationId: `inv-${id}`,
@@ -77,6 +76,11 @@ beforeAll(async () => {
       url: `http://agent.test?oob=${Buffer.from(`{"@id":"inv-${id}"}`).toString('base64url')}`,
     }),
   }
+}
+
+beforeAll(async () => {
+  running = await startTestAgent()
+  mintLocally(running)
 }, 30_000)
 
 afterAll(async () => {
@@ -1309,5 +1313,106 @@ describe('a message sent while the agent answers (D63, CORE-MSG-010, PROF-RUN-01
     const history = await historyOf(d)
     expect(history.some((m) => String(m.content).includes('one too many'))).toBe(false)
     expect(history.filter((m) => m.role === 'user')).toHaveLength(11)
+  })
+
+  describe('when the process is told to end (PLAT-DEPLOY-004)', () => {
+    /** An agent of its own for the test: it ends in it. */
+    const withAgent = async (test: () => Promise<void>) => {
+      const shared = running
+      const own = await startTestAgent()
+      mintLocally(own)
+      running = own
+      try {
+        await test()
+      } finally {
+        running = shared
+        await own.stop()
+      }
+    }
+    const listed = async (d: Device) => {
+      const session = await running.agent.sessions.get(d.sessionId)
+      const key = session?.conversationId ? `conv:${session.conversationId}` : `ses:${d.sessionId}`
+      return JSON.parse((await running.agent.store.kv.get(`turn.waiting:${key}`)) ?? '[]') as { messageId: string }[]
+    }
+
+    it('lets the reply in progress end, starts no other turn, and leaves what waits for the next process', () =>
+      withAgent(async () => {
+        const d = await device('did:peer:ending-one')
+        const idle = await device('did:peer:ending-two')
+        const first = post(d, 'e-1', LONG)
+        await pause(120)
+        expect((await post(d, 'e-2', 'sent during the reply'))[0]?.noTurn).toBe('waiting')
+
+        const ended = running.agent.shutdown(5000)
+        // a message that arrives while the process ends waits too, even in a conversation with no turn in progress
+        const late = await post(idle, 'e-3', 'sent while the agent restarts')
+        expect(types(late)).toEqual(['RUN_STARTED', 'RUN_FINISHED'])
+        expect(late[0]?.noTurn).toBe('waiting')
+
+        // the reply in progress ends as it would have
+        const firstEvents = await first
+        expect(firstEvents[firstEvents.length - 1]?.type).toBe('RUN_FINISHED')
+        expect(textOf(firstEvents)).toContain('word33')
+        await ended
+
+        // nothing answered what waits: it is listed, for the process that comes next
+        await pause(150)
+        expect(await replies(d)).toHaveLength(1)
+        expect(await replies(idle)).toHaveLength(0)
+        expect((await listed(d)).map((item) => item.messageId)).toEqual(['u_e-2'])
+        expect((await listed(idle)).map((item) => item.messageId)).toEqual(['u_e-3'])
+      }))
+
+    it('cuts a reply still in progress when its time is over, and keeps what it was answering on the list', () =>
+      withAgent(async () => {
+        const d = await device('did:peer:ending-three')
+        const first = post(d, 'c-1', 'hello')
+        await first
+        // a first reply, then one the agent starts for a message that waited: that one is cut
+        const second = post(d, 'c-2', LONG)
+        await pause(100)
+        expect((await post(d, 'c-3', `${LONG} again`))[0]?.noTurn).toBe('waiting')
+        await second
+        // its turn has begun: it shows as waiting no more, and is still on the list until that turn ends
+        await until(async () => (await waitingOf(d)).length === 0)
+        expect(await listed(d)).toHaveLength(1)
+        await pause(60)
+
+        const started = Date.now()
+        await running.agent.shutdown(40, 2000)
+        expect(Date.now() - started).toBeLessThan(1500)
+
+        const answers = await replies(d)
+        expect(answers).toHaveLength(3)
+        expect(answers[2]?.metadata.completion).toBe('interrupted')
+        // cut by the end of the process, not by the person: the next process answers it
+        expect((await listed(d)).map((item) => item.messageId)).toEqual(['u_c-3'])
+      }))
+
+    it('refuses what cannot wait', () =>
+      withAgent(async () => {
+        const d = await device('did:peer:ending-four')
+        await running.agent.shutdown(50)
+        const session = await running.agent.sessions.get(d.sessionId)
+        await expect(
+          running.agent.action(
+            session as never,
+            { kind: 'contextual.select', itemId: 'no-such-item' } as never,
+            { emit: () => undefined },
+            new AbortController().signal
+          )
+        ).resolves.toEqual({ text: 'Unknown menu item.' })
+        // a turn that is not a message of the person does not start
+        await expect(
+          running.agent.turn(
+            session as never,
+            {
+              entry: { sessionId: d.sessionId, principalId: null, role: 'principal', sourceType: 'text', text: 'x' },
+            } as never,
+            { emit: () => undefined },
+            new AbortController().signal
+          )
+        ).rejects.toThrow('restarting')
+      }))
   })
 })

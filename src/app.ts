@@ -58,7 +58,13 @@ export interface RunningAgent {
 
 export async function buildAgent(
   env: Env = loadEnv(),
-  logger: Logger = createLogger(env.logLevel)
+  logger: Logger = createLogger(env.logLevel),
+  hooks: {
+    /** the lock on the store is lost while the process runs; it ends the process when not given */
+    storeLost?: (error?: Error) => void
+    /** how long the turns in progress are given to end when the process stops */
+    drainMs?: number
+  } = {}
 ): Promise<RunningAgent> {
   const { pack, dir: packDir } = loadPack(env.agentPackPath)
   if (env.userAgentGate) pack.identity.userAgentGate = env.userAgentGate
@@ -81,6 +87,17 @@ export async function buildAgent(
   )
 
   const store = createStore(env.store, env.databaseUrl)
+  // one agent process at a time on a store (PLAT-DEPLOY-004): this one waits here until the one before is gone
+  const releaseStore = await store.exclusive({
+    onWaiting: () => logger.info('another agent process serves this store: waiting for it to end'),
+    onLost:
+      hooks.storeLost ??
+      ((err) => {
+        // it holds the store no more and another process may: it must not go on
+        logger.fatal({ err }, 'the lock on the store is lost: the process ends')
+        process.exit(1)
+      }),
+  })
   await store.init()
   const crypto = createEntryCrypto(env.entryEncryptionKey)
   const llm = createChatModel(pack.llm)
@@ -381,10 +398,16 @@ export async function buildAgent(
     agent,
     streams,
     stop: async () => {
+      // no turn starts any more; those in progress end, or are cut when their time is over (PLAT-DEPLOY-004)
+      await agent.shutdown(hooks.drainMs)
       for (const stop of stops) stop()
+      // the streams of the devices stay open for as long as they are served: they are closed, not waited for
+      app.server.closeAllConnections()
       await app.close()
       await registry.close()
       await redis?.quit().catch(() => undefined)
+      // the last thing but one: from here the next process may take the store
+      await releaseStore()
       await store.close()
     },
   }

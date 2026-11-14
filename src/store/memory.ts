@@ -22,6 +22,11 @@ const clone = <T>(v: T): T => (v === undefined ? v : (structuredClone(v) as T))
 
 export class MemoryStore implements Store {
   public readonly kind = 'memory' as const
+
+  /** One process holds a store that lives in its own memory. */
+  public async exclusive(): Promise<() => Promise<void>> {
+    return async () => undefined
+  }
   private principalRows = new Map<string, Principal>()
   private sessionRows = new Map<string, Session>()
   private conversationRows = new Map<string, Conversation>()

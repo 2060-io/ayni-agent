@@ -33,7 +33,7 @@ import type { PrincipalService, VerifiedFacts } from './principals.js'
 import { SessionError, type SessionService } from './sessions.js'
 import { TurnLock } from './turnLock.js'
 import type { ApprovalRecord, ClientDescription, ClosureReason, MessageEntry, Principal, Session } from './types.js'
-import { TooManyWaiting, type WaitingItem, WaitingList } from './waiting.js'
+import { ProcessEnding, TooManyWaiting, type WaitingItem, WaitingList } from './waiting.js'
 
 export interface AgentParts {
   env: Env
@@ -389,6 +389,56 @@ export class AyniAgent {
    */
   public queuedRun?: (session: Session) => Promise<QueuedRun>
 
+  // ---- the end of the process (PLAT-DEPLOY-004) ------------------------------------------------------
+
+  /** the process was told to end: no turn starts any more */
+  private ending = false
+  /** cuts the turns that are still running when the time given to them is over */
+  private readonly cut = new AbortController()
+  /** the turns in progress, and who waits for them to be over */
+  private running = 0
+  private readonly whenIdle: (() => void)[] = []
+
+  /** The signal of a turn: its caller's, and the end of the process. */
+  private untilCut(signal: AbortSignal): AbortSignal {
+    return AbortSignal.any([signal, this.cut.signal])
+  }
+
+  private async counted<T>(work: () => Promise<T>): Promise<T> {
+    this.running++
+    try {
+      return await work()
+    } finally {
+      this.running--
+      if (!this.running) for (const tell of this.whenIdle.splice(0)) tell()
+    }
+  }
+
+  private idle(withinMs: number): Promise<boolean> {
+    if (!this.running) return Promise.resolve(true)
+    return new Promise((resolve) => {
+      const late = setTimeout(() => resolve(false), withinMs)
+      this.whenIdle.push(() => {
+        clearTimeout(late)
+        resolve(true)
+      })
+    })
+  }
+
+  /**
+   * The process is told to end. From here no turn starts: a message that may wait is recorded and listed, and
+   * the next process answers it; anything else is refused. The turns in progress are given `drainMs` to end as
+   * they would; one that still runs then is cut like a turn the person stopped, its reply kept as interrupted,
+   * and what it was answering from the list stays listed for the next process.
+   */
+  public async shutdown(drainMs = 20_000, cutMs = 3_000): Promise<void> {
+    this.ending = true
+    if (await this.idle(drainMs)) return
+    this.logger.warn({ turns: this.running }, 'turns still in progress at the end of the process: cut')
+    this.cut.abort()
+    await this.idle(cutMs)
+  }
+
   private get waitingMessages(): WaitingList {
     this.waitingList ??= new WaitingList(this.store.kv)
     return this.waitingList
@@ -399,13 +449,15 @@ export class AyniAgent {
    * and arrives during one is recorded, listed as waiting and answered when it ends (`waiting` in the result);
    * any other caller waits for its turn.
    */
-  public async turn(session: Session, input: TurnInput, sink: TurnSink, signal: AbortSignal): Promise<TurnResult> {
+  public async turn(session: Session, input: TurnInput, sink: TurnSink, caller: AbortSignal): Promise<TurnResult> {
     this.sessions.requireBound(session)
     const principal = await this.principalOf(session)
     if (!principal) throw new Error('principal missing')
     await this.sessions.touch(session)
     const key = conversationKey(session)
-    if (input.mayWait && this.turns.busy(key)) return this.wait(key, session, principal, input)
+    const signal = this.untilCut(caller)
+    // while the process ends, as during a turn: the message waits, and the next process answers it
+    if (input.mayWait && (this.ending || this.turns.busy(key))) return this.wait(key, session, principal, input)
     return this.exclusive(session, signal, async () => {
       await sink.emit({ type: 'turn-start' })
       await this.sessions.noteActivity(session, input.entry.text, { title: true })
@@ -417,10 +469,13 @@ export class AyniAgent {
 
   /** Runs one thing at a time in the conversation of a session; a caller that gives up while it waits ran nothing. */
   private async exclusive(session: Session, signal: AbortSignal, work: () => Promise<TurnResult>): Promise<TurnResult> {
+    if (this.ending) throw new ProcessEnding()
     const release = await this.turns.acquire(conversationKey(session), signal)
     if (!release) return { cancelled: true, withdrawn: true }
     try {
-      return await work()
+      // its turn came after the process was told to end: it does not start
+      if (this.ending) throw new ProcessEnding()
+      return await this.counted(work)
     } finally {
       release()
     }
@@ -479,11 +534,14 @@ export class AyniAgent {
    * comes to wait, and when the agent starts: whoever comes first answers everything, the others find nothing.
    */
   private async answerWaiting(key: string, witness: Session): Promise<void> {
+    // the process ends: what waits stays listed, and the next process answers it
+    if (this.ending) return
     const release = await this.turns.acquire(key)
     if (!release) return
     try {
+      if (this.ending) return
       const items = await this.waitingMessages.list(key)
-      if (items.length) await this.turnForWaiting(key, witness, items)
+      if (items.length) await this.counted(() => this.turnForWaiting(key, witness, items))
     } catch (err) {
       this.logger.error({ err, conversation: key }, 'the messages that waited were not answered')
     } finally {
@@ -521,7 +579,7 @@ export class AyniAgent {
         principal,
         entries,
         sink,
-        queued?.signal ?? new AbortController().signal,
+        this.untilCut(queued?.signal ?? new AbortController().signal),
         this.turnContext(key)
       )
       await this.afterTurn(session, result)
@@ -529,8 +587,10 @@ export class AyniAgent {
       failure = err
       this.logger.error({ err, sessionId: session.id }, 'the turn for what waited failed')
     } finally {
-      // off the list once the turn has ended: one cut short by a restart is run again when the agent starts
-      await this.waitingMessages.remove(key, ids)
+      // off the list once the turn has ended. One cut short because the process ends stays listed, as one cut
+      // by a crash does: the next process answers it
+      const cutShort = this.cut.signal.aborted && (!result || result.cancelled)
+      if (!cutShort) await this.waitingMessages.remove(key, ids)
       for (const id of ids) this.inTurn.delete(id)
       this.waitingChanged?.(session)
       await queued?.finish(result, failure)
@@ -609,8 +669,9 @@ export class AyniAgent {
     session: Session,
     action: AyniAction,
     sink: TurnSink,
-    signal: AbortSignal
+    caller: AbortSignal
   ): Promise<TurnResult | { text: string; await?: 'binding-code' } | undefined> {
+    const signal = this.untilCut(caller)
     this.sessions.requireBound(session)
     const principal = await this.principalOf(session)
     if (!principal) throw new Error('principal missing')
