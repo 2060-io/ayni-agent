@@ -279,3 +279,11 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       recorded (`too-many-waiting`). One replica serves a conversation: the lock is the process's. An action
       other than a message (a menu choice) that arrives during a turn waits for its turn in memory.
     - `features.queue` in the descriptor, `state.ayni.waiting`, profile package 3.1.6.
+37. **One agent process at a time** (2026-11-14, found on devnet in the first live run of entry 36;
+    PLAT-DEPLOY-004). The agent pod was restarted while a message waited. The chart's deployment replaced it
+    by a rolling update: the new pod started while the old one, ending gracefully, was still writing its
+    reply. The new one found the waiting message in the store and answered it at start; the old one answered
+    it too when its reply ended: two replies to one message. The lock that keeps one turn per conversation is
+    the process's (entry 36), so two processes are two locks. The deployment now uses `Recreate`: the old pod
+    is gone before the new one starts. A turn in progress is given the grace period to end, as before; what
+    waits is answered by whichever process is the only one there. More than one replica stays unsupported.

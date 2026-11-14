@@ -7,6 +7,11 @@ metadata:
     {{- include "ayni-agent.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  # one process at a time (PLAT-DEPLOY-004): the turn in progress and the lock that keeps one turn per conversation
+  # are the process's. A rolling update runs the old and the new side by side for a moment, and each answered the
+  # messages that waited.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "ayni-agent.selectorLabels" . | nindent 6 }}
