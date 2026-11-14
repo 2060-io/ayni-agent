@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { RunningAgent } from '../src/app.js'
 import { DidcommAdapter, MediaLinks } from '../src/channels/didcomm/adapter.js'
 import { DidcommEvents } from '../src/channels/didcomm/events.js'
-import { IdentityFlow } from '../src/channels/didcomm/identity.js'
+import { IdentityFlow, TrustResolver } from '../src/channels/didcomm/identity.js'
 import { AYNI_FLOW_PROTOCOL, PeerProfiles } from '../src/channels/didcomm/peerProfiles.js'
 import type { FlowRecord } from '../src/channels/didcomm/vsAgentClient.js'
 import type { AgentPack } from '../src/config/packTypes.js'
@@ -541,11 +541,13 @@ describe('identity as flows (IDENT-RES-003, D54)', () => {
     metadata: { displayName: 'Test agent' },
     identity: {
       homeBackingIdentity: 'did:webvh:x:home',
-      recognizedBackingIdentities: [],
       roleRules: [],
       userAgentGate: 'optional',
       unidentifiedPeers: 'admit',
-      credentials: { userAgent: { schemaId: 'ecs-user-agent' }, badge: [{ schemaId: 'ecs-badge' }] },
+      credentials: { userAgent: { schemaId: 'ecs-user-agent' } },
+      authentication: [
+        { credential: { jsonSchemaCredentialId: 'https://ecs.example/badge.json' }, subjectKey: ['badgeNumber'] },
+      ],
     },
   } as unknown as AgentPack
 
@@ -560,7 +562,19 @@ describe('identity as flows (IDENT-RES-003, D54)', () => {
       running.agent.store.kv,
       logger
     )
-    const identity = new IdentityFlow(pack, local as never, {} as never, false, silent as never)
+    // the issuer of the badge, as trust resolution knows it: a service of an organization
+    const resolver = new TrustResolver(undefined, silent as never)
+    resolver.resolve = async (did: string) => ({
+      did,
+      trusted: true,
+      ecsCredentials: [
+        {
+          ecsSchema: 'OrganizationCredential',
+          credentialSubject: { name: 'Issuer', countryCode: 'EE', registryId: '1' },
+        },
+      ],
+    })
+    const identity = new IdentityFlow(pack, local as never, resolver, false, silent as never)
     identity.setFlows(localFlows)
     const establishing = identity.establish('conn-id', 'did:peer:alice', { flowMode: true })
     await settle()
@@ -589,9 +603,19 @@ describe('identity as flows (IDENT-RES-003, D54)', () => {
       state: 'done',
       verified: true,
       claims: [
-        { name: 'issuerDid', value: 'did:webvh:x:issuer' },
         { name: 'badgeNumber', value: '42' },
         { name: 'userName', value: 'Alice' },
+      ],
+      credentials: [
+        {
+          credentialDefinitionId: 'did:webvh:x:issuer/resources/def',
+          issuerDid: 'did:webvh:x:issuer',
+          claims: [
+            { name: 'badgeNumber', value: '42' },
+            { name: 'userName', value: 'Alice' },
+          ],
+          unrevealed: [],
+        },
       ],
     })
     const facts = await establishing

@@ -54,12 +54,21 @@ directory.
 
 ```yaml
 identity:
-  homeBackingIdentity: did:webvh:...          # the operator's Org or Persona
+  homeBackingIdentity: did:webvh:...          # the DID of this agent, the service its operator runs
   userAgentGate: required                     # required | optional
   unidentifiedPeers: refuse                   # refuse | admit (D53): a wallet with no valid identity credential
-  recognizedBackingIdentities:
-    - { identity: did:webvh:..., relation: home }
-    - { identity: did:webvh:..., relation: partner, label: Baltic Forwarding }
+  authentication:                             # the one schema that authenticates a person (D65)
+    - credential: { jsonSchemaCredentialId: https://.../vt/schemas-badge-jsc.json }
+      subjectKey: [badgeNumber]
+      attributes: [badgeNumber, name, title, department]
+  organizations:                              # patterns over the verified Organization credential (D64)
+    - match: { countryCode: EE, registryId: "14000000" }
+      relation: partner
+      roles: [partner]
+      label: Baltic Forwarding
+    - match: { countryCode: [DE, AT] }
+      relation: unrecognized
+      roles: [visitor]
   roles:
     finance-manager: { canApprove: true, crossSession: own-backing-identity }
     auditor:         { auditor: true }
@@ -71,16 +80,42 @@ identity:
     - when: { relation: partner }
       roles: [partner]
   perActorOverrides:
-    - { actor: <badge subject or service id>, roles: [auditor] }
+    - { actor: <a person's key or a service's DID>, roles: [auditor] }
 ```
+
+- **An organization is not a DID** (D64). The agent identifies the organization behind an actor by its
+  **organization key**, computed from the verified ECS Organization credential that trust resolution returns:
+  the country of registration and the identifier in its register (`org:EE:14000000`). A service that moves
+  to another DID, and two services of one organization, are the same organization. An actor that only a
+  Persona backs has no organization in this version.
+- **`home` is never configured.** It is the organization of the agent's own Organization credential, read
+  through the DID of the agent, and no other: its people get the `home` relation and the
+  `organization-shared` memory. A pattern that sets `home` is refused at start-up. An agent that is not
+  onboarded yet has no organization: nobody is home until it is.
+- **`organizations`** recognizes every other organization by patterns over the verified attributes
+  `countryCode`, `registryId`, `legalJurisdiction`, `organizationKind` and `lei`, in order, first match
+  wins. A pattern sets the relation (`partner` or `unrecognized`) and may add `roles`. Naming
+  `registryId` designates one organization; naming a country alone admits every accredited organization
+  of that country, which belongs with low-privilege roles. No match: `unrecognized`, no added role.
+- **`authentication`** names the one credential schema that authenticates a person, by its ecosystem
+  schema, so that a credential of any accredited issuer satisfies the request; it is a list validated to
+  exactly one entry. The agent takes the issuer from what the DIDComm agent verified in the proof, never
+  from an attribute, and resolves the issuer's organization. The person is then
+  `<organization key>|<schema>|<subject key>`: the same badge number from another organization is another
+  person, and a badge re-issued by the same organization is the same person, whichever of its services
+  issued it. A presentation that leaves a `subjectKey` attribute unrevealed identifies nobody, so the
+  subject key must be among the `attributes` asked. An agent that authenticates nobody omits
+  `authentication` and must set `unidentifiedPeers: admit`.
 
 - **Role assignment is rules over verified facts, never rosters** (D34). A rule's `when` matches on the
   Principal's `relation` to this agent (`home`, `partner`, `unrecognized`), its `connectionType`,
   whether the ECS-UserAgent credential was presented (`userAgentVerified`), and verified `claims`
   (ECS-Badge facts such as `department` or `title`; ECS-Service attributes for services). A list value
-  matches any of its entries. The first matching rule wins. No match: the Principal is authenticated
-  with no roles, no backing identity and `public` visibility only.
-- `perActorOverrides` apply before the rules, for named actors.
+  matches any of its entries. The first matching rule wins, and its roles are added to those of the
+  organization's pattern. No match: the Principal has the roles of its pattern, if any; an `unrecognized`
+  organization gives no backing identity and `public` visibility only.
+- `perActorOverrides` apply before the rules, for named actors: a service by its DID, a person by the key
+  above.
 - `roles` declares every role used anywhere in the pack. `crossSession` sets the role's cross-session
   memory scope (RBAC-XSESS): `own-sessions` (default), `own-backing-identity`, `all`. `canApprove`
   marks roles that may appear in `approvers`. `auditor` grants read-only access to the whole
@@ -92,12 +127,11 @@ identity:
   deployments; that flag stays development-only.
 - `userAgentGate: optional` lets wallets that do not present an ECS-UserAgent credential connect; the
   Principal is then marked `userAgentVerified: false`, which `roleRules` may use.
-- `credentials` names what the agent requests on DIDComm connect (IDENT-RES-001/002/003): `userAgent`
-  (the ECS-UserAgent credential of the gate), `badge` (one or more ECS-Badge credentials accepted as
-  a person's identity; one must be presented) and `service` (credentials accepted from a
+- `credentials` names the other credentials the agent requests on DIDComm connect (IDENT-RES-001/003):
+  `userAgent` (the ECS-UserAgent credential of the gate) and `service` (credentials accepted from a
   verifiable-service peer). Each entry is a `jsonSchemaCredentialId` or a `credentialDefinitionId`
-  the DIDComm agent can resolve, with optional `attributes`. Without `badge`, a person can only be
-  admitted in development mode (`DEV_ALLOW_UNIDENTIFIED_PRINCIPALS`).
+  the DIDComm agent can resolve, with optional `attributes`. The credential that authenticates a person
+  is `authentication`, above; `credentials.badge` no longer exists.
 
 ## persona
 
@@ -224,8 +258,9 @@ enables crypto-erasure with its lineage cascade.
 
 ## Cross-field rules (checked after schema validation)
 
-1. `identity.homeBackingIdentity` appears in `recognizedBackingIdentities` with `relation: home`,
-   and exactly one entry has `relation: home`.
+1. `identity.authentication` holds at most one entry, whose `subjectKey` is among the `attributes` it asks;
+   no `identity.organizations` pattern sets `relation: home`. At start-up, an agent with no authentication
+   entry must admit unidentified peers (checked after the environment's overrides).
 2. Every role named in `roleRules`, `perActorOverrides`, `toolAccess.roles`, `approvers`,
    `purposes[].permittedRoles` and `persona.menu[].roles` is declared in `identity.roles`.
 3. Every role in an `approvers` list has `canApprove: true`.

@@ -2,7 +2,7 @@
  * The one centralized scope query-builder (D12, D15, PRIV-SCOPE-001..005). Every retrieval, memory
  * and RAG alike, is filtered by the predicate built here; stores only compile it.
  */
-import type { BackingIdentity, Visibility } from '../core/types.js'
+import type { BackingIdentity, Relation, Visibility } from '../core/types.js'
 
 export type CrossSessionScope = 'own-sessions' | 'own-backing-identity' | 'all'
 
@@ -11,8 +11,8 @@ export interface ScopeContext {
   /** the session and the closed sessions it resumes (session-private entries of all of them are readable) */
   sessionIds: string[]
   backingIdentity: BackingIdentity | null
-  homeBackingIdentity: string
-  recognizedPartners: string[]
+  /** the relation of the backing identity to this agent: `home` is the agent's own organization only (D64) */
+  relation: Relation
   crossSession: CrossSessionScope
 }
 
@@ -39,10 +39,10 @@ export function buildScope(ctx: ScopeContext): ScopePredicate {
   } else terms.push({ visibility: 'session-private', sessionIds: ctx.sessionIds })
   terms.push({ visibility: 'principal-private', principalId: ctx.principalId })
   if (ctx.backingIdentity) {
-    if (ctx.backingIdentity.id === ctx.homeBackingIdentity) {
-      terms.push({ visibility: 'organization-shared', backingIdentityId: ctx.homeBackingIdentity })
+    if (ctx.relation === 'home') {
+      terms.push({ visibility: 'organization-shared', backingIdentityId: ctx.backingIdentity.id })
     }
-    if (ctx.recognizedPartners.includes(ctx.backingIdentity.id)) {
+    if (ctx.relation === 'partner') {
       terms.push({ visibility: 'partner-shared', backingIdentityId: ctx.backingIdentity.id })
     }
   }

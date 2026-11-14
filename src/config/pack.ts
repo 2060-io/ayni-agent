@@ -127,14 +127,36 @@ export function bundledToolNames(pack: AgentPack): string[] {
   return names
 }
 
+/**
+ * An agent that authenticates persons names one schema; one that names none must admit unidentified peers,
+ * or it would refuse everyone (IDENT-RES-010). Checked on the effective value, after the environment's.
+ */
+export function authenticationError(pack: AgentPack): string | undefined {
+  if ((pack.identity.authentication ?? []).length === 1) return undefined
+  if (pack.identity.unidentifiedPeers === 'admit') return undefined
+  return 'identity.authentication must name the credential schema that authenticates a person (exactly one entry), unless identity.unidentifiedPeers is admit'
+}
+
 /** Cross-field rules 1 to 9 of docs/agent-pack.md plus PRIV-RETN-006. */
 export function crossFieldErrors(pack: AgentPack): string[] {
   const errors: string[] = []
   const identity = pack.identity
-  const homes = identity.recognizedBackingIdentities.filter((e) => e.relation === 'home')
-  if (homes.length !== 1) errors.push('rule 1: exactly one recognizedBackingIdentities entry must have relation home')
-  else if (homes[0].identity !== identity.homeBackingIdentity) {
-    errors.push('rule 1: identity.homeBackingIdentity must be the entry with relation home')
+  // rule 1: one authentication schema, whose subject key is among the attributes asked (D65, IDENT-RES-010/012)
+  const authentication = identity.authentication ?? []
+  if (authentication.length > 1) errors.push('rule 1: identity.authentication must hold exactly one entry')
+  for (const entry of authentication) {
+    const hidden = entry.attributes ? entry.subjectKey.filter((a) => !entry.attributes?.includes(a)) : []
+    if (hidden.length) {
+      errors.push(
+        `rule 1: identity.authentication subjectKey [${hidden.join(', ')}] must be among the attributes asked, or the credential can never bind`
+      )
+    }
+  }
+  // home is the agent's own organization and no other: a pattern cannot give it (IDENT-ROLE-011)
+  for (const [i, pattern] of (identity.organizations ?? []).entries()) {
+    if ((pattern.relation as string) === 'home') {
+      errors.push(`rule 1: identity.organizations[${i}] sets relation home; home is the agent's own organization only`)
+    }
   }
 
   const declaredRoles = new Set(Object.keys(identity.roles ?? {}))
@@ -144,6 +166,7 @@ export function crossFieldErrors(pack: AgentPack): string[] {
     }
   }
   for (const [i, rule] of identity.roleRules.entries()) check(rule.roles, `identity.roleRules[${i}]`)
+  for (const [i, p] of (identity.organizations ?? []).entries()) check(p.roles, `identity.organizations[${i}]`)
   for (const [i, o] of (identity.perActorOverrides ?? []).entries()) check(o.roles, `identity.perActorOverrides[${i}]`)
   for (const p of pack.purposes ?? []) check(p.permittedRoles, `purposes.${p.id}.permittedRoles`)
   for (const m of pack.persona.menu ?? []) check(m.roles, `persona.menu.${m.id}.roles`)

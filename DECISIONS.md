@@ -336,3 +336,26 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     voice note only. The agent does not open the audio to measure it: that needs a decoder in the image, and
     a note without the fields (an older client, a note already stored) simply has neither. The profile
     package (3.1.7) types `waveform`.
+41. **A person is the organization of the issuer, the schema and the badge number; an organization is not a
+    DID** (2026-11-14, Fabrice, over several rounds: "the principal cannot be defined with a single
+    attribute of a credential, for example for a badge it depends on issuer, too", then patterns over
+    Organizations "better than an issuer DID that may change", "Only Orgs" for now, one authentication
+    schema, and for `home`: "it's 1. of course"; ayni-spec D59 amended, D64, D65; IDENT-RES-001/002/008..012,
+    IDENT-ROLE-008..011). Before: the Principal was found by one attribute of the badge (`id` or `subject`),
+    the issuer was read from an attribute the issuer writes itself, the organization was the issuer's DID,
+    organizations were recognized by a list of DIDs, and a list of badges asked the wallet for all of them
+    while the documentation said one. Now `src/core/organization.ts` computes the **organization key**
+    (`org:<countryCode>:<registryId>`, Verifiable Trust v4) in one function from the Organization credential
+    that trust resolution returns; `identity.organizations` recognizes an organization by patterns over those
+    attributes, first match wins, a pattern giving `partner` or `unrecognized` and optional roles; `home` is
+    the organization of the agent's own credential and no other, read through the DID the DIDComm agent
+    reports (`HomeOrganization`, looked up again after a failure: an agent that is not onboarded has nobody
+    home). `identity.authentication` names the one schema, asked as one requested credential by its
+    ecosystem schema. The issuer is `credentials[0].issuerDid` of the presentation record (VS Agent from
+    `v2.0.0-dev.110`, vs-agent#837, CC-VSA-011): a record without it, a subject key left unrevealed, an
+    issuer that is not trusted or that a Persona backs, identify nobody, and the pack's `unidentifiedPeers`
+    then decides. `recognizedBackingIdentities` and `credentials.badge` are gone from the pack schema.
+    A Principal keyed the earlier way is found by its earlier key once and re-keyed. Not done here: the
+    entries written before keep the DID of the earlier model as backing identity, so shared tiers do not
+    match them (no deployment used them); binding after connect (D66) comes with the presentation tools,
+    since nothing presents an identity credential after the connection yet.

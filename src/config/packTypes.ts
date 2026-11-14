@@ -29,19 +29,39 @@ export interface CredentialRef {
   attributes?: string[]
 }
 
+export interface AuthenticationEntry {
+  /** requested by its ecosystem schema, so that any accredited issuer satisfies the request */
+  credential: { jsonSchemaCredentialId: string }
+  /** the attributes that, with the issuer's organization and the schema, form the principal key */
+  subjectKey: string[]
+  /** the attributes asked of the credential; every attribute of the schema when omitted */
+  attributes?: string[]
+}
+
+export interface OrganizationPattern {
+  match: Partial<
+    Record<'countryCode' | 'registryId' | 'legalJurisdiction' | 'organizationKind' | 'lei', string | string[]>
+  >
+  relation: 'partner' | 'unrecognized'
+  roles?: string[]
+  label?: string
+}
+
 export interface PackIdentity {
   homeBackingIdentity: string
   userAgentGate?: 'required' | 'optional'
   /** what becomes of a user agent that presents no valid identity credential (D53, IDENT-RES-007) */
   unidentifiedPeers?: 'refuse' | 'admit'
-  recognizedBackingIdentities: { identity: string; relation: 'home' | 'partner'; label?: string }[]
+  /** the one credential schema that authenticates a person: a list validated to one entry (D65, IDENT-RES-010) */
+  authentication?: AuthenticationEntry[]
+  /** patterns over the verified Organization credential, first match wins; `home` is never set here (D64) */
+  organizations?: OrganizationPattern[]
   roles?: Record<string, RoleDefinition>
   roleRules: RoleRule[]
   perActorOverrides?: { actor: string; roles: string[]; comment?: string }[]
   /** Credentials requested on DIDComm connect (addition over schema 3.0, see docs/agent-pack.md). */
   credentials?: {
     userAgent?: CredentialRef
-    badge?: CredentialRef[]
     service?: CredentialRef[]
   }
 }

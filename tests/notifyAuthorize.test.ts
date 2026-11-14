@@ -87,7 +87,9 @@ beforeAll(async () => {
   adapter.setFlows(flows)
   running.agent.router.register(adapter)
   Object.assign(running.agent, { flows })
-  const home = running.agent.pack.identity.homeBackingIdentity
+  // the key of the agent's own organization: its people are home (IDENT-ROLE-011)
+  const home = 'org:EE:home'
+  Object.assign(running.agent.principals, { home: { key: async () => home } })
   // the approver is a manager of the home organization; everyone else an unidentified guest
   const identity = {
     establish: async (connectionId: string) =>

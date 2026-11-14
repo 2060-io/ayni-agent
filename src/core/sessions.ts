@@ -680,8 +680,7 @@ export class SessionService {
       principalId: conversation.principalId,
       sessionIds: conversation.sessionIds,
       backingIdentity: null,
-      homeBackingIdentity: '',
-      recognizedPartners: [],
+      relation: 'unrecognized',
       crossSession: 'own-sessions',
     })
   }
