@@ -244,3 +244,32 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     before the part `file`; when it is there and not empty it is the attachment's name, with any path and
     control character removed, otherwise the part's name stands (`channels/agui/uploadName.ts`). Additive: a
     client that sends no field is served as before. Files already stored keep their name.
+36. **One turn at a time; what is sent meanwhile waits** (2026-11-14, Fabrice: "when I use for example, claude, I
+    still can type and send information while it is thinking. Is it possible to do that with our ayni agent?",
+    then "ok go" on the proposal: a queue on the agent first, a message handed to the turn in progress later;
+    D63, CORE-MSG-010, PROF-RUN-011/012/013, PROF-DESC-006).
+    - **Before.** Nothing held a second message back: one that arrived during a turn (a second device could
+      send one, the UIs only closed Send on the device that was waiting) started a second turn beside the
+      first, which did not see the first reply.
+    - **The gate** (`core/turnGate.ts`, pure and tested). Every turn enters the gate of its conversation, in
+      `Orchestrator.run`, so the paths that reach the model all pass it: a message, a menu choice, a reaction
+      the agent is told of, an A2A task, a DIDComm message. With no turn in progress it runs; otherwise it
+      waits. When the turn ends, everything that waits is taken together: the last to arrive carries the turn,
+      the others are told which one answers them. A caller that gives up while it waits is withdrawn.
+    - **Together, in one reply** (my choice, proposed to Fabrice and not confirmed). The model reads the
+      messages that waited as one user message, in the order they came: one call, one reply, and providers
+      that want user and assistant messages to alternate take it as it is.
+    - **Recorded when taken.** A waiting message becomes an entry when its turn starts, so it stands after
+      the reply that was in progress; the time it was sent is kept in its payload (`sentAt`). Withdrawn (the
+      run cancelled, or its response closed), it leaves no entry (my choice too, not confirmed).
+    - **On the wire.** A waiting run's response is open and silent, kept alive by a comment every 15 s;
+      `RunStarted` is written when a run starts, not when it arrives. A run that gets no turn of its own says so in
+      its first event (`RunStarted{noTurn}`: merged, withdrawn or refused), so a client leaves the run it shows in
+      progress alone; one answered by another's turn names it (`mergedInto`) and ends with
+      `RunFinished{outcome: merged}`. `state.ayni.waiting` lists what waits
+      and is pushed to every session of the conversation each time it changes. The mirror gives a message to
+      every device but the one that sent it, and the run's own device gets a message that came through
+      another. `features.queue` in the descriptor. Profile package 3.1.6.
+    - **Limits.** Ten messages wait at most in a conversation; the next is refused (`too-many-waiting`). The
+      gate is in the memory of the process: one replica serves a conversation. If the turn that carries
+      merged messages fails before it records them, they are lost with it.

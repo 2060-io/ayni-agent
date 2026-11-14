@@ -11,6 +11,7 @@ import {
   type AyniAction,
   CUSTOM_EVENT,
   DESCRIPTOR_PATH,
+  type NoTurn,
   RUN_ERROR_CODE,
 } from '@ayni.org/ayni-agui-profile'
 import { Ajv2020 } from 'ajv/dist/2020.js'
@@ -19,6 +20,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type { AyniAgent } from '../../core/agent.js'
 import type { TurnEvent, TurnSink } from '../../core/orchestrator.js'
 import { normalizeClient, SessionError } from '../../core/sessions.js'
+import { TooManyWaiting } from '../../core/turnGate.js'
 import type { ClientDescription, Conversation, Session } from '../../core/types.js'
 import { canonicalMime, mimeAllowed } from '../../media/service.js'
 import { prefixedId } from '../../util/ids.js'
@@ -26,7 +28,7 @@ import type { Logger } from '../../util/logger.js'
 import type { AgUiAdapter } from './adapter.js'
 import { type AgUiEvent, ev, sse } from './events.js'
 import { attachmentActivity, entryToMessages, replyReference } from './mapping.js'
-import { RunMirror } from './mirror.js'
+import { inboundEvents, RunMirror } from './mirror.js'
 import type { SessionStreams } from './streams.js'
 import { uploadName } from './uploadName.js'
 
@@ -35,6 +37,8 @@ import { uploadName } from './uploadName.js'
  * capabilities, client platform and description).
  */
 const AGENT_PROFILE_VERSION = '3.1'
+/** A run's response gets a comment this often: it stays open while the run waits or a tool takes its time. */
+const RUN_HEARTBEAT_MS = 15_000
 
 const require = createRequire(import.meta.url)
 const loadSchema = (name: string) =>
@@ -99,6 +103,8 @@ export class AgUiRoutes {
         sessionGrant: true,
         // the unread count is the agent's, the same on every device (D62, PROF-DESC-005)
         readState: true,
+        // a message sent while a turn is in progress waits and is answered next (D63, PROF-DESC-006)
+        queue: true,
       },
       locales: [this.agent.pack.language.agent],
     }
@@ -564,6 +570,18 @@ export class AgUiRoutes {
     const write = (event: AgUiEvent) => {
       if (!reply.raw.writableEnded) reply.raw.write(sse(event))
     }
+    // a run may wait for the conversation's turn in progress to end (PROF-RUN-011): its response is open at once
+    // and kept alive by comments, and `RunStarted` is written when the run starts, not when it arrives
+    reply.raw.flushHeaders()
+    const heartbeat = setInterval(() => {
+      if (!reply.raw.writableEnded) reply.raw.write(': waiting\n\n')
+    }, RUN_HEARTBEAT_MS)
+    let started = false
+    const start = (noTurn?: NoTurn, mergedInto?: string) => {
+      if (started) return
+      started = true
+      write(ev.runStarted(session.id, runId, noTurn, mergedInto))
+    }
     // the person's other devices on this conversation see the run as it happens (PROF-STREAM-005)
     const peers = await this.agent.sessions.conversationPeers(session)
     const mirror = new RunMirror(
@@ -581,10 +599,13 @@ export class AgUiRoutes {
     request.raw.on('close', () => {
       if (!reply.raw.writableEnded) controller.abort()
     })
-    write(ev.runStarted(session.id, runId))
     const sink: TurnSink = {
       emit: (event: TurnEvent) => {
+        // the first thing a run does opens it: for a turn, that is its start, after any wait
+        start()
         switch (event.type) {
+          case 'turn-start':
+            return
           case 'text-start':
             return emit(ev.textStart(event.messageId))
           case 'text-delta':
@@ -597,18 +618,29 @@ export class AgUiRoutes {
             return emit(ev.stepFinished(event.label))
           case 'activity':
             return emit(ev.activitySnapshot(event.messageId, event.activityType, event.content))
-          case 'inbound':
+          case 'inbound': {
             // the other devices get the person's message whole; the device that sent it already shows it
             mirror.inbound(event.entry)
             // echo of the inbound entry for voice notes: the transcription under the note (PROF-MAP-006)
-            for (const a of event.entry.attachments)
-              write(
-                ev.activitySnapshot(a.id, ACTIVITY.attachment, {
-                  ...attachmentActivity(a, 'user'),
-                  entryId: event.entry.id,
-                })
-              )
+            const echo = event.entry.attachments.map((a) =>
+              ev.activitySnapshot(a.id, ACTIVITY.attachment, {
+                ...attachmentActivity(a, 'user'),
+                entryId: event.entry.id,
+              })
+            )
+            if (event.entry.sessionId === session.id) {
+              for (const each of echo) write(each)
+              return
+            }
+            // a message that waited and came through another device (D63): this one did not send it and gets it
+            // whole; the device that sent it gets its echo on its own stream
+            for (const each of inboundEvents(event.entry)) write(each)
+            for (const each of echo)
+              void this.streams
+                .publish(event.entry.sessionId, each)
+                .catch((err) => this.logger.debug({ err, runId }, 'echo not sent to the sending device'))
             return
+          }
         }
       },
     }
@@ -644,6 +676,8 @@ export class AgUiRoutes {
               backingIdentity: principal.backingIdentity,
               payload: replyTo ? { replyTo } : undefined,
             },
+            // how the message is named while it waits, and withdrawn (PROF-RUN-011/013)
+            runId,
           },
           sink,
           controller.signal
@@ -657,10 +691,19 @@ export class AgUiRoutes {
           emit(ev.textEnd(id))
         }
       }
-      if (result && 'cancelled' in result && result.cancelled) {
+      const merged = result && 'merged' in result ? result.merged : undefined
+      if (merged) {
+        // no turn of its own: the run named answers this message, and this one ends at once (PROF-RUN-012)
+        const into = merged.into ?? ''
+        start('merged', into)
+        write(ev.runFinished(session.id, runId, { type: 'merged', runId: into }))
+      } else if (result && 'cancelled' in result && result.cancelled) {
+        // stopped, or withdrawn while it waited (PROF-RUN-013): the same end, with nothing recorded for the second
+        start('withdrawn' in result && result.withdrawn ? 'withdrawn' : undefined)
         write(ev.runError('cancelled', RUN_ERROR_CODE.cancelled))
         mirror.finish({ message: 'cancelled', code: RUN_ERROR_CODE.cancelled })
       } else {
+        start()
         write(ev.runFinished(session.id, runId, { type: 'success' }))
         mirror.finish()
       }
@@ -668,11 +711,13 @@ export class AgUiRoutes {
       // the state a run changes (what is being generated, what waits) is the conversation's on every device
       for (const peer of peers) await this.adapter.pushState(peer).catch(() => undefined)
     } catch (error) {
+      start(error instanceof TooManyWaiting ? 'refused' : undefined)
       const failed = (message: string, code: string) => {
         write(ev.runError(message, code))
         mirror.finish({ message, code })
       }
-      if (error instanceof SessionError && error.code === 'not-bound')
+      if (error instanceof TooManyWaiting) failed(error.message, RUN_ERROR_CODE.tooManyWaiting)
+      else if (error instanceof SessionError && error.code === 'not-bound')
         write(ev.runError(error.message, RUN_ERROR_CODE.notBound))
       else if (controller.signal.aborted) failed('cancelled', RUN_ERROR_CODE.cancelled)
       else {
@@ -680,6 +725,7 @@ export class AgUiRoutes {
         failed(error instanceof Error ? error.message : 'internal error', RUN_ERROR_CODE.internal)
       }
     } finally {
+      clearInterval(heartbeat)
       this.runs.delete(runId)
       await mirror.settled()
       if (!reply.raw.writableEnded) reply.raw.end()

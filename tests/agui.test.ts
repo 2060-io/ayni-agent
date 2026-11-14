@@ -1055,3 +1055,215 @@ describe('session stream (PROF-STREAM-001..004)', () => {
     expect(after).toBeGreaterThan(before)
   })
 })
+
+describe('a message sent while the agent answers (D63, PROF-RUN-011/012/013)', () => {
+  // the stub answers a word every 15 ms: this takes it about half a second
+  const LONG = Array.from({ length: 34 }, (_, i) => `word${i}`).join(' ')
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+  type Device = { sessionId: string; sessionToken: string }
+  const device = async (actor: string): Promise<Device> => {
+    const { body } = await createSession()
+    await bindViaPhone(body.sessionId, actor)
+    return body
+  }
+  const post = (d: Device, runId: string, text: string) =>
+    running.app
+      .inject({
+        method: 'POST',
+        url: `/agui/v3/sessions/${d.sessionId}/runs`,
+        headers: { authorization: `Bearer ${d.sessionToken}` },
+        payload: {
+          threadId: d.sessionId,
+          runId,
+          messages: [{ id: `u_${runId}`, role: 'user', content: text }],
+          tools: [],
+          context: [],
+        },
+      })
+      .then((response) => parseSse(response.body).map((e) => e.event))
+  const cancel = (d: Device, runId: string) =>
+    running.app.inject({
+      method: 'POST',
+      url: `/agui/v3/sessions/${d.sessionId}/runs/${runId}/cancel`,
+      headers: { authorization: `Bearer ${d.sessionToken}` },
+    })
+  const historyOf = async (d: Device) =>
+    (
+      await running.app.inject({
+        method: 'GET',
+        url: `/agui/v3/sessions/${d.sessionId}/messages?limit=50`,
+        headers: { authorization: `Bearer ${d.sessionToken}` },
+      })
+    ).json().messages as { role: string; content: string }[]
+  const waitingOf = async (d: Device) => {
+    const session = await running.agent.sessions.get(d.sessionId)
+    return (await running.agent.ayniState(session as never)).waiting ?? []
+  }
+  const textOf = (events: Record<string, unknown>[]) =>
+    events
+      .filter((e) => e.type === 'TEXT_MESSAGE_CONTENT')
+      .map((e) => String(e.delta))
+      .join('')
+  const types = (events: Record<string, unknown>[]) => events.map((e) => e.type)
+
+  it('declares that it takes one (PROF-DESC-006)', async () => {
+    const descriptor = (await running.app.inject({ method: 'GET', url: '/.well-known/ayni-agent.json' })).json()
+    expect(descriptor.features.queue).toBe(true)
+  })
+
+  it('makes it wait, then answers what waited together, in one reply', async () => {
+    const d = await device('did:peer:queue-one')
+    const first = post(d, 'q-1', LONG)
+    await pause(120)
+    const second = post(d, 'q-2', 'the second thing')
+    await pause(30)
+    const third = post(d, 'q-3', 'and a third')
+    await pause(60)
+
+    // both wait, in the order they came, named by their run and by the id the client gave them
+    expect((await waitingOf(d)).map((w) => [w.runId, w.messageId, w.text, w.sessionId])).toEqual([
+      ['q-2', 'u_q-2', 'the second thing', d.sessionId],
+      ['q-3', 'u_q-3', 'and a third', d.sessionId],
+    ])
+
+    // the reply in progress is not disturbed
+    const firstEvents = await first
+    expect(firstEvents[0]?.type).toBe('RUN_STARTED')
+    expect(firstEvents[firstEvents.length - 1]?.type).toBe('RUN_FINISHED')
+    expect(textOf(firstEvents)).toContain('word33')
+
+    // the run of the last one carries the turn; the other ends at once, with no content, naming it
+    const secondEvents = await second
+    expect(types(secondEvents)).toEqual(['RUN_STARTED', 'RUN_FINISHED'])
+    expect(secondEvents[0]?.noTurn).toBe('merged')
+    expect(secondEvents[0]?.mergedInto).toBe('q-3')
+    expect(secondEvents[1]?.outcome).toEqual({ type: 'merged', runId: 'q-3' })
+    const thirdEvents = await third
+    expect(thirdEvents[0]?.type).toBe('RUN_STARTED')
+    expect(thirdEvents[0]?.noTurn).toBeUndefined()
+    expect(thirdEvents[0]?.mergedInto).toBeUndefined()
+    expect(thirdEvents[thirdEvents.length - 1]?.type).toBe('RUN_FINISHED')
+    // one reply, to both
+    expect(textOf(thirdEvents)).toContain('the second thing')
+    expect(textOf(thirdEvents)).toContain('and a third')
+    expect(await waitingOf(d)).toEqual([])
+
+    // history: the three messages in order, and two replies
+    const history = await historyOf(d)
+    expect(history.filter((m) => m.role === 'user').map((m) => m.content)).toEqual([
+      LONG,
+      'the second thing',
+      'and a third',
+    ])
+    expect(history.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'user', 'assistant'])
+  })
+
+  it('withdraws a waiting message that is cancelled: nothing is recorded, and the reply goes on (PROF-RUN-013)', async () => {
+    const d = await device('did:peer:queue-two')
+    const first = post(d, 'w-1', LONG)
+    await pause(120)
+    const second = post(d, 'w-2', 'forget this one')
+    await pause(60)
+    expect((await waitingOf(d)).map((w) => w.runId)).toEqual(['w-2'])
+    expect((await cancel(d, 'w-2')).statusCode).toBe(202)
+
+    const secondEvents = await second
+    expect(types(secondEvents)).toEqual(['RUN_STARTED', 'RUN_ERROR'])
+    expect(secondEvents[0]?.noTurn).toBe('withdrawn')
+    expect(secondEvents[1]?.code).toBe('cancelled')
+    expect(await waitingOf(d)).toEqual([])
+
+    const firstEvents = await first
+    expect(firstEvents[firstEvents.length - 1]?.type).toBe('RUN_FINISHED')
+    const history = await historyOf(d)
+    expect(history.map((m) => m.role)).toEqual(['user', 'assistant'])
+    expect(history.some((m) => String(m.content).includes('forget this one'))).toBe(false)
+  })
+
+  it('takes what waits next when the reply in progress is stopped', async () => {
+    const d = await device('did:peer:queue-three')
+    const first = post(d, 's-1', LONG)
+    await pause(120)
+    const second = post(d, 's-2', 'answer this instead')
+    await pause(60)
+    expect((await cancel(d, 's-1')).statusCode).toBe(202)
+
+    const firstEvents = await first
+    expect(firstEvents[firstEvents.length - 1]?.code).toBe('cancelled')
+    // a run that was running and is stopped had its turn: nothing marks it otherwise
+    expect(firstEvents[0]?.noTurn).toBeUndefined()
+    const secondEvents = await second
+    expect(secondEvents[0]?.type).toBe('RUN_STARTED')
+    expect(textOf(secondEvents)).toContain('answer this instead')
+    expect(secondEvents[secondEvents.length - 1]?.type).toBe('RUN_FINISHED')
+  })
+
+  it('holds one turn at a time across the devices of a conversation', async () => {
+    const laptop = await device('did:peer:queue-four')
+    const phone = await device('did:peer:queue-four')
+    const first = post(laptop, 'x-1', LONG)
+    await pause(120)
+    const second = post(phone, 'x-2', 'from the phone meanwhile')
+    await pause(60)
+    // it waits on both devices
+    expect((await waitingOf(laptop)).map((w) => [w.runId, w.sessionId])).toEqual([['x-2', phone.sessionId]])
+    expect((await waitingOf(phone)).map((w) => w.runId)).toEqual(['x-2'])
+
+    await first
+    const secondEvents = await second
+    expect(textOf(secondEvents)).toContain('from the phone meanwhile')
+    // the second turn started after the first reply: it is not beside it
+    const history = await historyOf(laptop)
+    expect(history.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant'])
+    expect(history[2]?.content).toBe('from the phone meanwhile')
+  })
+
+  it('gives the device whose run answers a message from another device that message, whole', async () => {
+    const laptop = await device('did:peer:queue-six')
+    const phone = await device('did:peer:queue-six')
+    const first = post(laptop, 'y-1', LONG)
+    await pause(120)
+    const fromPhone = post(phone, 'y-2', 'typed on the phone')
+    await pause(30)
+    const fromLaptop = post(laptop, 'y-3', 'typed on the laptop')
+    await first
+    // the phone's run has no turn of its own: the laptop's answers it
+    const phoneEvents = await fromPhone
+    expect(types(phoneEvents)).toEqual(['RUN_STARTED', 'RUN_FINISHED'])
+    expect(phoneEvents[0]?.mergedInto).toBe('y-3')
+    // the laptop did not send the phone's message: its run brings it, on the person's side, before the reply
+    const laptopEvents = await fromLaptop
+    const userStarts = laptopEvents.filter((e) => e.type === 'TEXT_MESSAGE_START' && e.role === 'user')
+    expect(userStarts).toHaveLength(1)
+    const brought = laptopEvents
+      .filter((e) => e.type === 'TEXT_MESSAGE_CONTENT' && e.messageId === userStarts[0]?.messageId)
+      .map((e) => e.delta)
+    expect(brought).toEqual(['typed on the phone'])
+    // its own message is not brought back to it
+    expect(laptopEvents.some((e) => e.type === 'TEXT_MESSAGE_CONTENT' && e.delta === 'typed on the laptop')).toBe(false)
+    const reply = laptopEvents
+      .filter((e) => e.type === 'TEXT_MESSAGE_CONTENT' && e.messageId !== userStarts[0]?.messageId)
+      .map((e) => String(e.delta))
+      .join('')
+    expect(reply).toContain('typed on the phone')
+    expect(reply).toContain('typed on the laptop')
+  })
+
+  it('refuses beyond the number it lets wait (PROF-RUN-011)', async () => {
+    const d = await device('did:peer:queue-five')
+    const first = post(d, 'm-0', LONG)
+    await pause(100)
+    const waiting = Array.from({ length: 10 }, (_, i) => post(d, `m-${i + 1}`, `message ${i + 1}`))
+    await pause(60)
+    const refused = await post(d, 'm-11', 'one too many')
+    expect(types(refused)).toEqual(['RUN_STARTED', 'RUN_ERROR'])
+    expect(refused[0]?.noTurn).toBe('refused')
+    expect(refused[1]?.code).toBe('too-many-waiting')
+    await first
+    await Promise.all(waiting)
+    const history = await historyOf(d)
+    expect(history.some((m) => String(m.content).includes('one too many'))).toBe(false)
+    expect(history.filter((m) => m.role === 'user')).toHaveLength(11)
+    expect(history.filter((m) => m.role === 'assistant')).toHaveLength(2)
+  })
+})

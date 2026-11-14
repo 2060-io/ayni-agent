@@ -166,6 +166,8 @@ export class AyniAgent {
       generating: this.media
         .generatingFor(session.id)
         .map((g) => ({ entryId: g.entryId, kind: g.kind, startedAt: g.startedAt })),
+      // the person's messages that wait for the turn in progress to end (D63, PROF-RUN-011)
+      waiting: this.orchestrator.waiting(session),
       principal: principal ? this.principalDisplay(principal) : null,
       purposes: this.features.elevation
         ? (this.pack.purposes ?? []).map((p) => ({ id: p.id, label: p.label, description: p.description }))
@@ -346,8 +348,17 @@ export class AyniAgent {
     const principal = await this.principalOf(session)
     if (!principal) throw new Error('principal missing')
     await this.sessions.touch(session)
-    await this.sessions.noteActivity(session, input.entry.text, { title: true })
-    const result = await this.orchestrator.run(session, principal, input, sink, signal)
+    // the message counts as the conversation's activity when its turn starts: until then it waits, and may be
+    // withdrawn without a trace (D63)
+    const started: TurnSink = {
+      emit: async (event) => {
+        if (event.type === 'turn-start') await this.sessions.noteActivity(session, input.entry.text, { title: true })
+        await sink.emit(event)
+      },
+    }
+    const result = await this.orchestrator.run(session, principal, input, started, signal)
+    // no turn ran for this message: another's turn answers it, or it was withdrawn
+    if (result.merged || result.withdrawn) return result
     // the person's message is read up to, the reply counts until a device reports it viewed (IDENT-SESS-017)
     await this.sessions
       .readAfterTurn(session, result.inbound?.id)
