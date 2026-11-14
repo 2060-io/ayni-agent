@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.15.0](https://github.com/2060-io/ayni-agent/compare/v0.14.1...v0.15.0) (2026-11-14)
+
+
+### Features
+
+* **voice:** a voice note keeps the length and the waveform its recorder measured ([#62](https://github.com/2060-io/ayni-agent/issues/62)) ([7d7e4e9](https://github.com/2060-io/ayni-agent/commit/7d7e4e96ccbb6a9e0844d7676e2a13ae801ccbd7))
+
+
+### Bug Fixes
+
+* **history:** a voice note of the person is one message, not its attachment and a text ([#60](https://github.com/2060-io/ayni-agent/issues/60)) ([8ffd20f](https://github.com/2060-io/ayni-agent/commit/8ffd20f1d40cc931c7f4e5c53d3331ccab04a674))
+* **process:** one agent process on a store, kept by a lock in the database; an ending process starts no turn ([#59](https://github.com/2060-io/ayni-agent/issues/59)) ([ce12af2](https://github.com/2060-io/ayni-agent/commit/ce12af2b047d24ce0ca743af8fc2d778db55c3c1))
+
 ## [0.14.1](https://github.com/2060-io/ayni-agent/compare/v0.14.0...v0.14.1) (2026-11-14)
 
 
