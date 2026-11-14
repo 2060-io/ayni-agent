@@ -4,7 +4,14 @@ export type AgUiEvent = Record<string, unknown> & { type: string; timestamp?: nu
 const ts = () => ({ timestamp: Date.now() })
 
 export const ev = {
-  runStarted: (threadId: string, runId: string): AgUiEvent => ({ type: 'RUN_STARTED', threadId, runId, ...ts() }),
+  /** `mergedInto`: the run was answered by another's turn and has none of its own (PROF-RUN-012) */
+  runStarted: (threadId: string, runId: string, mergedInto?: string): AgUiEvent => ({
+    type: 'RUN_STARTED',
+    threadId,
+    runId,
+    ...(mergedInto ? { mergedInto } : {}),
+    ...ts(),
+  }),
   runFinished: (threadId: string, runId: string, outcome?: Record<string, unknown>, result?: unknown): AgUiEvent => ({
     type: 'RUN_FINISHED',
     threadId,

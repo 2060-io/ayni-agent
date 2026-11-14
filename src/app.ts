@@ -215,6 +215,13 @@ export async function buildAgent(
       onApprovalPending: async (session, _principal, record, entry) => {
         await router.deliver(session, { kind: 'approval', entry, approval: record })
       },
+      // what waits in a conversation is shown on each of its devices (D63, PROF-RUN-011)
+      onWaitingChanged: (session) => {
+        if (session.channelType !== 'ag-ui') return
+        void (async () => {
+          for (const each of [session, ...(await sessions.conversationPeers(session))]) await agui.pushState(each)
+        })().catch((err) => logger.debug({ err, sessionId: session.id }, 'waiting messages not announced'))
+      },
     },
     logger
   )

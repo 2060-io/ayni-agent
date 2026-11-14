@@ -54,6 +54,8 @@ export interface DescriptorFeatures {
   sessionGrant?: boolean
   /** the agent opens flows through the flow profile rather than question-answer and chat (PROF-DESC-004) */
   flows?: boolean
+  /** the agent takes a message sent while a turn is in progress: it waits (PROF-DESC-006, PROF-RUN-011) */
+  queue?: boolean
   /** the agent keeps the shared read state: `unread` and `readUpTo` on a conversation (PROF-DESC-005, PROF-CONV-008) */
   readState?: boolean
 }
@@ -362,10 +364,27 @@ export interface GeneratingEntry {
   startedAt: string
 }
 
+/** A message of the person that waits for the turn in progress of its conversation to end (PROF-RUN-011). */
+export interface WaitingMessage {
+  /** the run that carries it: cancelling that run withdraws the message (PROF-RUN-013) */
+  runId?: string
+  /** the session it came through */
+  sessionId: string
+  /** the id the client gave the message */
+  messageId?: string
+  text: string
+  /** how many attachments it has */
+  attachments: number
+  /** when it was sent */
+  at: string
+}
+
 export interface AyniState {
   contextualMenu: { items: ContextualMenuItem[] }
   pendingApprovals: number
   generating: GeneratingEntry[]
+  /** what waits, in the order it arrived, the same on every session of the conversation; absent on an agent without `features.queue` */
+  waiting?: WaitingMessage[]
   principal: PrincipalDisplay | null
   /** purposes a human may declare on an elevation request (PROF-RUN-005) */
   purposes?: { id: string; label: string; description?: string }[]
@@ -510,7 +529,23 @@ export const RUN_ERROR_CODE = {
   notBound: 'not-bound',
   closed: 'closed',
   internal: 'internal',
+  /** more messages wait in the conversation than the agent lets wait (PROF-RUN-011) */
+  tooManyWaiting: 'too-many-waiting',
 } as const
+
+/** The outcome of a run that ended without a turn of its own: the run named answers its message (PROF-RUN-012). */
+export interface MergedRunOutcome {
+  type: 'merged'
+  runId: string
+}
+
+/** Whether a `RunStarted` or a `RunFinished` belongs to a run that was merged into another: a UI gives it no effect. */
+export function isMergedRunEvent(event: { type?: unknown; mergedInto?: unknown; outcome?: unknown }): boolean {
+  if (event.type === 'RUN_STARTED') return typeof event.mergedInto === 'string'
+  if (event.type !== 'RUN_FINISHED') return false
+  const outcome = event.outcome as { type?: unknown } | null | undefined
+  return !!outcome && typeof outcome === 'object' && outcome.type === 'merged'
+}
 
 // ---------------------------------------------------------------------------------------------
 // History (section 8)

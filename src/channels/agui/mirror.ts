@@ -13,6 +13,25 @@ import type { SessionStreams } from './streams.js'
 
 const GROUP_MS = 120
 
+/** The person's message as events: what a device that did not send it needs to show it. */
+export function inboundEvents(entry: MessageEntry): AgUiEvent[] {
+  const events: AgUiEvent[] = []
+  for (const message of entryToMessages(entry)) {
+    if (message.role === 'activity') {
+      events.push(
+        ev.activitySnapshot(String(message.id), String(message.activityType), {
+          ...(message.content as Record<string, unknown>),
+          entryId: entry.id,
+        })
+      )
+      continue
+    }
+    const id = String(message.id)
+    events.push(ev.textStart(id, 'user'), ev.textContent(id, String(message.content ?? '')), ev.textEnd(id))
+  }
+  return events
+}
+
 export class RunMirror {
   private queue: Promise<void> = Promise.resolve()
   private started = false
@@ -28,10 +47,11 @@ export class RunMirror {
     private readonly groupMs = GROUP_MS
   ) {}
 
-  /** One event to every target, in order. */
-  private send(event: (target: string) => AgUiEvent): void {
+  /** One event to every target, in order; `except` is left out: the session that already shows what the event carries. */
+  private send(event: (target: string) => AgUiEvent, except?: string): void {
     this.queue = this.queue.then(async () => {
       for (const target of this.targets) {
+        if (target === except) continue
         await this.streams
           .publish(target, event(target))
           .catch((err) => this.logger.debug({ err, target }, 'mirror publish failed'))
@@ -54,9 +74,14 @@ export class RunMirror {
   }
 
   /** An event of the run, as its own response carries it. */
-  public event(event: AgUiEvent): void {
+  public event(event: AgUiEvent, except?: string): void {
     if (!this.targets.length) return
     this.open()
+    if (except) {
+      this.flush()
+      this.send(() => event, except)
+      return
+    }
     if (event.type === 'TEXT_MESSAGE_CONTENT') {
       const id = String(event.messageId)
       this.deltas.set(id, `${this.deltas.get(id) ?? ''}${String(event.delta ?? '')}`)
@@ -67,24 +92,14 @@ export class RunMirror {
     this.send(() => event)
   }
 
-  /** The person's message as the other devices show it: what history will give for the entry. */
+  /**
+   * The person's message as the other devices show it: what history will give for the entry. The session the
+   * message came through already shows it, and is left out when it is one of the targets: a message that waited
+   * and is answered by the run of another device (D63).
+   */
   public inbound(entry: MessageEntry): void {
     if (!this.targets.length) return
-    for (const message of entryToMessages(entry)) {
-      if (message.role === 'activity') {
-        this.event(
-          ev.activitySnapshot(String(message.id), String(message.activityType), {
-            ...(message.content as Record<string, unknown>),
-            entryId: entry.id,
-          })
-        )
-        continue
-      }
-      const id = String(message.id)
-      this.event(ev.textStart(id, 'user'))
-      this.event(ev.textContent(id, String(message.content ?? '')))
-      this.event(ev.textEnd(id))
-    }
+    for (const event of inboundEvents(entry)) this.event(event, entry.sessionId)
   }
 
   /** The end of the run, as it ended for the session that made it. */
