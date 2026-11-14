@@ -13,6 +13,7 @@ export function attachmentActivity(a: MessageAttachment, role?: 'user' | 'assist
     width: a.width,
     height: a.height,
     duration: a.duration,
+    waveform: a.waveform,
     filename: a.filename,
     thumbnailId: a.thumbnailId,
   }

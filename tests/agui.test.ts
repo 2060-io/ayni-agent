@@ -1416,3 +1416,99 @@ describe('a message sent while the agent answers (D63, CORE-MSG-010, PROF-RUN-01
       }))
   })
 })
+
+describe('what the sender measured of a voice note (PROF-HIST-009)', () => {
+  const BOUNDARY = 'ayni-test-boundary'
+  const multipart = (parts: { name: string; value: string; filename?: string; type?: string }[]) =>
+    `${parts
+      .map(
+        (p) =>
+          `--${BOUNDARY}\r\ncontent-disposition: form-data; name="${p.name}"${
+            p.filename ? `; filename="${p.filename}"` : ''
+          }\r\n${p.type ? `content-type: ${p.type}\r\n` : ''}\r\n${p.value}\r\n`
+      )
+      .join('')}--${BOUNDARY}--\r\n`
+  const device = async (actor: string) => {
+    const { body } = await createSession()
+    await bindViaPhone(body.sessionId, actor)
+    return body
+  }
+  const upload = (d: { sessionId: string; sessionToken: string }, payload: string) =>
+    running.app.inject({
+      method: 'POST',
+      url: `/agui/v3/sessions/${d.sessionId}/attachments`,
+      headers: {
+        authorization: `Bearer ${d.sessionToken}`,
+        'content-type': `multipart/form-data; boundary=${BOUNDARY}`,
+      },
+      payload,
+    })
+
+  it('keeps the length and the waveform, and gives them back live and in history', async () => {
+    const d = await device('did:peer:voice-one')
+    const waveform = [0, 20, 100, 60, 35, 5]
+    const response = await upload(
+      d,
+      multipart([
+        { name: 'filename', value: 'voice-note.m4a' },
+        { name: 'duration', value: '3.2' },
+        { name: 'waveform', value: JSON.stringify(waveform) },
+        { name: 'file', value: 'not really audio', filename: 'x.m4a', type: 'audio/mp4' },
+      ])
+    )
+    expect(response.statusCode).toBe(201)
+    const uploaded = response.json() as { attachmentId: string; type: string }
+    expect(uploaded).toMatchObject({ type: 'voice', duration: 3.2, waveform })
+
+    const { events, status, body } = await run(d.sessionId, d.sessionToken, '', {
+      kind: 'attachments',
+      attachmentIds: [uploaded.attachmentId],
+    })
+    expect([status, events.length ? '' : body]).toEqual([200, ''])
+    const live = events.find((e) => e.type === 'ACTIVITY_SNAPSHOT' && e.activityType === 'ayni.attachment')
+    expect(live?.content).toMatchObject({ type: 'voice', duration: 3.2, waveform })
+
+    const history = (
+      await running.app.inject({
+        method: 'GET',
+        url: `/agui/v3/sessions/${d.sessionId}/messages?limit=10`,
+        headers: { authorization: `Bearer ${d.sessionToken}` },
+      })
+    ).json().messages as { role: string; content: Record<string, unknown> }[]
+    const note = history.find((m) => m.role === 'activity')
+    expect(note?.content).toMatchObject({ attachmentId: uploaded.attachmentId, duration: 3.2, waveform })
+  })
+
+  it('takes a note without them, and one whose fields do not read, as before', async () => {
+    const d = await device('did:peer:voice-two')
+    const plain = await upload(d, multipart([{ name: 'file', value: 'audio', filename: 'x.m4a', type: 'audio/mp4' }]))
+    expect(plain.statusCode).toBe(201)
+    expect(plain.json().duration).toBeUndefined()
+    const odd = await upload(
+      d,
+      multipart([
+        { name: 'duration', value: 'long' },
+        { name: 'waveform', value: '[1,2,300]' },
+        { name: 'file', value: 'audio', filename: 'x.m4a', type: 'audio/mp4' },
+      ])
+    )
+    expect(odd.statusCode).toBe(201)
+    expect(odd.json().duration).toBeUndefined()
+    expect(odd.json().waveform).toBeUndefined()
+  })
+
+  it('keeps them for a voice note only', async () => {
+    const d = await device('did:peer:voice-three')
+    const text = await upload(
+      d,
+      multipart([
+        { name: 'duration', value: '3' },
+        { name: 'waveform', value: '[1,2]' },
+        { name: 'file', value: 'not really a picture', filename: 'a.png', type: 'image/png' },
+      ])
+    )
+    expect(text.statusCode).toBe(201)
+    expect(text.json().duration).toBeUndefined()
+    expect(text.json().waveform).toBeUndefined()
+  })
+})

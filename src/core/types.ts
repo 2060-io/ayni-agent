@@ -219,7 +219,10 @@ export interface MessageAttachment {
   size?: number
   width?: number
   height?: number
+  /** the length of a voice note or a video, in seconds */
   duration?: number
+  /** the shape of a voice note's sound: up to 64 levels from 0 to 100, start to end (PROF-HIST-009) */
+  waveform?: number[]
   filename?: string
   /** prompt | transcription | description | summary */
   textRepr: string
