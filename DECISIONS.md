@@ -287,3 +287,12 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     the process's (entry 36), so two processes are two locks. The deployment now uses `Recreate`: the old pod
     is gone before the new one starts. A turn in progress is given the grace period to end, as before; what
     waits is answered by whichever process is the only one there. More than one replica stays unsupported.
+38. **A voice note is one message** (2026-11-14, Fabrice: "Voice notes show twice after reopening a
+    conversation … => fix it"; PROF-MAP-006). History gave a voice note of the person twice: its attachment,
+    with the transcription on it, and a text message with the same transcription, as PROF-MAP-006 read ("the
+    user message's text"). Live, the sender got the attachment only, so the note showed once until the
+    conversation was read again, then twice; the person's other devices got both at once. `entryToMessages`
+    now gives the attachment alone when the entry's text is the note's transcription; words the person added
+    are still a text of their own, and a note whose audio is gone (retention) still reads as a text. The
+    mirror to the other devices is built from the same mapping. Nothing stored changes: the entry keeps the
+    transcription as its text, for the model, the search and the previews.
