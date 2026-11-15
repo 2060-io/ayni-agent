@@ -4,6 +4,7 @@
  */
 
 import type { AyniAction, AyniState, PrincipalDisplay, SessionStatus } from '@ayni.org/ayni-agui-profile'
+import { type IdentityRequests, identityOutcomeForPerson } from '../channels/didcomm/identityRequests.js'
 import type { Env } from '../config/env.js'
 import type { AgentPack, Features } from '../config/packTypes.js'
 import { featuresOf } from '../config/packTypes.js'
@@ -105,6 +106,8 @@ export class AyniAgent {
   public readonly registry: ToolRegistry
   public readonly approvals: ApprovalService
   public readonly flows: FlowService
+  /** the authentication asked on demand; set once the DIDComm side is wired (IDENT-RES-015) */
+  public identityRequests?: Pick<IdentityRequests, 'request'>
   /** the agent's own DID, read from the DIDComm agent at start (IDENT-SELF-001) */
   public did = 'did:unknown'
   public readonly challenges: ChallengeService
@@ -825,6 +828,11 @@ export class AyniAgent {
         })
       return { text: lines.join('\n') }
     }
+    if (itemId === PLATFORM_MENU.identify) {
+      // the person asks to identify: always served (IDENT-RES-015/016)
+      const outcome = (await this.identityRequests?.request(principal, 'person')) ?? 'unavailable'
+      return { text: identityOutcomeForPerson(outcome) }
+    }
     if (itemId === PLATFORM_MENU.link) {
       return { text: 'Type the code shown on the web page (for example 47-KM), or /link 47-KM.', await: 'binding-code' }
     }
@@ -1044,6 +1052,61 @@ export class AyniAgent {
     if (!existing && options.welcome !== false) await this.welcome(session)
     this.stats.emit('peer-connected', 1, { connectionType: facts.connectionType })
     return { principal, session }
+  }
+
+  /**
+   * An identity credential presented on a connection that is already served (D66, IDENT-RES-013/014/017).
+   * An unidentified connection is upgraded to the Principal of the credential and its conversations, with
+   * their sessions and entries, move to it. An identified connection accepts the credential only when it
+   * resolves to the same Principal: any other is refused, changes nothing, and nothing of it is stored.
+   */
+  public async onIdentityPresented(
+    connectionId: string,
+    facts: VerifiedFacts
+  ): Promise<{ outcome: 'identified' | 'refreshed' | 'another-identity' | 'unavailable'; principal?: Principal }> {
+    const current = await this.store.principals.findByCapabilityChannel(connectionId)
+    if (!current) return { outcome: 'unavailable' }
+    if (current.identityCredentialRef) {
+      if (current.actorIdentity !== facts.actorIdentity) {
+        this.logger.warn({ principalId: current.id }, 'another identity presented on a bound connection: refused')
+        return { outcome: 'another-identity' }
+      }
+      const principal = await this.principals.resolve(facts)
+      if (facts.evidence) await this.evidence.record(principal, { ...facts.evidence, connectionRef: connectionId })
+      return { outcome: 'refreshed', principal }
+    }
+    const target = await this.principals.resolve(facts)
+    if (facts.evidence) await this.evidence.record(target, { ...facts.evidence, connectionRef: connectionId })
+    // the identified Principal may hold another channel: the device policy applies, as at a connection
+    await this.sessions.supersede(target, connectionId)
+    const sessions = await this.store.sessions.listByPrincipal(current.id)
+    for (const session of sessions) await this.store.sessions.save({ ...session, principalId: target.id })
+    const conversations = await this.store.conversations.listByPrincipal(current.id, ['active', 'archived', 'final'])
+    for (const conversation of conversations)
+      await this.store.conversations.save({ ...conversation, principalId: target.id })
+    const entries = await this.store.entries.reassign(
+      sessions.map((s) => s.id),
+      target.id
+    )
+    // the devices paired on this connection stay paired: their sessions moved with them
+    target.devices = [...(target.devices ?? []), ...(current.devices ?? [])]
+    target.capabilityChannelId = connectionId
+    await this.principals.save(target)
+    current.capabilityChannelId = null
+    current.devices = []
+    await this.principals.save(current)
+    this.stats.emit('peer-identified', 1, { connectionType: facts.connectionType })
+    this.logger.info(
+      {
+        from: current.id,
+        principalId: target.id,
+        sessions: sessions.length,
+        conversations: conversations.length,
+        entries,
+      },
+      'unidentified connection upgraded: its conversations moved to the identified Principal'
+    )
+    return { outcome: 'identified', principal: target }
   }
 
   public async onPeerDisconnected(connectionId: string): Promise<void> {

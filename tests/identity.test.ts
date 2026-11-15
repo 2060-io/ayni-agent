@@ -45,10 +45,18 @@ describe('unidentified peers (D53, IDENT-RES-007)', () => {
     expect(await ref.flow.establish('conn-1', 'did:peer:4z1')).toBeUndefined()
   })
 
-  it('admits it as a Principal without backing identity when the pack says so', async () => {
+  it('admits it as a Principal without backing identity when the authentication is asked on demand', async () => {
     const ref: { flow?: IdentityFlow } = {}
     ref.flow = new IdentityFlow(
-      packWith({ unidentifiedPeers: 'admit' }),
+      packWith({
+        authentication: [
+          {
+            credential: { jsonSchemaCredentialId: 'https://ecs.example/badge.json' },
+            subjectKey: ['badgeNumber'],
+            request: 'on-demand',
+          },
+        ],
+      }),
       clientRefusing(ref) as never,
       {} as never,
       false,

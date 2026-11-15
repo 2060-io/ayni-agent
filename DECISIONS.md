@@ -389,3 +389,20 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     document read, whose event carries the raw data groups and no parsed field, so its values need the
     DIDComm agent to send them with the outcome of its verification; an interface for the auditor
     (`EvidenceService.audit` is ready for it); evidence of catalog entries, which come with the request tool.
+43. **The authentication is asked on connect or on demand, and who enters unidentified follows from it**
+    (2026-11-14, Fabrice: "this should be configurable in agent pack: on connection, on demand", then on the
+    separate setting: "it could be implicit from authentication configuration", "and that eliminate 5",
+    "Agree to all. Go."; ayni-spec D53, D65, D66 amended; IDENT-RES-007/010/013..017). `identity.authentication`
+    gains `request`: `on-connect` (default) identifies a person or refuses them; `on-demand` asks nothing at
+    connection. `identity.unidentifiedPeers` and `UNIDENTIFIED_PEERS` are gone: a pack with no authentication
+    schema, or one asked on demand, admits everyone unidentified (`admitsUnidentified`), and the mode "asked
+    on connect, admitted when declined" no longer exists. On demand the credential is asked by the model,
+    through the bundled tool `request_presentation` (one parameter, the entry; absent from the model's list
+    for an identified person, by a new `when` on a tool), or by the person, through the platform menu item
+    "Identify yourself" (`IdentityRequests`). One request is pending on a connection at most, and the model
+    waits ten minutes after one that was declined or left unanswered. What comes back binds by
+    `AyniAgent.onIdentityPresented`: an unidentified connection is upgraded, its sessions, conversations and
+    entries moving to the identified Principal with the devices paired on it (working memory and preferences
+    are not merged); an identified one accepts the same Principal only, another identity being refused with
+    nothing kept. Known limit: the entries a turn in progress writes after the upgrade still carry the
+    visitor's Principal; they are session-private, so the conversation reads them all the same.

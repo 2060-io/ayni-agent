@@ -56,10 +56,10 @@ directory.
 identity:
   homeBackingIdentity: did:webvh:...          # the DID of this agent, the service its operator runs
   userAgentGate: required                     # required | optional
-  unidentifiedPeers: refuse                   # refuse | admit (D53): a wallet with no valid identity credential
   authentication:                             # the one schema that authenticates a person (D65)
     - credential: { jsonSchemaCredentialId: https://.../vt/schemas-badge-jsc.json }
       subjectKey: [badgeNumber]
+      request: on-connect                     # or on-demand: nothing is asked at connection
       attributes: [badgeNumber, name, title, department]
       store: { attributes: [name, title, department], retention: { days: 365, onExpiry: erase } }
       modelVisible: [name]
@@ -107,7 +107,7 @@ identity:
   person, and a badge re-issued by the same organization is the same person, whichever of its services
   issued it. A presentation that leaves a `subjectKey` attribute unrevealed identifies nobody, so the
   subject key must be among the `attributes` asked. An agent that authenticates nobody omits
-  `authentication` and must set `unidentifiedPeers: admit`.
+  `authentication`: everyone then enters unidentified.
 - **What is kept of a presented credential, and what the model reads of it** (D67, D68). Each verification
   leaves one **evidence** record. Its audit fields are in the clear and hold no attribute value: when, which
   Principal, which schema, the issuer and its organization, the outcome, the names of the attributes
@@ -139,11 +139,24 @@ identity:
   memory scope (RBAC-XSESS): `own-sessions` (default), `own-backing-identity`, `all`. `canApprove`
   marks roles that may appear in `approvers`. `auditor` grants read-only access to the whole
   persistent store outside LLM retrieval.
-- `unidentifiedPeers: admit` lets a wallet that presents no valid identity credential in as a Principal
-  without backing identity: relation `unrecognized`, `public` visibility only, role rules decide the rest.
-  The default `refuse` ends the connection with a short message. `UNIDENTIFIED_PEERS` in the environment
-  overrides the pack, as `USER_AGENT_GATE` does. It replaces `DEV_ALLOW_UNIDENTIFIED_PRINCIPALS` for
-  deployments; that flag stays development-only.
+- **Who enters unidentified follows from `authentication`, and from nothing else** (D53). A pack that names
+  no authentication schema lets every wallet in, unidentified. One that asks `on-connect` (the default)
+  identifies a person or refuses them, with a short message. One that asks `on-demand` asks nothing at
+  connection: the person enters unidentified and identifies later. An unidentified person is a Principal
+  without backing identity: relation `unrecognized`, `public` visibility only, the role rules decide the
+  rest. The agent says at start-up that it admits unidentified peers. There is no separate setting: the
+  earlier `unidentifiedPeers` and the `UNIDENTIFIED_PEERS` variable are gone (the variable is ignored, with
+  a warning). `DEV_ALLOW_UNIDENTIFIED_PRINCIPALS` stays, for development only.
+- **Identifying later** (D65, D66). While a connection is unidentified, the credential is asked when the
+  model calls `request_presentation` with the entry `authentication` (the tool exists for an unidentified
+  person only, takes nothing else, and answers with a status) or when the person picks **Identify
+  yourself** in the menu. The agent does not insist: one request at a time on a connection, and after a
+  request that was declined or left unanswered the model waits ten minutes; the person's own request is
+  always served. A valid credential upgrades the connection to the Principal it identifies, and the
+  conversations held before, with their sessions and entries, move to it; working memory and preferences
+  of the visitor are not merged. A connection that is already identified accepts the credential of the same
+  person only: another identity is refused and nothing of it is kept. Issuing a credential never
+  identifies: the person presents it.
 - `userAgentGate: optional` lets wallets that do not present an ECS-UserAgent credential connect; the
   Principal is then marked `userAgentVerified: false`, which `roleRules` may use.
 - `credentials` names the other credentials the agent requests on DIDComm connect (IDENT-RES-001/003):
@@ -278,8 +291,7 @@ enables crypto-erasure with its lineage cascade.
 ## Cross-field rules (checked after schema validation)
 
 1. `identity.authentication` holds at most one entry, whose `subjectKey` is among the `attributes` it asks;
-   no `identity.organizations` pattern sets `relation: home`. At start-up, an agent with no authentication
-   entry must admit unidentified peers (checked after the environment's overrides).
+   no `identity.organizations` pattern sets `relation: home`.
 2. Every role named in `roleRules`, `perActorOverrides`, `toolAccess.roles`, `approvers`,
    `purposes[].permittedRoles` and `persona.menu[].roles` is declared in `identity.roles`.
 3. Every role in an `approvers` list has `canApprove: true`.

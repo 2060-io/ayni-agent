@@ -13,7 +13,8 @@ export interface Env {
   vsAgentAdminUrl: string
   vsAgentEventsApiKey?: string
   userAgentGate?: 'required' | 'optional'
-  unidentifiedPeers?: 'refuse' | 'admit'
+  /** withdrawn: who enters unidentified follows from identity.authentication (D53); read only to warn */
+  unidentifiedPeers?: string
   walletLinkTemplate?: string
   /** base of the app links the agent may write in replies, e.g. https://app.dev.ayni.org/app/ (PROF-LINK-001) */
   appLinkBase?: string
@@ -107,7 +108,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
     vsAgentAdminUrl: (source.VS_AGENT_ADMIN_URL ?? '').replace(/\/+$/, ''),
     vsAgentEventsApiKey: source.VS_AGENT_EVENTS_API_KEY || undefined,
     userAgentGate: source.USER_AGENT_GATE as Env['userAgentGate'],
-    unidentifiedPeers: source.UNIDENTIFIED_PEERS as Env['unidentifiedPeers'],
+    unidentifiedPeers: source.UNIDENTIFIED_PEERS || undefined,
     walletLinkTemplate: source.WALLET_LINK_TEMPLATE || undefined,
     appLinkBase: source.APP_LINK_BASE || undefined,
     devAllowUnidentifiedPrincipals: bool(source.DEV_ALLOW_UNIDENTIFIED_PRINCIPALS, false),
@@ -166,8 +167,6 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   if (env.entryEncryptionKey.length !== 32) throw new Error('ENTRY_ENCRYPTION_KEY must be 32 bytes in hex')
   if (env.userAgentGate && !['required', 'optional'].includes(env.userAgentGate))
     throw new Error('USER_AGENT_GATE must be required or optional')
-  if (env.unidentifiedPeers && !['refuse', 'admit'].includes(env.unidentifiedPeers))
-    throw new Error('UNIDENTIFIED_PEERS must be refuse or admit')
   if (env.devAllowUnidentifiedPrincipals && env.nodeEnv === 'production') {
     throw new Error('DEV_ALLOW_UNIDENTIFIED_PRINCIPALS is refused in production')
   }

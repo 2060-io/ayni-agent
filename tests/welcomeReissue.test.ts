@@ -3,10 +3,12 @@
  * people to the app's destinations with app links only; the platform rules name the allowed paths when an app-link
  * base is configured; a holder's `reissue` request is answered with `unknown-reference` by an agent that issues nothing.
  */
+
 import { describe, expect, it } from 'vitest'
 import { DidcommEvents } from '../src/channels/didcomm/events.js'
 import { PeerProfiles } from '../src/channels/didcomm/peerProfiles.js'
 import { loadPack } from '../src/config/pack.js'
+import { admitsUnidentified } from '../src/config/packTypes.js'
 import { FlowService } from '../src/core/flows.js'
 import { APP_LINK_PATHS, renderPromptAddon } from '../src/core/promptAddon.js'
 import { createLogger } from '../src/util/logger.js'
@@ -38,7 +40,9 @@ describe('Welcome to Ayni pack (CC-WEL-002/003)', () => {
   const { pack } = loadPack('agent-packs/welcome', env)
 
   it('admits unidentified wallets and runs the user-agent gate as optional', () => {
-    expect(pack.identity.unidentifiedPeers).toBe('admit')
+    // it names no authentication schema: everyone enters unidentified (D53)
+    expect(admitsUnidentified(pack)).toBe(true)
+    expect(pack.identity.authentication).toBeUndefined()
     expect(pack.identity.userAgentGate).toBe('optional')
   })
 

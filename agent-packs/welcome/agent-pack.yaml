@@ -14,11 +14,9 @@ identity:
   # the DID of the VS Agent this instance controls; its Organization credential names the home organization
   homeBackingIdentity: ${HOME_BACKING_IDENTITY:-did:example:unset}
   userAgentGate: ${USER_AGENT_GATE:-optional}
-  # anyone may come and look: a visitor without a valid identity credential is admitted, unidentified
-  unidentifiedPeers: ${UNIDENTIFIED_PEERS:-admit}
   # home is the organization of this agent's own Organization credential, and no other (D64): nothing to list.
-  # This agent authenticates nobody (it offers nothing that requires a credential), so it names no
-  # authentication schema and admits everyone unidentified.
+  # This agent authenticates nobody (it offers nothing that requires a credential): it names no
+  # authentication schema, so anyone may come and look, unidentified (D53).
   roles:
     team: { description: People of the operator organization. }
     visitor: { description: Anyone else with a verified identity. }

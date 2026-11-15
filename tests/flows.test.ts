@@ -543,7 +543,6 @@ describe('identity as flows (IDENT-RES-003, D54)', () => {
       homeBackingIdentity: 'did:webvh:x:home',
       roleRules: [],
       userAgentGate: 'optional',
-      unidentifiedPeers: 'admit',
       credentials: { userAgent: { schemaId: 'ecs-user-agent' } },
       authentication: [
         { credential: { jsonSchemaCredentialId: 'https://ecs.example/badge.json' }, subjectKey: ['badgeNumber'] },

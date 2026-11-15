@@ -10,6 +10,7 @@ export const PLATFORM_MENU = {
   link: 'ayni.link-session',
   approvals: 'ayni.approvals',
   devices: 'ayni.devices',
+  identify: 'ayni.identify',
   endSessionPrefix: 'ayni.end-session:',
 } as const
 
@@ -47,6 +48,15 @@ export function contextualMenuFor(
     }))
   if (bound && (pack.features?.approvals ?? true) && pendingApprovals > 0) {
     items.push({ id: PLATFORM_MENU.approvals, label: 'Approvals', badge: pendingApprovals })
+  }
+  // an unidentified person may ask to identify, when the agent has an authentication schema (IDENT-RES-015)
+  if (
+    bound &&
+    principal?.connectionType === 'verifiable-user-agent' &&
+    !principal.identityCredentialRef &&
+    pack.identity.authentication?.length
+  ) {
+    items.push({ id: PLATFORM_MENU.identify, label: 'Identify yourself' })
   }
   if (bound && session.channelType === 'didcomm') {
     items.push({ id: PLATFORM_MENU.link, label: 'Link a web session' })

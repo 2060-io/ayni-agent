@@ -122,6 +122,8 @@ export function bundledToolNames(pack: AgentPack): string[] {
   if (b.statistics?.enabled) names.push('statistics')
   if (b.generateImage?.enabled) names.push('generate_image')
   if (b.principalCredentials?.enabled !== false) names.push('principal_credentials')
+  if (b.requestPresentation?.enabled !== false && pack.identity.authentication?.length)
+    names.push('request_presentation')
   if (b.principalPreferences?.enabled !== false) names.push('principal_preferences')
   if (b.workingMemory?.enabled !== false) names.push('working_memory')
   return names
@@ -158,16 +160,6 @@ export function evidenceWarnings(pack: AgentPack): string[] {
     }
   }
   return warnings
-}
-
-/**
- * An agent that authenticates persons names one schema; one that names none must admit unidentified peers,
- * or it would refuse everyone (IDENT-RES-010). Checked on the effective value, after the environment's.
- */
-export function authenticationError(pack: AgentPack): string | undefined {
-  if ((pack.identity.authentication ?? []).length === 1) return undefined
-  if (pack.identity.unidentifiedPeers === 'admit') return undefined
-  return 'identity.authentication must name the credential schema that authenticates a person (exactly one entry), unless identity.unidentifiedPeers is admit'
 }
 
 /** Cross-field rules 1 to 9 of docs/agent-pack.md plus PRIV-RETN-006. */

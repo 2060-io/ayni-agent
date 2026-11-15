@@ -305,7 +305,7 @@ export class Orchestrator {
     messages.push(await this.userTurn(inbounds, imageBytes))
 
     const grants = await this.approvals.activeGrants(principal.id)
-    const visible = await this.registry.visible(principal.roles, grants)
+    const visible = await this.registry.visible(principal.roles, grants, principal)
     const tools = this.registry.toDefinitions(visible)
     const toolCtx: ToolContext = {
       principal,
@@ -394,7 +394,7 @@ export class Orchestrator {
     skipApproval = false
   ): Promise<string> {
     const grants = await this.approvals.activeGrants(principal.id)
-    const visible = await this.registry.visible(principal.roles, grants)
+    const visible = await this.registry.visible(principal.roles, grants, principal)
     const ctx: ToolContext = {
       principal,
       session,

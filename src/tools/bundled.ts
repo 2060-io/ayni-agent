@@ -1,7 +1,10 @@
 /** Bundled tools enabled through configuration (TOOL-HTTP-002, INTX-CRED-001, INTX-PREF-001, MEM-TIER-003, MEM-RAG-004). */
+
+import { type IdentityRequestOutcome, identityOutcomeForModel } from '../channels/didcomm/identityRequests.js'
 import type { AgentPack, ToolAccess } from '../config/packTypes.js'
 import { featuresOf } from '../config/packTypes.js'
 import type { EvidenceService } from '../core/evidence.js'
+import type { Principal } from '../core/types.js'
 import type { MediaService } from '../media/service.js'
 import type { RagService } from '../memory/rag.js'
 import type { MemoryService } from '../memory/service.js'
@@ -15,6 +18,8 @@ export interface BundledDeps {
   store: Store
   memory: MemoryService
   evidence: EvidenceService
+  /** asks the wallet of the Principal for the authentication credential, on demand (IDENT-RES-015) */
+  requestIdentity?: (principal: Principal, by: 'model' | 'person') => Promise<IdentityRequestOutcome>
   media: MediaService
   rag?: RagService
   stats: StatsSink
@@ -50,6 +55,32 @@ export class BundledToolSource implements ToolSource {
           const records = await this.deps.evidence.forModel(ctx.principal.id)
           if (!records.length) return { content: 'Nothing was presented.' }
           return { content: JSON.stringify(records) }
+        },
+      })
+    }
+
+    // the model asks the wallet for a credential by naming an entry of the pack, and nothing else: no schema,
+    // no attribute, no recipient (D68, D69, INTX-PRES-003). The authentication entry exists for an
+    // unidentified person only (IDENT-RES-015).
+    if (pack.identity.authentication?.length && bundled.requestPresentation?.enabled !== false) {
+      specs.push({
+        key: 'bundled:request_presentation',
+        name: 'request_presentation',
+        description:
+          'Asks the wallet of the person for a credential this agent accepts. entry "authentication": the credential that identifies them, which gives them their roles and their own conversations; ask when they want to do something that needs it, or when they say they have it. The person answers in their wallet, which may take a minute. You get a status, never the content of the credential.',
+        parameters: {
+          type: 'object',
+          required: ['entry'],
+          additionalProperties: false,
+          properties: { entry: { type: 'string', enum: ['authentication'] } },
+        },
+        access: ALWAYS_ALLOWED,
+        when: (principal) => principal.connectionType === 'verifiable-user-agent' && !principal.identityCredentialRef,
+        stepLabel: 'Waiting for your wallet',
+        invoke: async (args, ctx) => {
+          if (args.entry !== 'authentication') return { content: 'unknown entry', isError: true }
+          const outcome = (await this.deps.requestIdentity?.(ctx.principal, 'model')) ?? 'unavailable'
+          return { content: identityOutcomeForModel(outcome), data: { outcome } }
         },
       })
     }

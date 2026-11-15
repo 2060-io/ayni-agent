@@ -237,48 +237,61 @@ export class IdentityFlow {
       this.logger.warn({ connectionId }, 'user-agent gate failed: refused (IDENT-RES-003)')
       return undefined
     }
-    // the one schema that authenticates a person, asked as one credential by its ecosystem schema (IDENT-RES-010)
+    // asked on connect: a person is identified or refused (D53); the development flag still lets one in
     const authentication = this.pack.identity.authentication?.[0]
-    if (authentication) {
-      const record = await this.request(
-        connectionId,
-        [
-          {
-            jsonSchemaCredentialId: authentication.credential.jsonSchemaCredentialId,
-            ...(authentication.attributes ? { attributes: authentication.attributes } : {}),
-          },
-        ],
-        undefined,
-        flowMode ? { kind: 'present', title: `Prove your identity to ${name}` } : undefined
-      ).catch((err) => {
-        this.logger.warn({ err, connectionId }, 'identity presentation request failed')
-        return undefined
-      })
-      if (record?.verified) {
-        const facts = await this.factsFromIdentityCredential(peerId, record, authentication, userAgentVerified)
-        if (facts) return facts
-      } else {
-        this.logger.warn(
-          { connectionId, state: record?.state, error: record?.errorMessage },
-          'identity credential not presented'
-        )
-      }
+    if (authentication && authentication.request !== 'on-demand') {
+      const facts = await this.identify(connectionId, peerId, flowMode, userAgentVerified)
+      if (facts) return facts
+      if (!this.devAllowUnidentified) return undefined
+      this.logger.warn({ connectionId }, 'DEV: unidentified principal admitted (no badge); development only')
     }
-    // the pack admits unidentified peers (D53, IDENT-RES-007), or the development flag does
-    if (this.pack.identity.unidentifiedPeers === 'admit' || this.devAllowUnidentified) {
-      if (this.pack.identity.unidentifiedPeers === 'admit')
-        this.logger.info({ connectionId }, 'unidentified principal admitted (identity.unidentifiedPeers: admit)')
-      else this.logger.warn({ connectionId }, 'DEV: unidentified principal admitted (no badge); development only')
-      return {
-        connectionType: 'verifiable-user-agent',
-        actorIdentity: peerId,
-        backingIdentity: null,
-        claims: { userName: 'Unidentified peer' },
-        userAgentVerified,
-        identityCredentialRef: null,
-      }
+    // no authentication schema, or one asked on demand: the person enters unidentified (D53, IDENT-RES-007)
+    return {
+      connectionType: 'verifiable-user-agent',
+      actorIdentity: peerId,
+      backingIdentity: null,
+      claims: { userName: 'Unidentified peer' },
+      userAgentVerified,
+      identityCredentialRef: null,
     }
-    return undefined
+  }
+
+  /**
+   * Asks the wallet of a connection for the credential of the authentication schema, as one credential by
+   * its ecosystem schema (IDENT-RES-010), and returns the verified facts it gives, or undefined when nothing
+   * that identifies was presented. Used at connection, and later on demand (IDENT-RES-015).
+   */
+  public async identify(
+    connectionId: string,
+    peerId: string,
+    flowMode: boolean,
+    userAgentVerified: boolean
+  ): Promise<VerifiedFacts | undefined> {
+    const authentication = this.pack.identity.authentication?.[0]
+    if (!authentication) return undefined
+    const name = this.pack.metadata?.displayName ?? 'The agent'
+    const record = await this.request(
+      connectionId,
+      [
+        {
+          jsonSchemaCredentialId: authentication.credential.jsonSchemaCredentialId,
+          ...(authentication.attributes ? { attributes: authentication.attributes } : {}),
+        },
+      ],
+      undefined,
+      flowMode ? { kind: 'present', title: `Prove your identity to ${name}` } : undefined
+    ).catch((err) => {
+      this.logger.warn({ err, connectionId }, 'identity presentation request failed')
+      return undefined
+    })
+    if (!record?.verified) {
+      this.logger.warn(
+        { connectionId, state: record?.state, error: record?.errorMessage },
+        'identity credential not presented'
+      )
+      return undefined
+    }
+    return this.factsFromIdentityCredential(peerId, record, authentication, userAgentVerified)
   }
 
   /**

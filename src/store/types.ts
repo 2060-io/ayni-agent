@@ -88,6 +88,8 @@ export interface EntryRepo {
   markAnchored(ids: string[], batchId: string): Promise<void>
   listOlderThan(cutoffIso: string, state: LifecycleState, limit: number): Promise<StoredEntry[]>
   setState(ids: string[], state: LifecycleState): Promise<void>
+  /** the entries of the given sessions become those of another Principal (a visitor who identifies, IDENT-RES-013) */
+  reassign(sessionIds: string[], principalId: string): Promise<number>
   listAttachmentKeys(): Promise<{ entryId: string; state: LifecycleState; bucketKey: string }[]>
 }
 

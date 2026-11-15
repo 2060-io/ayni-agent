@@ -19,6 +19,7 @@ identity:
   authentication:
     - credential: { jsonSchemaCredentialId: "${IDENTITY_SCHEMA_ID:-https://ecs.example/vt/schemas-badge-jsc.json}" }
       subjectKey: [badgeNumber]
+      request: on-connect        # before any conversation: identified or refused; on-demand lets people in first
       attributes: [badgeNumber, name, title, department, photo]
       # what is kept of the badge, sealed, and for how long; by default nothing but the audit record (D67)
       store:
