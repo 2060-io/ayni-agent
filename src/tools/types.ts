@@ -30,6 +30,8 @@ export interface ToolSpec {
   /** the access policy that governs this tool (tools.access or the MCP server's toolAccess) */
   access: ToolAccess | undefined
   serverName?: string
+  /** when given, the tool exists only for the Principals it accepts: absent from the model's list for the others */
+  when?: (principal: Principal) => boolean
   /** human label for StepStarted (PROF-MAP-005): never the function name or arguments */
   stepLabel?: string
   invoke(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult>

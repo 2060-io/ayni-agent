@@ -11,6 +11,9 @@ import { parse as parseYaml } from 'yaml'
 import type { AgentPack, EvidencePolicy, ToolAccess } from './packTypes.js'
 import { featuresOf } from './packTypes.js'
 
+/** The entry of the credential that authenticates a person (D65): never the name of a catalog entry. */
+export const AUTHENTICATION_ENTRY = 'authentication'
+
 export class PackError extends Error {
   public constructor(
     message: string,
@@ -122,6 +125,9 @@ export function bundledToolNames(pack: AgentPack): string[] {
   if (b.statistics?.enabled) names.push('statistics')
   if (b.generateImage?.enabled) names.push('generate_image')
   if (b.principalCredentials?.enabled !== false) names.push('principal_credentials')
+  const asksOnDemand = Object.values(pack.presentations ?? {}).some((e) => e.request === 'on-demand')
+  if (b.requestPresentation?.enabled !== false && (pack.identity.authentication?.length || asksOnDemand))
+    names.push('request_presentation')
   if (b.principalPreferences?.enabled !== false) names.push('principal_preferences')
   if (b.workingMemory?.enabled !== false) names.push('working_memory')
   return names
@@ -147,27 +153,21 @@ function evidencePolicyErrors(where: string, policy: EvidencePolicy, requested: 
 export function evidenceWarnings(pack: AgentPack): string[] {
   const conversation = pack.privacy.processingActivities.find((a) => a.id === 'conversation-memory')?.retention?.days
   const warnings: string[] = []
-  for (const entry of pack.identity.authentication ?? []) {
+  const policies: [string, EvidencePolicy][] = [
+    ...(pack.identity.authentication ?? []).map((e): [string, EvidencePolicy] => ['identity.authentication', e]),
+    ...Object.entries(pack.presentations ?? {}).map(([n, e]): [string, EvidencePolicy] => [`presentations.${n}`, e]),
+  ]
+  for (const [where, entry] of policies) {
     const days = entry.store?.retention?.days
     if (!entry.modelVisible?.length || days === undefined) continue
     if (conversation === undefined || days < conversation) {
       const kept = conversation === undefined ? 'as long as it is kept' : `${conversation} days`
       warnings.push(
-        `identity.authentication keeps [${entry.modelVisible.join(', ')}] ${days} days but lets the model read them: what the model reads stays in the conversation for ${kept}`
+        `${where} keeps [${entry.modelVisible.join(', ')}] ${days} days but lets the model read them: what the model reads stays in the conversation for ${kept}`
       )
     }
   }
   return warnings
-}
-
-/**
- * An agent that authenticates persons names one schema; one that names none must admit unidentified peers,
- * or it would refuse everyone (IDENT-RES-010). Checked on the effective value, after the environment's.
- */
-export function authenticationError(pack: AgentPack): string | undefined {
-  if ((pack.identity.authentication ?? []).length === 1) return undefined
-  if (pack.identity.unidentifiedPeers === 'admit') return undefined
-  return 'identity.authentication must name the credential schema that authenticates a person (exactly one entry), unless identity.unidentifiedPeers is admit'
 }
 
 /** Cross-field rules 1 to 9 of docs/agent-pack.md plus PRIV-RETN-006. */
@@ -188,6 +188,11 @@ export function crossFieldErrors(pack: AgentPack): string[] {
   // what is read by the model is stored, what is stored is asked (PRIV-EVID-006)
   for (const entry of authentication)
     errors.push(...evidencePolicyErrors('identity.authentication', entry, entry.attributes))
+  for (const [name, entry] of Object.entries(pack.presentations ?? {})) {
+    if (name === AUTHENTICATION_ENTRY)
+      errors.push('presentations: the name authentication is the entry of identity.authentication')
+    errors.push(...evidencePolicyErrors(`presentations.${name}`, entry, entry.attributes))
+  }
   // home is the agent's own organization and no other: a pattern cannot give it (IDENT-ROLE-011)
   for (const [i, pattern] of (identity.organizations ?? []).entries()) {
     if ((pattern.relation as string) === 'home') {

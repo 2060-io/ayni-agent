@@ -48,6 +48,8 @@ export interface AuthenticationEntry extends EvidencePolicy {
   subjectKey: string[]
   /** the attributes asked of the credential; every attribute of the schema when omitted */
   attributes?: string[]
+  /** when it is asked: at connection (default), or later, by the model's tool or the person's menu item (D65) */
+  request?: 'on-connect' | 'on-demand'
 }
 
 export interface OrganizationPattern {
@@ -59,11 +61,40 @@ export interface OrganizationPattern {
   label?: string
 }
 
+/**
+ * A credential the agent may ask for, beyond the one that authenticates (D69, INTX-PRES-001). What comes
+ * back is evidence attached to the Principal of the connection; it never binds one.
+ */
+export interface PresentationEntry extends EvidencePolicy {
+  credential: { jsonSchemaCredentialId: string }
+  /** to whom credentials of the schema are issued: a person (default) or a service; declared here under Verifiable Trust v4 */
+  subjectKind?: 'person' | 'service'
+  /** asked by the code when the connection is established, or by the model's tool when it judges the moment right */
+  request: 'on-connect' | 'on-demand'
+  /** shown to the person, or to the controller of the service, before it answers */
+  purpose: string
+  /** the attributes asked of the credential; every attribute of the schema when omitted */
+  attributes?: string[]
+}
+
+/** The connection type a schema of the given subject kind is asked of (INTX-PRES-007). */
+export function connectionTypeOf(subjectKind: PresentationEntry['subjectKind']): ConnectionType {
+  return subjectKind === 'service' ? 'verifiable-service' : 'verifiable-user-agent'
+}
+
+/**
+ * Who enters unidentified follows from the authentication alone (D53, IDENT-RES-007): an agent that names
+ * no authentication schema, or asks for it on demand, admits a person without a valid identity credential;
+ * one that asks on connect identifies a person or refuses them.
+ */
+export function admitsUnidentified(pack: Pick<AgentPack, 'identity'>): boolean {
+  const authentication = pack.identity.authentication?.[0]
+  return !authentication || authentication.request === 'on-demand'
+}
+
 export interface PackIdentity {
   homeBackingIdentity: string
   userAgentGate?: 'required' | 'optional'
-  /** what becomes of a user agent that presents no valid identity credential (D53, IDENT-RES-007) */
-  unidentifiedPeers?: 'refuse' | 'admit'
   /** the one credential schema that authenticates a person: a list validated to one entry (D65, IDENT-RES-010) */
   authentication?: AuthenticationEntry[]
   /** patterns over the verified Organization credential, first match wins; `home` is never set here (D64) */
@@ -236,12 +267,15 @@ export interface AgentPack {
     retrieval?: { topK?: number; ambientDescriptions?: boolean; chunkSize?: number; chunkOverlap?: number }
   }
   rag?: { enabled?: boolean; sources: RagSource[]; chunkSize?: number; chunkOverlap?: number }
+  /** the credentials the agent may ask for, by name; `authentication` is the entry of identity.authentication (D69) */
+  presentations?: Record<string, PresentationEntry>
   tools?: {
     http?: HttpToolDef[]
     bundled?: {
       statistics?: { enabled?: boolean; endpoint?: string; defaultStatClass?: string }
       generateImage?: { enabled?: boolean; provider?: string }
       principalCredentials?: { enabled?: boolean }
+      requestPresentation?: { enabled?: boolean }
       principalPreferences?: { enabled?: boolean }
       workingMemory?: { enabled?: boolean }
     }

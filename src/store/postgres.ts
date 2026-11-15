@@ -324,6 +324,14 @@ export class PostgresStore implements Store {
           limit,
         ])
       ).map((r) => this.entryFromRow(r)),
+    reassign: async (sessionIds: string[], principalId: string) => {
+      const result = await this.pool.query(
+        `UPDATE entries SET principal_id = $2, data = jsonb_set(data, '{principalId}', to_jsonb($2::text))
+         WHERE session_id = ANY($1) AND principal_id IS DISTINCT FROM $2`,
+        [sessionIds, principalId]
+      )
+      return result.rowCount ?? 0
+    },
     setState: async (ids: string[], state: LifecycleState) => {
       await this.pool.query(
         `UPDATE entries SET state = $2, data = jsonb_set(data, '{state}', to_jsonb($2::text)) WHERE id = ANY($1)`,

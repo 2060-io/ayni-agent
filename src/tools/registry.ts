@@ -2,7 +2,7 @@
  * The tool registry: aggregates sources, resolves the tier of every (role set, tool) and builds the
  * per-principal tool list that reaches the model (RBAC-FILTER-001/002).
  */
-import type { ElevationGrant } from '../core/types.js'
+import type { ElevationGrant, Principal } from '../core/types.js'
 import type { ToolDefinition } from '../llm/types.js'
 import { resolveTier, type TierResolution } from '../policy/rbac.js'
 import type { Logger } from '../util/logger.js'
@@ -46,9 +46,11 @@ export class ToolRegistry {
   }
 
   /** Tools present in the model request: ALLOW and APPROVAL tiers only (RBAC-TOOL-002/003/004). */
-  public async visible(roles: string[], grants: ElevationGrant[]): Promise<VisibleTool[]> {
+  public async visible(roles: string[], grants: ElevationGrant[], principal?: Principal): Promise<VisibleTool[]> {
     const out: VisibleTool[] = []
     for (const spec of await this.all()) {
+      // a tool that exists for some Principals only is absent for the others, not discouraged (RBAC-FILTER-002)
+      if (spec.when && (!principal || !spec.when(principal))) continue
       const resolution = await this.resolve(spec, roles, grants)
       if (resolution.tier === 'ALLOW' || resolution.tier === 'APPROVAL') out.push({ spec, resolution })
     }

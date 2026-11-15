@@ -184,6 +184,15 @@ export class MemoryStore implements Store {
     },
     listOlderThan: async (cutoff: string, state: LifecycleState, limit: number) =>
       clone([...this.entryRows.values()].filter((e) => e.state === state && e.createdAt < cutoff).slice(0, limit)),
+    reassign: async (sessionIds: string[], principalId: string) => {
+      let moved = 0
+      for (const row of this.entryRows.values()) {
+        if (!row.sessionId || !sessionIds.includes(row.sessionId) || row.principalId === principalId) continue
+        row.principalId = principalId
+        moved++
+      }
+      return moved
+    },
     setState: async (ids: string[], state: LifecycleState) => {
       for (const id of ids) {
         const row = this.entryRows.get(id)

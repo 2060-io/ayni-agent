@@ -13,11 +13,12 @@ import { DidcommAdapter, MediaLinks } from './channels/didcomm/adapter.js'
 import { registerDidcommCallbacks } from './channels/didcomm/callbacks.js'
 import { DidcommEvents } from './channels/didcomm/events.js'
 import { IdentityFlow, TrustResolver } from './channels/didcomm/identity.js'
+import { IdentityRequests } from './channels/didcomm/identityRequests.js'
 import { PeerProfiles } from './channels/didcomm/peerProfiles.js'
 import { VsAgentClient } from './channels/didcomm/vsAgentClient.js'
 import { type Env, loadEnv } from './config/env.js'
-import { authenticationError, evidenceWarnings, loadPack } from './config/pack.js'
-import { featuresOf } from './config/packTypes.js'
+import { evidenceWarnings, loadPack } from './config/pack.js'
+import { admitsUnidentified, featuresOf } from './config/packTypes.js'
 import { AyniAgent } from './core/agent.js'
 import { ChallengeService } from './core/challenges.js'
 import { CapabilityRouter } from './core/channel.js'
@@ -73,17 +74,18 @@ export async function buildAgent(
 ): Promise<RunningAgent> {
   const { pack, dir: packDir } = loadPack(env.agentPackPath)
   if (env.userAgentGate) pack.identity.userAgentGate = env.userAgentGate
-  if (env.unidentifiedPeers) pack.identity.unidentifiedPeers = env.unidentifiedPeers
   if (env.appLinkBase)
     pack.channels = { ...pack.channels, agui: { ...pack.channels?.agui, appLinkBase: env.appLinkBase } }
-  // the effective setting, after the environment's: an agent that authenticates nobody must admit unidentified peers
-  const authentication = authenticationError(pack)
-  // (the development flag admits everyone, so a development pack may name none)
-  if (authentication && !env.devAllowUnidentifiedPrincipals)
-    throw new Error(`agent-pack: ${authentication} (IDENT-RES-010)`)
-  if (pack.identity.unidentifiedPeers === 'admit')
+  if (env.unidentifiedPeers)
     logger.warn(
-      'identity: user agents without a valid identity credential are admitted as unidentified Principals (D53)'
+      'UNIDENTIFIED_PEERS is no longer read: who enters unidentified follows from identity.authentication of the agent-pack (D53)'
+    )
+  // who enters unidentified follows from the authentication alone, and is said at start-up (IDENT-RES-007)
+  if (admitsUnidentified(pack))
+    logger.warn(
+      pack.identity.authentication?.length
+        ? 'identity: the authentication is asked on demand: user agents enter unidentified until they identify (D53)'
+        : 'identity: the agent-pack names no authentication schema: every user agent enters unidentified (D53)'
     )
   const features = featuresOf(pack)
   logger.info(
@@ -229,12 +231,16 @@ export async function buildAgent(
   const registry = new ToolRegistry(logger)
   registry.add(new HttpToolSource(pack.tools?.http ?? [], pack.tools?.access))
   let orchestratorRef: Orchestrator | undefined
+  let identityRequestsRef: IdentityRequests | undefined
   registry.add(
     new BundledToolSource({
       pack,
       store,
       memory,
       evidence,
+      requestIdentity: async (principal, by) => (await identityRequestsRef?.request(principal, by)) ?? 'unavailable',
+      requestPresentation: async (principal, entry) =>
+        (await identityRequestsRef?.present(principal, entry, 'model')) ?? 'unavailable',
       media,
       rag,
       stats,
@@ -336,6 +342,20 @@ export async function buildAgent(
   if (did !== 'did:unknown') await declareAgUiService(vsAgent, did, env.publicBaseUrl, logger)
   const identity = new IdentityFlow(pack, vsAgent, resolver, env.devAllowUnidentifiedPrincipals, logger)
   identity.setFlows(flows)
+  // the authentication asked on demand, by the model's tool or the person's menu item (IDENT-RES-015)
+  identityRequestsRef = new IdentityRequests(
+    pack,
+    {
+      identify: (connectionId, peerId, flowMode, userAgentVerified) =>
+        identity.identify(connectionId, peerId, flowMode, userAgentVerified),
+      isFlowCapable: (connectionId) => peerProfiles.isFlowCapable(connectionId),
+      onIdentityPresented: (connectionId, facts) => agent.onIdentityPresented(connectionId, facts),
+      present: (connectionId, name, entry, flowMode) => identity.present(connectionId, name, entry, flowMode),
+      record: (principal, input) => evidence.record(principal, input),
+    },
+    logger
+  )
+  agent.identityRequests = identityRequestsRef
   const didcommEvents = new DidcommEvents(
     agent,
     vsAgent,

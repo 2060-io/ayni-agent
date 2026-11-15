@@ -5,7 +5,7 @@
 import { describe, expect, it } from 'vitest'
 import { actorIdentityOf, IdentityFlow, type ResolveResult, TrustResolver } from '../src/channels/didcomm/identity.js'
 import type { PresentationRecord } from '../src/channels/didcomm/vsAgentClient.js'
-import { authenticationError, crossFieldErrors, loadPack, validatePackDocument } from '../src/config/pack.js'
+import { crossFieldErrors, loadPack, validatePackDocument } from '../src/config/pack.js'
 import type { AgentPack } from '../src/config/packTypes.js'
 import { HomeOrganization, matchOrganization, organizationFrom, organizationKey } from '../src/core/organization.js'
 import { assignRoles, PrincipalService, recognize, type VerifiedFacts } from '../src/core/principals.js'
@@ -183,12 +183,6 @@ describe('organization patterns and home (IDENT-ROLE-008..011)', () => {
     expect(() => validatePackDocument(doc, {})).toThrow(/organizations/)
   })
 
-  it('wants one authentication schema, or an agent that admits unidentified peers', () => {
-    expect(authenticationError(packWith())).toBeUndefined()
-    expect(authenticationError(packWith({ authentication: undefined }))).toMatch(/exactly one entry/)
-    expect(authenticationError(packWith({ authentication: undefined, unidentifiedPeers: 'admit' }))).toBeUndefined()
-  })
-
   it('looks its own organization up again after a failure, and keeps a key it once established', async () => {
     let answer: 'none' | 'key' | 'fail' = 'none'
     const home = new HomeOrganization(
@@ -279,17 +273,10 @@ describe('the identity credential of a person (IDENT-RES-002/008/010/011/012)', 
     expect(await identify(resolver, { ...presented('did:webvh:a1', claims), verified: false })).toBeUndefined()
   })
 
-  it('admits as unidentified, when the pack says so, a wallet whose credential identifies nobody', async () => {
-    const facts = await identify(
-      resolver,
-      presented('did:webvh:persona', { badgeNumber: '42', name: 'Alice' }),
-      packWith({ unidentifiedPeers: 'admit' })
-    )
-    expect(facts).toMatchObject({
-      actorIdentity: 'did:peer:4zWallet',
-      backingIdentity: null,
-      identityCredentialRef: null,
-    })
+  it('refuses, when the credential is asked on connect, a wallet whose credential identifies nobody', async () => {
+    expect(
+      await identify(resolver, presented('did:webvh:persona', { badgeNumber: '42', name: 'Alice' }))
+    ).toBeUndefined()
   })
 })
 
