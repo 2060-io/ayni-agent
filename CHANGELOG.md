@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.0](https://github.com/2060-io/ayni-agent/compare/v0.18.0...v0.19.0) (2026-11-15)
+
+
+### Features
+
+* **identity:** the agent tells a peer where it stands, and a session grant names its endpoint ([#74](https://github.com/2060-io/ayni-agent/issues/74)) ([5e2fba2](https://github.com/2060-io/ayni-agent/commit/5e2fba205d530a2006d1e2dbcb3dc4c8761f8dea))
+
 ## [0.18.0](https://github.com/2060-io/ayni-agent/compare/v0.17.0...v0.18.0) (2026-11-15)
 
 
