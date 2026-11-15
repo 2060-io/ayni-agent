@@ -1,15 +1,24 @@
 /**
- * Credential issuance (D68, D70; INTX-ISSUE-001..016, RBAC-FILTER-003): every claim comes from a source the
+ * Credential issuance (D68, D70; INTX-ISSUE-001..017, RBAC-FILTER-003): every claim comes from a source the
  * profile names, the model names a credential and nothing else, and the requirements never show a value.
  */
 import { afterEach, describe, expect, it } from 'vitest'
 import type { RunningAgent } from '../src/app.js'
+import { CredentialDefinitions } from '../src/channels/didcomm/credentialDefinitions.js'
 import { CredentialOffers } from '../src/channels/didcomm/credentialOffers.js'
+import { VsAgentError } from '../src/channels/didcomm/vsAgentClient.js'
 import { crossFieldErrors, loadPack, validatePackDocument } from '../src/config/pack.js'
 import type { AgentPack, IssuanceProfile, PresentationEntry } from '../src/config/packTypes.js'
 import { type EvidenceInput, EvidenceService } from '../src/core/evidence.js'
 import { contextualMenuFor } from '../src/core/interaction.js'
-import { type IssuanceDeps, IssuanceService, issuanceEntry, subjectId, subjectIdKey } from '../src/core/issuance.js'
+import {
+  type IssuanceDeps,
+  IssuanceService,
+  issuanceEntry,
+  issuanceOutcomeForModel,
+  subjectId,
+  subjectIdKey,
+} from '../src/core/issuance.js'
 import type { Principal, Session } from '../src/core/types.js'
 import { createEntryCrypto } from '../src/memory/crypto.js'
 import { MemoryStore } from '../src/store/memory.js'
@@ -322,6 +331,109 @@ describe('an identifier of the subject (INTX-ISSUE-015/016)', () => {
     expect(subjectId(elsewhere, 'badge', 'prn_1')).not.toBe(offers[0].claims.badgeNumber)
     // the key is not the secret of the deployment itself
     expect(subjectIdKey(Buffer.alloc(32, 9)).equals(Buffer.alloc(32, 9))).toBe(false)
+  })
+})
+
+describe('a credential named by its schema (INTX-ISSUE-017)', () => {
+  const BADGE = 'https://ecs.example/vt/schemas-badge-jsc.json'
+  const bySchema: IssuanceProfile = {
+    credential: { jsonSchemaCredentialId: BADGE },
+    label: 'Badge',
+    claims: { badgeNumber: { from: 'computed', fn: 'subjectId' } },
+  }
+  /** a DIDComm agent that holds the definitions given, and counts what it is asked */
+  const didcommAgent = (held: { id: string; relatedJsonSchemaCredentialId?: string }[] = [], pageSize = 10) => {
+    const calls = { list: 0, create: 0 }
+    const client = {
+      listCredentialDefinitions: async (cursor?: string) => {
+        calls.list++
+        const from = cursor ? Number(cursor) : 0
+        const next = from + pageSize < held.length ? String(from + pageSize) : null
+        return { items: held.slice(from, from + pageSize), nextCursor: next }
+      },
+      createCredentialDefinition: async (body: { relatedJsonSchemaCredentialId: string }) => {
+        calls.create++
+        const created = {
+          id: `def-${held.length + 1}`,
+          relatedJsonSchemaCredentialId: body.relatedJsonSchemaCredentialId,
+        }
+        held.push(created)
+        return created
+      },
+    }
+    return { client, calls, held }
+  }
+
+  it('creates the definition when the DIDComm agent holds none, and only once', async () => {
+    const { client, calls } = didcommAgent()
+    const definitions = new CredentialDefinitions(client, silent as never)
+    const [one, two] = await Promise.all([definitions.forSchema(BADGE), definitions.forSchema(BADGE)])
+    expect(one).toBe('def-1')
+    expect(two).toBe('def-1')
+    expect(await definitions.forSchema(BADGE)).toBe('def-1')
+    expect(calls.create).toBe(1)
+    // a second start finds it and creates none
+    const restarted = new CredentialDefinitions(client, silent as never)
+    expect(await restarted.forSchema(BADGE)).toBe('def-1')
+    expect(calls.create).toBe(1)
+  })
+
+  it('finds the definition of the schema among those of other schemas, on any page', async () => {
+    const others = Array.from({ length: 5 }, (_, i) => ({ id: `other-${i}`, relatedJsonSchemaCredentialId: `s-${i}` }))
+    const { client, calls } = didcommAgent([...others, { id: 'badge-def', relatedJsonSchemaCredentialId: BADGE }], 2)
+    expect(await new CredentialDefinitions(client, silent as never).forSchema(BADGE)).toBe('badge-def')
+    expect(calls.create).toBe(0)
+    expect(calls.list).toBe(3)
+  })
+
+  it('takes the definition that exists when the creation meets a conflict', async () => {
+    const { client, held } = didcommAgent()
+    client.createCredentialDefinition = async () => {
+      held.push({ id: 'made-elsewhere', relatedJsonSchemaCredentialId: BADGE })
+      throw new VsAgentError(409, '/anoncreds/credential-definitions', 'already exists')
+    }
+    expect(await new CredentialDefinitions(client, silent as never).forSchema(BADGE)).toBe('made-elsewhere')
+  })
+
+  it('issues nothing while the definition cannot be established, and issues once it can', async () => {
+    let reachable = false
+    const { client } = didcommAgent()
+    const list = client.listCredentialDefinitions
+    client.listCredentialDefinitions = async (cursor) => {
+      if (!reachable) throw new Error('connect ECONNREFUSED')
+      return list(cursor)
+    }
+    const definitions = new CredentialDefinitions(client, silent as never)
+    const { service, offers } = setup({ badge: bySchema }, { definitionFor: (schema) => definitions.forSchema(schema) })
+    await service.prepare()
+    expect((await service.requirements(person()))[0].state).toBe('ready')
+    expect(await service.issue(person(), session, 'badge', 'model')).toEqual({ outcome: 'not-ready' })
+    expect(offers).toEqual([])
+    expect(issuanceOutcomeForModel('not-ready')).toMatch(/cannot issue this credential yet/)
+    reachable = true
+    expect((await service.issue(person(), session, 'badge', 'model')).outcome).toBe('issued')
+    expect(offers[0].credentialDefinitionId).toBe('def-1')
+  })
+
+  it('refuses a profile that names both a definition and a schema, or neither', () => {
+    const env = { ...process.env, HOME_BACKING_IDENTITY: 'did:webvh:x:h' }
+    const dev = structuredClone(loadPack('agent-packs/dev', env).pack) as unknown as Record<string, unknown>
+    const withCredential = (credential: Record<string, string>) => ({
+      ...dev,
+      issuance: { badge: { credential, claims: { badgeNumber: { from: 'computed', fn: 'subjectId' } } } },
+    })
+    expect(
+      validatePackDocument(withCredential({ jsonSchemaCredentialId: BADGE }), env).issuance?.badge.credential
+    ).toEqual({ jsonSchemaCredentialId: BADGE })
+    expect(() => validatePackDocument(withCredential({}), env)).toThrow(/issuance\/badge\/credential/)
+    expect(() =>
+      validatePackDocument(withCredential({ jsonSchemaCredentialId: BADGE, credentialDefinitionId: 'def' }), env)
+    ).toThrow(/issuance\/badge\/credential/)
+    const both = structuredClone(loadPack('agent-packs/dev', env).pack)
+    both.issuance = {
+      badge: { ...bySchema, credential: { jsonSchemaCredentialId: BADGE, credentialDefinitionId: 'def' } },
+    }
+    expect(crossFieldErrors(both).join('\n')).toMatch(/INTX-ISSUE-017: issuance\.badge\.credential names one of/)
   })
 })
 

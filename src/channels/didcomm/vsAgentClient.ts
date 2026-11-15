@@ -313,6 +313,22 @@ export class VsAgentClient {
     })
   }
 
+  /** The credential definitions this DIDComm agent created, a page at a time. */
+  public listCredentialDefinitions(
+    cursor?: string
+  ): Promise<{ items: { id: string; relatedJsonSchemaCredentialId?: string }[]; nextCursor?: string | null }> {
+    const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
+    return this.request('GET', `/anoncreds/credential-definitions${query}`)
+  }
+
+  /** Creates the credential definition of this DIDComm agent for a schema of an ecosystem. */
+  public createCredentialDefinition(body: {
+    relatedJsonSchemaCredentialId: string
+    supportRevocation?: boolean
+  }): Promise<{ id: string }> {
+    return this.request('POST', '/anoncreds/credential-definitions', body)
+  }
+
   /** Offers an AnonCreds credential on a connection; `autoAccept` issues it once the holder asks for it. */
   public offerCredential(body: {
     connectionId: string
