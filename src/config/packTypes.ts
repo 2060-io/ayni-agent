@@ -83,7 +83,14 @@ export interface PresentationEntry extends EvidencePolicy {
  */
 export type ClaimSource =
   | { from: 'evidence'; entry: string; attribute: string }
-  | { from: 'computed'; fn: 'today' | 'now' | 'addDays' | 'constant'; days?: number; value?: string }
+  | { from: 'computed'; fn: ComputedFunction; days?: number; value?: string }
+
+/**
+ * The functions of a `computed` source, a closed list (INTX-ISSUE-015). `subjectId` is an identifier of the
+ * subject, derived from the Principal and the profile (INTX-ISSUE-016): the number of a badge, for one.
+ */
+export const COMPUTED_FUNCTIONS = ['today', 'now', 'addDays', 'constant', 'subjectId'] as const
+export type ComputedFunction = (typeof COMPUTED_FUNCTIONS)[number]
 
 /** A credential the agent may issue, and the source of each of its claims (D70, INTX-ISSUE-001). */
 export interface IssuanceProfile {

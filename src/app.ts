@@ -25,7 +25,7 @@ import { ChallengeService } from './core/challenges.js'
 import { CapabilityRouter } from './core/channel.js'
 import { EvidenceService } from './core/evidence.js'
 import { FlowService } from './core/flows.js'
-import { IssuanceService } from './core/issuance.js'
+import { IssuanceService, subjectIdKey } from './core/issuance.js'
 import { Orchestrator } from './core/orchestrator.js'
 import { HomeOrganization } from './core/organization.js'
 import { PrincipalService } from './core/principals.js'
@@ -384,7 +384,8 @@ export async function buildAgent(
         return outcome === 'completed' || outcome === 'degraded'
       },
     },
-    logger
+    logger,
+    subjectIdKey(env.entryEncryptionKey)
   )
   agent.issuance = issuanceRef
   const didcommEvents = new DidcommEvents(
