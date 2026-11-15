@@ -13,8 +13,8 @@ import type { MessageAttachment, Principal, Session } from '../../core/types.js'
 import type { Logger } from '../../util/logger.js'
 import { clientOfConnection, DidcommAdapter } from './adapter.js'
 import { type IdentityFlow, isServicePeer } from './identity.js'
-import type { PeerProfiles } from './peerProfiles.js'
-import { AG_UI_ENDPOINT, type PeerStatusRefusalCode } from './peerStatus.js'
+import { AYNI_FLOW_PROTOCOL, type PeerProfiles } from './peerProfiles.js'
+import { AG_UI_ENDPOINT, PEER_STATUS_PROTOCOL, type PeerStatusRefusalCode } from './peerStatus.js'
 import type {
   CarrierExchange,
   ConnectionRecord,
@@ -254,8 +254,26 @@ export class DidcommEvents {
    * resolved: a query that arrives during the identification is answered by the status that follows it.
    */
   private async onPeerStatusQuery(connectionId: string, answered: boolean): Promise<void> {
-    if (answered || !connectionId) return
+    if (!connectionId) return
+    // a peer that asks for its status takes one: it is told of the changes that follow too (CHAN-PROF-007)
+    await this.learnt(connectionId, PEER_STATUS_PROTOCOL, 'receiver')
+    if (answered) return
     await this.tellStatus(connectionId, true)
+  }
+
+  /**
+   * A protocol the peer was seen to use is one it speaks (CHAN-PROF-007). The disclosure of a wallet may be late
+   * or lost: one message that does not go, and the agent served a flow-capable wallet as an older one for the
+   * life of the connection, with offers it refuses. What the peer does is better evidence than what it says.
+   */
+  private async learnt(connectionId: string, protocol: string, role: string): Promise<void> {
+    if (!connectionId || (await this.peers.supports(connectionId, protocol))) return
+    const wasFlowCapable = await this.peers.isFlowCapable(connectionId)
+    await this.peers.record(connectionId, {
+      [protocol]: JSON.stringify({ 'feature-type': 'protocol', id: protocol, roles: [role] }),
+    })
+    this.logger.info({ connectionId, protocol }, 'peer uses a protocol it did not disclose: taken as spoken')
+    if (!wasFlowCapable && (await this.peers.isFlowCapable(connectionId))) await this.reaskInFlowMode(connectionId)
   }
 
   // ---- binding (CHAN-BIND-003/009, PROF-BIND-002/004/005) -------------------------------------------
@@ -510,6 +528,8 @@ export class DidcommEvents {
 
   /** A flow closed by the holder or by expiry ends the capability event it served (INTX-FLOW-004). */
   private async onFlowStateChanged(record: FlowRecord & { previousState?: string }): Promise<void> {
+    // a peer that opens a flow speaks flows, whatever became of its disclosure (CHAN-PROF-007)
+    if (!record.openedByMe) await this.learnt(record.connectionId, AYNI_FLOW_PROTOCOL, 'holder')
     const closed = await this.agent.flows.onFlowEvent(record)
     if (!closed || closed.closedBy === 'me') return
     const challenge = (await this.agent.store.challenges.listPending()).find((c) => c.details?.flowId === closed.flowId)

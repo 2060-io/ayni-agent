@@ -146,7 +146,10 @@ export class A2aRoutes {
             { emit: () => undefined },
             new AbortController().signal
           )
-          reply_text = result.reply?.text ?? ''
+          // a peer service reads the reply as one text, however many messages it took
+          reply_text = (result.replies?.length ? result.replies : result.reply ? [result.reply] : [])
+            .map((r) => r.text)
+            .join('\n\n')
         } catch (error) {
           this.logger.error({ err: error }, 'a2a turn failed')
           return fail(-32000, 'internal error', 500)

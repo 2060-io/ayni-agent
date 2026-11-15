@@ -841,7 +841,9 @@ export class AyniAgent {
       // the person asks for a credential the pack issues on request (INTX-ISSUE-008)
       const name = itemId.slice(PLATFORM_MENU.issuePrefix.length)
       const result = await this.issuance?.issue(principal, session, name, 'person')
-      return { text: issuanceOutcomeForPerson(result?.outcome ?? 'unavailable', result?.requirements) }
+      return {
+        text: issuanceOutcomeForPerson(result?.outcome ?? 'unavailable', result?.requirements, result?.reason),
+      }
     }
     if (itemId === PLATFORM_MENU.identify) {
       // the person asks to identify: always served (IDENT-RES-015/016)

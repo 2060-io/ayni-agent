@@ -465,3 +465,64 @@ describe('a connection that ends', () => {
     expect(statuses('ps-ended')).toHaveLength(2)
   })
 })
+
+describe('a protocol learnt from its use (CHAN-PROF-007)', () => {
+  /** A wallet whose disclosure never arrives: the agent serves it as an older wallet. */
+  const connectSilent = (connectionId: string) =>
+    events.handle(
+      envelope('didcomm.connections.state-updated', {
+        id: connectionId,
+        state: 'completed',
+        theirDid: `did:peer:${connectionId}`,
+        theirLabel: 'Ayni',
+        outOfBandId: null,
+        metadata: {},
+      })
+    )
+  const flowOpened = (connectionId: string, openedByMe: boolean) =>
+    events.handle(
+      envelope('didcomm.ayni-flow.state-changed', {
+        flowId: `flow-of-${connectionId}`,
+        connectionId,
+        role: 'service',
+        openedByMe,
+        state: 'pending',
+        kind: 'session-grant',
+        title: 'Open a session',
+        origin: { channel: 'none' },
+        expiresTime: new Date(Date.now() + 60_000).toISOString(),
+        createdAt: new Date().toISOString(),
+      })
+    )
+
+  it('a peer that opens a flow is served in flow mode, though its disclosure was lost', async () => {
+    useRule('none')
+    await connectSilent('ps-lost')
+    expect(await peers.isFlowCapable('ps-lost')).toBe(false)
+    await flowOpened('ps-lost', false)
+    expect(await peers.isFlowCapable('ps-lost')).toBe(true)
+  })
+
+  it('a flow the agent opened itself teaches nothing about the peer', async () => {
+    useRule('none')
+    await connectSilent('ps-mine')
+    await flowOpened('ps-mine', true)
+    expect(await peers.isFlowCapable('ps-mine')).toBe(false)
+  })
+
+  it('a peer that asks for its status is told of the changes that follow', async () => {
+    const notifier = useRule('optional')
+    await connectSilent('ps-asks')
+    expect(statuses('ps-asks')).toHaveLength(0)
+    await events.handle(
+      envelope('didcomm.peer-status.query-received', { messageId: 'q-9', connectionId: 'ps-asks', answered: false })
+    )
+    expect(statuses('ps-asks')).toHaveLength(1)
+    const bound = await running.agent.didcommSession('ps-asks')
+    if (!bound) throw new Error('no session on the connection')
+    // identified later: told without being asked, as a peer that disclosed the protocol would be
+    await notifier.resolved('ps-asks', { ...bound.principal, identityCredentialRef: 'badge:asks' })
+    expect(statuses('ps-asks')).toHaveLength(2)
+    expect(statuses('ps-asks')[1]?.identified).toBe(true)
+  })
+})

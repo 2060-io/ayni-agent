@@ -265,8 +265,8 @@ describe('the offer in the wallet (INTX-ISSUE-004)', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     offers.onExchange({ credentialExchangeId: 'cex-2', state: 'declined' })
     expect((await refused).outcome).toBe('declined')
-    // an offer left unanswered ends as declined; one that cannot be sent as failed
-    expect((await offers.offer(input)).outcome).toBe('declined')
+    // an offer nobody answers in time is told apart from one the person declined (INTX-ISSUE-018)
+    expect((await offers.offer(input)).outcome).toBe('unanswered')
     const broken = new CredentialOffers(
       { offerCredential: async () => Promise.reject(new Error('down')) } as never,
       undefined,
@@ -274,6 +274,41 @@ describe('the offer in the wallet (INTX-ISSUE-004)', () => {
       silent as never
     )
     expect(await broken.offer(input)).toEqual({ outcome: 'failed' })
+  })
+
+  it('tells apart the person who declines, the offer nobody answers and the wallet that refuses it (INTX-ISSUE-018)', async () => {
+    const client = { offerCredential: async () => ({ credentialExchangeId: 'cex-flow' }) }
+    const input = { connectionId: 'conn-2', credentialDefinitionId: 'def-1', claims: {}, title: 'Badge' }
+    // the wallet closes the flow of the offer: how it closed is what the agent learns
+    const endedBy = async (closed: Record<string, unknown>) => {
+      const flows = {
+        open: async () => ({ flowId: 'flow-1', connectionId: 'conn-2', kind: 'issue' }),
+        waitForClose: async () => ({ flowId: 'flow-1', state: closed.outcome, ...closed }),
+        close: async () => undefined,
+      }
+      return new CredentialOffers(client as never, flows as never, async () => true, silent as never, 5_000).offer(
+        input
+      )
+    }
+    expect(await endedBy({ outcome: 'declined', closedBy: 'peer' })).toEqual({
+      outcome: 'declined',
+      exchangeId: 'cex-flow',
+    })
+    expect(await endedBy({ outcome: 'expired', closedBy: 'expiry' })).toEqual({
+      outcome: 'unanswered',
+      exchangeId: 'cex-flow',
+    })
+    expect(await endedBy({ outcome: 'failed', closedBy: 'peer', errorCode: 'untrusted-issuer' })).toEqual({
+      outcome: 'refused',
+      reason: 'untrusted-issuer',
+      exchangeId: 'cex-flow',
+    })
+    // and the model is told which it was, so that it can tell the person
+    expect(issuanceOutcomeForModel('declined')).toMatch(/the person declined/)
+    expect(issuanceOutcomeForModel('unanswered')).toMatch(/did not answer/)
+    expect(issuanceOutcomeForModel('refused', undefined, 'untrusted-issuer')).toMatch(
+      /wallet of the person refused the offer by itself.*untrusted-issuer/
+    )
   })
 })
 

@@ -1,7 +1,8 @@
 /**
  * Deterministic stub model for development and tests: echoes the last user text word by word;
  * a user text of the form `/call <tool> <json>` triggers one tool call, and the stub then summarizes
- * the tool result. No network, no key.
+ * the tool result; words before `/call` are said first, as a model that announces what it is about to do.
+ * No network, no key.
  */
 import type { ChatDelta, ChatModel, ChatRequest } from './types.js'
 
@@ -25,15 +26,17 @@ export class StubChatModel implements ChatModel {
       typeof last.content === 'string'
         ? last.content
         : last.content.map((p) => (p.type === 'text' ? p.text : '[image]')).join(' ')
-    const call = /^\/call\s+(\S+)\s*(\{.*\})?\s*$/s.exec(text.trim())
-    if (call && req.tools?.some((t) => t.name === call[1])) {
+    const asked = /^(.*?)\/call\s+(\S+)\s*(\{.*\})?\s*$/s.exec(text.trim())
+    const call = asked ? [asked[0], asked[2], asked[3]] : null
+    if (asked && call && req.tools?.some((t) => t.name === call[1])) {
       let args: Record<string, unknown> = {}
       try {
         args = call[2] ? (JSON.parse(call[2]) as Record<string, unknown>) : {}
       } catch {
         args = {}
       }
-      yield { type: 'tool_call', call: { id: `call_${Date.now()}`, name: call[1], arguments: args } }
+      if (asked[1]?.trim()) yield { type: 'text', text: asked[1].trim() }
+      yield { type: 'tool_call', call: { id: `call_${Date.now()}`, name: call[1] as string, arguments: args } }
       return
     }
     if (call) {

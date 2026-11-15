@@ -84,7 +84,7 @@ export class BundledToolSource implements ToolSource {
         key: 'bundled:request_presentation',
         name: 'request_presentation',
         description: [
-          'Asks the wallet of the peer for a credential this agent accepts, by the name of its entry. The answer is given in the wallet, which may take a minute. You get a status, never the content of the credential.',
+          'Asks the wallet of the peer for a credential this agent accepts, by the name of its entry. The call sends the request and waits for the answer, given in the wallet, which may take a minute: before you call, nothing has been asked. You get a status, never the content of the credential. After it returns, tell the person what happened.',
           ...(authenticates
             ? [
                 'authentication: the credential that identifies the person, which gives them their roles and their own conversations; only while they are not identified. Ask when they want something that needs it, or when they say they have it.',
@@ -146,7 +146,8 @@ export class BundledToolSource implements ToolSource {
           key: 'bundled:issue_credential',
           name: 'issue_credential',
           description: [
-            'Issues a credential of this agent to the person, to their wallet. Call credential_requirements first: issue only when the state is ready. The agent fills every claim from what it verified; you give the name of the credential and nothing else.',
+            'Issues a credential of this agent to the person, to their wallet. Call credential_requirements first: issue only when the state is ready. The agent fills every claim from what it verified; you give the name of the credential and nothing else. The call sends the offer and waits for the person to answer it in their wallet, up to two minutes: it returns whether they accepted, declined, did not answer, or their wallet refused it. Before you call, nothing has been sent: do not say it was. After it returns, tell the person what happened.',
+            undefined,
             ...byModel.map(([name, p]) => `${name}${p.label ? `: ${p.label}` : ''}`),
           ].join('\n'),
           parameters: {
@@ -163,7 +164,7 @@ export class BundledToolSource implements ToolSource {
             if (!issuance) return { content: issuanceOutcomeForModel('unavailable') }
             const result = await issuance.issue(ctx.principal, ctx.session, String(args.credential ?? ''), 'model')
             return {
-              content: issuanceOutcomeForModel(result.outcome, result.requirements),
+              content: issuanceOutcomeForModel(result.outcome, result.requirements, result.reason),
               data: { credential: args.credential, outcome: result.outcome },
               isError: result.outcome === 'failed',
             }
