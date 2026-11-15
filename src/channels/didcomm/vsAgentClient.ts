@@ -3,6 +3,7 @@
  * API is unprotected and reachable only inside the deployment (reference profile). TOOL-HTTP-003.
  */
 import type { Logger } from '../../util/logger.js'
+import type { PeerStatus } from './peerStatus.js'
 
 export interface VsAgentInfo {
   did: string
@@ -428,6 +429,31 @@ export class VsAgentClient {
     grant: { grant: string; sessionsUrl: string; expiresAt: string }
   ): Promise<CarrierExchange> {
     return this.request('POST', `/didcomm/session-grant/${encodeURIComponent(threadId)}/grant`, { grant })
+  }
+
+  /**
+   * `peer-status/1.0/status`: where this agent stands with the peer of a connection (flow profile §4.1,
+   * IDENT-STAT-001). It replaces the status sent before on the connection.
+   */
+  public sendPeerStatus(connectionId: string, status: PeerStatus): Promise<{ id: string }> {
+    return this.request('POST', '/didcomm/peer-status', { connectionId, status })
+  }
+
+  /**
+   * Whether the DIDComm agent speaks `peer-status/1.0` (CC-VSA-012). Asked with a call that sends nothing: a
+   * query with no connection, which a DIDComm agent with the protocol refuses as invalid and one without it
+   * does not know. Throws when the DIDComm agent is out of reach or answers anything else.
+   */
+  public async supportsPeerStatus(): Promise<boolean> {
+    const path = '/didcomm/peer-status/query'
+    const response = await fetch(`${this.baseUrl}/v2${path}`, {
+      method: 'POST',
+      headers: { accept: 'application/json', 'content-type': 'application/json' },
+      body: '{}',
+    })
+    if (response.status === 400) return true
+    if (response.status === 404) return false
+    throw new VsAgentError(response.status, path, await response.text())
   }
 
   /** `link-session/1.0/request` inside a flow (flow profile §6.7, CHAN-BIND-009/012). */

@@ -55,6 +55,9 @@ describe('schemas', () => {
     }
     expect(validate(base)).toBe(true)
     expect(validate({ ...base, features: { ...base.features, sessionGrant: true, flows: true } })).toBe(true)
+    // PROF-DESC-007: additive, a boolean
+    expect(validate({ ...base, features: { ...base.features, peerStatus: true } })).toBe(true)
+    expect(validate({ ...base, features: { ...base.features, peerStatus: 'yes' } })).toBe(false)
     expect(
       validate({ ...base, binding: { modes: ['cross-device'], walletLinkTemplate: 'didcomm://x?oob={oob}' } })
     ).toBe(false)

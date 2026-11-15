@@ -15,6 +15,7 @@ import type { BackingIdentity, ConnectionType, LivenessVerdict, Principal } from
 import { Deferred } from '../../util/async.js'
 import { nowIso } from '../../util/ids.js'
 import type { Logger } from '../../util/logger.js'
+import type { PeerStatusRefusalCode } from './peerStatus.js'
 import type { PresentationRecord, VsAgentClient } from './vsAgentClient.js'
 
 export interface ResolveResult {
@@ -178,17 +179,21 @@ export class IdentityFlow {
   public async establish(
     connectionId: string,
     theirDid: string | undefined,
-    options: { flowMode?: boolean } = {}
+    options: { flowMode?: boolean; onRefused?: (code: PeerStatusRefusalCode) => void } = {}
   ): Promise<VerifiedFacts | undefined> {
-    const isService = !!theirDid && !theirDid.startsWith('did:peer:') && !theirDid.startsWith('did:key:')
-    if (isService && theirDid) return this.establishService(connectionId, theirDid)
-    return this.establishPerson(connectionId, theirDid ?? connectionId, options.flowMode === true)
+    if (isServicePeer(theirDid) && theirDid) return this.establishService(connectionId, theirDid, options.onRefused)
+    return this.establishPerson(connectionId, theirDid ?? connectionId, options.flowMode === true, options.onRefused)
   }
 
-  private async establishService(connectionId: string, did: string): Promise<VerifiedFacts | undefined> {
+  private async establishService(
+    connectionId: string,
+    did: string,
+    onRefused?: (code: PeerStatusRefusalCode) => void
+  ): Promise<VerifiedFacts | undefined> {
     const result = await this.resolver.resolve(did)
     if (!result.trusted) {
       this.logger.warn({ connectionId, did }, 'service peer is not trusted: refused')
+      onRefused?.('untrusted')
       return undefined
     }
     const service = result.ecsCredentials?.find((c) => c.ecsSchema === 'ServiceCredential')
@@ -212,7 +217,8 @@ export class IdentityFlow {
   private async establishPerson(
     connectionId: string,
     peerId: string,
-    flowMode: boolean
+    flowMode: boolean,
+    onRefused?: (code: PeerStatusRefusalCode) => void
   ): Promise<VerifiedFacts | undefined> {
     const creds = this.pack.identity.credentials
     const gate = this.pack.identity.userAgentGate ?? 'required'
@@ -235,6 +241,7 @@ export class IdentityFlow {
     }
     if (!userAgentVerified && gate === 'required' && creds?.userAgent) {
       this.logger.warn({ connectionId }, 'user-agent gate failed: refused (IDENT-RES-003)')
+      onRefused?.('not-admitted')
       return undefined
     }
     // asked on connect: a person is identified or refused (D53); the development flag still lets one in
@@ -242,7 +249,10 @@ export class IdentityFlow {
     if (authentication && authentication.request !== 'on-demand') {
       const facts = await this.identify(connectionId, peerId, flowMode, userAgentVerified)
       if (facts) return facts
-      if (!this.devAllowUnidentified) return undefined
+      if (!this.devAllowUnidentified) {
+        onRefused?.('identity-refused')
+        return undefined
+      }
       this.logger.warn({ connectionId }, 'DEV: unidentified principal admitted (no badge); development only')
     }
     // no authentication schema, or one asked on demand: the person enters unidentified (D53, IDENT-RES-007)
@@ -423,6 +433,11 @@ export class IdentityFlow {
 }
 
 /** The actor identity of a person: the organization of the issuer, the schema and the subject key (D59). */
+/** A peer with a public DID is a service; a wallet connects with a DID of its own making (IDENT-TRUST-001). */
+export function isServicePeer(theirDid: string | undefined): boolean {
+  return !!theirDid && !theirDid.startsWith('did:peer:') && !theirDid.startsWith('did:key:')
+}
+
 export function actorIdentityOf(organizationKey: string, schema: string, subject: string[]): string {
   return [organizationKey, schema, ...subject.map((v) => encodeURIComponent(v))].join('|')
 }

@@ -122,7 +122,17 @@ docker run --rm -p 3010:3010 --env-file .env io2060/ayni-agent:local
   `POST /v2/didcomm/session-grant/:threadId/grant`, then `POST /agui/v3/sessions` with `grant`): single use,
   `GRANT_EXPIRY_SECONDS` (default and maximum 60), issued only on a connection whose peer is a resolved Principal
   (ayni-spec D56, CHAN-BIND-014). `client.platform` is `web`, `ios` or `android` and `client.description` is what the
-  phone shows for the session (CHAN-BIND-015).
+  phone shows for the session (CHAN-BIND-015). The request names its `endpoint`, `ag-ui` when absent; one that is
+  not open to the peer is refused with `not-eligible`.
+- The agent tells each peer where it stands with it (`peer-status/1.0`, `POST /v2/didcomm/peer-status`; ayni-spec
+  D71, IDENT-STAT): the rule by which it identifies the peer, following from `identity.authentication` (`none`
+  with no schema, `optional` asked on demand, `required` asked on connect), whether the peer is identified, and
+  what is open to it on the connection (`ag-ui` for a person). It is sent once the Principal is resolved, before
+  the credential is asked when it is required, and again when a field changes; a peer the agent refuses is told why
+  (`untrusted`, `identity-refused`, `not-admitted`) before the connection ends. A wallet waits for this message
+  before it asks for a session grant. It needs the plugin `@ayni.org/vs-agent-plugin-ayni-flow` with the peer-status
+  module: the agent asks its VS Agent at start, declares `features.peerStatus` in its descriptor only when the VS
+  Agent has it (PROF-DESC-007), and serves wallets as before when it does not.
 - Wake-ups: a reply or an agent-initiated run that lands while no screen of the Principal shows the conversation
   sends one `notify/1.0` on a flow-capable phone (`POST /v2/didcomm/notify`; conversation id, title, preview,
   collapse key), never for a flow; the agent holds no push token (ayni-spec D57, INTX-NOTIFY-001/002). An approval

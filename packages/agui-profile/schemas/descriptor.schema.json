@@ -95,6 +95,10 @@
         "flows": {
           "type": "boolean",
           "description": "the agent opens flows through the flow profile (PROF-DESC-004)"
+        },
+        "peerStatus": {
+          "type": "boolean",
+          "description": "the agent tells a wallet where it stands with peer-status/1.0/status; a wallet asks for a session grant once a status lists ag-ui as open (PROF-DESC-007)"
         }
       }
     },

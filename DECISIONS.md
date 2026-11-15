@@ -459,3 +459,25 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     the process, a failure is not. `IssuanceService.prepare()` runs at start without blocking it; `issue`
     resolves again when needed and answers `not-ready`, a new outcome, when no definition can be had. The
     creation needs no entry on the registry; the offer does, and the VS Agent checks it then.
+
+50. **The agent tells a peer where it stands** (2026-11-15, decided with Fabrice; ayni-spec D71, IDENT-STAT-001..008,
+    CHAN-BIND-014, PROF-DESC-007). A wallet that asked for its session grant while the agent was still
+    identifying it was refused, and nothing told it when to ask. The agent now sends `peer-status/1.0/status`
+    on the connection: the authentication rule, whether the peer is identified, and what is open to it.
+    `PeerStatusNotifier` (`src/channels/didcomm/peerStatus.ts`) derives the three fields from the agent-pack
+    and the Principal and from nothing else, so the status and the session grant cannot disagree: the grant
+    handler refuses an endpoint that `openFor` does not list. It is on `AyniAgent.peerStatus`, optional as the
+    other DIDComm services are. Sent from four places: `DidcommEvents.onConnection` (before the identification
+    under `required`, after `onPeerConnected`, with a refusal before `deleteConnection`), the
+    `onIdentityPresented` dependency of `IdentityRequests` in `app.ts`, `AyniAgent.onCredentialInvalid`, and
+    a late features disclosure. The refusal code comes from `IdentityFlow.establish` through `onRefused`,
+    because only it knows whether the trust resolution, the user-agent gate or the credential failed. The same
+    status is not sent twice on a connection (kept in memory: after a restart a peer may get it once more).
+    A `query` is answered by the VS Agent from the last status sent; the agent answers only when the VS Agent
+    held none. **The descriptor declares `features.peerStatus` only when the VS Agent has the route**
+    (`VsAgentClient.supportsPeerStatus`: a query with no connection, 400 with the module and 404 without, and
+    nothing is sent). A wallet waits for the status of an agent that declares the feature, so an agent on a
+    VS Agent without the module must not declare it; it is asked again every minute while the answer is no.
+    Deferred: what a service may open (`a2a`, ayni-spec O20), so a service gets `open: []` and no session
+    grant; the client side of the protocol, where this agent would act on the status another service sends.
+    Entry 49 is the wait of the session grant handler, in its own pull request.

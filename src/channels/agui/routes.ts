@@ -117,6 +117,9 @@ export class AgUiRoutes {
         readState: true,
         // a message sent while a turn is in progress waits and is answered next (D63, PROF-DESC-006)
         queue: true,
+        // a wallet waits for the agent's status before it asks for a session grant (D71, PROF-DESC-007):
+        // declared only when the DIDComm agent can send one
+        peerStatus: this.agent.peerStatus?.declared === true,
       },
       locales: [this.agent.pack.language.agent],
     }
