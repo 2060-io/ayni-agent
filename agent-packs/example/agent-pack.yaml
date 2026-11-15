@@ -154,6 +154,23 @@ presentations:
       retention: { days: 30, onExpiry: erase }
     modelVisible: [categories, validUntil]
 
+# The credentials this agent may issue (D70). Every claim has one source, and the model is never one: it names
+# the credential, the agent fills it from what it verified.
+issuance:
+  driver_pass:
+    credential: { credentialDefinitionId: "${DRIVER_PASS_CRED_DEF:-did:webvh:example:northwind/resources/driver-pass}" }
+    label: Driver pass
+    trigger: model                     # model (default) | request (a menu item) | automatic
+    roles: [partner]                   # who may receive it; anyone when absent
+    authChallenge: { type: device }    # confirmed on the phone before the issuance
+    evidenceMaxAgeMinutes: 60
+    claims:
+      name:       { from: evidence, entry: authentication, attribute: name }
+      categories: { from: evidence, entry: driving_licence, attribute: categories }
+      issuedOn:   { from: computed, fn: today }
+      validUntil: { from: computed, fn: addDays, days: 90 }
+    record: { storeClaims: false }     # the audit record is always kept; the claims only when asked
+
 tools:
   http:
     - name: track_shipment

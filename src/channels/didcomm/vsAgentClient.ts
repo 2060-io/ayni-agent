@@ -62,6 +62,15 @@ export interface PresentationRecord {
   requestedCredentials?: RequestedCredential[]
 }
 
+/** A credential exchange, as the DIDComm agent reports it when its state changes. */
+export interface CredentialExchangeRecord {
+  credentialExchangeId: string
+  state: string
+  connectionId?: string
+  threadId?: string
+  errorMessage?: string
+}
+
 // ---- Ayni flow profile (plugin @ayni.org/vs-agent-plugin-ayni-flow, CC-VSA-005) ----------------------
 
 export interface FlowOrigin {
@@ -302,6 +311,17 @@ export class VsAgentClient {
       autoAccept: true,
       ...(parentThreadId ? { parentThreadId } : {}),
     })
+  }
+
+  /** Offers an AnonCreds credential on a connection; `autoAccept` issues it once the holder asks for it. */
+  public offerCredential(body: {
+    connectionId: string
+    credentialDefinitionId: string
+    claims: { name: string; value: string }[]
+    autoAccept?: boolean
+    parentThreadId?: string
+  }): Promise<{ credentialExchangeId: string }> {
+    return this.request('POST', '/didcomm/credential-offer', body)
   }
 
   public getPresentation(proofExchangeId: string): Promise<PresentationRecord> {

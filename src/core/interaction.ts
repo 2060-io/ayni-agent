@@ -11,6 +11,7 @@ export const PLATFORM_MENU = {
   approvals: 'ayni.approvals',
   devices: 'ayni.devices',
   identify: 'ayni.identify',
+  issuePrefix: 'ayni.issue:',
   endSessionPrefix: 'ayni.end-session:',
 } as const
 
@@ -57,6 +58,14 @@ export function contextualMenuFor(
     pack.identity.authentication?.length
   ) {
     items.push({ id: PLATFORM_MENU.identify, label: 'Identify yourself' })
+  }
+  // the credentials a person asks for themselves: the profiles whose trigger is `request` (INTX-ISSUE-008)
+  if (bound && principal?.connectionType === 'verifiable-user-agent') {
+    for (const [name, profile] of Object.entries(pack.issuance ?? {})) {
+      if (profile.trigger !== 'request') continue
+      if (profile.roles?.length && !profile.roles.some((r) => principal.roles.includes(r))) continue
+      items.push({ id: `${PLATFORM_MENU.issuePrefix}${name}`, label: `Get ${profile.label ?? name}` })
+    }
   }
   if (bound && session.channelType === 'didcomm') {
     items.push({ id: PLATFORM_MENU.link, label: 'Link a web session' })

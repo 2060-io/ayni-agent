@@ -77,6 +77,34 @@ export interface PresentationEntry extends EvidencePolicy {
   attributes?: string[]
 }
 
+/**
+ * Where a claim of an issued credential comes from (D70, INTX-ISSUE-002): never the model. `evidence` is an
+ * attribute of a verified presentation the pack stores; `computed` is a fixed function of the profile.
+ */
+export type ClaimSource =
+  | { from: 'evidence'; entry: string; attribute: string }
+  | { from: 'computed'; fn: 'today' | 'now' | 'addDays' | 'constant'; days?: number; value?: string }
+
+/** A credential the agent may issue, and the source of each of its claims (D70, INTX-ISSUE-001). */
+export interface IssuanceProfile {
+  credential: { credentialDefinitionId: string }
+  /** how the credential is named to a person, in the menu */
+  label?: string
+  /** to whom it is issued; persons only in this version */
+  subjectKind?: 'person'
+  /** who starts the issuance: the model (default), the peer (a menu item), or the agent once every claim resolves */
+  trigger?: 'model' | 'request' | 'automatic'
+  /** the roles that may receive it; anyone of the subject kind when absent */
+  roles?: string[]
+  /** enforced before the issuance, as for any action (INTX-ISSUE-010) */
+  authChallenge?: ActionPolicy['authChallenge']
+  /** evidence older than this is expired for the profile (INTX-ISSUE-013) */
+  evidenceMaxAgeMinutes?: number
+  claims: Record<string, ClaimSource>
+  /** what is kept of an issuance beyond its audit fields: the issued claims, when asked, for the retention given */
+  record?: { storeClaims?: boolean; retention?: { days?: number; onExpiry?: 'archive' | 'erase' } }
+}
+
 /** The connection type a schema of the given subject kind is asked of (INTX-PRES-007). */
 export function connectionTypeOf(subjectKind: PresentationEntry['subjectKind']): ConnectionType {
   return subjectKind === 'service' ? 'verifiable-service' : 'verifiable-user-agent'
@@ -269,6 +297,8 @@ export interface AgentPack {
   rag?: { enabled?: boolean; sources: RagSource[]; chunkSize?: number; chunkOverlap?: number }
   /** the credentials the agent may ask for, by name; `authentication` is the entry of identity.authentication (D69) */
   presentations?: Record<string, PresentationEntry>
+  /** the credentials the agent may issue, by name (D70) */
+  issuance?: Record<string, IssuanceProfile>
   tools?: {
     http?: HttpToolDef[]
     bundled?: {
@@ -276,6 +306,7 @@ export interface AgentPack {
       generateImage?: { enabled?: boolean; provider?: string }
       principalCredentials?: { enabled?: boolean }
       requestPresentation?: { enabled?: boolean }
+      credentialIssuance?: { enabled?: boolean }
       principalPreferences?: { enabled?: boolean }
       workingMemory?: { enabled?: boolean }
     }

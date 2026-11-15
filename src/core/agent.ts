@@ -4,6 +4,7 @@
  */
 
 import type { AyniAction, AyniState, PrincipalDisplay, SessionStatus } from '@ayni.org/ayni-agui-profile'
+import type { CredentialOffers } from '../channels/didcomm/credentialOffers.js'
 import { type IdentityRequests, identityOutcomeForPerson } from '../channels/didcomm/identityRequests.js'
 import type { Env } from '../config/env.js'
 import type { AgentPack, Features } from '../config/packTypes.js'
@@ -23,6 +24,7 @@ import type { CapabilityRouter } from './channel.js'
 import type { EvidenceService } from './evidence.js'
 import type { FlowService } from './flows.js'
 import { contextualMenuFor, describeDevices, describeSessions, greetingFor, PLATFORM_MENU } from './interaction.js'
+import { type IssuanceService, issuanceOutcomeForPerson } from './issuance.js'
 import {
   conversationKey,
   type Orchestrator,
@@ -106,6 +108,10 @@ export class AyniAgent {
   public readonly registry: ToolRegistry
   public readonly approvals: ApprovalService
   public readonly flows: FlowService
+  /** the offers of issued credentials waiting for the wallet; set once the DIDComm side is wired */
+  public credentialOffers?: Pick<CredentialOffers, 'onExchange'>
+  /** credential issuance; set once the DIDComm side is wired (INTX-ISSUE) */
+  public issuance?: IssuanceService
   /** the authentication asked on demand; set once the DIDComm side is wired (IDENT-RES-015) */
   public identityRequests?: Pick<IdentityRequests, 'request' | 'present' | 'onConnect'>
   /** the agent's own DID, read from the DIDComm agent at start (IDENT-SELF-001) */
@@ -828,6 +834,12 @@ export class AyniAgent {
         })
       return { text: lines.join('\n') }
     }
+    if (itemId.startsWith(PLATFORM_MENU.issuePrefix)) {
+      // the person asks for a credential the pack issues on request (INTX-ISSUE-008)
+      const name = itemId.slice(PLATFORM_MENU.issuePrefix.length)
+      const result = await this.issuance?.issue(principal, session, name, 'person')
+      return { text: issuanceOutcomeForPerson(result?.outcome ?? 'unavailable', result?.requirements) }
+    }
     if (itemId === PLATFORM_MENU.identify) {
       // the person asks to identify: always served (IDENT-RES-015/016)
       const outcome = (await this.identityRequests?.request(principal, 'person')) ?? 'unavailable'
@@ -1051,6 +1063,7 @@ export class AyniAgent {
     // a flow-capable wallet gets no welcome text and no menu on its connection (D54, CHAN-PROF-006)
     if (!existing && options.welcome !== false) await this.welcome(session)
     this.stats.emit('peer-connected', 1, { connectionType: facts.connectionType })
+    if (facts.evidence) this.issueAutomatically(principal)
     return { principal, session }
   }
 
@@ -1073,6 +1086,7 @@ export class AyniAgent {
       }
       const principal = await this.principals.resolve(facts)
       if (facts.evidence) await this.evidence.record(principal, { ...facts.evidence, connectionRef: connectionId })
+      this.issueAutomatically(principal)
       return { outcome: 'refreshed', principal }
     }
     const target = await this.principals.resolve(facts)
@@ -1106,7 +1120,18 @@ export class AyniAgent {
       },
       'unidentified connection upgraded: its conversations moved to the identified Principal'
     )
+    this.issueAutomatically(target)
     return { outcome: 'identified', principal: target }
+  }
+
+  /** The credentials the agent issues by itself are issued as soon as their evidence is complete (INTX-ISSUE-008). */
+  public issueAutomatically(principal: Principal): void {
+    const issuance = this.issuance
+    const connectionId = principal.capabilityChannelId
+    if (!issuance || !connectionId) return
+    void this.didcommSession(connectionId)
+      .then((bound) => (bound ? issuance.automatic(bound.principal, bound.session) : undefined))
+      .catch((err) => this.logger.warn({ err, principalId: principal.id }, 'automatic issuance failed'))
   }
 
   public async onPeerDisconnected(connectionId: string): Promise<void> {

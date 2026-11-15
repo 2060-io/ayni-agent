@@ -117,6 +117,7 @@ export class Orchestrator {
         (pack.tools?.access?.elevation?.length ?? 0) > 0 ||
         (pack.mcp?.servers ?? []).some((s) => (s.toolAccess?.elevation?.length ?? 0) > 0),
       challengesConfigured: Object.values(pack.actions ?? {}).some((a) => a.authChallenge),
+      issuance: Object.keys(pack.issuance ?? {}).length > 0,
       appLinkBase: pack.channels?.agui?.appLinkBase,
     })
     const tokens = addonTokenCount(this.addon)

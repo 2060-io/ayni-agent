@@ -291,7 +291,8 @@ export interface PrincipalPreference {
 export interface EvidenceRecord {
   id: string
   principalId: string
-  kind: 'presentation' | 'document'
+  /** a verification (a presentation, a document read) or an issuance, recorded the same way (INTX-ISSUE-014) */
+  kind: 'presentation' | 'document' | 'issuance'
   /** the entry of the agent-pack it answers: `authentication`, a catalog entry, or the evidence kind */
   entry: string
   schema?: string
@@ -306,6 +307,8 @@ export interface EvidenceRecord {
   stored: string[]
   requestRef?: string
   connectionRef?: string
+  /** an issuance: the evidence records its claims were resolved from */
+  evidenceRefs?: string[]
   verifiedAt: string
   state: 'active' | 'archived' | 'legal-hold' | 'crypto-erased'
   /** the end of the retention of the values, and what happens then */

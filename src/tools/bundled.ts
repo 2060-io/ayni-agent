@@ -10,6 +10,7 @@ import { AUTHENTICATION_ENTRY } from '../config/pack.js'
 import type { AgentPack, ToolAccess } from '../config/packTypes.js'
 import { connectionTypeOf, featuresOf } from '../config/packTypes.js'
 import type { EvidenceService } from '../core/evidence.js'
+import { type IssuanceService, issuanceOutcomeForModel, offeredProfiles } from '../core/issuance.js'
 import type { Principal } from '../core/types.js'
 import type { MediaService } from '../media/service.js'
 import type { RagService } from '../memory/rag.js'
@@ -26,6 +27,8 @@ export interface BundledDeps {
   evidence: EvidenceService
   /** asks the wallet of the Principal for the authentication credential, on demand (IDENT-RES-015) */
   requestIdentity?: (principal: Principal, by: 'model' | 'person') => Promise<IdentityRequestOutcome>
+  /** credential issuance, wired once the DIDComm side is (INTX-ISSUE) */
+  issuance?: () => IssuanceService | undefined
   /** asks the wallet of the Principal for the credential of a catalog entry (INTX-PRES-003) */
   requestPresentation?: (principal: Principal, entry: string) => Promise<PresentationRequestOutcome>
   media: MediaService
@@ -116,6 +119,57 @@ export class BundledToolSource implements ToolSource {
           return { content: presentationOutcomeForModel(outcome), data: { entry, outcome } }
         },
       })
+    }
+
+    // what the peer may receive and what is missing: read-only, no gate, never a value (INTX-ISSUE-005/006)
+    const profiles = Object.entries(pack.issuance ?? {})
+    if (profiles.length && bundled.credentialIssuance?.enabled !== false) {
+      specs.push({
+        key: 'bundled:credential_requirements',
+        name: 'credential_requirements',
+        description:
+          'Tells which credentials this agent can issue to the person, and for each whether it is held, ready or incomplete. For an incomplete one, each claim has a status and, when something can be done, an action: do what it says (for example request_presentation with the entry it names), then look again. You never see or supply a value: the agent fills the credential itself.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        access: ALWAYS_ALLOWED,
+        when: (principal) => offeredProfiles(pack, principal).length > 0,
+        stepLabel: 'Checking what can be issued',
+        invoke: async (_args, ctx) => {
+          const requirements = (await this.deps.issuance?.()?.requirements(ctx.principal)) ?? []
+          return { content: JSON.stringify(requirements) }
+        },
+      })
+      // the model names a profile and nothing else: no claim, no recipient (D68, INTX-ISSUE-003). A profile
+      // the peer or the agent starts is not in its list (RBAC-FILTER-003).
+      const byModel = profiles.filter(([, p]) => (p.trigger ?? 'model') === 'model')
+      if (byModel.length) {
+        specs.push({
+          key: 'bundled:issue_credential',
+          name: 'issue_credential',
+          description: [
+            'Issues a credential of this agent to the person, to their wallet. Call credential_requirements first: issue only when the state is ready. The agent fills every claim from what it verified; you give the name of the credential and nothing else.',
+            ...byModel.map(([name, p]) => `${name}${p.label ? `: ${p.label}` : ''}`),
+          ].join('\n'),
+          parameters: {
+            type: 'object',
+            required: ['credential'],
+            additionalProperties: false,
+            properties: { credential: { type: 'string', enum: byModel.map(([name]) => name) } },
+          },
+          access: ALWAYS_ALLOWED,
+          when: (principal) => offeredProfiles(pack, principal).some(([, p]) => (p.trigger ?? 'model') === 'model'),
+          stepLabel: 'Issuing your credential',
+          invoke: async (args, ctx) => {
+            const issuance = this.deps.issuance?.()
+            if (!issuance) return { content: issuanceOutcomeForModel('unavailable') }
+            const result = await issuance.issue(ctx.principal, ctx.session, String(args.credential ?? ''), 'model')
+            return {
+              content: issuanceOutcomeForModel(result.outcome, result.requirements),
+              data: { credential: args.credential, outcome: result.outcome },
+              isError: result.outcome === 'failed',
+            }
+          },
+        })
+      }
     }
 
     if (features.preferences && bundled.principalPreferences?.enabled !== false) {

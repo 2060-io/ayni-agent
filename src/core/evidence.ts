@@ -72,6 +72,7 @@ export interface EvidenceInput {
   unrevealed?: string[]
   requestRef?: string
   connectionRef?: string
+  evidenceRefs?: string[]
 }
 
 /** What the model is told of a record: its audit fields and the visible attributes, when it is usable. */
@@ -102,8 +103,13 @@ export class EvidenceService {
    * the earlier records of the same entry are erased: the newest presentation is the one in use, the
    * earlier ones stay as audit.
    */
-  public async record(principal: Pick<Principal, 'id'>, input: EvidenceInput): Promise<EvidenceRecord> {
-    const policy = evidencePolicyOf(this.pack, input.entry)
+  public async record(
+    principal: Pick<Principal, 'id'>,
+    input: EvidenceInput,
+    /** the policy of an issuance comes from its profile, not from an entry of the catalog */
+    policyOf?: EvidencePolicy
+  ): Promise<EvidenceRecord> {
+    const policy = policyOf ?? evidencePolicyOf(this.pack, input.entry)
     const outcome = input.outcome ?? 'verified'
     const values = outcome === 'verified' ? pick(input.values, policy.store?.attributes ?? []) : {}
     const stored = Object.keys(values)
@@ -124,6 +130,7 @@ export class EvidenceService {
       stored,
       requestRef: input.requestRef,
       connectionRef: input.connectionRef,
+      evidenceRefs: input.evidenceRefs,
       verifiedAt,
       state: 'active',
       expiresAt:
@@ -161,7 +168,8 @@ export class EvidenceService {
   public async forModel(principalId: string): Promise<EvidenceForModel[]> {
     const out: EvidenceForModel[] = []
     for (const stored of await this.store.evidence.list(principalId)) {
-      if (stored.outcome !== 'verified') continue
+      // an issuance is not something the person presented: the requirements tool tells what was issued
+      if (stored.outcome !== 'verified' || stored.kind === 'issuance') continue
       const usable = stored.state === 'active' && !this.expired(stored)
       const visible = evidencePolicyOf(this.pack, stored.entry).modelVisible ?? []
       const values = usable ? this.open(stored) : {}
@@ -175,6 +183,14 @@ export class EvidenceService {
       })
     }
     return out.reverse()
+  }
+
+  /** The newest verified record of an entry, with its audit fields: what the requirements of an issuance are read from. */
+  public async latest(principalId: string, entry: string): Promise<EvidenceRecord | undefined> {
+    const stored = (await this.store.evidence.list(principalId))
+      .filter((e) => e.entry === entry && e.outcome === 'verified')
+      .at(-1)
+    return stored ? auditOf(stored) : undefined
   }
 
   /** The stored values of the newest usable record of an entry, for the code that issues from it; never the model. */

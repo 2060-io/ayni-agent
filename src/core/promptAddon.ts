@@ -14,6 +14,8 @@ export interface AddonContext {
   hasTools: boolean
   hasRequestableTools: boolean
   challengesConfigured: boolean
+  /** the pack issues credentials: the model is told how (INTX-ISSUE-005) */
+  issuance?: boolean
   /** when set, the model may send the person to places in the app with links on this base (PROF-LINK-001) */
   appLinkBase?: string
 }
@@ -53,6 +55,10 @@ export function renderPromptAddon(ctx: AddonContext): string {
   if (ctx.features.credentialTool)
     lines.push(
       'principal_credentials lists what was verified about the person and the attributes you may read; treat them as verified facts, and never ask the person to type what a credential should prove.'
+    )
+  if (ctx.issuance)
+    lines.push(
+      'credential_requirements tells which credentials you can issue and what is missing for each; you never supply the content of a credential: when it is ready, issue_credential with its name issues it.'
     )
   if (ctx.features.semanticRecall)
     lines.push('Relevant earlier messages and notes may be supplied as context; cite them in your own words.')

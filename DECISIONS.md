@@ -419,3 +419,19 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     entry. Known limits: a wallet without flows is not shown the purpose (the present-proof request of the
     DIDComm agent carries no comment); asking a service for a credential follows the same path and was not
     tried against a real service.
+46. **Issuance: every claim has a source, and the model is never one** (2026-11-11 to 14, Fabrice: "I do not
+    want the agent to be corrupted by user and issue arbitrary credentials", then "a tool must list the
+    missing attributes and what are the actions to get them", "two tools", "the three triggers", forms left
+    out; ayni-spec D68, D70; INTX-ISSUE-001..014, RBAC-FILTER-003). `issuance` in the pack names each
+    credential the agent may issue, with one source per claim. `IssuanceService` (`src/core/issuance.ts`)
+    answers `credential_requirements` (state held, ready or incomplete; per claim a status and an action,
+    never a value) and runs `issue_credential`, whose only parameter is the name of the profile: the claims
+    are resolved in code from the stored values of evidence and from computed values, for the Principal of
+    the session, and nothing is issued when one is missing. `trigger` is `model`, `request` (a platform
+    menu item "Get <label>", the profile absent from the model's list) or `automatic` (run when evidence is
+    recorded). The challenge of a profile runs inside the issuance, since one tool serves every profile.
+    `CredentialOffers` sends the offer through the DIDComm agent, as an `issue` flow on a flow-capable
+    wallet, and waits for the exchange. An issuance is recorded as evidence of kind `issuance`. Not in this
+    version: the sources `record`, `attestation` and `declared`; a claim read from a document (the document
+    read is not recorded yet, entry 43); issuing to a service, which under Verifiable Trust v4 goes through
+    the credential flow the peer starts.
