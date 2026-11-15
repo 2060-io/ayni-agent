@@ -1,5 +1,6 @@
-/** Retention and media garbage collection (PRIV-RETN-001..003). */
+/** Retention and media garbage collection (PRIV-RETN-001..003), and the retention of evidence (PRIV-EVID-007). */
 
+import type { EvidenceService } from '../core/evidence.js'
 import type { ObjectStore } from '../media/objectStore.js'
 import type { MemoryService } from '../memory/service.js'
 import type { Store } from '../store/types.js'
@@ -12,13 +13,16 @@ export class RetentionService {
     private readonly objects: ObjectStore | undefined,
     private readonly historyDays: number,
     private readonly mediaGraceDays: number,
-    private readonly logger: Logger
+    private readonly logger: Logger,
+    private readonly evidence?: EvidenceService
   ) {}
 
   public async tick(): Promise<void> {
     const archived = await this.memory.archiveOlderThan(this.historyDays)
     if (archived) this.logger.info({ archived }, 'histories archived')
     await this.collectOrphans()
+    // the values of evidence past their retention are archived or erased; the audit fields stay (PRIV-EVID-007)
+    await this.evidence?.expire()
   }
 
   /** Objects referenced by any non-deleted entry are kept; orphans older than the grace period go (PRIV-RETN-003). */

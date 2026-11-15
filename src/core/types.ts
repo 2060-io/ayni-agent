@@ -283,15 +283,38 @@ export interface PrincipalPreference {
   updatedAt: string
 }
 
-export interface CredentialPresentation {
+/**
+ * What the agent verified about a Principal: a credential presentation or a document read (D67,
+ * PRIV-EVID-002). The audit fields are in the clear and hold no attribute value; the stored values are
+ * sealed under the key of the record, which `erase` destroys.
+ */
+export interface EvidenceRecord {
   id: string
   principalId: string
-  credentialId: string
-  type: string
-  issuerDid: string
-  summary: Record<string, unknown>
-  refDigest: string
-  presentedAt: string
+  kind: 'presentation' | 'document'
+  /** the entry of the agent-pack it answers: `authentication`, a catalog entry, or the evidence kind */
+  entry: string
+  schema?: string
+  credentialDefinitionId?: string
+  issuerDid?: string
+  issuerOrganization?: { key: string; name?: string }
+  outcome: 'verified' | 'refused'
+  /** the names of the attributes revealed and of the requested ones left unrevealed, never a value */
+  revealed: string[]
+  unrevealed: string[]
+  /** the names of the attributes whose values are sealed in the record */
+  stored: string[]
+  requestRef?: string
+  connectionRef?: string
+  verifiedAt: string
+  state: 'active' | 'archived' | 'legal-hold' | 'crypto-erased'
+  /** the end of the retention of the values, and what happens then */
+  expiresAt?: string
+  onExpiry?: 'archive' | 'erase'
+  /** SHA-256 over the ciphertext; kept when the key is gone */
+  contentDigest: string
+  /** wrapped per-record key; null once the values are erased */
+  encKeyRef: string | null
 }
 
 export type ApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED' | 'EXPIRED'

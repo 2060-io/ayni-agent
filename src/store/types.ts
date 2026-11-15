@@ -9,9 +9,9 @@ import type {
   ChannelType,
   Conversation,
   ConversationState,
-  CredentialPresentation,
   DigestAnchor,
   ElevationGrant,
+  EvidenceRecord,
   LifecycleState,
   MemoryAccessLog,
   MessageEntry,
@@ -103,10 +103,15 @@ export interface PreferenceRepo {
   set(pref: PrincipalPreference): Promise<void>
 }
 
-export interface CredentialRepo {
-  list(principalId: string): Promise<CredentialPresentation[]>
-  get(id: string): Promise<CredentialPresentation | undefined>
-  save(cred: CredentialPresentation): Promise<void>
+/** An evidence record with the ciphertext of its stored values (null when none were stored, or once erased). */
+export type StoredEvidence = EvidenceRecord & { cipher: Buffer | null }
+
+export interface EvidenceRepo {
+  list(principalId: string): Promise<StoredEvidence[]>
+  get(id: string): Promise<StoredEvidence | undefined>
+  save(record: StoredEvidence): Promise<void>
+  /** active records whose retention ended at or before the given time */
+  listExpired(nowIso: string): Promise<StoredEvidence[]>
 }
 
 export interface ApprovalRepo {
@@ -174,7 +179,7 @@ export interface Store {
   entries: EntryRepo
   notes: WorkingMemoryRepo
   preferences: PreferenceRepo
-  credentials: CredentialRepo
+  evidence: EvidenceRepo
   approvals: ApprovalRepo
   grants: GrantRepo
   challenges: ChallengeRepo

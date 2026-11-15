@@ -16,6 +16,7 @@ import { prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import { estimateTokens } from '../util/tokens.js'
 import type { ChallengeService } from './challenges.js'
+import { nameForModel } from './evidence.js'
 import type { PrincipalService } from './principals.js'
 import { addonTokenCount, renderPromptAddon } from './promptAddon.js'
 import type { ApprovalRecord, MessageEntry, Principal, ReactionPolicy, Session } from './types.js'
@@ -140,9 +141,9 @@ export class Orchestrator {
           `Working memory notes:\n${notes.map((n) => `- [${n.id}]${n.needsRevision ? ' (needs revision)' : ''} ${n.content}`).join('\n')}`
         )
     }
-    const display = principal.identityAttributes.userName
-      ? `The person is ${principal.identityAttributes.userName}`
-      : 'The person is authenticated'
+    // a person identified by a credential is named only when the pack lets the model read the name (D68)
+    const name = nameForModel(this.pack, principal)
+    const display = name ? `The person is ${name}` : 'The person is authenticated'
     const backing = principal.backingIdentity?.name
       ? `, backed by ${principal.backingIdentity.name} (${principal.backingRelation})`
       : ''

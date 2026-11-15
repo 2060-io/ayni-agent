@@ -1,5 +1,5 @@
 /** Memory schema versions (CORE-VER-001/002). Each migration is applied once, in order. */
-export const MEMORY_SCHEMA_VERSION = '3.2.0'
+export const MEMORY_SCHEMA_VERSION = '3.3.0'
 
 export const MIGRATIONS: { version: string; sql: string }[] = [
   {
@@ -175,6 +175,25 @@ CREATE INDEX IF NOT EXISTS conversations_principal ON conversations (principal_i
 ALTER TABLE entries DROP CONSTRAINT IF EXISTS entries_source_type_check;
 ALTER TABLE entries ADD CONSTRAINT entries_source_type_check
   CHECK (source_type IN ('text','voice','media','tool-call','approval','refusal','auth-challenge','reaction','state-update','flow'));
+`,
+  },
+  {
+    // evidence: what the agent verified about a Principal, audit fields in the clear, values sealed (D67, PRIV-EVID).
+    // The table of credential presentations it replaces was never written to.
+    version: '3.3.0',
+    sql: `
+CREATE TABLE IF NOT EXISTS evidence (
+  id TEXT PRIMARY KEY,
+  principal_id TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('active','archived','legal-hold','crypto-erased')),
+  verified_at TIMESTAMPTZ NOT NULL,
+  expires_at TIMESTAMPTZ,
+  data JSONB NOT NULL,
+  cipher BYTEA
+);
+CREATE INDEX IF NOT EXISTS evidence_principal ON evidence (principal_id, verified_at);
+CREATE INDEX IF NOT EXISTS evidence_expiry ON evidence (expires_at) WHERE state = 'active';
+DROP TABLE IF EXISTS credential_presentations;
 `,
   },
 ]

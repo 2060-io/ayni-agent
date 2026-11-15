@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { Ajv2020 } from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
 import { parse as parseYaml } from 'yaml'
-import type { AgentPack, ToolAccess } from './packTypes.js'
+import type { AgentPack, EvidencePolicy, ToolAccess } from './packTypes.js'
 import { featuresOf } from './packTypes.js'
 
 export class PackError extends Error {
@@ -127,6 +127,39 @@ export function bundledToolNames(pack: AgentPack): string[] {
   return names
 }
 
+/** A model-visible attribute must be stored, and a stored attribute must be among those asked (PRIV-EVID-006). */
+function evidencePolicyErrors(where: string, policy: EvidencePolicy, requested: string[] | undefined): string[] {
+  const errors: string[] = []
+  const stored = policy.store?.attributes ?? []
+  const notStored = (policy.modelVisible ?? []).filter((a) => !stored.includes(a))
+  if (notStored.length) {
+    errors.push(`PRIV-EVID-006: ${where} makes [${notStored.join(', ')}] visible to the model without storing them`)
+  }
+  const notAsked = requested ? stored.filter((a) => !requested.includes(a)) : []
+  if (notAsked.length) errors.push(`PRIV-EVID-006: ${where} stores [${notAsked.join(', ')}] without asking for them`)
+  return errors
+}
+
+/**
+ * What the pack leaves to the operator's judgment: a model-visible attribute enters the conversation, so a
+ * shorter retention than conversation memory's cannot be honoured for it (PRIV-EVID-006).
+ */
+export function evidenceWarnings(pack: AgentPack): string[] {
+  const conversation = pack.privacy.processingActivities.find((a) => a.id === 'conversation-memory')?.retention?.days
+  const warnings: string[] = []
+  for (const entry of pack.identity.authentication ?? []) {
+    const days = entry.store?.retention?.days
+    if (!entry.modelVisible?.length || days === undefined) continue
+    if (conversation === undefined || days < conversation) {
+      const kept = conversation === undefined ? 'as long as it is kept' : `${conversation} days`
+      warnings.push(
+        `identity.authentication keeps [${entry.modelVisible.join(', ')}] ${days} days but lets the model read them: what the model reads stays in the conversation for ${kept}`
+      )
+    }
+  }
+  return warnings
+}
+
 /**
  * An agent that authenticates persons names one schema; one that names none must admit unidentified peers,
  * or it would refuse everyone (IDENT-RES-010). Checked on the effective value, after the environment's.
@@ -152,6 +185,9 @@ export function crossFieldErrors(pack: AgentPack): string[] {
       )
     }
   }
+  // what is read by the model is stored, what is stored is asked (PRIV-EVID-006)
+  for (const entry of authentication)
+    errors.push(...evidencePolicyErrors('identity.authentication', entry, entry.attributes))
   // home is the agent's own organization and no other: a pattern cannot give it (IDENT-ROLE-011)
   for (const [i, pattern] of (identity.organizations ?? []).entries()) {
     if ((pattern.relation as string) === 'home') {

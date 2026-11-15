@@ -19,6 +19,7 @@ import { nowIso } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import type { ChallengeService } from './challenges.js'
 import type { CapabilityRouter } from './channel.js'
+import type { EvidenceService } from './evidence.js'
 import type { FlowService } from './flows.js'
 import { contextualMenuFor, describeDevices, describeSessions, greetingFor, PLATFORM_MENU } from './interaction.js'
 import {
@@ -43,6 +44,7 @@ export interface AgentParts {
   media: MediaService
   rag?: RagService
   principals: PrincipalService
+  evidence: EvidenceService
   sessions: SessionService
   router: CapabilityRouter
   registry: ToolRegistry
@@ -97,6 +99,7 @@ export class AyniAgent {
   public readonly media: MediaService
   public readonly rag?: RagService
   public readonly principals: PrincipalService
+  public readonly evidence: EvidenceService
   public readonly sessions: SessionService
   public readonly router: CapabilityRouter
   public readonly registry: ToolRegistry
@@ -119,6 +122,7 @@ export class AyniAgent {
     this.media = parts.media
     this.rag = parts.rag
     this.principals = parts.principals
+    this.evidence = parts.evidence
     this.sessions = parts.sessions
     this.router = parts.router
     this.registry = parts.registry
@@ -1029,6 +1033,8 @@ export class AyniAgent {
     options: { welcome?: boolean } = {}
   ): Promise<{ principal: Principal; session: Session }> {
     const principal = await this.principals.resolve(facts)
+    // the presentation that identified the peer is evidence of the Principal (PRIV-EVID-001)
+    if (facts.evidence) await this.evidence.record(principal, { ...facts.evidence, connectionRef: connectionId })
     await this.sessions.supersede(principal, connectionId)
     principal.capabilityChannelId = connectionId
     await this.principals.save(principal)

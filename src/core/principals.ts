@@ -6,6 +6,7 @@ import type { AgentPack } from '../config/packTypes.js'
 import type { Store } from '../store/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
+import { type EvidenceInput, storedIdentityAttributes } from './evidence.js'
 import { type HomeKeySource, matchOrganization, type OrganizationFacts } from './organization.js'
 import type { BackingIdentity, ConnectionType, LivenessVerdict, Principal, Relation } from './types.js'
 
@@ -17,6 +18,8 @@ export interface VerifiedFacts {
   organization?: OrganizationFacts | null
   /** the actor identity this Principal had before the organization key (issuer attribute or subject alone): re-keyed when met again */
   legacyActorIdentity?: string
+  /** the verification the facts come from, when it is a presented credential: recorded as evidence (D67) */
+  evidence?: EvidenceInput
   /** verified claims: badge facts (userName, photo, title, department...) or ECS-Service attributes */
   claims: Record<string, unknown>
   userAgentVerified: boolean
@@ -109,6 +112,11 @@ export class PrincipalService {
         this.logger.info({ principalId: existing.id }, 'principal re-keyed on the organization of its issuer')
     }
     const { id: _id, ...attributes } = facts.claims as Record<string, unknown>
+    // of a presented credential a Principal keeps what the pack stores and nothing else (PRIV-EVID-004/009);
+    // the attributes of a service come from its public credentials and are kept as they are
+    const identityAttributes = facts.evidence
+      ? storedIdentityAttributes(this.pack, { ...facts.evidence.values, issuerDid: facts.evidence.issuerDid })
+      : { ...(existing?.identityAttributes ?? {}), ...attributes }
     const now = nowIso()
     const principal: Principal = {
       id: existing?.id ?? prefixedId('prn'),
@@ -117,7 +125,7 @@ export class PrincipalService {
       backingIdentity: backing,
       backingRelation: relation,
       roles: assignRoles(this.pack, facts, recognition),
-      identityAttributes: { ...(existing?.identityAttributes ?? {}), ...attributes },
+      identityAttributes,
       capabilityChannelId: existing?.capabilityChannelId ?? null,
       identityCredentialRef: facts.identityCredentialRef ?? existing?.identityCredentialRef ?? null,
       livenessCache: existing?.livenessCache ?? {},

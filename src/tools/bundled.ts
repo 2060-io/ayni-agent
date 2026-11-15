@@ -1,6 +1,7 @@
 /** Bundled tools enabled through configuration (TOOL-HTTP-002, INTX-CRED-001, INTX-PREF-001, MEM-TIER-003, MEM-RAG-004). */
 import type { AgentPack, ToolAccess } from '../config/packTypes.js'
 import { featuresOf } from '../config/packTypes.js'
+import type { EvidenceService } from '../core/evidence.js'
 import type { MediaService } from '../media/service.js'
 import type { RagService } from '../memory/rag.js'
 import type { MemoryService } from '../memory/service.js'
@@ -13,6 +14,7 @@ export interface BundledDeps {
   pack: AgentPack
   store: Store
   memory: MemoryService
+  evidence: EvidenceService
   media: MediaService
   rag?: RagService
   stats: StatsSink
@@ -38,18 +40,16 @@ export class BundledToolSource implements ToolSource {
       specs.push({
         key: 'bundled:principal_credentials',
         name: 'principal_credentials',
-        description: 'Lists the verified credentials the person presented to this agent (type, issuer, summary).',
+        description:
+          'Lists what this agent verified about the person (a presented credential: which one, its issuing organization, when, whether it is still usable) with the attributes you are allowed to read. Other attributes exist and are not shown.',
         parameters: { type: 'object', properties: {} },
         access: ALWAYS_ALLOWED,
         stepLabel: 'Checking credentials',
         invoke: async (_args, ctx) => {
-          const creds = await this.deps.store.credentials.list(ctx.principal.id)
-          if (!creds.length) return { content: 'No credentials presented.' }
-          return {
-            content: JSON.stringify(
-              creds.map((c) => ({ type: c.type, issuer: c.issuerDid, presentedAt: c.presentedAt, ...c.summary }))
-            ),
-          }
+          // the evidence of the Principal, with the attributes the pack makes visible and no other (INTX-CRED-001)
+          const records = await this.deps.evidence.forModel(ctx.principal.id)
+          if (!records.length) return { content: 'Nothing was presented.' }
+          return { content: JSON.stringify(records) }
         },
       })
     }

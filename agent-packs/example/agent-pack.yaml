@@ -20,6 +20,13 @@ identity:
     - credential: { jsonSchemaCredentialId: "${IDENTITY_SCHEMA_ID:-https://ecs.example/vt/schemas-badge-jsc.json}" }
       subjectKey: [badgeNumber]
       attributes: [badgeNumber, name, title, department, photo]
+      # what is kept of the badge, sealed, and for how long; by default nothing but the audit record (D67)
+      store:
+        attributes: [name, title, department, photo]
+        retention: { days: 365, onExpiry: erase }
+      # what the model may read of it; by default nothing. department is used by the role rules and kept for
+      # audit, the photo is the reference of the face-match challenge: neither is shown to the model
+      modelVisible: [name, title]
   # home is Northwind itself, the organization of this agent's own Organization credential: it is never listed.
   # Every other organization is recognized by a pattern over its verified attributes, first match wins (D64).
   organizations:
