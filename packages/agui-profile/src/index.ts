@@ -58,6 +58,11 @@ export interface DescriptorFeatures {
   queue?: boolean
   /** the agent keeps the shared read state: `unread` and `readUpTo` on a conversation (PROF-DESC-005, PROF-CONV-008) */
   readState?: boolean
+  /**
+   * the agent tells a wallet where it stands with `peer-status/1.0/status`: a client that is also a wallet asks
+   * for a session grant only once a status lists `ag-ui` as open (PROF-DESC-007, flow profile §4.1)
+   */
+  peerStatus?: boolean
 }
 
 export type BindingMode = 'cross-device' | 'same-device'

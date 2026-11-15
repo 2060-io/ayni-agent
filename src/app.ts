@@ -17,6 +17,7 @@ import { DidcommEvents } from './channels/didcomm/events.js'
 import { IdentityFlow, TrustResolver } from './channels/didcomm/identity.js'
 import { IdentityRequests } from './channels/didcomm/identityRequests.js'
 import { PeerProfiles } from './channels/didcomm/peerProfiles.js'
+import { PeerStatusNotifier } from './channels/didcomm/peerStatus.js'
 import { VsAgentClient } from './channels/didcomm/vsAgentClient.js'
 import { type Env, loadEnv } from './config/env.js'
 import { evidenceWarnings, loadPack } from './config/pack.js'
@@ -347,6 +348,11 @@ export async function buildAgent(
   if (did !== 'did:unknown') await declareAgUiService(vsAgent, did, env.publicBaseUrl, logger)
   const identity = new IdentityFlow(pack, vsAgent, resolver, env.devAllowUnidentifiedPrincipals, logger)
   identity.setFlows(flows)
+  // each peer is told where it stands with the agent (D71); the descriptor declares it once the DIDComm agent
+  // is known to speak the protocol (PROF-DESC-007)
+  const peerStatus = new PeerStatusNotifier(pack, vsAgent, peerProfiles, logger)
+  agent.peerStatus = peerStatus
+  void peerStatus.supported()
   // the authentication asked on demand, by the model's tool or the person's menu item (IDENT-RES-015)
   identityRequestsRef = new IdentityRequests(
     pack,
@@ -354,7 +360,12 @@ export async function buildAgent(
       identify: (connectionId, peerId, flowMode, userAgentVerified) =>
         identity.identify(connectionId, peerId, flowMode, userAgentVerified),
       isFlowCapable: (connectionId) => peerProfiles.isFlowCapable(connectionId),
-      onIdentityPresented: (connectionId, facts) => agent.onIdentityPresented(connectionId, facts),
+      onIdentityPresented: async (connectionId, facts) => {
+        const result = await agent.onIdentityPresented(connectionId, facts)
+        // a person identified after connect is told so (IDENT-STAT-005)
+        if (result.principal) await peerStatus.resolved(connectionId, result.principal)
+        return result
+      },
       present: (connectionId, name, entry, flowMode) => identity.present(connectionId, name, entry, flowMode),
       record: async (principal, input) => {
         const record = await evidence.record(principal, input)

@@ -6,6 +6,7 @@
 import type { AyniAction, AyniState, PrincipalDisplay, SessionStatus } from '@ayni.org/ayni-agui-profile'
 import type { CredentialOffers } from '../channels/didcomm/credentialOffers.js'
 import { type IdentityRequests, identityOutcomeForPerson } from '../channels/didcomm/identityRequests.js'
+import type { PeerStatusNotifier } from '../channels/didcomm/peerStatus.js'
 import type { Env } from '../config/env.js'
 import type { AgentPack, Features } from '../config/packTypes.js'
 import { featuresOf } from '../config/packTypes.js'
@@ -114,6 +115,8 @@ export class AyniAgent {
   public issuance?: IssuanceService
   /** the authentication asked on demand; set once the DIDComm side is wired (IDENT-RES-015) */
   public identityRequests?: Pick<IdentityRequests, 'request' | 'present' | 'onConnect'>
+  /** tells each peer where it stands with the agent; set once the DIDComm side is wired (D71, IDENT-STAT) */
+  public peerStatus?: PeerStatusNotifier
   /** the agent's own DID, read from the DIDComm agent at start (IDENT-SELF-001) */
   public did = 'did:unknown'
   public readonly challenges: ChallengeService
@@ -1151,8 +1154,9 @@ export class AyniAgent {
     return principal ? { session, principal } : undefined
   }
 
-  /** Credential failure terminates the Principal's sessions (IDENT-LIVE-004/005). */
+  /** Credential failure terminates the Principal's sessions (IDENT-LIVE-004/005); its wallet is told (IDENT-STAT-005). */
   public async onCredentialInvalid(principal: Principal): Promise<void> {
+    await this.peerStatus?.credentialInvalid(principal)
     await this.sessions.closeAll(principal.id, 'credential-invalid')
     await this.sessions.revokeAllDevices(principal)
   }

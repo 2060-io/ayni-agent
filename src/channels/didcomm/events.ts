@@ -3,7 +3,8 @@
  * reuse (binding), question answers (binding confirmation, device challenges, approvals), messages
  * (conversation on DIDComm), reactions, receipts, calls and documents (challenges), presentations,
  * discover-features disclosures (per-peer capability profile, D54), and on flow-capable wallets the
- * flows: `link-session` answers (binding), `confirm` answers (device challenges), flow closures (D55).
+ * flows: `link-session` answers (binding), `confirm` answers (device challenges), flow closures (D55). Each
+ * peer is told where it stands with the agent as its Principal is resolved, refused or changes (D71).
  */
 import type { FastifyInstance } from 'fastify'
 import type { AyniAgent } from '../../core/agent.js'
@@ -11,8 +12,9 @@ import type { TurnSink } from '../../core/orchestrator.js'
 import type { MessageAttachment, Principal, Session } from '../../core/types.js'
 import type { Logger } from '../../util/logger.js'
 import { clientOfConnection, DidcommAdapter } from './adapter.js'
-import type { IdentityFlow } from './identity.js'
+import { type IdentityFlow, isServicePeer } from './identity.js'
 import type { PeerProfiles } from './peerProfiles.js'
+import { AG_UI_ENDPOINT, type PeerStatusRefusalCode } from './peerStatus.js'
 import type {
   CarrierExchange,
   ConnectionRecord,
@@ -147,6 +149,13 @@ export class DidcommEvents {
         return this.onAuthorizeStateChanged(data as unknown as CarrierExchange & { previousState?: string })
       case 'didcomm.reissue.state-changed':
         return this.onReissueStateChanged(data as unknown as CarrierExchange & { previousState?: string })
+      // ---- peer status (plugin events, CC-VSA-012) ----
+      case 'didcomm.peer-status.query-received':
+        return this.onPeerStatusQuery(String(data.connectionId ?? ''), data.answered === true)
+      case 'didcomm.peer-status.status-received':
+        // what a peer says of this agent: the DIDComm agent keeps it, and it decides nothing here (IDENT-STAT-007)
+        this.logger.info({ connectionId: data.connectionId, status: data.status }, 'peer status received')
+        return
       default:
         return
     }
@@ -162,6 +171,8 @@ export class DidcommEvents {
       await this.peers.record(record.id, record.metadata)
       // a disclosure that arrives after a binding question went out as in v3 (FLOW-CAP-002, decision 24)
       if (!wasFlowCapable && (await this.peers.isFlowCapable(record.id))) await this.reaskInFlowMode(record.id)
+      // a peer that discloses the protocol after its Principal was resolved is told now (IDENT-STAT-001)
+      await this.tellStatus(record.id)
       return
     }
     if (record.state === 'completed' && record.previousState !== 'completed') {
@@ -175,8 +186,23 @@ export class DidcommEvents {
           (record.metadata ? await this.peers.awaitDisclosure(record.id, this.disclosureWaitMs) : undefined)
         const flowMode = !!profile && (await this.peers.isFlowCapable(record.id))
         if (flowMode) this.logger.info({ connectionId: record.id }, 'peer served in flow mode')
-        const facts = await this.identity.establish(record.id, record.theirDid, { flowMode })
+        const person = !isServicePeer(record.theirDid)
+        // a person asked for a credential on connect is told so before it is asked (IDENT-STAT-003)
+        if (person) await this.agent.peerStatus?.identifying(record.id)
+        const refusal: { code?: PeerStatusRefusalCode } = {}
+        const facts = await this.identity.establish(record.id, record.theirDid, {
+          flowMode,
+          onRefused: (code) => {
+            refusal.code = code
+          },
+        })
         if (!facts) {
+          // the peer is told why before the connection ends (IDENT-STAT-006)
+          await this.agent.peerStatus?.refused(
+            record.id,
+            person ? 'verifiable-user-agent' : 'verifiable-service',
+            refusal.code ?? (person ? 'not-admitted' : 'untrusted')
+          )
           await this.client
             .sendText(
               record.id,
@@ -194,6 +220,9 @@ export class DidcommEvents {
             welcome: !flowMode,
           }
         )
+        // the peer is told where it stands: what the agent asks of it, whether it is identified, what is open
+        // to it (IDENT-STAT-001). A wallet asks for its session grant on this, and not before (PROF-DESC-007).
+        await this.agent.peerStatus?.resolved(record.id, principal)
         // the catalog entries asked on connect follow, without holding the connection back (INTX-PRES-002)
         void this.agent.identityRequests
           ?.onConnect(principal)
@@ -206,7 +235,27 @@ export class DidcommEvents {
     } else if (record.state === 'terminated' || record.state === 'abandoned') {
       await this.agent.onPeerDisconnected(record.id)
       await this.peers.forget(record.id)
+      this.agent.peerStatus?.forget(record.id)
     }
+  }
+
+  // ---- peer status (D71, IDENT-STAT) --------------------------------------------------------------------
+
+  /** The current status of a connection whose Principal is resolved; nothing before that. */
+  private async tellStatus(connectionId: string, asked = false): Promise<void> {
+    if (!this.agent.peerStatus) return
+    const bound = await this.agent.didcommSession(connectionId)
+    if (bound) await this.agent.peerStatus.resolved(connectionId, bound.principal, { asked })
+  }
+
+  /**
+   * `peer-status/1.0/query` (IDENT-STAT-008): the DIDComm agent answers with the last status sent on the
+   * connection when it holds one. When it holds none the agent sends the current one, once the Principal is
+   * resolved: a query that arrives during the identification is answered by the status that follows it.
+   */
+  private async onPeerStatusQuery(connectionId: string, answered: boolean): Promise<void> {
+    if (answered || !connectionId) return
+    await this.tellStatus(connectionId, true)
   }
 
   // ---- binding (CHAN-BIND-003/009, PROF-BIND-002/004/005) -------------------------------------------
@@ -564,9 +613,23 @@ export class DidcommEvents {
       return
     }
     const request = exchange.request as {
+      endpoint?: string | null
       conversationId?: string | null
       newConversation?: boolean
       client?: { description?: string; platform?: string; appVersion?: string }
+    }
+    // a grant is for an endpoint that is open to the peer, the conversation channel when none is named
+    // (CHAN-BIND-014, FLOW-GRANT-004): what the status does not list is refused
+    const endpoint = request.endpoint ?? AG_UI_ENDPOINT
+    const open = this.agent.peerStatus ? this.agent.peerStatus.openFor(bound.principal) : [AG_UI_ENDPOINT]
+    if (!open.includes(endpoint)) {
+      this.logger.warn(
+        { connectionId: exchange.connectionId, endpoint },
+        'session grant requested for an endpoint that is not open to the peer'
+      )
+      if (exchange.flowId)
+        await this.agent.flows.problemReport(exchange.flowId, 'not-eligible', 'This endpoint is not open to you.')
+      return
     }
     const { grant, expiresAt } = await this.agent.sessions.issueGrant({
       principalId: bound.principal.id,

@@ -149,6 +149,11 @@ identity:
   rest. The agent says at start-up that it admits unidentified peers. There is no separate setting: the
   earlier `unidentifiedPeers` and the `UNIDENTIFIED_PEERS` variable are gone (the variable is ignored, with
   a warning). `DEV_ALLOW_UNIDENTIFIED_PRINCIPALS` stays, for development only.
+- **The wallet is told which of the three it is** (D71). The same setting gives the rule of the status
+  message the agent sends on each connection: `none` with no authentication schema, `optional` when it is
+  asked `on-demand`, `required` when it is asked `on-connect`, with the schema asked for. The message also
+  says whether the person is identified and what is open to them, so the app knows whether to wait for a
+  credential request, and when it may open the conversation. Nothing is configured for it.
 - **Identifying later** (D65, D66). While a connection is unidentified, the credential is asked when the
   model calls `request_presentation` with the entry `authentication` (the tool exists for an unidentified
   person only, takes nothing else, and answers with a status) or when the person picks **Identify
