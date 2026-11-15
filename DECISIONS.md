@@ -484,3 +484,43 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     peer was being identified (pull request #73, ayni-spec CHAN-BIND-016). It was closed without being merged
     and the requirement withdrawn: with the status a wallet no longer asks early, the wait did not cover an
     identification that takes minutes, and two answers to one problem would hide a fault in this one.
+
+51. **What the agent says after a wait is a new message** (2026-11-15, found by Fabrice on devnet with a phone:
+    "when I present the badge to the agent, it looks like the agent is not notified"; ayni-spec CORE-MSG-011,
+    INTX-ISSUE-018). The agent was notified: its tool returned `issued`, then `identified`. But the model had
+    written "I sent the offer to your wallet, please check" before the call, the person went to their wallet,
+    and what the model said afterwards was appended to that same message, with no space ("Here it
+    goes.The offer was declined"). Nothing new showed in the conversation.
+    - `Orchestrator.answer` keeps the time its tools began once the agent has said something. When the reply
+      resumes `resumeAsNewMessageMs` later or more (five seconds), the message before it ends, is saved, and a
+      new one starts under a new id: the stream carries a `text-end` and a `text-start`, and history holds two
+      messages. Under that the same message goes on after a blank line.
+    - Five seconds is a pause a person notices, and no tool that only reads takes it; a wait on the wallet
+      always does. A rule on time needs no list of the tools that wait.
+    - The first message sits where the reply does (after the messages it answers, D63); one written after a
+      pause sits where it was written. `TurnResult.reply` is the last message and `replies` all of them; a
+      peer service on A2A reads them as one text.
+    - **How an offer ended is told apart.** `CredentialOffers.offer` answered `declined` when the person said
+      no, when nobody answered and when the wallet refused the offer by itself. It now answers `declined`,
+      `unanswered` or `refused` with the wallet's code, from how the flow closed, and the model and the person
+      are told which. The first test on devnet failed on a wallet that refused every offer as from an
+      untrusted issuer; the agent said "declined or left unanswered" and offered to try again.
+    - The descriptions of `issue_credential` and `request_presentation` say that the call sends and waits, so
+      that a model does not announce as sent what it has not sent yet. This is help, not a guarantee: the
+      split above is what holds whatever the model writes.
+    - Not done: a flow asked from a conversation does not show as a card there (`origin` is not passed for an
+      offer nor for a presentation asked on demand).
+
+52. **A protocol a peer uses is one it speaks** (2026-11-15, same test; ayni-spec CHAN-PROF-007). After the
+    phone removed its connection and connected again, its features disclosure did not leave the phone (one
+    websocket that did not open, and Credo does not send again). The agent waited three seconds, took the
+    phone for an older wallet, sent it a welcome and a menu it does not read, and later an offer outside a
+    flow, which the phone refuses. Nothing would have repaired that connection.
+    - `DidcommEvents.learnt` records a protocol the peer was seen to use in its profile, as its disclosure
+      would have: `ayni-flow/1.0` when the peer opens a flow (a session grant request always comes in one),
+      `peer-status/1.0` as a receiver when it sends a query. From then on the peer is served in flow mode,
+      questions still open are asked again as flows, and it is told of its status when it changes.
+    - It does not help an agent that asks for a credential on connect: that request leaves before the peer
+      has opened anything. The app now sends its disclosure by itself and again when it does not go
+      (ayni-app), which is the repair of the cause; this is the repair of the consequence, for any wallet.
+
