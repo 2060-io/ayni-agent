@@ -50,6 +50,9 @@ import { ToolRegistry } from './tools/registry.js'
 import { schedule } from './util/async.js'
 import { createLogger, type Logger } from './util/logger.js'
 
+/** how long the runs whose turn is over are given to end their responses when the process stops */
+const RUNS_END_WITHIN_MS = 2000
+
 export interface RunningAgent {
   app: FastifyInstance
   agent: AyniAgent
@@ -426,6 +429,8 @@ export async function buildAgent(
     stop: async () => {
       // no turn starts any more; those in progress end, or are cut when their time is over (PLAT-DEPLOY-004)
       await agent.shutdown(hooks.drainMs)
+      // the turns are over: their runs are given a moment to tell their clients so, before anything is closed
+      await aguiRoutes?.quiet(RUNS_END_WITHIN_MS)
       for (const stop of stops) stop()
       // the streams of the devices stay open for as long as they are served: they are closed, not waited for
       app.server.closeAllConnections()

@@ -359,7 +359,18 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     entries written before keep the DID of the earlier model as backing identity, so shared tiers do not
     match them (no deployment used them); binding after connect (D66) comes with the presentation tools,
     since nothing presents an identity credential after the connection yet.
-42. **Evidence: one record per verification, audit fields in the clear, values sealed and governed per schema**
+42. **A reply that ends as the process ends is told to its client to the end** (2026-11-14, found on devnet
+    0.15.0 while checking entry 38; PLAT-DEPLOY-005). The check itself passed: the agent pod was deleted
+    during a reply with a message waiting behind it; the new pod logged that another process served the
+    store and waited, 20 seconds, for the old one to finish its reply and go; the waiting message was then
+    answered once, by the new pod, and nothing was answered twice. One flaw showed: the reply the old pod
+    finished reached its client complete but without `RunFinished`. The process closed its connections the
+    moment the last turn was over, while the run's handler still had its end to write. `stop()` now waits,
+    two seconds at most, until no run is being answered (`AgUiRoutes.quiet`) before it closes anything.
+    - Seen in the same check, and left as it is: a message sent during the 20 seconds in which neither pod
+      is ready does not reach the agent (the terminating pod is out of the service, the new one not yet
+      in): its sender gets an error, as before. Only a request that reaches the ending process waits.
+43. **Evidence: one record per verification, audit fields in the clear, values sealed and governed per schema**
     (2026-11-14, Fabrice: "this is a governance policy. We should be able to configure the agent to how we
     want. What's important too is to be able to define what the LLM see and what it does not", then "Agree"
     to the defaults, the two ends of a retention and one record with a key of its own; ayni-spec D67, D68;
