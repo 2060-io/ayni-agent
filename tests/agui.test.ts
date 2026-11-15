@@ -4,8 +4,10 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { RunningAgent } from '../src/app.js'
+import { buildAgent } from '../src/app.js'
 import { SessionStreams } from '../src/channels/agui/streams.js'
-import { parseSse, startTestAgent } from './helpers.js'
+import { createLogger } from '../src/util/logger.js'
+import { parseSse, startTestAgent, testEnv } from './helpers.js'
 
 let running: RunningAgent
 const client = { name: 'ayni-ui', version: '3.0.0', platform: 'web' }
@@ -1388,6 +1390,36 @@ describe('a message sent while the agent answers (D63, CORE-MSG-010, PROF-RUN-01
         // cut by the end of the process, not by the person: the next process answers it
         expect((await listed(d)).map((item) => item.messageId)).toEqual(['u_c-3'])
       }))
+
+    it('tells the client of a reply that ended in time that its run is over, before it closes anything', async () => {
+      // over a real connection: the process closes the connections it holds when it ends
+      const own = await buildAgent(testEnv(), createLogger('silent'), { drainMs: 4000 })
+      mintLocally(own)
+      const shared = running
+      running = own
+      try {
+        const d = await device('did:peer:ending-five')
+        const address = await own.app.listen({ port: 0, host: '127.0.0.1' })
+        const response = fetch(`${address}/agui/v3/sessions/${d.sessionId}/runs`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${d.sessionToken}`, 'content-type': 'application/json' },
+          body: JSON.stringify({
+            threadId: d.sessionId,
+            runId: 'f-1',
+            messages: [{ id: 'u_f-1', role: 'user', content: LONG }],
+            tools: [],
+            context: [],
+          }),
+        }).then((r) => r.text())
+        await pause(150)
+        await own.stop()
+        const events = parseSse(await response).map((e) => e.event)
+        expect(textOf(events)).toContain('word33')
+        expect(events[events.length - 1]?.type).toBe('RUN_FINISHED')
+      } finally {
+        running = shared
+      }
+    })
 
     it('refuses what cannot wait', () =>
       withAgent(async () => {
