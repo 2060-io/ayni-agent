@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.16.0](https://github.com/2060-io/ayni-agent/compare/v0.15.0...v0.16.0) (2026-11-15)
+
+
+### ⚠ BREAKING CHANGES
+
+* **identity:** identity.unidentifiedPeers leaves the agent-pack and the UNIDENTIFIED_PEERS variable is no longer read. An agent that asked on connect and admitted a person who declined now refuses them: ask on demand instead.
+* **evidence:** a Principal no longer keeps every attribute of its identity credential, and the model is no longer told the person's name, unless the agent-pack stores the attribute (identity.authentication.store) and makes it visible (modelVisible). Memory schema 3.3.0 adds the evidence table and drops the unused credential_presentations table.
+* **identity:** the agent-pack loses identity.recognizedBackingIdentities and identity.credentials.badge; it gains identity.authentication and identity.organizations. The DIDComm agent must report the issuer of each presented credential (VS Agent from v2.0.0-dev.110).
+
+### Features
+
+* **evidence:** one record per verification, values sealed and kept as the pack says; the model reads what the pack makes visible ([#66](https://github.com/2060-io/ayni-agent/issues/66)) ([9f6b52c](https://github.com/2060-io/ayni-agent/commit/9f6b52c929a4c42c6b862a4fafdd47bccdb5e4ce))
+* **identity:** a person is the organization of the issuer, the schema and the badge number; organizations by patterns ([#63](https://github.com/2060-io/ayni-agent/issues/63)) ([4c67d23](https://github.com/2060-io/ayni-agent/commit/4c67d23d20a28323ce81606c1e0068046bab33fb))
+* **identity:** the authentication asked on connect or on demand, binding after connect, and the presentation catalog ([#67](https://github.com/2060-io/ayni-agent/issues/67)) ([551380d](https://github.com/2060-io/ayni-agent/commit/551380d97ac40051780d16c380f20c3a451efd14))
+* **issuance:** the agent issues credentials whose every claim has a source; the model names the credential and nothing else ([#68](https://github.com/2060-io/ayni-agent/issues/68)) ([963f4bf](https://github.com/2060-io/ayni-agent/commit/963f4bf045370bfedc3dda22afd2300284f8f422))
+
+
+### Bug Fixes
+
+* **process:** a reply that ends as the process ends is told to its client to the end ([#65](https://github.com/2060-io/ayni-agent/issues/65)) ([5a45449](https://github.com/2060-io/ayni-agent/commit/5a454499c79ecda1043990b93fd8c83851be8448))
+
 ## [0.15.0](https://github.com/2060-io/ayni-agent/compare/v0.14.1...v0.15.0) (2026-11-14)
 
 
