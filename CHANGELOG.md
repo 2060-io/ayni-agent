@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0](https://github.com/2060-io/ayni-agent/compare/v0.16.0...v0.17.0) (2026-11-15)
+
+
+### Features
+
+* **issuance:** an identifier of the subject, derived from the Principal, numbers the holders of a credential ([#69](https://github.com/2060-io/ayni-agent/issues/69)) ([e62d100](https://github.com/2060-io/ayni-agent/commit/e62d10035056ee324957c49c636a52ff0dc895c2))
+
 ## [0.16.0](https://github.com/2060-io/ayni-agent/compare/v0.15.0...v0.16.0) (2026-11-15)
 
 
