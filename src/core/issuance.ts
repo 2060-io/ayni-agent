@@ -43,6 +43,8 @@ export type IssuanceOutcome =
   | 'not-offered'
   | 'challenge-failed'
   | 'declined'
+  | 'unanswered'
+  | 'refused'
   | 'unavailable'
   | 'not-ready'
   | 'failed'
@@ -54,7 +56,12 @@ export interface IssuanceDeps {
     credentialDefinitionId: string
     claims: Record<string, string>
     title: string
-  }): Promise<{ outcome: 'issued' | 'declined' | 'failed'; exchangeId?: string }>
+  }): Promise<{
+    outcome: 'issued' | 'declined' | 'unanswered' | 'refused' | 'failed'
+    /** why the wallet refused, when it did: the code of its problem report */
+    reason?: string
+    exchangeId?: string
+  }>
   /** runs the challenge of the profile and tells whether it passed */
   challenge(
     principal: Principal,
@@ -158,7 +165,7 @@ export class IssuanceService {
     session: Session,
     name: string,
     by: 'model' | 'person' | 'agent'
-  ): Promise<{ outcome: IssuanceOutcome; requirements?: CredentialRequirements }> {
+  ): Promise<{ outcome: IssuanceOutcome; requirements?: CredentialRequirements; reason?: string }> {
     const profile = this.offered(principal).find(([n]) => n === name)?.[1]
     if (!profile) return { outcome: 'not-offered' }
     const trigger = profile.trigger ?? 'model'
@@ -196,7 +203,7 @@ export class IssuanceService {
         claims,
         title: label,
       })
-      if (offer.outcome !== 'issued') return { outcome: offer.outcome }
+      if (offer.outcome !== 'issued') return { outcome: offer.outcome, reason: offer.reason }
       // one record per issuance: audit fields always, the claims only when the profile keeps them (INTX-ISSUE-014)
       await this.evidence.record(
         principal,
@@ -296,7 +303,11 @@ export class IssuanceService {
 }
 
 /** What the model is told of an issuance: a status, and what is missing when something is. */
-export function issuanceOutcomeForModel(outcome: IssuanceOutcome, requirements?: CredentialRequirements): string {
+export function issuanceOutcomeForModel(
+  outcome: IssuanceOutcome,
+  requirements?: CredentialRequirements,
+  reason?: string
+): string {
   const detail = requirements ? `\n${JSON.stringify(requirements)}` : ''
   switch (outcome) {
     case 'issued':
@@ -308,7 +319,11 @@ export function issuanceOutcomeForModel(outcome: IssuanceOutcome, requirements?:
     case 'challenge-failed':
       return 'not issued: the identity check before the issuance did not pass.'
     case 'declined':
-      return 'not issued: the offer was declined or left unanswered in the wallet.'
+      return 'not issued: the person declined the offer in their wallet.'
+    case 'unanswered':
+      return 'not issued: the person did not answer the offer in their wallet in time. Nothing was refused; they can ask again.'
+    case 'refused':
+      return `not issued: the wallet of the person refused the offer by itself, before showing it to them${reason ? ` (${reason})` : ''}. The person did nothing; trying again will not help.`
     case 'unavailable':
       return 'not issued: the wallet cannot be reached right now, or an issuance is already under way.'
     case 'not-ready':
@@ -321,7 +336,11 @@ export function issuanceOutcomeForModel(outcome: IssuanceOutcome, requirements?:
 }
 
 /** What the person is told after asking for a credential from the menu. */
-export function issuanceOutcomeForPerson(outcome: IssuanceOutcome, requirements?: CredentialRequirements): string {
+export function issuanceOutcomeForPerson(
+  outcome: IssuanceOutcome,
+  requirements?: CredentialRequirements,
+  reason?: string
+): string {
   switch (outcome) {
     case 'issued':
       return 'The credential is in your wallet.'
@@ -334,7 +353,11 @@ export function issuanceOutcomeForPerson(outcome: IssuanceOutcome, requirements?
     case 'challenge-failed':
       return 'The identity check did not pass. Nothing was issued.'
     case 'declined':
-      return 'The offer was not accepted. Nothing was issued.'
+      return 'You declined the offer. Nothing was issued.'
+    case 'unanswered':
+      return 'The offer was not answered in time. Nothing was issued; you can ask again.'
+    case 'refused':
+      return `Your wallet refused the offer by itself${reason ? ` (${reason})` : ''}. Nothing was issued.`
     default:
       return 'This credential cannot be issued right now.'
   }

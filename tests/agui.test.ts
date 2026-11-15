@@ -2,7 +2,7 @@
  * The AG-UI profile over the real agent on the in-memory store with the stub model. Binding is
  * driven by simulating the DIDComm agent's events (the VS Agent is not reachable in tests).
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import type { RunningAgent } from '../src/app.js'
 import { buildAgent } from '../src/app.js'
 import { SessionStreams } from '../src/channels/agui/streams.js'
@@ -1542,5 +1542,78 @@ describe('what the sender measured of a voice note (PROF-HIST-009)', () => {
     expect(text.statusCode).toBe(201)
     expect(text.json().duration).toBeUndefined()
     expect(text.json().waveform).toBeUndefined()
+  })
+})
+
+describe('a reply that resumes after its tools (CORE-MSG-011)', () => {
+  const PREFERENCE = '/call principal_preferences {"action":"set","key":"language","value":"es"}'
+  type Sent = { type: string; messageId?: string; delta?: string }
+  const textOf = (events: Sent[], messageId: string | undefined) =>
+    events
+      .filter((e) => e.type === 'TEXT_MESSAGE_CONTENT' && e.messageId === messageId)
+      .map((e) => e.delta)
+      .join('')
+  const agentMessages = async (sessionId: string, token: string) =>
+    (
+      (
+        await running.app.inject({
+          method: 'GET',
+          url: `/agui/v3/sessions/${sessionId}/messages?limit=50`,
+          headers: { authorization: `Bearer ${token}` },
+        })
+      ).json().messages as { id: string; role: string; content?: string }[]
+    ).filter((m) => m.role === 'assistant')
+
+  afterEach(() => {
+    running.agent.orchestrator.resumeAsNewMessageMs = 5_000
+  })
+
+  it('after a pause, what the agent says is a new message: the one before it is complete', async () => {
+    // the person was in their wallet meanwhile: any pause counts in this test
+    running.agent.orchestrator.resumeAsNewMessageMs = 0
+    const { body } = await createSession()
+    await bindViaPhone(body.sessionId, 'did:peer:pause-1')
+    const r = await run(body.sessionId, body.sessionToken, `I send it to your wallet now. ${PREFERENCE}`)
+    const events = r.events as Sent[]
+    const starts = events.filter((e) => e.type === 'TEXT_MESSAGE_START').map((e) => e.messageId)
+    const ends = events.filter((e) => e.type === 'TEXT_MESSAGE_END').map((e) => e.messageId)
+    expect(starts).toHaveLength(2)
+    expect(new Set(starts).size).toBe(2)
+    expect(ends).toEqual(starts)
+    expect(textOf(events, starts[0])).toBe('I send it to your wallet now.')
+    expect(textOf(events, starts[1])).toMatch(/^Tool \S+ answered/)
+    // the first message ends before the second begins
+    const order = events.filter((e) => e.type.startsWith('TEXT_MESSAGE_')).map((e) => `${e.type}:${e.messageId}`)
+    expect(order.indexOf(`TEXT_MESSAGE_END:${starts[0]}`)).toBeLessThan(
+      order.indexOf(`TEXT_MESSAGE_START:${starts[1]}`)
+    )
+    // and history holds two messages, under the ids the stream gave them, in that order
+    const kept = await agentMessages(body.sessionId, body.sessionToken)
+    expect(kept.map((m) => m.id)).toEqual(starts)
+    expect(kept[0]?.content).toBe('I send it to your wallet now.')
+    expect(kept[1]?.content).toMatch(/^Tool \S+ answered/)
+  })
+
+  it('with no pause the reply goes on in one message, in a new paragraph', async () => {
+    const { body } = await createSession()
+    await bindViaPhone(body.sessionId, 'did:peer:pause-2')
+    const r = await run(body.sessionId, body.sessionToken, `Let me check. ${PREFERENCE}`)
+    const events = r.events as Sent[]
+    const starts = events.filter((e) => e.type === 'TEXT_MESSAGE_START').map((e) => e.messageId)
+    expect(starts).toHaveLength(1)
+    expect(textOf(events, starts[0])).toMatch(/^Let me check\.\n\nTool \S+ answered/)
+    const kept = await agentMessages(body.sessionId, body.sessionToken)
+    expect(kept).toHaveLength(1)
+    expect(kept[0]?.content).toMatch(/^Let me check\.\n\nTool \S+ answered/)
+  })
+
+  it('an agent that said nothing before its tools writes one message, as before', async () => {
+    running.agent.orchestrator.resumeAsNewMessageMs = 0
+    const { body } = await createSession()
+    await bindViaPhone(body.sessionId, 'did:peer:pause-3')
+    const r = await run(body.sessionId, body.sessionToken, PREFERENCE)
+    const starts = (r.events as Sent[]).filter((e) => e.type === 'TEXT_MESSAGE_START')
+    expect(starts).toHaveLength(1)
+    expect(await agentMessages(body.sessionId, body.sessionToken)).toHaveLength(1)
   })
 })

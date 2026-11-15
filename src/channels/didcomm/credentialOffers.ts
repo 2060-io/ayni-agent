@@ -8,10 +8,21 @@ import { Deferred } from '../../util/async.js'
 import type { Logger } from '../../util/logger.js'
 import type { CredentialExchangeRecord, VsAgentClient } from './vsAgentClient.js'
 
-type OfferOutcome = { outcome: 'issued' | 'declined' | 'failed'; exchangeId?: string }
+/**
+ * How an offer ended. The three ways it is not accepted are told apart (INTX-ISSUE-018): the person said no;
+ * nobody answered in time; the wallet refused it by itself, before the person saw it, with its reason.
+ */
+type OfferOutcome = {
+  outcome: 'issued' | 'declined' | 'unanswered' | 'refused' | 'failed'
+  reason?: string
+  exchangeId?: string
+}
 
 export class CredentialOffers {
-  private readonly pending = new Map<string, { deferred: Deferred<'issued' | 'declined'>; timer: NodeJS.Timeout }>()
+  private readonly pending = new Map<
+    string,
+    { deferred: Deferred<'issued' | 'declined' | 'unanswered'>; timer: NodeJS.Timeout }
+  >()
 
   public constructor(
     private readonly client: Pick<VsAgentClient, 'offerCredential'>,
@@ -64,25 +75,32 @@ export class CredentialOffers {
       if (handle) await this.flows?.close(handle.flowId, 'failed', { reason: 'The offer could not be sent.' })
       return { outcome: 'failed' }
     }
-    const deferred = new Deferred<'issued' | 'declined'>()
+    const deferred = new Deferred<'issued' | 'declined' | 'unanswered'>()
     const timer = setTimeout(() => {
       this.pending.delete(exchangeId)
-      deferred.resolve('declined')
+      deferred.resolve('unanswered')
     }, this.timeoutMs)
     this.pending.set(exchangeId, { deferred, timer })
     // whichever ends first settles it: the exchange, or the holder closing the flow
-    const closed = handle ? this.flows?.waitForClose(handle.flowId).then(() => 'closed' as const) : undefined
+    const closed = handle ? this.flows?.waitForClose(handle.flowId) : undefined
     const first = await Promise.race([deferred.promise, ...(closed ? [closed] : [])])
-    if (first === 'closed') {
+    if (typeof first !== 'string') {
+      // the holder closed the flow: by the person, by its expiry, or by the wallet itself with a code
       const waiting = this.pending.get(exchangeId)
       if (waiting) clearTimeout(waiting.timer)
       this.pending.delete(exchangeId)
+      if (first.outcome === 'expired' || first.closedBy === 'expiry') return { outcome: 'unanswered', exchangeId }
+      if (first.outcome === 'failed') return { outcome: 'refused', reason: first.errorCode ?? first.reason, exchangeId }
       return { outcome: 'declined', exchangeId }
     }
     if (handle) {
-      await this.flows?.close(handle.flowId, first === 'issued' ? 'completed' : 'failed', {
-        reason: first === 'issued' ? undefined : 'The credential was not accepted.',
-      })
+      await this.flows?.close(
+        handle.flowId,
+        first === 'issued' ? 'completed' : first === 'unanswered' ? 'expired' : 'failed',
+        {
+          reason: first === 'issued' ? undefined : 'The credential was not accepted.',
+        }
+      )
     }
     return { outcome: first, exchangeId }
   }

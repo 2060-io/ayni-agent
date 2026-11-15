@@ -50,7 +50,10 @@ export interface TurnInput {
 export interface TurnResult {
   /** the person's message: the last one when several were answered together; none when no turn ran */
   inbound?: MessageEntry
+  /** the agent's reply: its last message, when it wrote several (CORE-MSG-011) */
   reply?: MessageEntry
+  /** every message of the reply, in order; one, unless the agent resumed after a pause */
+  replies?: MessageEntry[]
   cancelled: boolean
   /** every message this turn answered, in the order they arrived */
   inbounds?: MessageEntry[]
@@ -94,6 +97,12 @@ export class Orchestrator {
   private readonly reactionPolicies = new Map<string, ReactionPolicy>()
   private readonly addon: string
   private readonly maxToolRounds = 8
+  /**
+   * A reply that resumes after its tools took this long is a new message (CORE-MSG-011): the person was away from
+   * the conversation meanwhile, answering a request in their wallet, and what the agent says of the outcome must
+   * not be the end of a message they already read. Under it the reply goes on, in a new paragraph.
+   */
+  public resumeAsNewMessageMs = 5_000
 
   public constructor(
     private readonly pack: AgentPack,
@@ -316,17 +325,60 @@ export class Orchestrator {
       language: inbound.language,
     }
 
-    const messageId = prefixedId('msg')
+    let messageId = prefixedId('msg')
     let text = ''
     let started = false
     let cancelled = false
+    /** the messages of the reply already written; the first sits where the reply does, the others where they end */
+    const written: MessageEntry[] = []
+    /** when the tools began, after the agent had said something */
+    let pausedAt: number | undefined
+    const save = async (completion: 'complete' | 'interrupted', body: string) => {
+      const previous = written[written.length - 1]
+      const entry = await this.memory.append({
+        id: messageId,
+        // after the messages it answers, and before one that arrived to wait while it was written (D63); a
+        // message written after a pause is in its own place, after what happened meanwhile and after the
+        // message before it
+        initiatedAt: previous
+          ? new Date(Math.max(Date.now(), Date.parse(previous.initiatedAt) + 1)).toISOString()
+          : await context.replyAt?.(),
+        sessionId: session.id,
+        principalId: principal.id,
+        role: 'agent',
+        sourceType: 'text',
+        text: body,
+        completion,
+        backingIdentity: principal.backingIdentity,
+        reactionPolicy: this.reactionPolicies.get(session.id) ?? 'historize',
+      })
+      written.push(entry)
+      return entry
+    }
     const emitText = async (delta: string) => {
+      let more = delta
+      if (pausedAt !== undefined && started && text.trim()) {
+        if (Date.now() - pausedAt >= this.resumeAsNewMessageMs) {
+          // the agent resumes after a pause: what it said before is a message, and this is another
+          await sink.emit({ type: 'text-end', messageId })
+          await save('complete', text.trim())
+          messageId = prefixedId('msg')
+          text = ''
+          started = false
+          more = delta.replace(/^\s+/, '')
+        } else if (!/\n\s*$/.test(text)) {
+          // the same message goes on, apart from what came before the tools
+          more = `\n\n${delta.replace(/^\s+/, '')}`
+        }
+      }
+      pausedAt = undefined
+      if (!more) return
       if (!started) {
         started = true
         await sink.emit({ type: 'text-start', messageId })
       }
-      text += delta
-      await sink.emit({ type: 'text-delta', messageId, delta })
+      text += more
+      await sink.emit({ type: 'text-delta', messageId, delta: more })
     }
 
     try {
@@ -351,6 +403,7 @@ export class Orchestrator {
         }
         if (calls.length === 0) break
         messages.push({ role: 'assistant', content: roundText, toolCalls: calls })
+        if (pausedAt === undefined) pausedAt = Date.now()
         for (const call of calls) {
           if (signal.aborted) throw new TurnCancelled()
           const result = await this.executeToolCall(call, visible, session, principal, inbound, toolCtx, sink)
@@ -367,22 +420,17 @@ export class Orchestrator {
     }
     if (started) await sink.emit({ type: 'text-end', messageId })
 
-    const reply = await this.memory.append({
-      id: messageId,
-      // after the messages it answers, and before one that arrived to wait while it was written (D63)
-      initiatedAt: await context.replyAt?.(),
-      sessionId: session.id,
-      principalId: principal.id,
-      role: 'agent',
-      sourceType: 'text',
-      text: text.trim() || (cancelled ? '(stopped before any text)' : '(no reply)'),
-      completion: cancelled ? 'interrupted' : 'complete',
-      backingIdentity: principal.backingIdentity,
-      reactionPolicy: this.reactionPolicies.get(session.id) ?? 'historize',
-    })
+    // a reply that said nothing after its pause is the messages before it, and no empty one is added
+    const reply =
+      text.trim() || !written.length
+        ? await save(
+            cancelled ? 'interrupted' : 'complete',
+            text.trim() || (cancelled ? '(stopped before any text)' : '(no reply)')
+          )
+        : (written[written.length - 1] as MessageEntry)
     this.reactionPolicies.delete(session.id)
     this.stats.emit('message-out', 1, { channel: session.channelType, cancelled: String(cancelled) })
-    return { inbound, reply, cancelled, inbounds }
+    return { inbound, reply, replies: written, cancelled, inbounds }
   }
 
   /** Runs a tool directly (contextual-menu tool items, approved actions) with the same gates. */
