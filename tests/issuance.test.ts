@@ -1,15 +1,15 @@
 /**
- * Credential issuance (D68, D70; INTX-ISSUE-001..014, RBAC-FILTER-003): every claim comes from a source the
+ * Credential issuance (D68, D70; INTX-ISSUE-001..016, RBAC-FILTER-003): every claim comes from a source the
  * profile names, the model names a credential and nothing else, and the requirements never show a value.
  */
 import { afterEach, describe, expect, it } from 'vitest'
 import type { RunningAgent } from '../src/app.js'
 import { CredentialOffers } from '../src/channels/didcomm/credentialOffers.js'
-import { crossFieldErrors, loadPack } from '../src/config/pack.js'
+import { crossFieldErrors, loadPack, validatePackDocument } from '../src/config/pack.js'
 import type { AgentPack, IssuanceProfile, PresentationEntry } from '../src/config/packTypes.js'
 import { type EvidenceInput, EvidenceService } from '../src/core/evidence.js'
 import { contextualMenuFor } from '../src/core/interaction.js'
-import { type IssuanceDeps, IssuanceService, issuanceEntry } from '../src/core/issuance.js'
+import { type IssuanceDeps, IssuanceService, issuanceEntry, subjectId, subjectIdKey } from '../src/core/issuance.js'
 import type { Principal, Session } from '../src/core/types.js'
 import { createEntryCrypto } from '../src/memory/crypto.js'
 import { MemoryStore } from '../src/store/memory.js'
@@ -81,7 +81,8 @@ function setup(issuance: Record<string, IssuanceProfile>, deps: Partial<Issuance
       challenge: async () => true,
       ...deps,
     },
-    silent as never
+    silent as never,
+    subjectIdKey(Buffer.alloc(32, 9))
   )
   return { pack, store, evidence, service, offers }
 }
@@ -267,6 +268,63 @@ describe('the offer in the wallet (INTX-ISSUE-004)', () => {
   })
 })
 
+describe('an identifier of the subject (INTX-ISSUE-015/016)', () => {
+  const badge: IssuanceProfile = {
+    credential: { credentialDefinitionId: 'did:webvh:issuer/resources/badge' },
+    label: 'Badge',
+    claims: {
+      badgeNumber: { from: 'computed', fn: 'subjectId' },
+      name: { from: 'computed', fn: 'constant', value: 'Tester' },
+    },
+  }
+  const card: IssuanceProfile = {
+    credential: { credentialDefinitionId: 'did:webvh:issuer/resources/card' },
+    label: 'Card',
+    claims: { number: { from: 'computed', fn: 'subjectId' } },
+  }
+  const other = () => person({ id: 'prn_2', capabilityChannelId: 'conn-2' })
+
+  it('gives two persons different numbers, and nothing of the Principal can be read from them', async () => {
+    const { service, offers } = setup({ badge })
+    expect((await service.requirements(person()))[0]).toMatchObject({
+      state: 'ready',
+      claims: [
+        { name: 'badgeNumber', status: 'available' },
+        { name: 'name', status: 'available' },
+      ],
+    })
+    expect((await service.issue(person(), session, 'badge', 'model')).outcome).toBe('issued')
+    expect((await service.issue(other(), session, 'badge', 'model')).outcome).toBe('issued')
+    const [first, second] = offers.map((offer) => offer.claims.badgeNumber)
+    expect(first).toMatch(/^[0-9A-HJKMNP-TV-Z]{16}$/)
+    expect(second).toMatch(/^[0-9A-HJKMNP-TV-Z]{16}$/)
+    expect(second).not.toBe(first)
+    expect(first.toLowerCase()).not.toContain('prn')
+    expect(offers.map((offer) => offer.connectionId)).toEqual(['conn-1', 'conn-2'])
+  })
+
+  it('keeps the number of a person: the same value at every issuance, in another process too', async () => {
+    const one = setup({ badge })
+    const again = setup({ badge })
+    await one.service.issue(person(), session, 'badge', 'model')
+    await again.service.issue(person(), session, 'badge', 'model')
+    expect(again.offers[0].claims.badgeNumber).toBe(one.offers[0].claims.badgeNumber)
+    const key = subjectIdKey(Buffer.alloc(32, 9))
+    expect(subjectId(key, 'badge', 'prn_1')).toBe(one.offers[0].claims.badgeNumber)
+  })
+
+  it('gives one person unrelated numbers under two profiles, and other numbers with another secret', async () => {
+    const { service, offers } = setup({ badge, card })
+    await service.issue(person(), session, 'badge', 'model')
+    await service.issue(person(), session, 'card', 'model')
+    expect(offers[1].claims.number).not.toBe(offers[0].claims.badgeNumber)
+    const elsewhere = subjectIdKey(Buffer.alloc(32, 7))
+    expect(subjectId(elsewhere, 'badge', 'prn_1')).not.toBe(offers[0].claims.badgeNumber)
+    // the key is not the secret of the deployment itself
+    expect(subjectIdKey(Buffer.alloc(32, 9)).equals(Buffer.alloc(32, 9))).toBe(false)
+  })
+})
+
 describe('the pack, the tools and the menu (INTX-ISSUE-001/003, RBAC-FILTER-003)', () => {
   let running: RunningAgent | undefined
   afterEach(async () => {
@@ -288,13 +346,34 @@ describe('the pack, the tools and the menu (INTX-ISSUE-001/003, RBAC-FILTER-003)
           year: { from: 'evidence', entry: 'diploma', attribute: 'graduationDate' },
           name: { from: 'evidence', entry: 'passport', attribute: 'name' },
           until: { from: 'computed', fn: 'addDays' },
+          code: { from: 'computed', fn: 'random' as never },
         },
       },
     }
     const errors = crossFieldErrors(dev).join('\n')
+    expect(errors).toMatch(/INTX-ISSUE-015: issuance\.alumni\.claims\.code names the unknown function random/)
     expect(errors).toMatch(/claims\.year reads diploma\.graduationDate, which that entry does not store/)
     expect(errors).toMatch(/claims\.name names the unknown entry passport/)
     expect(errors).toMatch(/claims\.until addDays needs days/)
+  })
+
+  it('takes the identifier of the subject in a pack document, and no function outside the list (INTX-ISSUE-015)', () => {
+    const env = { ...process.env, HOME_BACKING_IDENTITY: 'did:webvh:x:h' }
+    const dev = structuredClone(loadPack('agent-packs/dev', env).pack) as unknown as Record<string, unknown>
+    const withBadge = (fn: string) => ({
+      ...dev,
+      issuance: {
+        badge: {
+          credential: { credentialDefinitionId: 'did:webvh:issuer/resources/badge' },
+          claims: { badgeNumber: { from: 'computed', fn } },
+        },
+      },
+    })
+    expect(validatePackDocument(withBadge('subjectId'), env).issuance?.badge.claims.badgeNumber).toEqual({
+      from: 'computed',
+      fn: 'subjectId',
+    })
+    expect(() => validatePackDocument(withBadge('random'), env)).toThrow(/claims\/badgeNumber/)
   })
 
   it('gives the model the name of a credential and nothing else, and the person a menu item for what they ask themselves', async () => {

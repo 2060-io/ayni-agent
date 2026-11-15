@@ -9,7 +9,7 @@ import { Ajv2020 } from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
 import { parse as parseYaml } from 'yaml'
 import type { AgentPack, EvidencePolicy, ToolAccess } from './packTypes.js'
-import { featuresOf } from './packTypes.js'
+import { COMPUTED_FUNCTIONS, featuresOf } from './packTypes.js'
 
 /** The entry of the credential that authenticates a person (D65): never the name of a catalog entry. */
 export const AUTHENTICATION_ENTRY = 'authentication'
@@ -202,6 +202,8 @@ export function crossFieldErrors(pack: AgentPack): string[] {
   for (const [name, profile] of Object.entries(pack.issuance ?? {})) {
     for (const [claim, source] of Object.entries(profile.claims)) {
       if (source.from === 'computed') {
+        if (!COMPUTED_FUNCTIONS.includes(source.fn))
+          errors.push(`INTX-ISSUE-015: issuance.${name}.claims.${claim} names the unknown function ${source.fn}`)
         if (source.fn === 'addDays' && source.days === undefined)
           errors.push(`INTX-ISSUE-001: issuance.${name}.claims.${claim} addDays needs days`)
         if (source.fn === 'constant' && source.value === undefined)

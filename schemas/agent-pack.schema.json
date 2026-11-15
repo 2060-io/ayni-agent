@@ -772,7 +772,7 @@
                   "required": ["from", "fn"],
                   "properties": {
                     "from": { "const": "computed" },
-                    "fn": { "type": "string", "enum": ["today", "now", "addDays", "constant"] },
+                    "fn": { "type": "string", "enum": ["today", "now", "addDays", "constant", "subjectId"] },
                     "days": { "type": "integer" },
                     "value": { "type": "string" }
                   }

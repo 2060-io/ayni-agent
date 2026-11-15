@@ -5,6 +5,7 @@
  * `issue` resolves the claims in code for the Principal of the session, issues nothing when one cannot be
  * resolved, and leaves a record built as evidence is.
  */
+import { createHmac, hkdfSync } from 'node:crypto'
 import { AUTHENTICATION_ENTRY } from '../config/pack.js'
 import type { ActionPolicy, AgentPack, ClaimSource, IssuanceProfile } from '../config/packTypes.js'
 import { nowIso } from '../util/ids.js'
@@ -71,6 +72,28 @@ interface Resolution {
 
 const today = () => nowIso().slice(0, 10)
 
+/** The key the identifiers of subjects are derived with: its own key, from the secret of the deployment. */
+export function subjectIdKey(deploymentSecret: Buffer): Buffer {
+  return Buffer.from(hkdfSync('sha256', deploymentSecret, Buffer.alloc(0), 'ayni-agent/issuance/subject-id', 32))
+}
+
+const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
+
+/**
+ * An identifier of the subject under a profile (INTX-ISSUE-016): 80 bits of a keyed digest of the profile
+ * and the Principal, as 16 characters without the letters that read as digits. The same Principal has the
+ * same value under the same profile at every issuance; nothing of the Principal can be read from it, and
+ * the values of two profiles cannot be linked without the key.
+ */
+export function subjectId(key: Buffer, profile: string, principalId: string): string {
+  const digest = createHmac('sha256', key).update(`${profile}\u0000${principalId}`).digest()
+  let bits = 0n
+  for (const byte of digest.subarray(0, 10)) bits = (bits << 8n) | BigInt(byte)
+  let out = ''
+  for (let shift = 75n; shift >= 0n; shift -= 5n) out += CROCKFORD[Number((bits >> shift) & 31n)]
+  return out
+}
+
 /** The profiles a Principal may receive: a person, of a role the profile names when it names some. */
 export function offeredProfiles(pack: AgentPack, principal: Principal): [string, IssuanceProfile][] {
   if (principal.connectionType !== 'verifiable-user-agent') return []
@@ -87,7 +110,9 @@ export class IssuanceService {
     private readonly pack: AgentPack,
     private readonly evidence: EvidenceService,
     private readonly deps: IssuanceDeps,
-    private readonly logger: Logger
+    private readonly logger: Logger,
+    /** derives the identifiers of subjects (INTX-ISSUE-016); see `subjectIdKey` */
+    private readonly idKey: Buffer
   ) {}
 
   /** The profiles a Principal may receive: a person, of a role the profile names when it names some. */
@@ -103,7 +128,7 @@ export class IssuanceService {
       const held = !!(await this.evidence.latest(principal.id, issuanceEntry(name)))
       const claims: ClaimRequirement[] = []
       for (const [claim, source] of Object.entries(profile.claims)) {
-        const { status, action } = await this.resolve(principal, profile, source)
+        const { status, action } = await this.resolve(principal, name, profile, source)
         claims.push({ name: claim, status, ...(action ? { action } : {}) })
       }
       out.push({
@@ -149,7 +174,7 @@ export class IssuanceService {
       const claims: Record<string, string> = {}
       const evidenceRefs = new Set<string>()
       for (const [claim, source] of Object.entries(profile.claims)) {
-        const resolved = await this.resolve(principal, profile, source)
+        const resolved = await this.resolve(principal, name, profile, source)
         if (resolved.status !== 'available' || resolved.value === undefined) {
           return { outcome: 'incomplete', requirements: (await this.requirements(principal, name))[0] }
         }
@@ -197,8 +222,14 @@ export class IssuanceService {
     }
   }
 
-  private async resolve(principal: Principal, profile: IssuanceProfile, source: ClaimSource): Promise<Resolution> {
+  private async resolve(
+    principal: Principal,
+    name: string,
+    profile: IssuanceProfile,
+    source: ClaimSource
+  ): Promise<Resolution> {
     if (source.from === 'computed') {
+      if (source.fn === 'subjectId') return { status: 'available', value: subjectId(this.idKey, name, principal.id) }
       if (source.fn === 'today') return { status: 'available', value: today() }
       if (source.fn === 'now') return { status: 'available', value: nowIso() }
       if (source.fn === 'constant') return { status: 'available', value: source.value ?? '' }

@@ -262,9 +262,16 @@ issuance:
 
 - **Sources.** `evidence` reads an attribute of a verified presentation: the `authentication`, or an entry
   of `presentations`. The attribute must be among those the entry **stores**, or the pack is refused: what
-  is not kept cannot be issued from. `computed` is `today`, `now`, `addDays` (with `days`) or `constant`
-  (with `value`). A system of record, a human attestation and a value declared by the peer are named by the
-  specification and not available in this version; neither is a value read from a document.
+  is not kept cannot be issued from. `computed` is `today`, `now`, `addDays` (with `days`), `constant`
+  (with `value`) or `subjectId`; the list is closed, and another name is refused. A system of record, a
+  human attestation and a value declared by the peer are named by the specification and not available in
+  this version; neither is a value read from a document.
+- **An identifier of the subject.** `subjectId` gives a claim that numbers the holders of an issuer, such
+  as `badgeNumber`: 16 characters derived from the Principal and the name of the profile with a key of the
+  deployment (from `ENTRY_ENCRYPTION_KEY`). The same person gets the same number under the same profile at
+  every issuance, two persons never the same one, and the number shows nothing of the Principal. It
+  follows the Principal: a person who connects again unidentified is another Principal, with another
+  number.
 - **Two tools.** `credential_requirements` is read-only and passes no gate. For each credential the person
   may receive it answers `held`, `ready` or `incomplete`, and for each claim a status without any value:
   `available`, `missing`, `expired`, `not-revealed` or `unavailable`. A claim that is not available names

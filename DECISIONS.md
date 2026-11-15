@@ -435,3 +435,15 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     version: the sources `record`, `attestation` and `declared`; a claim read from a document (the document
     read is not recorded yet, entry 43); issuing to a service, which under Verifiable Trust v4 goes through
     the credential flow the peer starts.
+
+47. **The number of a badge is derived, not drawn** (2026-11-15; ayni-spec INTX-ISSUE-015/016). A credential
+    that numbers its holders needs a claim no evidence holds. The `computed` source gains `subjectId`, and
+    its functions become a closed list (`COMPUTED_FUNCTIONS`), checked by the schema and by the cross-field
+    rules. The value is 80 bits of HMAC-SHA-256 over the name of the profile and the id of the Principal,
+    in 16 Crockford base32 characters, under a key derived with HKDF from `ENTRY_ENCRYPTION_KEY` and the
+    label `ayni-agent/issuance/subject-id` (`subjectIdKey`, `subjectId` in `src/core/issuance.ts`). Derived
+    rather than random, so a person keeps the number at a new issuance and nothing is stored for it;
+    keyed, so the number tells nothing of the Principal and two profiles cannot be linked. Rotating
+    `ENTRY_ENCRYPTION_KEY` changes the numbers. Not solved here: a person who received a badge as an
+    unidentified Principal and then authenticates with it is another Principal; a pack that issues its own
+    authentication credential offers the profile to the roles of the unidentified only.
