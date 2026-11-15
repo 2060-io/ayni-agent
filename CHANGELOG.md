@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.0](https://github.com/2060-io/ayni-agent/compare/v0.17.0...v0.18.0) (2026-11-15)
+
+
+### Features
+
+* **issuance:** a profile names its credential by schema, and the agent finds or creates its definition ([#71](https://github.com/2060-io/ayni-agent/issues/71)) ([8ca9243](https://github.com/2060-io/ayni-agent/commit/8ca9243124981443886529d0297421ae96aa744b))
+
 ## [0.17.0](https://github.com/2060-io/ayni-agent/compare/v0.16.0...v0.17.0) (2026-11-15)
 
 
