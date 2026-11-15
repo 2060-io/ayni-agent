@@ -38,6 +38,7 @@ directory.
 | `memory` | | context window, working memory, summarization, retrieval | D9, D10, D24, D25 |
 | `rag` | | corpus sources with visibility | D42, MEM-RAG |
 | `presentations` | | the credentials the agent may ask for, with what is kept and what the model reads | D69, INTX-PRES, PRIV-EVID |
+| `issuance` | | the credentials the agent may issue, each claim with its source | D70, INTX-ISSUE |
 | `tools` | | declarative HTTP tools, bundled tools, their access policy | TOOL-HTTP, TOOL-ACCESS |
 | `mcp` | | MCP servers and per-server tool access | TOOL-MCP, D41 |
 | `purposes` | | governance list for elevation | D14, D15 |
@@ -236,6 +237,51 @@ presentations:
   minutes before the same entry can be asked again; one request is pending on a connection at a time.
 - The name `authentication` is reserved: it is the entry of `identity.authentication`, which the same tool
   offers to an unidentified person.
+
+## issuance
+
+The credentials the agent may issue: a closed list, each under a name (D70). A profile gives **every claim one
+source**, and the model is never a source.
+
+```yaml
+issuance:
+  alumni_card:
+    credential: { credentialDefinitionId: did:webvh:.../resources/... }
+    label: Alumni card
+    trigger: model                     # model (default) | request | automatic
+    roles: [member]                    # optional: who may receive it
+    authChallenge: { type: device }    # optional: enforced before the issuance
+    evidenceMaxAgeMinutes: 60          # optional: older evidence is expired for this profile
+    claims:
+      degree:   { from: evidence, entry: diploma, attribute: degree }
+      name:     { from: evidence, entry: authentication, attribute: name }
+      issuedOn: { from: computed, fn: today }
+      status:   { from: computed, fn: constant, value: active }
+    record: { storeClaims: false, retention: { days: 365, onExpiry: erase } }
+```
+
+- **Sources.** `evidence` reads an attribute of a verified presentation: the `authentication`, or an entry
+  of `presentations`. The attribute must be among those the entry **stores**, or the pack is refused: what
+  is not kept cannot be issued from. `computed` is `today`, `now`, `addDays` (with `days`) or `constant`
+  (with `value`). A system of record, a human attestation and a value declared by the peer are named by the
+  specification and not available in this version; neither is a value read from a document.
+- **Two tools.** `credential_requirements` is read-only and passes no gate. For each credential the person
+  may receive it answers `held`, `ready` or `incomplete`, and for each claim a status without any value:
+  `available`, `missing`, `expired`, `not-revealed` or `unavailable`. A claim that is not available names
+  what obtains it: `request_presentation` with an entry, or nothing to do. `issue_credential` takes the
+  name of the credential and nothing else: the agent resolves the claims itself, for the person of the
+  session, offers the credential to their wallet, and issues nothing when a claim cannot be resolved,
+  answering with the same list.
+- **Triggers.** `model`: the model calls `issue_credential`. `request`: the person asks, from a menu item
+  "Get <label>"; the credential is absent from the model's list. `automatic`: the agent issues as soon as
+  every claim resolves, when evidence arrives. `credential_requirements` is there in the three cases.
+- **Gates.** `roles` limits who may receive the credential. `authChallenge` runs before the offer, as for
+  any action. A credential is issued once to a Principal.
+- **Persons only** in this version: a credential is offered on the connection of the person, as an `issue`
+  flow on a flow-capable wallet.
+- **The record.** Each issuance leaves a record built as evidence is: the audit fields always (the profile,
+  the credential definition, the exchange, the evidence its claims came from), the issued claims sealed
+  and kept only with `storeClaims`, for the `retention` given.
 
 ## tools, mcp and access tiers
 

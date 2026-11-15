@@ -16,6 +16,7 @@ import type { PeerProfiles } from './peerProfiles.js'
 import type {
   CarrierExchange,
   ConnectionRecord,
+  CredentialExchangeRecord,
   FlowRecord,
   PresentationRecord,
   VsAgentClient,
@@ -128,6 +129,10 @@ export class DidcommEvents {
         return this.onDocument(String(data.connectionId), String(data.threadId ?? ''), false, data)
       case 'didcomm.presentations.state-updated':
         this.identity.onPresentation(data as unknown as PresentationRecord)
+        return
+      case 'didcomm.credential-exchanges.state-updated':
+        // an offer of this agent, accepted or refused in the wallet (INTX-ISSUE-004)
+        this.agent.credentialOffers?.onExchange(data as unknown as CredentialExchangeRecord)
         return
       // ---- flows (plugin events, CC-VSA-005) ----
       case 'didcomm.ayni-flow.state-changed':

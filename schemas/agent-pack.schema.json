@@ -678,6 +678,130 @@
         }
       }
     },
+    "issuance": {
+      "description": "The credentials the agent may issue: a closed list by name, each claim with one source that is never the model (D70, INTX-ISSUE-001).",
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["credential", "claims"],
+        "properties": {
+          "credential": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["credentialDefinitionId"],
+            "properties": {
+              "credentialDefinitionId": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "label": {
+            "description": "How the credential is named to a person, in the menu.",
+            "type": "string",
+            "maxLength": 60
+          },
+          "subjectKind": {
+            "description": "To whom credentials of the schema are issued. Persons only in this version.",
+            "type": "string",
+            "enum": ["person"],
+            "default": "person"
+          },
+          "trigger": {
+            "description": "Who starts the issuance (INTX-ISSUE-008): model, the LLM with issue_credential; request, the person from a menu item; automatic, the agent as soon as every claim resolves.",
+            "type": "string",
+            "enum": ["model", "request", "automatic"],
+            "default": "model"
+          },
+          "roles": {
+            "$ref": "#/$defs/roleList"
+          },
+          "authChallenge": {
+            "description": "The challenge enforced before the issuance (INTX-ISSUE-010).",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type"],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": ["device", "face-match", "document"]
+              },
+              "onChannelUnavailable": {
+                "type": "string",
+                "enum": ["fail", "degrade"],
+                "default": "fail"
+              },
+              "referenceImage": {
+                "type": "string",
+                "enum": ["badge-photo"]
+              },
+              "timeoutSeconds": {
+                "type": "integer",
+                "minimum": 30
+              }
+            }
+          },
+          "evidenceMaxAgeMinutes": {
+            "description": "Evidence older than this is expired for the profile (INTX-ISSUE-013).",
+            "type": "integer",
+            "minimum": 1
+          },
+          "claims": {
+            "description": "Every claim of the credential with its one source (INTX-ISSUE-002). evidence: a stored attribute of the authentication or of a presentations entry; computed: today, now, addDays (days) or constant (value).",
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["from", "entry", "attribute"],
+                  "properties": {
+                    "from": { "const": "evidence" },
+                    "entry": { "type": "string", "minLength": 1 },
+                    "attribute": { "type": "string", "minLength": 1 }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["from", "fn"],
+                  "properties": {
+                    "from": { "const": "computed" },
+                    "fn": { "type": "string", "enum": ["today", "now", "addDays", "constant"] },
+                    "days": { "type": "integer" },
+                    "value": { "type": "string" }
+                  }
+                }
+              ]
+            }
+          },
+          "record": {
+            "description": "What is kept of an issuance beyond its audit fields (INTX-ISSUE-014).",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "storeClaims": {
+                "type": "boolean",
+                "default": false
+              },
+              "retention": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "days": { "type": "integer", "minimum": 0 },
+                  "onExpiry": { "type": "string", "enum": ["archive", "erase"], "default": "erase" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "tools": {
       "description": "Declarative HTTP tools and bundled tools (TOOL-HTTP, D41). Tool credentials are deployment-held (TOOL-ACCESS-001).",
       "type": "object",
@@ -783,6 +907,17 @@
                 }
               },
               "description": "request_presentation: the model asks the wallet for a credential the pack lists; the authentication schema while the connection is unidentified (INTX-PRES-003, IDENT-RES-015)."
+            },
+            "credentialIssuance": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": true
+                }
+              },
+              "description": "credential_requirements and issue_credential (INTX-ISSUE-003/005)."
             },
             "principalPreferences": {
               "type": "object",

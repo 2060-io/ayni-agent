@@ -11,6 +11,7 @@ import { AgUiRoutes } from './channels/agui/routes.js'
 import { SessionStreams } from './channels/agui/streams.js'
 import { DidcommAdapter, MediaLinks } from './channels/didcomm/adapter.js'
 import { registerDidcommCallbacks } from './channels/didcomm/callbacks.js'
+import { CredentialOffers } from './channels/didcomm/credentialOffers.js'
 import { DidcommEvents } from './channels/didcomm/events.js'
 import { IdentityFlow, TrustResolver } from './channels/didcomm/identity.js'
 import { IdentityRequests } from './channels/didcomm/identityRequests.js'
@@ -24,6 +25,7 @@ import { ChallengeService } from './core/challenges.js'
 import { CapabilityRouter } from './core/channel.js'
 import { EvidenceService } from './core/evidence.js'
 import { FlowService } from './core/flows.js'
+import { IssuanceService } from './core/issuance.js'
 import { Orchestrator } from './core/orchestrator.js'
 import { HomeOrganization } from './core/organization.js'
 import { PrincipalService } from './core/principals.js'
@@ -232,6 +234,7 @@ export async function buildAgent(
   registry.add(new HttpToolSource(pack.tools?.http ?? [], pack.tools?.access))
   let orchestratorRef: Orchestrator | undefined
   let identityRequestsRef: IdentityRequests | undefined
+  let issuanceRef: IssuanceService | undefined
   registry.add(
     new BundledToolSource({
       pack,
@@ -239,6 +242,7 @@ export async function buildAgent(
       memory,
       evidence,
       requestIdentity: async (principal, by) => (await identityRequestsRef?.request(principal, by)) ?? 'unavailable',
+      issuance: () => issuanceRef,
       requestPresentation: async (principal, entry) =>
         (await identityRequestsRef?.present(principal, entry, 'model')) ?? 'unavailable',
       media,
@@ -351,11 +355,38 @@ export async function buildAgent(
       isFlowCapable: (connectionId) => peerProfiles.isFlowCapable(connectionId),
       onIdentityPresented: (connectionId, facts) => agent.onIdentityPresented(connectionId, facts),
       present: (connectionId, name, entry, flowMode) => identity.present(connectionId, name, entry, flowMode),
-      record: (principal, input) => evidence.record(principal, input),
+      record: async (principal, input) => {
+        const record = await evidence.record(principal, input)
+        // a credential the agent issues by itself may now be complete (INTX-ISSUE-008)
+        agent.issueAutomatically(principal)
+        return record
+      },
     },
     logger
   )
   agent.identityRequests = identityRequestsRef
+  // credential issuance: the claims come from the sources of the profile, the offer goes to the Principal's wallet
+  const credentialOffers = new CredentialOffers(vsAgent, flows, (c) => peerProfiles.isFlowCapable(c), logger)
+  agent.credentialOffers = credentialOffers
+  issuanceRef = new IssuanceService(
+    pack,
+    evidence,
+    {
+      offer: (input) => credentialOffers.offer(input),
+      challenge: async (principal, session, policy, purpose) => {
+        const { outcome } = await challenges.run({
+          principal,
+          originSession: session,
+          toolName: 'issue_credential',
+          policy,
+          purpose,
+        })
+        return outcome === 'completed' || outcome === 'degraded'
+      },
+    },
+    logger
+  )
+  agent.issuance = issuanceRef
   const didcommEvents = new DidcommEvents(
     agent,
     vsAgent,

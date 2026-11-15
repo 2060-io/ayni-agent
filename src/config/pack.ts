@@ -128,6 +128,11 @@ export function bundledToolNames(pack: AgentPack): string[] {
   const asksOnDemand = Object.values(pack.presentations ?? {}).some((e) => e.request === 'on-demand')
   if (b.requestPresentation?.enabled !== false && (pack.identity.authentication?.length || asksOnDemand))
     names.push('request_presentation')
+  if (b.credentialIssuance?.enabled !== false && Object.keys(pack.issuance ?? {}).length) {
+    names.push('credential_requirements')
+    if (Object.values(pack.issuance ?? {}).some((p) => (p.trigger ?? 'model') === 'model'))
+      names.push('issue_credential')
+  }
   if (b.principalPreferences?.enabled !== false) names.push('principal_preferences')
   if (b.workingMemory?.enabled !== false) names.push('working_memory')
   return names
@@ -193,6 +198,30 @@ export function crossFieldErrors(pack: AgentPack): string[] {
       errors.push('presentations: the name authentication is the entry of identity.authentication')
     errors.push(...evidencePolicyErrors(`presentations.${name}`, entry, entry.attributes))
   }
+  // every claim of an issued credential has a source the agent can resolve (INTX-ISSUE-001/002)
+  for (const [name, profile] of Object.entries(pack.issuance ?? {})) {
+    for (const [claim, source] of Object.entries(profile.claims)) {
+      if (source.from === 'computed') {
+        if (source.fn === 'addDays' && source.days === undefined)
+          errors.push(`INTX-ISSUE-001: issuance.${name}.claims.${claim} addDays needs days`)
+        if (source.fn === 'constant' && source.value === undefined)
+          errors.push(`INTX-ISSUE-001: issuance.${name}.claims.${claim} constant needs a value`)
+        continue
+      }
+      const stored =
+        source.entry === AUTHENTICATION_ENTRY
+          ? identity.authentication?.[0]?.store?.attributes
+          : pack.presentations?.[source.entry]?.store?.attributes
+      const known =
+        source.entry === AUTHENTICATION_ENTRY ? authentication.length > 0 : !!pack.presentations?.[source.entry]
+      if (!known)
+        errors.push(`INTX-ISSUE-001: issuance.${name}.claims.${claim} names the unknown entry ${source.entry}`)
+      else if (!stored?.includes(source.attribute))
+        errors.push(
+          `INTX-ISSUE-001: issuance.${name}.claims.${claim} reads ${source.entry}.${source.attribute}, which that entry does not store`
+        )
+    }
+  }
   // home is the agent's own organization and no other: a pattern cannot give it (IDENT-ROLE-011)
   for (const [i, pattern] of (identity.organizations ?? []).entries()) {
     if ((pattern.relation as string) === 'home') {
@@ -207,6 +236,7 @@ export function crossFieldErrors(pack: AgentPack): string[] {
     }
   }
   for (const [i, rule] of identity.roleRules.entries()) check(rule.roles, `identity.roleRules[${i}]`)
+  for (const [name, profile] of Object.entries(pack.issuance ?? {})) check(profile.roles, `issuance.${name}`)
   for (const [i, p] of (identity.organizations ?? []).entries()) check(p.roles, `identity.organizations[${i}]`)
   for (const [i, o] of (identity.perActorOverrides ?? []).entries()) check(o.roles, `identity.perActorOverrides[${i}]`)
   for (const p of pack.purposes ?? []) check(p.permittedRoles, `purposes.${p.id}.permittedRoles`)
