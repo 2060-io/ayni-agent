@@ -480,4 +480,7 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     VS Agent without the module must not declare it; it is asked again every minute while the answer is no.
     Deferred: what a service may open (`a2a`, ayni-spec O20), so a service gets `open: []` and no session
     grant; the client side of the protocol, where this agent would act on the status another service sends.
-    Entry 49 is the wait of the session grant handler, in its own pull request.
+    There is no entry 49. It was a wait in the session grant handler, for a request that arrived while the
+    peer was being identified (pull request #73, ayni-spec CHAN-BIND-016). It was closed without being merged
+    and the requirement withdrawn: with the status a wallet no longer asks early, the wait did not cover an
+    identification that takes minutes, and two answers to one problem would hide a fault in this one.
