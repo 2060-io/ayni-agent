@@ -94,7 +94,11 @@ export type ComputedFunction = (typeof COMPUTED_FUNCTIONS)[number]
 
 /** A credential the agent may issue, and the source of each of its claims (D70, INTX-ISSUE-001). */
 export interface IssuanceProfile {
-  credential: { credentialDefinitionId: string }
+  /**
+   * The credential issued: a credential definition of this agent, or the schema of the credential in its
+   * ecosystem, for which the agent finds or creates its definition (INTX-ISSUE-017). One of the two.
+   */
+  credential: { credentialDefinitionId?: string; jsonSchemaCredentialId?: string }
   /** how the credential is named to a person, in the menu */
   label?: string
   /** to whom it is issued; persons only in this version */

@@ -200,6 +200,11 @@ export function crossFieldErrors(pack: AgentPack): string[] {
   }
   // every claim of an issued credential has a source the agent can resolve (INTX-ISSUE-001/002)
   for (const [name, profile] of Object.entries(pack.issuance ?? {})) {
+    const named = [profile.credential.credentialDefinitionId, profile.credential.jsonSchemaCredentialId].filter(Boolean)
+    if (named.length !== 1)
+      errors.push(
+        `INTX-ISSUE-017: issuance.${name}.credential names one of credentialDefinitionId and jsonSchemaCredentialId`
+      )
     for (const [claim, source] of Object.entries(profile.claims)) {
       if (source.from === 'computed') {
         if (!COMPUTED_FUNCTIONS.includes(source.fn))

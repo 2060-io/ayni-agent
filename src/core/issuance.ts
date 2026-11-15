@@ -44,6 +44,7 @@ export type IssuanceOutcome =
   | 'challenge-failed'
   | 'declined'
   | 'unavailable'
+  | 'not-ready'
   | 'failed'
 
 export interface IssuanceDeps {
@@ -61,6 +62,11 @@ export interface IssuanceDeps {
     policy: NonNullable<ActionPolicy['authChallenge']>,
     purpose: string
   ): Promise<boolean>
+  /**
+   * the credential definition of this agent for a schema, found or created; undefined while it cannot be
+   * established (INTX-ISSUE-017)
+   */
+  definitionFor?(jsonSchemaCredentialId: string): Promise<string | undefined>
 }
 
 interface Resolution {
@@ -168,6 +174,9 @@ export class IssuanceService {
       if (requirements.state === 'held') return { outcome: 'held', requirements }
       if (requirements.state !== 'ready') return { outcome: 'incomplete', requirements }
       const label = profile.label ?? name
+      // a profile that names a schema issues under the definition of this agent for it, or not at all
+      const credentialDefinitionId = await this.definitionOf(profile)
+      if (!credentialDefinitionId) return { outcome: 'not-ready' }
       if (profile.authChallenge && !(await this.deps.challenge(principal, session, profile.authChallenge, label)))
         return { outcome: 'challenge-failed' }
       // the claims are resolved now, by the code, from the sources the profile names and nothing else
@@ -183,7 +192,7 @@ export class IssuanceService {
       }
       const offer = await this.deps.offer({
         connectionId,
-        credentialDefinitionId: profile.credential.credentialDefinitionId,
+        credentialDefinitionId,
         claims,
         title: label,
       })
@@ -194,7 +203,7 @@ export class IssuanceService {
         {
           kind: 'issuance',
           entry: issuanceEntry(name),
-          credentialDefinitionId: profile.credential.credentialDefinitionId,
+          credentialDefinitionId,
           values: claims,
           requestRef: offer.exchangeId,
           connectionRef: connectionId,
@@ -250,6 +259,23 @@ export class IssuanceService {
     return { status: 'available', value, evidenceRef: record.id }
   }
 
+  /** The credential definition a profile issues under: the one it names, or the agent's for the schema it names. */
+  private async definitionOf(profile: IssuanceProfile): Promise<string | undefined> {
+    const { credentialDefinitionId, jsonSchemaCredentialId } = profile.credential
+    if (credentialDefinitionId) return credentialDefinitionId
+    if (!jsonSchemaCredentialId || !this.deps.definitionFor) return undefined
+    return this.deps.definitionFor(jsonSchemaCredentialId)
+  }
+
+  /** Establishes the definitions of the profiles that name a schema, ahead of the first issuance. */
+  public async prepare(): Promise<void> {
+    for (const [name, profile] of Object.entries(this.pack.issuance ?? {})) {
+      if (profile.credential.credentialDefinitionId) continue
+      const id = await this.definitionOf(profile)
+      this.logger.info({ profile: name, credentialDefinitionId: id ?? null }, 'issuance profile by schema')
+    }
+  }
+
   private tooOld(record: EvidenceRecord, profile: IssuanceProfile): boolean {
     if (record.expiresAt && record.expiresAt <= nowIso()) return true
     const minutes = profile.evidenceMaxAgeMinutes
@@ -285,6 +311,8 @@ export function issuanceOutcomeForModel(outcome: IssuanceOutcome, requirements?:
       return 'not issued: the offer was declined or left unanswered in the wallet.'
     case 'unavailable':
       return 'not issued: the wallet cannot be reached right now, or an issuance is already under way.'
+    case 'not-ready':
+      return 'not issued: this agent cannot issue this credential yet. It is not something the person can fix; they can try again later.'
     case 'failed':
       return 'not issued: the offer could not be sent.'
     default:

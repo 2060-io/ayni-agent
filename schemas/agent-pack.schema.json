@@ -690,11 +690,17 @@
         "required": ["credential", "claims"],
         "properties": {
           "credential": {
+            "description": "The credential issued, named by a credential definition of this agent or by the schema of the credential in its ecosystem: the agent then uses the definition its DIDComm agent holds for that schema and creates it when there is none (INTX-ISSUE-017).",
             "type": "object",
             "additionalProperties": false,
-            "required": ["credentialDefinitionId"],
+            "minProperties": 1,
+            "maxProperties": 1,
             "properties": {
               "credentialDefinitionId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "jsonSchemaCredentialId": {
                 "type": "string",
                 "minLength": 1
               }

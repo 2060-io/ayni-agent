@@ -447,3 +447,15 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     `ENTRY_ENCRYPTION_KEY` changes the numbers. Not solved here: a person who received a badge as an
     unidentified Principal and then authenticates with it is another Principal; a pack that issues its own
     authentication credential offers the profile to the roles of the unidentified only.
+
+48. **A profile names its credential by definition or by schema** (2026-11-15, Fabrice agreed; ayni-spec
+    INTX-ISSUE-017). A credential definition exists only once the VS Agent created it, and its identifier
+    holds the agent's DID: a pack that names it serves one wallet. `issuance.<name>.credential` takes
+    `jsonSchemaCredentialId` as an alternative, exactly one of the two (schema and cross-field rule).
+    `CredentialDefinitions` (`src/channels/didcomm/credentialDefinitions.ts`) lists the definitions of the
+    VS Agent (`GET /v2/anoncreds/credential-definitions`, every page), takes the one whose
+    `relatedJsonSchemaCredentialId` is the schema, else creates it (`POST`, a 409 means one exists by now).
+    One look-up at a time per schema, so two callers never create two; the result is kept for the life of
+    the process, a failure is not. `IssuanceService.prepare()` runs at start without blocking it; `issue`
+    resolves again when needed and answers `not-ready`, a new outcome, when no definition can be had. The
+    creation needs no entry on the registry; the offer does, and the VS Agent checks it then.

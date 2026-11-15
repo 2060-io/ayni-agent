@@ -260,6 +260,14 @@ issuance:
     record: { storeClaims: false, retention: { days: 365, onExpiry: erase } }
 ```
 
+- **The credential, by definition or by schema.** `credential` names one of the two.
+  `credentialDefinitionId` is a credential definition of this agent. `jsonSchemaCredentialId` is the schema
+  of the credential in its ecosystem, as a presentation entry names it: the agent then issues under the
+  definition its VS Agent holds for that schema, and creates it at start when there is none. The identifier
+  of a definition holds the DID of the agent and changes with every new wallet, so a pack that names the
+  schema serves any deployment. While the definition cannot be established (the VS Agent out of reach, the
+  ecosystem not publishing its AnonCreds schema yet) nothing is issued under the profile, the model is told
+  so, and the agent looks again at the next issuance.
 - **Sources.** `evidence` reads an attribute of a verified presentation: the `authentication`, or an entry
   of `presentations`. The attribute must be among those the entry **stores**, or the pack is refused: what
   is not kept cannot be issued from. `computed` is `today`, `now`, `addDays` (with `days`), `constant`

@@ -11,6 +11,7 @@ import { AgUiRoutes } from './channels/agui/routes.js'
 import { SessionStreams } from './channels/agui/streams.js'
 import { DidcommAdapter, MediaLinks } from './channels/didcomm/adapter.js'
 import { registerDidcommCallbacks } from './channels/didcomm/callbacks.js'
+import { CredentialDefinitions } from './channels/didcomm/credentialDefinitions.js'
 import { CredentialOffers } from './channels/didcomm/credentialOffers.js'
 import { DidcommEvents } from './channels/didcomm/events.js'
 import { IdentityFlow, TrustResolver } from './channels/didcomm/identity.js'
@@ -368,11 +369,13 @@ export async function buildAgent(
   // credential issuance: the claims come from the sources of the profile, the offer goes to the Principal's wallet
   const credentialOffers = new CredentialOffers(vsAgent, flows, (c) => peerProfiles.isFlowCapable(c), logger)
   agent.credentialOffers = credentialOffers
+  const credentialDefinitions = new CredentialDefinitions(vsAgent, logger)
   issuanceRef = new IssuanceService(
     pack,
     evidence,
     {
       offer: (input) => credentialOffers.offer(input),
+      definitionFor: (schema) => credentialDefinitions.forSchema(schema),
       challenge: async (principal, session, policy, purpose) => {
         const { outcome } = await challenges.run({
           principal,
@@ -388,6 +391,9 @@ export async function buildAgent(
     subjectIdKey(env.entryEncryptionKey)
   )
   agent.issuance = issuanceRef
+  // the definitions of the profiles that name a schema: found or created now, and again at the first issuance
+  // when the DIDComm agent was out of reach; the agent serves meanwhile (INTX-ISSUE-017)
+  void issuanceRef.prepare().catch((err) => logger.warn({ err }, 'issuance profiles not prepared'))
   const didcommEvents = new DidcommEvents(
     agent,
     vsAgent,
