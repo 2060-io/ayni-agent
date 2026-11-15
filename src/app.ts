@@ -239,6 +239,8 @@ export async function buildAgent(
       memory,
       evidence,
       requestIdentity: async (principal, by) => (await identityRequestsRef?.request(principal, by)) ?? 'unavailable',
+      requestPresentation: async (principal, entry) =>
+        (await identityRequestsRef?.present(principal, entry, 'model')) ?? 'unavailable',
       media,
       rag,
       stats,
@@ -348,6 +350,8 @@ export async function buildAgent(
         identity.identify(connectionId, peerId, flowMode, userAgentVerified),
       isFlowCapable: (connectionId) => peerProfiles.isFlowCapable(connectionId),
       onIdentityPresented: (connectionId, facts) => agent.onIdentityPresented(connectionId, facts),
+      present: (connectionId, name, entry, flowMode) => identity.present(connectionId, name, entry, flowMode),
+      record: (principal, input) => evidence.record(principal, input),
     },
     logger
   )

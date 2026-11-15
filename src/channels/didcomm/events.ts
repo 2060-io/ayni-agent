@@ -181,9 +181,18 @@ export class DidcommEvents {
           await this.client.deleteConnection(record.id).catch(() => undefined)
           return
         }
-        await this.agent.onPeerConnected(facts, record.id, clientOfConnection(record.theirLabel), {
-          welcome: !flowMode,
-        })
+        const { principal } = await this.agent.onPeerConnected(
+          facts,
+          record.id,
+          clientOfConnection(record.theirLabel),
+          {
+            welcome: !flowMode,
+          }
+        )
+        // the catalog entries asked on connect follow, without holding the connection back (INTX-PRES-002)
+        void this.agent.identityRequests
+          ?.onConnect(principal)
+          .catch((err) => this.logger.warn({ err, connectionId: record.id }, 'presentations on connect failed'))
         // a connection created from a binding invitation: ask the confirmation question (CHAN-BIND-009)
         if (record.outOfBandId) await this.onInvitationAccepted(record.outOfBandId, '', record.id)
       } finally {

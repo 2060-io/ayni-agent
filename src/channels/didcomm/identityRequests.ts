@@ -5,7 +5,8 @@
  * IDENT-RES-013/014. The agent does not insist: one request at a time on a connection, and after a request
  * that was declined or left unanswered the model waits; the person's own request is always served.
  */
-import type { AgentPack } from '../../config/packTypes.js'
+import { type AgentPack, connectionTypeOf, type PresentationEntry } from '../../config/packTypes.js'
+import type { EvidenceInput } from '../../core/evidence.js'
 import type { VerifiedFacts } from '../../core/principals.js'
 import type { Principal } from '../../core/types.js'
 import type { Logger } from '../../util/logger.js'
@@ -32,7 +33,25 @@ export interface IdentityRequestDeps {
   isFlowCapable(connectionId: string): Promise<boolean>
   /** binds the connection by the rules of D66 */
   onIdentityPresented(connectionId: string, facts: VerifiedFacts): Promise<{ outcome: string }>
+  /** asks the wallet for the credential of a catalog entry and returns what was verified */
+  present?(
+    connectionId: string,
+    name: string,
+    entry: PresentationEntry,
+    flowMode: boolean
+  ): Promise<EvidenceInput | undefined>
+  /** records what was verified as evidence of the Principal */
+  record?(principal: Principal, evidence: EvidenceInput): Promise<unknown>
 }
+
+/** What a request for a catalog entry ends in. A status, never a value (D68, INTX-PRES-005/006). */
+export type PresentationRequestOutcome =
+  | 'verified'
+  | 'not-presented'
+  | 'pending'
+  | 'wait'
+  | 'unavailable'
+  | 'not-offered'
 
 export class IdentityRequests {
   private readonly pending = new Set<string>()
@@ -74,6 +93,49 @@ export class IdentityRequests {
       this.pending.delete(connectionId)
     }
   }
+  /**
+   * A catalog entry asked on demand (D69, INTX-PRES-003..007): of a peer of the subject kind of its schema,
+   * on the connection of the Principal. What comes back is evidence of that Principal; it binds nobody.
+   */
+  public async present(
+    principal: Principal,
+    name: string,
+    by: 'model' | 'person' | 'connect'
+  ): Promise<PresentationRequestOutcome> {
+    const entry = this.pack.presentations?.[name]
+    if (!entry || !this.deps.present || !this.deps.record) return 'not-offered'
+    if (principal.connectionType !== connectionTypeOf(entry.subjectKind)) return 'not-offered'
+    if (by === 'model' && entry.request !== 'on-demand') return 'not-offered'
+    const connectionId = principal.capabilityChannelId
+    if (!connectionId) return 'unavailable'
+    if (this.pending.has(connectionId)) return 'pending'
+    const key = `${connectionId}|${name}`
+    const since = this.unanswered.get(key)
+    if (by === 'model' && since !== undefined && Date.now() - since < this.waitMs) return 'wait'
+    this.pending.add(connectionId)
+    try {
+      const flowMode = await this.deps.isFlowCapable(connectionId)
+      const evidence = await this.deps.present(connectionId, name, entry, flowMode)
+      if (!evidence) {
+        this.unanswered.set(key, Date.now())
+        return 'not-presented'
+      }
+      this.unanswered.delete(key)
+      await this.deps.record(principal, { ...evidence, connectionRef: connectionId })
+      return 'verified'
+    } finally {
+      this.pending.delete(connectionId)
+    }
+  }
+
+  /** The entries asked when the capability channel is established, one after the other (INTX-PRES-002). */
+  public async onConnect(principal: Principal): Promise<void> {
+    for (const [name, entry] of Object.entries(this.pack.presentations ?? {})) {
+      if (entry.request !== 'on-connect') continue
+      const outcome = await this.present(principal, name, 'connect')
+      this.logger.info({ principalId: principal.id, entry: name, outcome }, 'presentation asked on connect')
+    }
+  }
 }
 
 /** What the model is told: a status and what to do with it, never a value (D68, INTX-PRES-005/006). */
@@ -95,6 +157,24 @@ export function identityOutcomeForModel(outcome: IdentityRequestOutcome): string
       return 'not asked: the wallet of this person cannot be reached right now.'
     default:
       return 'not asked: this agent asks for no identity credential.'
+  }
+}
+
+/** What the model is told of a request for a catalog entry. */
+export function presentationOutcomeForModel(outcome: PresentationRequestOutcome): string {
+  switch (outcome) {
+    case 'verified':
+      return 'verified: the credential was presented and verified. principal_credentials tells what you may read of it.'
+    case 'not-presented':
+      return 'not presented: the request was declined or left unanswered. This says nothing about whether the credential is held. Do not ask again unless you are told they are ready.'
+    case 'wait':
+      return 'not asked: a request for it was declined or left unanswered a moment ago.'
+    case 'pending':
+      return 'not asked: a request is already waiting for an answer.'
+    case 'unavailable':
+      return 'not asked: the wallet cannot be reached right now.'
+    default:
+      return 'not asked: this credential is not one this agent asks of this peer.'
   }
 }
 

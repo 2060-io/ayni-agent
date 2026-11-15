@@ -389,7 +389,7 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     document read, whose event carries the raw data groups and no parsed field, so its values need the
     DIDComm agent to send them with the outcome of its verification; an interface for the auditor
     (`EvidenceService.audit` is ready for it); evidence of catalog entries, which come with the request tool.
-43. **The authentication is asked on connect or on demand, and who enters unidentified follows from it**
+44. **The authentication is asked on connect or on demand, and who enters unidentified follows from it**
     (2026-11-14, Fabrice: "this should be configurable in agent pack: on connection, on demand", then on the
     separate setting: "it could be implicit from authentication configuration", "and that eliminate 5",
     "Agree to all. Go."; ayni-spec D53, D65, D66 amended; IDENT-RES-007/010/013..017). `identity.authentication`
@@ -406,3 +406,16 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     are not merged); an identified one accepts the same Principal only, another identity being refused with
     nothing kept. Known limit: the entries a turn in progress writes after the upgrade still carry the
     visitor's Principal; they are session-private, so the conversation reads them all the same.
+45. **The presentation catalog: the agent asks only for what the pack lists** (2026-11-14, Fabrice: the model
+    may "request one later and maybe choose in a list of presentable credentials, based on the context";
+    ayni-spec D69; INTX-PRES-001..008). `presentations` in the pack names each credential the agent may ask
+    for, with its subject kind, when it is asked (`on-connect`, by the code after the connection, or
+    `on-demand`), a purpose, and the three lists of evidence. `request_presentation` takes the name of an
+    entry: its list holds `authentication` for an unidentified person and the on-demand entries, and the
+    tool refuses an entry that is not of the peer's kind. `IdentityFlow.present` asks one credential by its
+    schema with the purpose as the title of the flow, reads the issuer from the presentation record and its
+    organization from trust resolution; `IdentityRequests.present` records the result as evidence of the
+    Principal of the connection, which binds nobody. The no-insisting rule of the authentication applies per
+    entry. Known limits: a wallet without flows is not shown the purpose (the present-proof request of the
+    DIDComm agent carries no comment); asking a service for a credential follows the same path and was not
+    tried against a real service.

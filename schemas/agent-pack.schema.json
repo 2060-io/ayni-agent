@@ -620,6 +620,64 @@
         }
       }
     },
+    "presentations": {
+      "description": "The credentials the agent may ask for, beyond the one that authenticates (D69, INTX-PRES-001): a closed list by name. What comes back is evidence attached to the Principal of the connection; it never binds one.",
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_-]*$",
+        "not": { "const": "authentication" }
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["credential", "request", "purpose"],
+        "properties": {
+          "credential": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["jsonSchemaCredentialId"],
+            "properties": {
+              "jsonSchemaCredentialId": {
+                "type": "string",
+                "format": "uri"
+              }
+            }
+          },
+          "subjectKind": {
+            "description": "To whom credentials of the schema are issued; the entry is asked of such a peer only (INTX-PRES-007). Declared here under Verifiable Trust v4.",
+            "type": "string",
+            "enum": ["person", "service"],
+            "default": "person"
+          },
+          "request": {
+            "description": "on-connect: asked by the code when the connection is established; on-demand: asked when the model names the entry with request_presentation.",
+            "type": "string",
+            "enum": ["on-connect", "on-demand"]
+          },
+          "purpose": {
+            "description": "Why the credential is asked, shown before the answer (INTX-PRES-008).",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "attributes": {
+            "description": "The attributes asked of the credential; every attribute of the schema when omitted.",
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "store": {
+            "$ref": "#/$defs/evidenceStore"
+          },
+          "modelVisible": {
+            "$ref": "#/$defs/evidenceModelVisible"
+          }
+        }
+      }
+    },
     "tools": {
       "description": "Declarative HTTP tools and bundled tools (TOOL-HTTP, D41). Tool credentials are deployment-held (TOOL-ACCESS-001).",
       "type": "object",

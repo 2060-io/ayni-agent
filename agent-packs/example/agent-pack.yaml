@@ -140,6 +140,20 @@ rag:
       visibility: partner-shared
       refreshHours: 24
 
+# The other credentials this agent may ask for: a closed list by name (D69). What comes back is evidence of the
+# person, kept and shown to the model as each entry says; it never changes who they are.
+presentations:
+  driving_licence:
+    credential: { jsonSchemaCredentialId: "${LICENCE_SCHEMA_ID:-https://transport.example/vt/schemas-licence-jsc.json}" }
+    subjectKind: person
+    request: on-demand                 # asked when the model names it with request_presentation
+    purpose: Check that you may drive the vehicle class of this shipment
+    attributes: [categories, validUntil, licenceNumber]
+    store:
+      attributes: [categories, validUntil]
+      retention: { days: 30, onExpiry: erase }
+    modelVisible: [categories, validUntil]
+
 tools:
   http:
     - name: track_shipment

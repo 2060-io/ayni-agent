@@ -1,8 +1,14 @@
 /** Bundled tools enabled through configuration (TOOL-HTTP-002, INTX-CRED-001, INTX-PREF-001, MEM-TIER-003, MEM-RAG-004). */
 
-import { type IdentityRequestOutcome, identityOutcomeForModel } from '../channels/didcomm/identityRequests.js'
+import {
+  type IdentityRequestOutcome,
+  identityOutcomeForModel,
+  type PresentationRequestOutcome,
+  presentationOutcomeForModel,
+} from '../channels/didcomm/identityRequests.js'
+import { AUTHENTICATION_ENTRY } from '../config/pack.js'
 import type { AgentPack, ToolAccess } from '../config/packTypes.js'
-import { featuresOf } from '../config/packTypes.js'
+import { connectionTypeOf, featuresOf } from '../config/packTypes.js'
 import type { EvidenceService } from '../core/evidence.js'
 import type { Principal } from '../core/types.js'
 import type { MediaService } from '../media/service.js'
@@ -20,6 +26,8 @@ export interface BundledDeps {
   evidence: EvidenceService
   /** asks the wallet of the Principal for the authentication credential, on demand (IDENT-RES-015) */
   requestIdentity?: (principal: Principal, by: 'model' | 'person') => Promise<IdentityRequestOutcome>
+  /** asks the wallet of the Principal for the credential of a catalog entry (INTX-PRES-003) */
+  requestPresentation?: (principal: Principal, entry: string) => Promise<PresentationRequestOutcome>
   media: MediaService
   rag?: RagService
   stats: StatsSink
@@ -60,27 +68,52 @@ export class BundledToolSource implements ToolSource {
     }
 
     // the model asks the wallet for a credential by naming an entry of the pack, and nothing else: no schema,
-    // no attribute, no recipient (D68, D69, INTX-PRES-003). The authentication entry exists for an
-    // unidentified person only (IDENT-RES-015).
-    if (pack.identity.authentication?.length && bundled.requestPresentation?.enabled !== false) {
+    // no attribute, no recipient (D68, D69, INTX-PRES-003). The authentication entry is for an unidentified
+    // person only (IDENT-RES-015); a catalog entry is for a peer of the subject kind of its schema.
+    const onDemand = Object.entries(pack.presentations ?? {}).filter(([, e]) => e.request === 'on-demand')
+    const authenticates = !!pack.identity.authentication?.length
+    if ((authenticates || onDemand.length) && bundled.requestPresentation?.enabled !== false) {
+      const mayIdentify = (principal: Principal) =>
+        authenticates && principal.connectionType === 'verifiable-user-agent' && !principal.identityCredentialRef
+      const offered = (principal: Principal) =>
+        onDemand.filter(([, e]) => connectionTypeOf(e.subjectKind) === principal.connectionType)
       specs.push({
         key: 'bundled:request_presentation',
         name: 'request_presentation',
-        description:
-          'Asks the wallet of the person for a credential this agent accepts. entry "authentication": the credential that identifies them, which gives them their roles and their own conversations; ask when they want to do something that needs it, or when they say they have it. The person answers in their wallet, which may take a minute. You get a status, never the content of the credential.',
+        description: [
+          'Asks the wallet of the peer for a credential this agent accepts, by the name of its entry. The answer is given in the wallet, which may take a minute. You get a status, never the content of the credential.',
+          ...(authenticates
+            ? [
+                'authentication: the credential that identifies the person, which gives them their roles and their own conversations; only while they are not identified. Ask when they want something that needs it, or when they say they have it.',
+              ]
+            : []),
+          ...onDemand.map(([name, e]) => `${name}: ${e.purpose}`),
+        ].join('\n'),
         parameters: {
           type: 'object',
           required: ['entry'],
           additionalProperties: false,
-          properties: { entry: { type: 'string', enum: ['authentication'] } },
+          properties: {
+            entry: {
+              type: 'string',
+              enum: [...(authenticates ? [AUTHENTICATION_ENTRY] : []), ...onDemand.map(([name]) => name)],
+            },
+          },
         },
         access: ALWAYS_ALLOWED,
-        when: (principal) => principal.connectionType === 'verifiable-user-agent' && !principal.identityCredentialRef,
+        when: (principal) => mayIdentify(principal) || offered(principal).length > 0,
         stepLabel: 'Waiting for your wallet',
         invoke: async (args, ctx) => {
-          if (args.entry !== 'authentication') return { content: 'unknown entry', isError: true }
-          const outcome = (await this.deps.requestIdentity?.(ctx.principal, 'model')) ?? 'unavailable'
-          return { content: identityOutcomeForModel(outcome), data: { outcome } }
+          const entry = String(args.entry ?? '')
+          if (entry === AUTHENTICATION_ENTRY) {
+            if (!authenticates) return { content: presentationOutcomeForModel('not-offered') }
+            const outcome = (await this.deps.requestIdentity?.(ctx.principal, 'model')) ?? 'unavailable'
+            return { content: identityOutcomeForModel(outcome), data: { entry, outcome } }
+          }
+          const outcome = offered(ctx.principal).some(([name]) => name === entry)
+            ? ((await this.deps.requestPresentation?.(ctx.principal, entry)) ?? 'unavailable')
+            : 'not-offered'
+          return { content: presentationOutcomeForModel(outcome), data: { entry, outcome } }
         },
       })
     }

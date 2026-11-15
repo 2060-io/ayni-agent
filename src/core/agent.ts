@@ -107,7 +107,7 @@ export class AyniAgent {
   public readonly approvals: ApprovalService
   public readonly flows: FlowService
   /** the authentication asked on demand; set once the DIDComm side is wired (IDENT-RES-015) */
-  public identityRequests?: Pick<IdentityRequests, 'request'>
+  public identityRequests?: Pick<IdentityRequests, 'request' | 'present' | 'onConnect'>
   /** the agent's own DID, read from the DIDComm agent at start (IDENT-SELF-001) */
   public did = 'did:unknown'
   public readonly challenges: ChallengeService

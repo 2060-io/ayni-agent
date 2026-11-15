@@ -6,8 +6,8 @@
  * wallet each request is a flow (`identify-ua` for the user-agent credential, `present` for the badge,
  * D54); a holder that answers `unsupported-kind` is treated as having no such credential (IDENT-RES-003).
  */
-import type { AgentPack, AuthenticationEntry, CredentialRef } from '../../config/packTypes.js'
-import { AUTHENTICATION_ENTRY } from '../../core/evidence.js'
+import type { AgentPack, AuthenticationEntry, CredentialRef, PresentationEntry } from '../../config/packTypes.js'
+import { AUTHENTICATION_ENTRY, type EvidenceInput } from '../../core/evidence.js'
 import type { FlowService } from '../../core/flows.js'
 import { type OrganizationFacts, organizationFrom } from '../../core/organization.js'
 import type { LivenessChecker, VerifiedFacts } from '../../core/principals.js'
@@ -292,6 +292,57 @@ export class IdentityFlow {
       return undefined
     }
     return this.factsFromIdentityCredential(peerId, record, authentication, userAgentVerified)
+  }
+
+  /**
+   * Asks the wallet of a connection for the credential of a catalog entry, as one credential by its ecosystem
+   * schema, and returns what was verified, for the evidence record, or undefined when nothing verified came
+   * back (D69, INTX-PRES-005). The issuer is the one the DIDComm agent verified in the proof (IDENT-RES-008).
+   */
+  public async present(
+    connectionId: string,
+    name: string,
+    entry: PresentationEntry,
+    flowMode: boolean
+  ): Promise<EvidenceInput | undefined> {
+    const record = await this.request(
+      connectionId,
+      [
+        {
+          jsonSchemaCredentialId: entry.credential.jsonSchemaCredentialId,
+          ...(entry.attributes ? { attributes: entry.attributes } : {}),
+        },
+      ],
+      undefined,
+      // the purpose of the entry is what the person reads before answering (INTX-PRES-008)
+      flowMode ? { kind: 'present', title: entry.purpose } : undefined
+    ).catch((err) => {
+      this.logger.warn({ err, connectionId, entry: name }, 'presentation request failed')
+      return undefined
+    })
+    if (!record?.verified) return undefined
+    const presented = record.credentials?.[0]
+    if (!presented?.issuerDid) {
+      this.logger.warn({ entry: name }, 'the presentation record reports no issuer: not evidence (IDENT-RES-008)')
+      return undefined
+    }
+    let organization: OrganizationFacts | null = null
+    try {
+      organization = this.resolver.organizationOf(await this.resolver.resolve(presented.issuerDid))
+    } catch (error) {
+      this.logger.warn({ err: error, issuerDid: presented.issuerDid }, 'issuer trust resolution failed')
+    }
+    return {
+      kind: 'presentation',
+      entry: name,
+      schema: entry.credential.jsonSchemaCredentialId,
+      credentialDefinitionId: presented.credentialDefinitionId,
+      issuerDid: presented.issuerDid,
+      issuerOrganization: organization ? { key: organization.key, name: organization.name } : undefined,
+      values: Object.fromEntries((presented.claims ?? []).map((c) => [c.name, String(c.value)])),
+      unrevealed: [...(presented.unrevealed ?? [])],
+      requestRef: record.proofExchangeId,
+    }
   }
 
   /**

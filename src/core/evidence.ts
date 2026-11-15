@@ -5,6 +5,7 @@
  * the retention the pack gives, then archived or erased. The model reads the attributes the pack makes
  * visible, and nothing else.
  */
+import { AUTHENTICATION_ENTRY } from '../config/pack.js'
 import type { AgentPack, EvidencePolicy } from '../config/packTypes.js'
 import { type EntryCrypto, openJson, sealJson } from '../memory/crypto.js'
 import type { Store, StoredEvidence } from '../store/types.js'
@@ -12,8 +13,7 @@ import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import type { EvidenceRecord, Principal } from './types.js'
 
-/** The entry of the credential that authenticates a person (D65). */
-export const AUTHENTICATION_ENTRY = 'authentication'
+export { AUTHENTICATION_ENTRY }
 
 /** The attribute names under which a credential may carry the name of the person. */
 const NAME_ATTRIBUTES = ['userName', 'name']
@@ -24,7 +24,8 @@ export function evidencePolicyOf(pack: AgentPack, entry: string): EvidencePolicy
     const authentication = pack.identity.authentication?.[0]
     return { store: authentication?.store, modelVisible: authentication?.modelVisible }
   }
-  return {}
+  const catalog = pack.presentations?.[entry]
+  return catalog ? { store: catalog.store, modelVisible: catalog.modelVisible } : {}
 }
 
 const pick = (values: Record<string, string>, names: string[]): Record<string, string> =>

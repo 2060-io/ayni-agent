@@ -30,13 +30,14 @@ directory.
 |---------|----------|---------------|------|
 | `schemaVersion` | yes | `"3.x"`; the loader refuses another major | CORE-PACK-004 |
 | `metadata` | yes | id, display name, description, tags | |
-| `identity` | yes | home backing identity, user-agent gate, recognized backing identities, roles, role rules, per-actor overrides | D30, D34, D37, D38 |
+| `identity` | yes | the agent's DID, user-agent gate, the authentication schema, organization patterns, roles, role rules, per-actor overrides | D30, D34, D37, D38 |
 | `language` | yes | the one agent language | D21 |
 | `persona` | yes | system prompt, greeting, contextual menu | D46, CORE-PROMPT |
 | `llm` | yes | model provider and model | LLM-PROV |
 | `embeddings` | yes | embeddings provider and model | LLM-EMB |
 | `memory` | | context window, working memory, summarization, retrieval | D9, D10, D24, D25 |
 | `rag` | | corpus sources with visibility | D42, MEM-RAG |
+| `presentations` | | the credentials the agent may ask for, with what is kept and what the model reads | D69, INTX-PRES, PRIV-EVID |
 | `tools` | | declarative HTTP tools, bundled tools, their access policy | TOOL-HTTP, TOOL-ACCESS |
 | `mcp` | | MCP servers and per-server tool access | TOOL-MCP, D41 |
 | `purposes` | | governance list for elevation | D14, D15 |
@@ -201,6 +202,40 @@ the agent never depends on it. Embeddings are configured independently and may u
 - `rag.sources` are agent-level knowledge, chunked and embedded. Each source declares a `visibility`
   (`public` default, `organization-shared`, `partner-shared`) and is retrieved through the same scope
   predicate as memory (MEM-RAG-005). `url` sources may be refreshed on an interval.
+
+## presentations
+
+The credentials the agent may ask for beyond the one that authenticates: a closed list, each entry under a
+name (D69). The agent asks for nothing else.
+
+```yaml
+presentations:
+  diploma:
+    credential: { jsonSchemaCredentialId: https://.../vt/schemas-diploma-jsc.json }
+    subjectKind: person              # person (default) or service
+    request: on-demand               # or on-connect
+    purpose: Check your degree for the application
+    attributes: [degree, institution, graduationDate]
+    store: { attributes: [degree, institution], retention: { days: 365, onExpiry: erase } }
+    modelVisible: [degree]
+```
+
+- `request: on-connect` entries are asked by the code when the connection is established, one after the
+  other, after the authentication when it is asked on connect. `on-demand` entries are asked when the model
+  calls `request_presentation` with the name of the entry. The tool takes the name and nothing else: the
+  schema, the attributes, the purpose and the recipient are the entry's and the connection's.
+- An entry is asked only of a peer of the `subjectKind` of its schema: a person behind a user agent, or a
+  service. Under Verifiable Trust v4 the pack declares it; under v5 the schema does.
+- `purpose` is what the person reads in the wallet before answering.
+- What comes back is **evidence** of the Principal of the connection, kept and shown to the model by the
+  three lists `attributes`, `store` and `modelVisible`, exactly as for `identity.authentication`. It never
+  binds a Principal: only the authentication does. The issuer is the one the DIDComm agent verified in the
+  proof; a presentation whose record reports no issuer is not evidence.
+- The model gets a status: `verified`, or `not presented` when the request was declined or left
+  unanswered, which says nothing about whether the credential is held. After that the model waits ten
+  minutes before the same entry can be asked again; one request is pending on a connection at a time.
+- The name `authentication` is reserved: it is the entry of `identity.authentication`, which the same tool
+  offers to an unidentified person.
 
 ## tools, mcp and access tiers
 
