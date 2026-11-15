@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.1](https://github.com/2060-io/ayni-agent/compare/v0.19.0...v0.19.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* the agent speaks again after a wait, knows how an offer ended, and serves in flow mode a peer that uses flows ([#77](https://github.com/2060-io/ayni-agent/issues/77)) ([04a8c1d](https://github.com/2060-io/ayni-agent/commit/04a8c1d0f80cfbf0a8437a7db5124e8bf920090f))
+
 ## [0.19.0](https://github.com/2060-io/ayni-agent/compare/v0.18.0...v0.19.0) (2026-11-15)
 
 
