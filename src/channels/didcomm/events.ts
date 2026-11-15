@@ -37,6 +37,8 @@ const LINK_WINDOW_MS = 10 * 60_000
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 /** How long the serving-mode decision waits for a disclosure the DIDComm agent announced (D54). */
 export const DISCLOSURE_WAIT_MS = 3_000
+/** how long a session grant request waits for the identification of its connection (CHAN-BIND-016) */
+export const PRINCIPAL_WAIT_MS = 30_000
 
 /** The connection event as the DIDComm agent forwards it: state changes and, in state `updated`, disclosed features. */
 type ConnectionEvent = ConnectionRecord & { previousState?: string; metadata?: Record<string, string> }
@@ -64,7 +66,8 @@ export class DidcommEvents {
     private readonly peers: PeerProfiles,
     private readonly apiKey: string | undefined,
     private readonly logger: Logger,
-    private readonly disclosureWaitMs = DISCLOSURE_WAIT_MS
+    private readonly disclosureWaitMs = DISCLOSURE_WAIT_MS,
+    private readonly principalWaitMs = PRINCIPAL_WAIT_MS
   ) {}
 
   public register(app: FastifyInstance): void {
@@ -593,16 +596,30 @@ export class DidcommEvents {
   }
 
   /**
+   * The session of a connection, once the agent knows who its peer is. A wallet that is also a UI asks for its
+   * session in the instant its connection is established, and the Principal is resolved a moment later, after
+   * the features disclosure: the request waits for it rather than being refused (CHAN-BIND-016).
+   */
+  private async sessionOnceIdentified(connectionId: string) {
+    const deadline = Date.now() + this.principalWaitMs
+    for (;;) {
+      const bound = await this.agent.didcommSession(connectionId)
+      if (bound || Date.now() >= deadline) return bound
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+  }
+
+  /**
    * `session-grant/1.0/request` (D56, CHAN-BIND-014): a single-use grant for the connection's resolved Principal,
-   * with the sessions URL; refused on a connection without a Principal.
+   * with the sessions URL; refused on a connection that resolves no Principal (CHAN-BIND-016).
    */
   private async onSessionGrantStateChanged(exchange: CarrierExchange & { previousState?: string }): Promise<void> {
     if (exchange.state !== 'request-received') return
-    const bound = await this.agent.didcommSession(exchange.connectionId)
+    const bound = await this.sessionOnceIdentified(exchange.connectionId)
     if (!bound) {
       this.logger.warn(
         { connectionId: exchange.connectionId },
-        'session grant requested before the principal was resolved'
+        'session grant requested on a connection with no resolved principal'
       )
       if (exchange.flowId)
         await this.agent.flows.problemReport(

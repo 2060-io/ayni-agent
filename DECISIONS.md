@@ -460,6 +460,16 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     resolves again when needed and answers `not-ready`, a new outcome, when no definition can be had. The
     creation needs no entry on the registry; the offer does, and the VS Agent checks it then.
 
+49. **A session grant asked during the identification waits for it** (2026-11-15, found on devnet with the
+    Ayni app on a first connection; ayni-spec CHAN-BIND-016). The app asks for its session in the instant
+    its connection completes, with its features disclosure. `onConnection` resolves the Principal after the
+    disclosure wait and `identity.establish`, and the events are handled concurrently (the webhook answers
+    202 at once), so `onSessionGrantStateChanged` found no bound session and answered `not-eligible`: the
+    app showed the code and did not ask again. The handler now polls `didcommSession` for up to
+    `PRINCIPAL_WAIT_MS` (30 s, under the app's one minute) before refusing (`sessionOnceIdentified`). Not
+    covered: an agent that asks for the identity credential on connect resolves the Principal when the
+    person answers, which can take longer than the wait; the app has to ask again there.
+
 50. **The agent tells a peer where it stands** (2026-11-15, decided with Fabrice; ayni-spec D71, IDENT-STAT-001..008,
     CHAN-BIND-014, PROF-DESC-007). A wallet that asked for its session grant while the agent was still
     identifying it was refused, and nothing told it when to ask. The agent now sends `peer-status/1.0/status`

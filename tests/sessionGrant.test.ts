@@ -59,6 +59,7 @@ const envelope = (type: string, data: Record<string, unknown>) => ({
 
 let running: RunningAgent
 let events: DidcommEvents
+let slowEvents: DidcommEvents
 let calls: Call[]
 const lastGrant = () =>
   calls.filter((c) => c.method === 'grantSession').at(-1)?.args[1] as {
@@ -93,7 +94,34 @@ beforeAll(async () => {
   running.agent.router.register(adapter)
   Object.assign(running.agent, { flows })
   const identity = { establish: async (_c: string, did?: string) => facts(did ?? 'did:peer:x') }
-  events = new DidcommEvents(running.agent, client as never, identity as never, adapter, peers, undefined, logger, 100)
+  events = new DidcommEvents(
+    running.agent,
+    client as never,
+    identity as never,
+    adapter,
+    peers,
+    undefined,
+    logger,
+    100,
+    300
+  )
+  slowEvents = new DidcommEvents(
+    running.agent,
+    client as never,
+    {
+      // the identification takes a moment, as it does after a features disclosure
+      establish: async (_c: string, did?: string) => {
+        await new Promise((resolve) => setTimeout(resolve, 400))
+        return facts(did ?? 'did:peer:x')
+      },
+    } as never,
+    adapter,
+    peers,
+    undefined,
+    logger,
+    100,
+    5_000
+  )
 })
 
 afterAll(async () => {
@@ -202,6 +230,44 @@ describe('session grant (D56, CHAN-BIND-014, PROF-SESS-013)', () => {
     const expired = await createWithGrant(granted.grant)
     expect(expired.statusCode).toBe(409)
     expect(expired.json().error).toBe('grant-expired')
+  })
+
+  it('waits for the identification under way and then grants: the app asks as soon as it is connected (CHAN-BIND-016)', async () => {
+    const connectionId = 'conn-early'
+    const before = calls.filter((c) => c.method === 'grantSession').length
+    const reportsBefore = calls.filter((c) => c.method === 'flowProblemReport').length
+    const completed = slowEvents.handle(
+      envelope('didcomm.connections.state-updated', {
+        id: connectionId,
+        state: 'completed',
+        theirDid: `did:peer:${connectionId}`,
+        theirLabel: 'Ayni',
+        outOfBandId: null,
+        metadata: {},
+      })
+    )
+    // the disclosure and the grant request arrive together, before the Principal is resolved
+    const disclosed = slowEvents.handle(
+      envelope('didcomm.connections.state-updated', {
+        id: connectionId,
+        state: 'updated',
+        metadata: { [AYNI_FLOW_PROTOCOL]: feature(AYNI_FLOW_PROTOCOL) },
+      })
+    )
+    const asked = slowEvents.handle(
+      envelope('didcomm.session-grant.state-changed', {
+        threadId: 'sg-early',
+        flowId: 'holder-flow-sg-early',
+        connectionId,
+        state: 'request-received',
+        request: { agentDid: 'did:webvh:test:agent', conversationId: null, newConversation: false, client: {} },
+      })
+    )
+    expect(await running.agent.didcommSession(connectionId)).toBeUndefined()
+    await Promise.all([completed, disclosed, asked])
+    expect(calls.filter((c) => c.method === 'grantSession')).toHaveLength(before + 1)
+    expect(calls.filter((c) => c.method === 'flowProblemReport')).toHaveLength(reportsBefore)
+    expect(lastGrant().grant).toMatch(/^sg_/)
   })
 
   it('refuses a grant request on a connection with no resolved principal', async () => {
