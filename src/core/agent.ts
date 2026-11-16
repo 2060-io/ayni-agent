@@ -846,7 +846,7 @@ export class AyniAgent {
       }
     }
     if (itemId === PLATFORM_MENU.identify) {
-      // the person asks to identify: always served (IDENT-RES-015/016)
+      // the person asks to authenticate: always served (IDENT-RES-015/016)
       const outcome = (await this.identityRequests?.request(principal, 'person')) ?? 'unavailable'
       return { text: identityOutcomeForPerson(outcome) }
     }

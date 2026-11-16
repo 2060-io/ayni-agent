@@ -10,7 +10,7 @@ import { DidcommEvents } from '../src/channels/didcomm/events.js'
 import { IdentityFlow, TrustResolver } from '../src/channels/didcomm/identity.js'
 import { AYNI_FLOW_PROTOCOL, PeerProfiles } from '../src/channels/didcomm/peerProfiles.js'
 import type { FlowRecord } from '../src/channels/didcomm/vsAgentClient.js'
-import type { AgentPack } from '../src/config/packTypes.js'
+import type { AgentPack, AuthenticationEntry } from '../src/config/packTypes.js'
 import { FlowService } from '../src/core/flows.js'
 import { greetingFor } from '../src/core/interaction.js'
 import type { Session } from '../src/core/types.js'
@@ -550,7 +550,7 @@ describe('identity as flows (IDENT-RES-003, D54)', () => {
     },
   } as unknown as AgentPack
 
-  it('requests the user-agent credential as identify-ua, treats unsupported-kind as absent, and the badge as present', async () => {
+  it('requests the user-agent credential as identify-ua, treats unsupported-kind as absent, and the badge as authenticate', async () => {
     const localCalls: Call[] = []
     const local = stubClient(localCalls)
     const logger = createLogger('silent')
@@ -590,9 +590,9 @@ describe('identity as flows (IDENT-RES-003, D54)', () => {
       closedBy: 'peer',
     })
     await settle()
-    // present: the badge, verified
+    // authenticate: the badge, verified
     const badge = localCalls.filter((c) => c.method === 'openFlow').at(-1)?.args[0] as { kind: string; title: string }
-    expect(badge.kind).toBe('present')
+    expect(badge.kind).toBe('authenticate')
     expect(badge.title).toContain('Test agent')
     const presentationCall = localCalls.filter((c) => c.method === 'requestPresentation').at(-1)
     if (!presentationCall) throw new Error('no presentation request')
@@ -622,6 +622,174 @@ describe('identity as flows (IDENT-RES-003, D54)', () => {
     expect(facts?.claims.userName).toBe('Alice')
     const close = localCalls.filter((c) => c.method === 'closeFlow').at(-1)?.args as [string, { outcome: string }]
     expect(close[1].outcome).toBe('completed')
+  })
+})
+
+describe('the authentication of a person (D72; IDENT-RES-010/018/019/020, FLOW-SIGNIN)', () => {
+  const silent = { info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined }
+  const BADGE = 'https://ecs.example/badge.json'
+  /** Two issuers of the badge, each of an organization of its own: org:EE:1 and org:EE:2. */
+  const ISSUER_1 = 'did:webvh:x:issuer-1'
+  const ISSUER_2 = 'did:webvh:x:issuer-2'
+
+  function setup(authentication: Partial<AuthenticationEntry> = {}) {
+    const calls: Call[] = []
+    const local = stubClient(calls)
+    const flows = new FlowService(
+      local as never,
+      running.agent.memory,
+      running.agent.router,
+      running.agent.store.kv,
+      createLogger('silent')
+    )
+    const resolver = new TrustResolver(undefined, silent as never)
+    resolver.resolve = async (did: string) => ({
+      did,
+      trusted: true,
+      ecsCredentials: [
+        {
+          ecsSchema: 'OrganizationCredential',
+          credentialSubject: { name: 'Issuer', countryCode: 'EE', registryId: did === ISSUER_2 ? '2' : '1' },
+        },
+      ],
+    })
+    const pack = {
+      metadata: { displayName: 'Test agent' },
+      identity: {
+        homeBackingIdentity: 'did:webvh:x:home',
+        roleRules: [],
+        userAgentGate: 'optional',
+        authentication: [
+          { credential: { jsonSchemaCredentialId: BADGE }, subjectKey: ['badgeNumber'], ...authentication },
+        ],
+      },
+    } as unknown as AgentPack
+    const identity = new IdentityFlow(pack, local as never, resolver, false, silent as never)
+    identity.setFlows(flows)
+    const refused: string[] = []
+    const establishing = identity.establish(`conn-${Math.random()}`, 'did:peer:alice', {
+      flowMode: true,
+      onRefused: (code) => refused.push(code),
+    })
+    const opened = () =>
+      calls.filter((c) => c.method === 'openFlow').map((c) => c.result as FlowRecord & { expiresTime: string })
+    const flowNow = () => opened().at(-1) as FlowRecord & { expiresTime: string }
+    /** The wallet presents a badge of an issuer; `unrevealed` are the attributes it leaves private. */
+    const present = (issuerDid: string, unrevealed: string[] = []) => {
+      const request = calls.filter((c) => c.method === 'requestPresentation').at(-1) as Call
+      const claims = [
+        { name: 'badgeNumber', value: '42' },
+        { name: 'userName', value: 'Alice' },
+      ].filter((c) => !unrevealed.includes(c.name))
+      identity.onPresentation({
+        proofExchangeId: (request.result as { proofExchangeId: string }).proofExchangeId,
+        state: 'done',
+        verified: true,
+        claims,
+        credentials: [{ credentialDefinitionId: `${issuerDid}/resources/def`, issuerDid, claims, unrevealed }],
+      })
+    }
+    /** The wallet closes the flow itself: the person declined, or its time ran out. */
+    const holder = (state: 'declined' | 'expired') =>
+      flows.onFlowEvent({ ...flowNow(), state, closedBy: state === 'expired' ? 'expiry' : 'peer' } as never)
+    const problems = () =>
+      calls.filter((c) => c.method === 'flowProblemReport').map((c) => (c.args[1] as { code: string }).code)
+    return { calls, establishing, refused, opened, flowNow, present, holder, problems }
+  }
+
+  it('asks in an authenticate flow that is valid five minutes, and accepts the badge of any accredited issuer', async () => {
+    const t = setup()
+    await settle()
+    const flow = t.flowNow()
+    expect(flow.kind).toBe('authenticate')
+    expect(flow.title).toBe('Authenticate to Test agent')
+    const validMs = Date.parse(flow.expiresTime) - Date.now()
+    expect(validMs).toBeGreaterThan(4.9 * 60_000)
+    expect(validMs).toBeLessThanOrEqual(5 * 60_000)
+    t.present(ISSUER_2)
+    const facts = await t.establishing
+    expect(facts).toMatchObject({ actorIdentity: `org:EE:2|${BADGE}|42`, backingIdentity: { id: 'org:EE:2' } })
+    expect(facts?.identityCredentialRef).toMatch(/^badge:/)
+    expect(t.opened()).toHaveLength(1)
+    expect(t.problems()).toEqual([])
+    expect(t.refused).toEqual([])
+  })
+
+  it('accepts only the organizations the pack lists: it says why, asks again, and takes the next badge', async () => {
+    const t = setup({ issuers: { organizations: ['org:EE:1'] } })
+    await settle()
+    t.present(ISSUER_2)
+    await settle()
+    // not accepted: the flow fails with its reason, and a new request follows
+    expect(t.problems()).toEqual(['issuer-not-accepted'])
+    expect(t.opened().map((f) => f.kind)).toEqual(['authenticate', 'authenticate'])
+    t.present(ISSUER_1)
+    const facts = await t.establishing
+    expect(facts?.backingIdentity).toMatchObject({ id: 'org:EE:1' })
+    const close = t.calls.filter((c) => c.method === 'closeFlow').at(-1)?.args as [string, { outcome: string }]
+    expect(close).toMatchObject([t.flowNow().flowId, { outcome: 'completed' }])
+  })
+
+  it('asks again, with no limit, after a badge that leaves the subject key private; the person ends it by declining', async () => {
+    const t = setup()
+    await settle()
+    for (let attempt = 0; attempt < 3; attempt++) {
+      t.present(ISSUER_1, ['badgeNumber'])
+      await settle()
+    }
+    expect(t.problems()).toEqual(['incomplete', 'incomplete', 'incomplete'])
+    expect(t.opened()).toHaveLength(4)
+    await t.holder('declined')
+    expect(await t.establishing).toBeUndefined()
+    expect(t.refused).toEqual(['authentication-declined'])
+  })
+
+  it('required: a decline, and no answer in time, each end the connection with their own refusal', async () => {
+    const declined = setup()
+    await settle()
+    await declined.holder('declined')
+    expect(await declined.establishing).toBeUndefined()
+    expect(declined.refused).toEqual(['authentication-declined'])
+
+    const silentWallet = setup()
+    await settle()
+    await silentWallet.holder('expired')
+    expect(await silentWallet.establishing).toBeUndefined()
+    expect(silentWallet.refused).toEqual(['authentication-unanswered'])
+  })
+
+  it('offered: a decline lets the person in as a guest; no answer in time still ends the connection', async () => {
+    const guest = setup({ guests: true })
+    await settle()
+    expect(guest.flowNow().kind).toBe('authenticate')
+    await guest.holder('declined')
+    expect(await guest.establishing).toMatchObject({
+      actorIdentity: 'did:peer:alice',
+      backingIdentity: null,
+      identityCredentialRef: null,
+    })
+    expect(guest.refused).toEqual([])
+
+    const silentWallet = setup({ guests: true })
+    await settle()
+    await silentWallet.holder('expired')
+    expect(await silentWallet.establishing).toBeUndefined()
+    expect(silentWallet.refused).toEqual(['authentication-unanswered'])
+
+    // offered, and a badge that is not accepted: asked again, and the person may still enter as a guest
+    const retry = setup({ guests: true, issuers: { organizations: ['org:EE:1'] } })
+    await settle()
+    retry.present(ISSUER_2)
+    await settle()
+    expect(retry.problems()).toEqual(['issuer-not-accepted'])
+    await retry.holder('declined')
+    expect(await retry.establishing).toMatchObject({ identityCredentialRef: null })
+  })
+
+  it('on request: nothing is asked at connection and the person enters as a guest', async () => {
+    const t = setup({ request: 'on-demand' })
+    expect(await t.establishing).toMatchObject({ identityCredentialRef: null })
+    expect(t.opened()).toEqual([])
   })
 })
 

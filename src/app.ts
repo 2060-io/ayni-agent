@@ -88,7 +88,7 @@ export async function buildAgent(
   if (admitsUnidentified(pack))
     logger.warn(
       pack.identity.authentication?.length
-        ? 'identity: the authentication is asked on demand: user agents enter unidentified until they identify (D53)'
+        ? 'identity: the authentication lets guests in: user agents enter unidentified until they authenticate (D53, D72)'
         : 'identity: the agent-pack names no authentication schema: every user agent enters unidentified (D53)'
     )
   const features = featuresOf(pack)
@@ -357,8 +357,8 @@ export async function buildAgent(
   identityRequestsRef = new IdentityRequests(
     pack,
     {
-      identify: (connectionId, peerId, flowMode, userAgentVerified) =>
-        identity.identify(connectionId, peerId, flowMode, userAgentVerified),
+      authenticate: (connectionId, peerId, flowMode, userAgentVerified) =>
+        identity.authenticate(connectionId, peerId, flowMode, userAgentVerified),
       isFlowCapable: (connectionId) => peerProfiles.isFlowCapable(connectionId),
       onIdentityPresented: async (connectionId, facts) => {
         const result = await agent.onIdentityPresented(connectionId, facts)

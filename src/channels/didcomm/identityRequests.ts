@@ -1,15 +1,18 @@
 /**
- * The authentication asked on demand (D65, D66; IDENT-RES-015/016): while a connection is unidentified,
- * the model, through its tool, or the person, from the menu, has the agent ask the wallet for the
- * credential of the authentication schema. What comes back binds the connection by the rules of
- * IDENT-RES-013/014. The agent does not insist: one request at a time on a connection, and after a request
- * that was declined or left unanswered the model waits; the person's own request is always served.
+ * The authentication asked of a guest (D65, D66, D72; IDENT-RES-015/016): while a connection is unidentified,
+ * the person, from their wallet or from a menu item, or the model, through its tool, has the agent ask the
+ * wallet for the credential of the authentication schema. What comes back binds the connection by the rules of
+ * IDENT-RES-013/014. A credential that is not accepted is asked again; a request declined or left unanswered
+ * changes nothing (FLOW-SIGNIN-006). The agent does not insist: one request at a time on a connection, and
+ * after a request that was declined or left unanswered the model waits; the person's own request is always
+ * served.
  */
 import { type AgentPack, connectionTypeOf, type PresentationEntry } from '../../config/packTypes.js'
 import type { EvidenceInput } from '../../core/evidence.js'
 import type { VerifiedFacts } from '../../core/principals.js'
 import type { Principal } from '../../core/types.js'
 import type { Logger } from '../../util/logger.js'
+import type { AuthenticationAttempt } from './identity.js'
 
 /** What a request ends in. A status, never a value of the credential (D68). */
 export type IdentityRequestOutcome =
@@ -23,13 +26,13 @@ export type IdentityRequestOutcome =
   | 'not-offered'
 
 export interface IdentityRequestDeps {
-  /** asks the wallet and returns the verified facts, or undefined when nothing that identifies was presented */
-  identify(
+  /** asks the wallet once and returns what the request ended in */
+  authenticate(
     connectionId: string,
     peerId: string,
     flowMode: boolean,
     userAgentVerified: boolean
-  ): Promise<VerifiedFacts | undefined>
+  ): Promise<AuthenticationAttempt>
   isFlowCapable(connectionId: string): Promise<boolean>
   /** binds the connection by the rules of D66 */
   onIdentityPresented(connectionId: string, facts: VerifiedFacts): Promise<{ outcome: string }>
@@ -75,18 +78,24 @@ export class IdentityRequests {
     if (by === 'model' && since !== undefined && Date.now() - since < this.waitMs) return 'wait'
     this.pending.add(connectionId)
     try {
-      const facts = await this.deps.identify(
-        connectionId,
-        principal.actorIdentity,
-        await this.deps.isFlowCapable(connectionId),
-        principal.userAgentVerified
-      )
-      if (!facts) {
+      const flowMode = await this.deps.isFlowCapable(connectionId)
+      let attempt: AuthenticationAttempt
+      // a credential that is not accepted is asked again, as long as the person presents one (IDENT-RES-019);
+      // a wallet without flows cannot be told why, and is asked once
+      do {
+        attempt = await this.deps.authenticate(
+          connectionId,
+          principal.actorIdentity,
+          flowMode,
+          principal.userAgentVerified
+        )
+      } while (attempt.outcome === 'not-accepted' && flowMode)
+      if (attempt.outcome !== 'accepted') {
         this.unanswered.set(connectionId, Date.now())
         return 'not-presented'
       }
       this.unanswered.delete(connectionId)
-      const { outcome } = await this.deps.onIdentityPresented(connectionId, facts)
+      const { outcome } = await this.deps.onIdentityPresented(connectionId, attempt.facts)
       this.logger.info({ principalId: principal.id, by, outcome }, 'identity asked on demand')
       return outcome === 'identified' || outcome === 'refreshed' ? 'identified' : (outcome as IdentityRequestOutcome)
     } finally {
@@ -182,11 +191,11 @@ export function presentationOutcomeForModel(outcome: PresentationRequestOutcome)
 export function identityOutcomeForPerson(outcome: IdentityRequestOutcome): string {
   switch (outcome) {
     case 'identified':
-      return 'You are identified.'
+      return 'You are authenticated.'
     case 'already-identified':
-      return 'You are already identified.'
+      return 'You are already authenticated.'
     case 'not-presented':
-      return 'No identity credential was presented.'
+      return 'No credential was presented.'
     case 'pending':
       return 'A request is already waiting in your wallet.'
     case 'another-identity':

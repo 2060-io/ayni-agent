@@ -62,6 +62,9 @@ identity:
     - credential: { jsonSchemaCredentialId: https://.../vt/schemas-badge-jsc.json }
       subjectKey: [badgeNumber]
       request: on-connect                     # or on-demand: nothing is asked at connection
+      guests: false                           # true: the person may continue as a guest (with on-connect)
+      issuers: { organizations: ["org:EE:14000000"] }   # whose credentials are accepted; any issuer when absent
+      obtain: { text: "Ask your front desk for your badge.", url: https://.../badge }   # how to obtain it
       attributes: [badgeNumber, name, title, department]
       store: { attributes: [name, title, department], retention: { days: 365, onExpiry: erase } }
       modelVisible: [name]
@@ -141,23 +144,46 @@ identity:
   memory scope (RBAC-XSESS): `own-sessions` (default), `own-backing-identity`, `all`. `canApprove`
   marks roles that may appear in `approvers`. `auditor` grants read-only access to the whole
   persistent store outside LLM retrieval.
-- **Who enters unidentified follows from `authentication`, and from nothing else** (D53). A pack that names
-  no authentication schema lets every wallet in, unidentified. One that asks `on-connect` (the default)
-  identifies a person or refuses them, with a short message. One that asks `on-demand` asks nothing at
-  connection: the person enters unidentified and identifies later. An unidentified person is a Principal
+- **Who enters unidentified follows from `authentication`, and from nothing else** (D53, D72). A pack that
+  names no authentication schema lets every wallet in, unidentified. One that names a schema is in one of
+  three modes:
+
+  | Mode | Pack | At connection |
+  |---|---|---|
+  | required | `request: on-connect` | the credential is asked; nothing opens without it |
+  | offered | `request: on-connect`, `guests: true` | the credential is asked; the person may continue as a guest |
+  | on request | `request: on-demand` | nothing is asked; the person enters as a guest and authenticates when they ask |
+
+  `on-demand` lets guests in by itself: `guests: false` with it is refused at start-up.
+- **The request at connection** (D72). It is valid five minutes. A credential that is not accepted is
+  answered with its reason and asked again, with no limit: the person ends it by declining. A decline ends
+  the connection when the credential is required and lets the person in as a guest when it is offered. No
+  answer in time ends the connection in both. Nothing is open before the outcome, so no conversation
+  exists before it; a person who authenticates finds their conversations.
+- **Whose credentials are accepted** (D72). With no `issuers`, the credential of any accredited issuer of
+  the schema that an organization backs. With `issuers.organizations`, only the credentials whose issuer
+  is one of those organizations, by organization key (`org:<country>:<register id>`). The agent decides
+  this when it verifies the presentation; the wallet is told the list so that it offers no other.
+- **How the credential is obtained** (D72). `obtain` is the operator's own text, with a link when there is
+  one. The wallet shows it to a person who holds no such credential, or whose credential was not accepted.
+- An unidentified person, a guest, is a Principal
   without backing identity: relation `unrecognized`, `public` visibility only, the role rules decide the
   rest. The agent says at start-up that it admits unidentified peers. There is no separate setting: the
   earlier `unidentifiedPeers` and the `UNIDENTIFIED_PEERS` variable are gone (the variable is ignored, with
   a warning). `DEV_ALLOW_UNIDENTIFIED_PRINCIPALS` stays, for development only.
-- **The wallet is told which of the three it is** (D71). The same setting gives the rule of the status
-  message the agent sends on each connection: `none` with no authentication schema, `optional` when it is
-  asked `on-demand`, `required` when it is asked `on-connect`, with the schema asked for. The message also
-  says whether the person is identified and what is open to them, so the app knows whether to wait for a
-  credential request, and when it may open the conversation. Nothing is configured for it.
-- **Identifying later** (D65, D66). While a connection is unidentified, the credential is asked when the
-  model calls `request_presentation` with the entry `authentication` (the tool exists for an unidentified
-  person only, takes nothing else, and answers with a status) or when the person picks **Identify
-  yourself** in the menu. The agent does not insist: one request at a time on a connection, and after a
+- **The wallet is told where it stands** (D71, D72). The same entry gives the status message the agent sends
+  on each connection: the rule, `none` with no authentication schema, `optional` when guests are let in,
+  `required` when they are not; the schema asked for; the organizations accepted, when the pack lists any;
+  and how the credential is obtained, when the pack says it. The message also says whether the person is
+  identified and what is open to them, so the app knows whether to wait for the request, and when it may
+  open the conversation. Nothing else is configured for it.
+- **Authenticating later** (D65, D66, D72). While a connection is unidentified, the credential is asked when
+  the person asks from their wallet (the Ayni app's **Authenticate**, in the service's menu, which needs no
+  conversation), when the person picks **Authenticate** in the agent's own menu (sent to the web UI and to
+  other clients, not to the Ayni app), or when the model calls `request_presentation` with the entry
+  `authentication` (the tool exists for an unidentified person only, takes nothing else, and answers with
+  a status). A request made this way, declined or left unanswered, changes nothing: the person stays a
+  guest. The agent does not insist: one request at a time on a connection, and after a
   request that was declined or left unanswered the model waits ten minutes; the person's own request is
   always served. A valid credential upgrades the connection to the Principal it identifies, and the
   conversations held before, with their sessions and entries, move to it; working memory and preferences

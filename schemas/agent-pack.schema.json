@@ -97,10 +97,50 @@
                 }
               },
               "request": {
-                "description": "When the credential is asked: on-connect (default), before any conversation, the person being identified or refused; on-demand, later, by the model's tool or the person's menu item, the person entering unidentified meanwhile (D53, D65).",
+                "description": "When the credential is asked: on-connect (default), before any conversation; on-demand, only when it is asked for, by the person, from their wallet or a menu item, or by the model's tool, the person entering as a guest meanwhile (D53, D65, D72).",
                 "type": "string",
                 "enum": ["on-connect", "on-demand"],
                 "default": "on-connect"
+              },
+              "guests": {
+                "description": "Whether a person may enter without the credential, as a guest (D72). With on-connect: false (default), the credential is required and nothing opens without it; true, it is offered at connection and the person may continue as a guest. on-demand lets guests in by itself and refuses false.",
+                "type": "boolean",
+                "default": false
+              },
+              "issuers": {
+                "description": "Whose credentials are accepted (D72). Absent: any accredited issuer of the schema that an organization backs.",
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["organizations"],
+                "properties": {
+                  "organizations": {
+                    "description": "The organization keys accepted: org:<country>:<register id>, as the verified Organization credential of the issuer gives them.",
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^org:[A-Z]{2}:.+$"
+                    }
+                  }
+                }
+              },
+              "obtain": {
+                "description": "How a person obtains the credential, in the operator's words, with a link when there is one (D72). Shown by the wallet to a person who holds no such credential, or whose credential was not accepted.",
+                "type": "object",
+                "additionalProperties": false,
+                "minProperties": 1,
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "url": {
+                    "type": "string",
+                    "format": "uri",
+                    "pattern": "^https://"
+                  }
+                }
               },
               "store": {
                 "$ref": "#/$defs/evidenceStore"

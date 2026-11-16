@@ -48,8 +48,33 @@ export interface AuthenticationEntry extends EvidencePolicy {
   subjectKey: string[]
   /** the attributes asked of the credential; every attribute of the schema when omitted */
   attributes?: string[]
-  /** when it is asked: at connection (default), or later, by the model's tool or the person's menu item (D65) */
+  /**
+   * when it is asked: at connection (default), or only when it is asked for, by the person, from their wallet or
+   * a menu item, or by the model's tool (D65, D72)
+   */
   request?: 'on-connect' | 'on-demand'
+  /**
+   * whether a person may enter without the credential, as a guest (D72). `false` by default with `on-connect`:
+   * nothing opens without it. `on-demand` lets guests in by itself, and refuses `false`.
+   */
+  guests?: boolean
+  /** the organizations whose credentials are accepted, by organization key; any accredited issuer when absent */
+  issuers?: { organizations?: string[] }
+  /** how a person obtains the credential, in the operator's words, with a link when there is one */
+  obtain?: { text?: string; url?: string }
+}
+
+/**
+ * How an agent authenticates a person (D72, IDENT-RES-010): **required**, asked at connection and nothing opens
+ * without it; **offered**, asked at connection and the person may enter as a guest instead; **on-request**,
+ * nothing asked at connection and a guest authenticates when they ask.
+ */
+export type AuthenticationMode = 'required' | 'offered' | 'on-request'
+
+export function authenticationModeOf(entry: AuthenticationEntry | undefined): AuthenticationMode | undefined {
+  if (!entry) return undefined
+  if (entry.request === 'on-demand') return 'on-request'
+  return entry.guests ? 'offered' : 'required'
 }
 
 export interface OrganizationPattern {
@@ -122,13 +147,12 @@ export function connectionTypeOf(subjectKind: PresentationEntry['subjectKind']):
 }
 
 /**
- * Who enters unidentified follows from the authentication alone (D53, IDENT-RES-007): an agent that names
- * no authentication schema, or asks for it on demand, admits a person without a valid identity credential;
- * one that asks on connect identifies a person or refuses them.
+ * Who enters unidentified follows from the authentication alone (D53, D72, IDENT-RES-007): an agent that names
+ * no authentication schema, or lets guests in, admits a person without a valid identity credential; one that
+ * requires it authenticates a person or refuses them.
  */
 export function admitsUnidentified(pack: Pick<AgentPack, 'identity'>): boolean {
-  const authentication = pack.identity.authentication?.[0]
-  return !authentication || authentication.request === 'on-demand'
+  return authenticationModeOf(pack.identity.authentication?.[0]) !== 'required'
 }
 
 export interface PackIdentity {

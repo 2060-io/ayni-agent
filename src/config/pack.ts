@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { Ajv2020 } from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
 import { parse as parseYaml } from 'yaml'
-import type { AgentPack, EvidencePolicy, ToolAccess } from './packTypes.js'
+import type { AgentPack, AuthenticationEntry, EvidencePolicy, ToolAccess } from './packTypes.js'
 import { COMPUTED_FUNCTIONS, featuresOf } from './packTypes.js'
 
 /** The entry of the credential that authenticates a person (D65): never the name of a catalog entry. */
@@ -175,6 +175,36 @@ export function evidenceWarnings(pack: AgentPack): string[] {
   return warnings
 }
 
+/**
+ * What an authentication entry may not say (D72, IDENT-RES-010): `on-demand` lets guests in by itself; a list of
+ * organizations is not empty and holds organization keys; how the credential is obtained is a text, an https
+ * link, or both.
+ */
+export function authenticationErrors(entry: AuthenticationEntry): string[] {
+  const errors: string[] = []
+  if (entry.request === 'on-demand' && entry.guests === false)
+    errors.push('rule 1: identity.authentication asked on-demand lets guests in: guests cannot be false')
+  const organizations = entry.issuers?.organizations
+  if (organizations !== undefined) {
+    if (!organizations.length)
+      errors.push(
+        'rule 1: identity.authentication.issuers.organizations is empty: it would accept nobody; leave it out to accept any accredited issuer'
+      )
+    const unkeyed = organizations.filter((key) => !/^org:[A-Z]{2}:.+$/.test(key))
+    if (unkeyed.length)
+      errors.push(
+        `rule 1: identity.authentication.issuers.organizations [${unkeyed.join(', ')}] must be organization keys, org:<country>:<register id>`
+      )
+  }
+  if (entry.obtain) {
+    if (!entry.obtain.text && !entry.obtain.url)
+      errors.push('rule 1: identity.authentication.obtain says a text, a link, or both')
+    if (entry.obtain.url && !entry.obtain.url.startsWith('https://'))
+      errors.push('rule 1: identity.authentication.obtain.url must be an https link')
+  }
+  return errors
+}
+
 /** Cross-field rules 1 to 9 of docs/agent-pack.md plus PRIV-RETN-006. */
 export function crossFieldErrors(pack: AgentPack): string[] {
   const errors: string[] = []
@@ -190,6 +220,8 @@ export function crossFieldErrors(pack: AgentPack): string[] {
       )
     }
   }
+  // rule 1, the mode (D72): who enters, who is accepted and how the credential is obtained
+  for (const entry of authentication) errors.push(...authenticationErrors(entry))
   // what is read by the model is stored, what is stored is asked (PRIV-EVID-006)
   for (const entry of authentication)
     errors.push(...evidencePolicyErrors('identity.authentication', entry, entry.attributes))
