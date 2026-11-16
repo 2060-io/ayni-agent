@@ -109,6 +109,16 @@ export type AuthenticationAttempt =
 /** A presentation record, with how the holder closed its flow when the holder closed it first. */
 type FlowPresentation = PresentationRecord & { flowClosed?: string }
 
+/**
+ * Whether a presentation record says that the holder declined. A wallet that declines sends the problem report
+ * of present-proof, which the DIDComm agent reports as a record `abandoned` with the wallet's words ("Request
+ * declined"), and then closes the flow: the record comes first. It is a refusal of the person, not a
+ * presentation that came and did not verify.
+ */
+export function declinedByHolder(record: Pick<PresentationRecord, 'state' | 'errorMessage'>): boolean {
+  return record.state === 'declined' || /declin/i.test(record.errorMessage ?? '')
+}
+
 export class IdentityFlow {
   private readonly pending = new Map<string, PendingProof>()
   private flows?: FlowService
@@ -190,7 +200,7 @@ export class IdentityFlow {
       const record = first.record
       const ok = record.verified && record.state !== 'declined' && record.state !== 'abandoned'
       // a presentation that came and does not verify is not a silence: the holder is told why
-      const came = !ok && record.state !== 'declined' && record.errorMessage !== 'timeout'
+      const came = !ok && !declinedByHolder(record) && record.errorMessage !== 'timeout'
       const code = ok ? await decide?.(record) : decide && came ? ('not-valid' as const) : undefined
       if (code) await flows.problemReport(handle.flowId, code, NOT_ACCEPTED[code])
       else
@@ -371,7 +381,7 @@ export class IdentityFlow {
     )
     // the holder closed the flow first: its time ran out, or the person, or the wallet, would not answer
     if (record.flowClosed) return { outcome: record.flowClosed === 'expired' ? 'unanswered' : 'declined' }
-    if (record.state === 'declined') return { outcome: 'declined' }
+    if (declinedByHolder(record)) return { outcome: 'declined' }
     if (record.errorMessage === 'timeout') return { outcome: 'unanswered' }
     // a presentation that came and did not verify
     return { outcome: 'not-accepted', code: 'not-valid' }

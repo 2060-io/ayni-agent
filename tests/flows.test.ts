@@ -689,12 +689,40 @@ describe('the authentication of a person (D72; IDENT-RES-010/018/019/020, FLOW-S
         credentials: [{ credentialDefinitionId: `${issuerDid}/resources/def`, issuerDid, claims, unrevealed }],
       })
     }
+    /**
+     * The wallet declines as a wallet does: the problem report of present-proof first, which the DIDComm agent
+     * reports as an abandoned presentation in the wallet's words, then the close of the flow.
+     */
+    const declines = async () => {
+      const request = calls.filter((c) => c.method === 'requestPresentation').at(-1) as Call
+      const flow = flowNow()
+      identity.onPresentation({
+        proofExchangeId: (request.result as { proofExchangeId: string }).proofExchangeId,
+        state: 'abandoned',
+        verified: false,
+        claims: [],
+        errorMessage: 'abandoned: Request declined',
+      })
+      await settle()
+      await flows.onFlowEvent({ ...flow, state: 'declined', closedBy: 'peer' } as never)
+    }
     /** The wallet closes the flow itself: the person declined, or its time ran out. */
     const holder = (state: 'declined' | 'expired') =>
       flows.onFlowEvent({ ...flowNow(), state, closedBy: state === 'expired' ? 'expiry' : 'peer' } as never)
     const problems = () =>
       calls.filter((c) => c.method === 'flowProblemReport').map((c) => (c.args[1] as { code: string }).code)
-    return { calls, establishing, refused, opened, flowNow, present, holder, problems }
+    return {
+      calls,
+      establishing,
+      refused,
+      opened,
+      flowNow,
+      present,
+      holder,
+      declines,
+      problems,
+      identityOf: () => identity,
+    }
   }
 
   it('asks in an authenticate flow that is valid five minutes, and accepts the badge of any accredited issuer', async () => {
@@ -784,6 +812,45 @@ describe('the authentication of a person (D72; IDENT-RES-010/018/019/020, FLOW-S
     expect(retry.problems()).toEqual(['issuer-not-accepted'])
     await retry.holder('declined')
     expect(await retry.establishing).toMatchObject({ identityCredentialRef: null })
+  })
+
+  it('takes the decline of a wallet for a decline: its abandoned presentation is not one that failed to verify', async () => {
+    // Found on devnet with a phone: Continue as guest brought the request back. The decline reached the agent
+    // as an abandoned presentation, a moment before the flow closed, and was taken for a presentation that did
+    // not verify: the agent said `not-valid` and asked again, for ever
+    const guest = setup({ guests: true })
+    await settle()
+    await guest.declines()
+    expect(await guest.establishing).toMatchObject({ identityCredentialRef: null })
+    expect(guest.problems()).toEqual([])
+    expect(guest.opened()).toHaveLength(1)
+    expect(guest.refused).toEqual([])
+
+    const required = setup()
+    await settle()
+    await required.declines()
+    expect(await required.establishing).toBeUndefined()
+    expect(required.refused).toEqual(['authentication-declined'])
+    expect(required.problems()).toEqual([])
+    expect(required.opened()).toHaveLength(1)
+  })
+
+  it('still says not-valid, and asks again, of a presentation that came and did not verify', async () => {
+    const t = setup({ guests: true })
+    await settle()
+    const request = t.calls.filter((c) => c.method === 'requestPresentation').at(-1) as Call
+    t.identityOf().onPresentation({
+      proofExchangeId: (request.result as { proofExchangeId: string }).proofExchangeId,
+      state: 'abandoned',
+      verified: false,
+      claims: [],
+      errorMessage: 'abandoned: Invalid proof',
+    })
+    await settle()
+    expect(t.problems()).toEqual(['not-valid'])
+    expect(t.opened()).toHaveLength(2)
+    await t.holder('declined')
+    expect(await t.establishing).toMatchObject({ identityCredentialRef: null })
   })
 
   it('on request: nothing is asked at connection and the person enters as a guest', async () => {

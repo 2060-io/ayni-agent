@@ -553,3 +553,17 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     - By tests: the three modes at connection, the organizations accepted, a credential asked again, the
       status fields, the guest's request, the menu item, the rules of the pack. Not run against a DIDComm
       agent, which is not built yet.
+54. **A wallet's decline is a decline, not a presentation that failed** (2026-11-16, found by Fabrice on
+    devnet with a phone, an hour after 0.20.0: "continue as guest => show again the authentication window";
+    ayni-spec IDENT-RES-019 amended).
+    - **Cause:** a wallet that declines sends the problem report of present-proof, then closes the flow. The
+      DIDComm agent reports the first as a presentation record `abandoned`, with the wallet's words
+      ("abandoned: Request declined"), and it reaches the agent a moment before the close. Entry 53 took
+      every unverified record that was neither `declined` nor a timeout for a presentation that came and
+      did not verify: the agent answered `not-valid` and asked again, each time the person declined. With
+      the credential required it would have looped the same way in place of ending the connection.
+    - **Fix:** `declinedByHolder(record)`: the state `declined`, or the wallet's words of a decline. Such a
+      record is the person's refusal: no reason is sent, and the request ends declined.
+    - My tests of entry 53 declined through the close of the flow alone, which is the second of the two
+      messages a wallet sends. The new test sends both, in their order; it fails without the fix. A record
+      `abandoned` for another reason ("Invalid proof") is still answered `not-valid` and asked again.
