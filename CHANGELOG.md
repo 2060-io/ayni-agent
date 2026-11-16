@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.0](https://github.com/2060-io/ayni-agent/compare/v0.19.1...v0.20.0) (2026-11-16)
+
+
+### Features
+
+* **identity:** a person authenticates in a step of its own, in one of three modes: required, offered, on request ([#79](https://github.com/2060-io/ayni-agent/issues/79)) ([ba3b3f1](https://github.com/2060-io/ayni-agent/commit/ba3b3f1d8bea2f4a6e76ee26e14428f47b2b24b6))
+
 ## [0.19.1](https://github.com/2060-io/ayni-agent/compare/v0.19.0...v0.19.1) (2026-11-15)
 
 
