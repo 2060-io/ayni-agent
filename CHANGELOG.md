@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.1](https://github.com/2060-io/ayni-agent/compare/v0.20.0...v0.20.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* **identity:** a wallet's decline is a decline, not a presentation that failed: Continue as guest lets the person in ([#81](https://github.com/2060-io/ayni-agent/issues/81)) ([8ea47ee](https://github.com/2060-io/ayni-agent/commit/8ea47eea67b94eb9472f13a9840b950d061e5f09))
+
 ## [0.20.0](https://github.com/2060-io/ayni-agent/compare/v0.19.1...v0.20.0) (2026-11-16)
 
 
