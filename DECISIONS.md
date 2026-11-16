@@ -523,4 +523,33 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     - It does not help an agent that asks for a credential on connect: that request leaves before the peer
       has opened anything. The app now sends its disclosure by itself and again when it does not go
       (ayni-app), which is the repair of the cause; this is the repair of the consequence, for any wallet.
-
+53. **A person authenticates in a step of its own, in one of three modes** (2026-11-16, decided by Fabrice;
+    ayni-spec D72, IDENT-RES-007/010/015 amended, IDENT-RES-018..021, IDENT-STAT-002/003/006, flow profile §4.1
+    and §6.14). Before, a required credential had one attempt and a failure deleted the connection; an agent
+    that let guests in asked nothing at connection; a guest asked to be identified only from a menu item
+    inside a conversation; and the credential of any accredited issuer was accepted.
+    - **The modes** follow from the authentication entry of the pack (`authenticationModeOf`): `request:
+      on-connect` is **required**; with `guests: true` it is **offered**; `request: on-demand` is **on
+      request**, which lets guests in by itself. The entry may list the organizations accepted
+      (`issuers.organizations`) and say how the credential is obtained (`obtain`); the status carries both.
+    - **One request is one attempt** (`IdentityFlow.authenticate`): an `authenticate` flow, valid five
+      minutes, that ends accepted, not accepted with a reason, declined or unanswered. The agent decides on a
+      presentation that verified before the flow closes: accepted, the flow completes; not accepted, it
+      fails with the reason's code (`issuer-not-accepted`, `not-valid`, `incomplete`) and the caller asks
+      again. `another-identity` of the profile is not produced: an identified connection is asked nothing.
+    - **At connection** (`establishPerson`): a decline refuses the peer when the credential is required
+      (`authentication-declined`) and admits a guest when it is offered; no answer in time refuses in both
+      (`authentication-unanswered`). No Principal exists before the outcome: a credential accepted then
+      binds the connection directly.
+    - **A guest asks from their wallet** with `peer-status/1.0/authenticate`, relayed by the DIDComm agent
+      as `didcomm.peer-status.authenticate-received` and served as the person's own request. The agent's
+      menu item is renamed Authenticate and is no longer sent to the Ayni app, which has its own entry.
+    - **Nothing is kept for an earlier wallet** (Fabrice: there is none). A wallet without flows, which
+      cannot be told why a credential is not accepted, is asked once. The refusal `identity-refused` is
+      gone with the single attempt.
+    - Needs the DIDComm agent built with the protocol packages that carry the new status fields, the
+      `authenticate` message and the refusal codes (credo-ts-ayni-flow #29): the earlier plugin refuses
+      the new codes, and this agent no longer sends the old one.
+    - By tests: the three modes at connection, the organizations accepted, a credential asked again, the
+      status fields, the guest's request, the menu item, the rules of the pack. Not run against a DIDComm
+      agent, which is not built yet.

@@ -152,6 +152,8 @@ export class DidcommEvents {
       // ---- peer status (plugin events, CC-VSA-012) ----
       case 'didcomm.peer-status.query-received':
         return this.onPeerStatusQuery(String(data.connectionId ?? ''), data.answered === true)
+      case 'didcomm.peer-status.authenticate-received':
+        return this.onPeerAuthenticate(String(data.connectionId ?? ''))
       case 'didcomm.peer-status.status-received':
         // what a peer says of this agent: the DIDComm agent keeps it, and it decides nothing here (IDENT-STAT-007)
         this.logger.info({ connectionId: data.connectionId, status: data.status }, 'peer status received')
@@ -246,6 +248,20 @@ export class DidcommEvents {
     if (!this.agent.peerStatus) return
     const bound = await this.agent.didcommSession(connectionId)
     if (bound) await this.agent.peerStatus.resolved(connectionId, bound.principal, { asked })
+  }
+
+  /**
+   * `peer-status/1.0/authenticate` (FLOW-STAT-009, IDENT-RES-015): a guest asks, from their wallet and outside
+   * any conversation, to be asked for their credential. Served as the person's own request: always, and with
+   * nothing changed when it is declined or left unanswered. On a connection with no Principal yet, where the
+   * request of the connection is still waiting, and on one that is identified, there is nothing to do.
+   */
+  private async onPeerAuthenticate(connectionId: string): Promise<void> {
+    if (!connectionId || !this.agent.identityRequests) return
+    const bound = await this.agent.didcommSession(connectionId)
+    if (!bound) return
+    const outcome = await this.agent.identityRequests.request(bound.principal, 'person')
+    this.logger.info({ connectionId, outcome }, 'authentication asked by the peer (FLOW-STAT-009)')
   }
 
   /**

@@ -52,7 +52,7 @@ const verified: EvidenceInput = {
 
 describe('asking for a catalog entry (INTX-PRES-003..007)', () => {
   const deps = (over: Partial<IdentityRequestDeps> = {}, recorded: EvidenceInput[] = []): IdentityRequestDeps => ({
-    identify: async () => undefined,
+    authenticate: async () => ({ outcome: 'declined' }),
     isFlowCapable: async () => true,
     onIdentityPresented: async () => ({ outcome: 'identified' }),
     present: async () => verified,
@@ -263,7 +263,7 @@ describe('the pack and the tool (INTX-PRES-001/003, PRIV-EVID-006)', () => {
     agent.identityRequests = new IdentityRequests(
       agent.pack,
       {
-        identify: async () => undefined,
+        authenticate: async () => ({ outcome: 'declined' }),
         isFlowCapable: async () => false,
         onIdentityPresented: async () => ({ outcome: 'unavailable' }),
         present: async () => verified,

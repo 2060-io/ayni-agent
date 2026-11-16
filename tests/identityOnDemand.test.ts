@@ -4,9 +4,15 @@
  */
 import { afterEach, describe, expect, it } from 'vitest'
 import type { RunningAgent } from '../src/app.js'
-import { IdentityFlow } from '../src/channels/didcomm/identity.js'
+import { type AuthenticationAttempt, IdentityFlow } from '../src/channels/didcomm/identity.js'
 import { type IdentityRequestDeps, IdentityRequests } from '../src/channels/didcomm/identityRequests.js'
-import { type AgentPack, type AuthenticationEntry, admitsUnidentified } from '../src/config/packTypes.js'
+import { authenticationErrors } from '../src/config/pack.js'
+import {
+  type AgentPack,
+  type AuthenticationEntry,
+  admitsUnidentified,
+  authenticationModeOf,
+} from '../src/config/packTypes.js'
 import type { EvidenceInput } from '../src/core/evidence.js'
 import { contextualMenuFor, PLATFORM_MENU } from '../src/core/interaction.js'
 import type { VerifiedFacts } from '../src/core/principals.js'
@@ -62,6 +68,27 @@ describe('who enters unidentified follows from the authentication (D53, IDENT-RE
     expect(admitsUnidentified(packWith([entry()]))).toBe(false)
   })
 
+  it('gives the agent one of three modes, and refuses a pack that contradicts itself (D72, IDENT-RES-010)', () => {
+    expect(authenticationModeOf(undefined)).toBeUndefined()
+    expect(authenticationModeOf(entry())).toBe('required')
+    expect(authenticationModeOf(entry({ request: 'on-connect', guests: true }))).toBe('offered')
+    expect(authenticationModeOf(entry({ request: 'on-demand' }))).toBe('on-request')
+    expect(authenticationModeOf(entry({ request: 'on-demand', guests: true }))).toBe('on-request')
+    // offered lets guests in; required does not
+    expect(admitsUnidentified(packWith([entry({ guests: true })]))).toBe(true)
+    expect(admitsUnidentified(packWith([entry({ guests: false })]))).toBe(false)
+
+    const errorsOf = (over: Partial<AuthenticationEntry>) => authenticationErrors(entry(over))
+    expect(
+      errorsOf({ guests: true, issuers: { organizations: ['org:EE:1'] }, obtain: { text: 'At the desk.' } })
+    ).toEqual([])
+    expect(errorsOf({ request: 'on-demand', guests: false })[0]).toMatch(/guests cannot be false/)
+    expect(errorsOf({ issuers: { organizations: [] } })[0]).toMatch(/would accept nobody/)
+    expect(errorsOf({ issuers: { organizations: ['Acme'] } })[0]).toMatch(/must be organization keys/)
+    expect(errorsOf({ obtain: {} })[0]).toMatch(/a text, a link, or both/)
+    expect(errorsOf({ obtain: { url: 'http://acme.example' } })[0]).toMatch(/https link/)
+  })
+
   it('asks nothing at connection when there is no schema or it is asked on demand', async () => {
     for (const pack of [packWith(), packWith([entry({ request: 'on-demand' })])]) {
       const calls: unknown[] = []
@@ -103,7 +130,7 @@ describe('the request on demand (IDENT-RES-015/016)', () => {
       ...over,
     }) as Principal
   const deps = (over: Partial<IdentityRequestDeps> = {}): IdentityRequestDeps => ({
-    identify: async () => identified(),
+    authenticate: async () => ({ outcome: 'accepted', facts: identified() }),
     isFlowCapable: async () => true,
     onIdentityPresented: async () => ({ outcome: 'identified' }),
     ...over,
@@ -115,9 +142,9 @@ describe('the request on demand (IDENT-RES-015/016)', () => {
     const requests = new IdentityRequests(
       pack,
       deps({
-        identify: async (...args) => {
+        authenticate: async (...args) => {
           asked.push(args)
-          return identified()
+          return { outcome: 'accepted', facts: identified() }
         },
       }),
       silent as never
@@ -137,9 +164,9 @@ describe('the request on demand (IDENT-RES-015/016)', () => {
     const requests = new IdentityRequests(
       pack,
       deps({
-        identify: async () => {
+        authenticate: async () => {
           calls++
-          return undefined
+          return { outcome: 'declined' }
         },
       }),
       silent as never
@@ -150,22 +177,68 @@ describe('the request on demand (IDENT-RES-015/016)', () => {
     expect(await requests.request(principal(), 'person')).toBe('not-presented')
     expect(calls).toBe(2)
     // no wait once the period is over
-    const impatient = new IdentityRequests(pack, deps({ identify: async () => undefined }), silent as never, 0)
+    const impatient = new IdentityRequests(
+      pack,
+      deps({ authenticate: async () => ({ outcome: 'unanswered' }) }),
+      silent as never,
+      0
+    )
     expect(await impatient.request(principal(), 'model')).toBe('not-presented')
     expect(await impatient.request(principal(), 'model')).toBe('not-presented')
   })
 
+  it('asks again after a credential that is not accepted, as long as the person presents one (IDENT-RES-019)', async () => {
+    const attempts: AuthenticationAttempt[] = [
+      { outcome: 'not-accepted', code: 'issuer-not-accepted' },
+      { outcome: 'not-accepted', code: 'incomplete' },
+      { outcome: 'accepted', facts: identified() },
+    ]
+    let asked = 0
+    const requests = new IdentityRequests(
+      pack,
+      deps({ authenticate: async () => attempts[asked++] as AuthenticationAttempt }),
+      silent as never
+    )
+    expect(await requests.request(principal(), 'person')).toBe('identified')
+    expect(asked).toBe(3)
+    // the person gives up: nothing changed, and they may ask again
+    const refused: AuthenticationAttempt[] = [{ outcome: 'not-accepted', code: 'not-valid' }, { outcome: 'declined' }]
+    let n = 0
+    const giving = new IdentityRequests(
+      pack,
+      deps({ authenticate: async () => refused[n++] as AuthenticationAttempt }),
+      silent as never
+    )
+    expect(await giving.request(principal(), 'person')).toBe('not-presented')
+    expect(n).toBe(2)
+    // a wallet without flows cannot be told why: it is asked once
+    let once = 0
+    const plain = new IdentityRequests(
+      pack,
+      deps({
+        isFlowCapable: async () => false,
+        authenticate: async () => {
+          once++
+          return { outcome: 'not-accepted', code: 'not-valid' }
+        },
+      }),
+      silent as never
+    )
+    expect(await plain.request(principal(), 'person')).toBe('not-presented')
+    expect(once).toBe(1)
+  })
+
   it('keeps one request pending on a connection', async () => {
-    let release: (facts: VerifiedFacts | undefined) => void = () => undefined
-    const waiting = new Promise<VerifiedFacts | undefined>((resolve) => {
+    let release: (attempt: AuthenticationAttempt) => void = () => undefined
+    const waiting = new Promise<AuthenticationAttempt>((resolve) => {
       release = resolve
     })
-    const requests = new IdentityRequests(pack, deps({ identify: () => waiting }), silent as never)
+    const requests = new IdentityRequests(pack, deps({ authenticate: () => waiting }), silent as never)
     const first = requests.request(principal(), 'person')
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(await requests.request(principal(), 'person')).toBe('pending')
     expect(await requests.request(principal(), 'model')).toBe('pending')
-    release(identified())
+    release({ outcome: 'accepted', facts: identified() })
     expect(await first).toBe('identified')
     expect(await requests.request(principal(), 'person')).toBe('identified')
   })
@@ -261,6 +334,15 @@ describe('binding after connect (D66, IDENT-RES-013/014/017)', () => {
     const names = async (p: Principal) => (await agent.registry.visible(p.roles, [], p)).map((t) => t.spec.name)
     expect(await names(guest.principal)).toContain('request_presentation')
     expect(contextualMenuFor(agent.pack, guest.principal, guest.session, 0).map((i) => i.id)).toContain(
+      PLATFORM_MENU.identify
+    )
+    expect(
+      contextualMenuFor(agent.pack, guest.principal, guest.session, 0).find((i) => i.id === PLATFORM_MENU.identify)
+        ?.label
+    ).toBe('Authenticate')
+    // the Ayni app has its own entry, in the service's menu on Home: it is not sent the agent's (IDENT-RES-015)
+    const inTheApp = { ...guest.session, client: { name: 'ayni-app', version: '1.0.0', platform: 'ios' } }
+    expect(contextualMenuFor(agent.pack, guest.principal, inTheApp, 0).map((i) => i.id)).not.toContain(
       PLATFORM_MENU.identify
     )
     const alice = (await agent.onIdentityPresented('conn-menu', identified())).principal as Principal

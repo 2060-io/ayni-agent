@@ -33,6 +33,9 @@ export function menuItemVisible(item: MenuItemDef, principal: Principal | null, 
   return !!principal && (item.roles ?? []).some((r) => principal.roles.includes(r))
 }
 
+/** The name the Ayni app gives as its client (PROF-SESS-014). */
+export const AYNI_APP_CLIENT = 'ayni-app'
+
 export function contextualMenuFor(
   pack: AgentPack,
   principal: Principal | null,
@@ -50,14 +53,16 @@ export function contextualMenuFor(
   if (bound && (pack.features?.approvals ?? true) && pendingApprovals > 0) {
     items.push({ id: PLATFORM_MENU.approvals, label: 'Approvals', badge: pendingApprovals })
   }
-  // an unidentified person may ask to identify, when the agent has an authentication schema (IDENT-RES-015)
+  // a guest may ask to authenticate, when the agent has an authentication schema (IDENT-RES-015). The Ayni app
+  // has its own entry for it, in the service's menu, and is not sent this one
   if (
     bound &&
     principal?.connectionType === 'verifiable-user-agent' &&
     !principal.identityCredentialRef &&
-    pack.identity.authentication?.length
+    pack.identity.authentication?.length &&
+    session.client?.name !== AYNI_APP_CLIENT
   ) {
-    items.push({ id: PLATFORM_MENU.identify, label: 'Identify yourself' })
+    items.push({ id: PLATFORM_MENU.identify, label: 'Authenticate' })
   }
   // the credentials a person asks for themselves: the profiles whose trigger is `request` (INTX-ISSUE-008)
   if (bound && principal?.connectionType === 'verifiable-user-agent') {

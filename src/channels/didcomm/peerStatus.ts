@@ -5,7 +5,7 @@
  * whether it is identified, and what is open to it on the connection. It is sent once the Principal is resolved,
  * before the request for a credential the agent requires, and again whenever a field changes.
  */
-import type { AgentPack } from '../../config/packTypes.js'
+import { type AgentPack, authenticationModeOf } from '../../config/packTypes.js'
 import type { ConnectionType, Principal } from '../../core/types.js'
 import type { Logger } from '../../util/logger.js'
 import { type PeerProfiles, supportsProtocol } from './peerProfiles.js'
@@ -15,13 +15,21 @@ export const PEER_STATUS_PROTOCOL = 'https://didcomm.org/peer-status/1.0'
 /** What a status lists as open for the conversation channel, and what a session grant is for by default. */
 export const AG_UI_ENDPOINT = 'ag-ui'
 
-export type PeerStatusRefusalCode = 'untrusted' | 'identity-refused' | 'not-admitted'
+export type PeerStatusRefusalCode =
+  | 'untrusted'
+  | 'not-admitted'
+  | 'authentication-declined'
+  | 'authentication-unanswered'
 
 export interface PeerStatus {
   authentication: {
     rule: 'none' | 'optional' | 'required'
     /** the credential that identifies the peer; absent with `none` */
     credential?: { jsonSchemaCredentialId: string }
+    /** the organizations whose credentials are accepted, by organization key; absent when any issuer is */
+    issuers?: string[]
+    /** how the peer obtains the credential, in the operator's words; absent when the pack says nothing of it */
+    obtain?: { text?: string; url?: string }
   }
   identified: boolean
   /** what the peer may use on the connection now */
@@ -85,15 +93,22 @@ export class PeerStatusNotifier {
 
   /**
    * The rule follows from the agent-pack and from nothing else (IDENT-STAT-002): no authentication schema,
-   * `none`; asked on demand, `optional`; asked on connect, `required`. A service is identified by its DID:
-   * nothing is asked of it (IDENT-STAT-007).
+   * `none`; guests let in, `optional`; the credential required, `required`. With the rule go the organizations
+   * accepted, when the pack lists any, and how the credential is obtained, when it says it. A service is
+   * identified by its DID: nothing is asked of it (IDENT-STAT-007).
    */
   public authenticationFor(connectionType: ConnectionType): PeerStatus['authentication'] {
     const entry = connectionType === 'verifiable-user-agent' ? this.pack.identity.authentication?.[0] : undefined
     if (!entry) return { rule: 'none' }
+    const organizations = entry.issuers?.organizations
+    const obtain = entry.obtain
     return {
-      rule: entry.request === 'on-demand' ? 'optional' : 'required',
+      rule: authenticationModeOf(entry) === 'required' ? 'required' : 'optional',
       credential: { jsonSchemaCredentialId: entry.credential.jsonSchemaCredentialId },
+      ...(organizations?.length ? { issuers: [...organizations] } : {}),
+      ...(obtain?.text || obtain?.url
+        ? { obtain: { ...(obtain.text ? { text: obtain.text } : {}), ...(obtain.url ? { url: obtain.url } : {}) } }
+        : {}),
     }
   }
 
@@ -116,13 +131,17 @@ export class PeerStatusNotifier {
   }
 
   /**
-   * A person connects to an agent that asks for the credential on connect: nothing is open until it is
-   * accepted, and the peer is told so before it is asked (IDENT-STAT-003).
+   * A person connects to an agent that asks for the credential at connection, required or offered: nothing is
+   * open until the request has an outcome, and the peer is told so before it is asked (IDENT-STAT-003).
    */
   public async identifying(connectionId: string): Promise<void> {
-    const authentication = this.authenticationFor('verifiable-user-agent')
-    if (authentication.rule !== 'required') return
-    await this.tell(connectionId, { authentication, identified: false, open: [] })
+    const mode = authenticationModeOf(this.pack.identity.authentication?.[0])
+    if (mode !== 'required' && mode !== 'offered') return
+    await this.tell(connectionId, {
+      authentication: this.authenticationFor('verifiable-user-agent'),
+      identified: false,
+      open: [],
+    })
   }
 
   /**
