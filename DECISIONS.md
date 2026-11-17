@@ -600,3 +600,20 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       no data of a real person: the zone and its check digits, the portrait conversion, each reason a
       read is not kept, the flow and its close, the issuance and the number, the rules of the pack. Not
       run against a phone: the app cannot read a chip yet.
+56. **What the system did is told to the model as a record, never in the agent's voice** (2026-11-16, found
+    by Fabrice on devnet with a phone, at the first document read: "when I ask the model to retry, I see a
+    message [note] Read your passport or identity card, but I have no command link to trigger the reading").
+    - **Cause:** a request shown on the phone, an approval and a challenge are kept in the conversation, and
+      the history the model reads held each of them as a line of the agent, `[note] <text>`. A request reads
+      as its title. After a read that expired the history held, in the agent's voice, "[note] Read your
+      passport or identity card" right after the person's "Retry". At the next "Retry" the model wrote that
+      line as its whole answer and called no tool: nothing was sent to the phone, three times in a row.
+    - **Fix:** `systemRecord`: these entries are given in the other side's turn, framed as records the
+      system wrote, and a request says what became of it ("it is expired and over: nothing is on their
+      phone now"). The platform rules tell the model never to write such a line and to call the tool again
+      when a person asks again.
+    - With it, the word of a document read that did not pass says that nothing is on the phone any more
+      and that the model must not announce a request: in the same test the model had answered "Your phone
+      will now ask you" to a tool that had just said the phone could not.
+    - By test: the record of a request in each state, and that no record starts as a line of the agent.
+      That the model no longer copies it is to be seen on devnet: it is a behaviour of the model.

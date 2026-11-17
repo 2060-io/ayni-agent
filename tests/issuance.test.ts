@@ -679,7 +679,7 @@ describe('a credential from a document read (D73, INTX-AUTH-010, INTX-ISSUE-019)
     expect(result.outcome).toBe('challenge-failed')
     expect(failed.offers).toHaveLength(0)
     expect(issuanceOutcomeForModel(result.outcome, undefined, result.reason)).toBe(
-      'not issued: the document has expired; another, valid document is needed.'
+      'not issued, and nothing is on the phone of the person now: the document has expired; another, valid document is needed. Tell them this; do not say that their phone will ask them.'
     )
   })
 
