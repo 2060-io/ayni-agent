@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.0](https://github.com/2060-io/ayni-agent/compare/v0.20.1...v0.21.0) (2026-11-17)
+
+
+### Features
+
+* **issuance:** a credential from a passport or an identity card: the chip read as a flow, kept as evidence, and a number by the document ([#83](https://github.com/2060-io/ayni-agent/issues/83)) ([b1c2f24](https://github.com/2060-io/ayni-agent/commit/b1c2f243dfc1d20c2bd7ab05910cd44af37f0a29))
+
 ## [0.20.1](https://github.com/2060-io/ayni-agent/compare/v0.20.0...v0.20.1) (2026-11-16)
 
 
