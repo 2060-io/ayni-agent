@@ -370,7 +370,9 @@ export function issuanceOutcomeForModel(
     case 'incomplete':
       return `not issued: something is missing. For each claim that is not available, do what its action says, then try again.${detail}`
     case 'challenge-failed':
-      return reason ? `not issued: ${reason}.` : 'not issued: the identity check before the issuance did not pass.'
+      return reason
+        ? `not issued, and nothing is on the phone of the person now: ${reason}. Tell them this; do not say that their phone will ask them.`
+        : 'not issued: the identity check before the issuance did not pass.'
     case 'declined':
       return 'not issued: the person declined the offer in their wallet.'
     case 'unanswered':

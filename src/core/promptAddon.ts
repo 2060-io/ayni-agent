@@ -74,6 +74,9 @@ export function renderPromptAddon(ctx: AddonContext): string {
       'If a task needs an access the person does not have, say so and tell them they may request an elevation with a purpose and a justification of their own; never choose the purpose or write the justification for them.'
     )
   }
+  lines.push(
+    'The history holds lines that start with "[system record": the system wrote them to tell you what happened (a request shown on the phone, an approval, an identity check). Never write such a line yourself, and never answer with the words of one. A request that is over is not on the phone of the person any more: when they ask again, call the tool again.'
+  )
   if (ctx.challengesConfigured)
     lines.push(
       "Identity checks (device confirmation, face check, document read) are triggered by the system on the person's phone; never ask the person to perform one yourself."

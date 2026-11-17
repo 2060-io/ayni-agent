@@ -93,6 +93,27 @@ export class TurnCancelled extends Error {
   }
 }
 
+/**
+ * What the system did in a conversation, as the model reads it in the history: a record, framed as one, in the
+ * turn of the other side. These records were written in the agent's own voice, as `[note] <text>`. A request
+ * shown on the phone reads as its title, so the history held an agent line "[note] Read your passport or
+ * identity card" after the person's "Retry": at the next "Retry" the model wrote that line itself, as its
+ * whole answer, and called no tool. The person saw the words and no request, three times.
+ *
+ * A request shown on the phone says what became of it, so that the model knows that an expired or declined one
+ * is over and that asking again means calling the tool again.
+ */
+export function systemRecord(entry: Pick<MessageEntry, 'sourceType' | 'text' | 'payload'>): string {
+  let what = entry.text
+  if (entry.sourceType === 'flow') {
+    const card = (entry.payload ?? {}) as { kind?: string; state?: string; outcome?: string }
+    const became = card.outcome ?? card.state ?? 'pending'
+    const over = became !== 'pending' && became !== 'active'
+    what = `a request was shown on the phone of the person, "${entry.text}"${card.kind ? ` (${card.kind})` : ''}; it is ${became}${over ? ' and over: nothing is on their phone now' : ''}`
+  }
+  return `[system record, written by the system, not by the person and not by you: ${what}]`
+}
+
 export class Orchestrator {
   private readonly reactionPolicies = new Map<string, ReactionPolicy>()
   private readonly addon: string
@@ -180,7 +201,8 @@ export class Orchestrator {
       ]
     }
     // receipts and reactions are bookkeeping, not conversation (a reaction the model must know about
-    // arrives as its own turn); approvals and challenges become short notes in the agent's voice
+    // arrives as its own turn); approvals, challenges and the requests shown on the phone are records of the
+    // system, told as such and never in the agent's voice
     if (entry.sourceType === 'state-update' || entry.sourceType === 'reaction') return []
     if (
       entry.sourceType === 'approval' ||
@@ -189,7 +211,7 @@ export class Orchestrator {
       entry.sourceType === 'flow' ||
       entry.role === 'system'
     ) {
-      return [{ role: 'assistant', content: `[note] ${entry.text}` }]
+      return [{ role: 'user', content: systemRecord(entry) }]
     }
     if (entry.role === 'agent')
       return [
