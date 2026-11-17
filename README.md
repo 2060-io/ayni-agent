@@ -93,12 +93,12 @@ docker run --rm -p 3010:3010 --env-file .env io2060/ayni-agent:local
     the image `io2060/ayni-agent:vX.Y.Z-dev` with the floating `dev`, `vX-dev`, `vX.Y-dev` tags from
     `main`, and the Helm chart `oci://docker.io/io2060/ayni-agent-chart` at the same version;
   - **release-please** keeps a Release PR open on `main`; merging it creates the stable tag `vX.Y.Z`,
-    the GitHub release with `CHANGELOG.md`, the image tags `vX.Y.Z`, `vX.Y`, `vX` and `latest`, the
-    chart at `vX.Y.Z`, and a Discord announcement.
+    the GitHub release with `CHANGELOG.md`, the image tags `vX.Y.Z`, `vX.Y`, `vX` and `latest`, and
+    the chart at `vX.Y.Z`.
 - Versions follow conventional commits: `fix:` bumps the patch, `feat:` the minor, `feat!:` the
   major (minor while below 1.0).
-- Secrets and variables expected by CD: `DOCKER_HUB_LOGIN`, `DOCKER_HUB_PWD`,
-  `DISCORD_UPDATES_WEBHOOK_URL` (secrets) and `CD_ENABLED` (variable).
+- Secrets and variables expected by CD: `DOCKER_HUB_LOGIN`, `DOCKER_HUB_PWD` (secrets) and `CD_ENABLED`
+  (variable).
 
 ## Dependencies on other components
 
