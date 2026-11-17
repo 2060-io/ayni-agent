@@ -25,6 +25,7 @@ import { admitsUnidentified, featuresOf } from './config/packTypes.js'
 import { AyniAgent } from './core/agent.js'
 import { ChallengeService } from './core/challenges.js'
 import { CapabilityRouter } from './core/channel.js'
+import { documentOutcomeForModel } from './core/document.js'
 import { EvidenceService } from './core/evidence.js'
 import { FlowService } from './core/flows.js'
 import { IssuanceService, subjectIdKey } from './core/issuance.js'
@@ -388,14 +389,17 @@ export async function buildAgent(
       offer: (input) => credentialOffers.offer(input),
       definitionFor: (schema) => credentialDefinitions.forSchema(schema),
       challenge: async (principal, session, policy, purpose) => {
-        const { outcome } = await challenges.run({
+        const { outcome, record } = await challenges.run({
           principal,
           originSession: session,
           toolName: 'issue_credential',
           policy,
           purpose,
         })
-        return outcome === 'completed' || outcome === 'degraded'
+        if (outcome === 'completed' || outcome === 'degraded') return { passed: true }
+        // a document read says why it did not pass, in words and with nothing of the document (INTX-AUTH-010)
+        const why = typeof record?.details?.reason === 'string' ? record.details.reason : outcome
+        return { passed: false, reason: policy.type === 'document' ? documentOutcomeForModel(why) : undefined }
       },
     },
     logger,

@@ -3,9 +3,11 @@
  * binding through `link-session`, the device challenge as a `confirm` flow with its card in the conversation,
  * identity requests as flows, the pending cap and the holder's closures.
  */
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { RunningAgent } from '../src/app.js'
-import { DidcommAdapter, MediaLinks } from '../src/channels/didcomm/adapter.js'
+import { DidcommAdapter, MediaLinks, MRTD_PROTOCOL } from '../src/channels/didcomm/adapter.js'
 import { DidcommEvents } from '../src/channels/didcomm/events.js'
 import { IdentityFlow, TrustResolver } from '../src/channels/didcomm/identity.js'
 import { AYNI_FLOW_PROTOCOL, PeerProfiles } from '../src/channels/didcomm/peerProfiles.js'
@@ -76,6 +78,7 @@ function stubClient(calls: Call[]) {
       return { threadId: `link-${++n}`, flowId: b.flowId, connectionId: b.connectionId, state: 'request-sent' }
     }),
     requestPresentation: rec('requestPresentation', () => ({ proofExchangeId: `pex-${++n}` })),
+    requestEmrtd: rec('requestEmrtd', () => ({ id: `emrtd-${++n}` })),
   }
 }
 
@@ -532,6 +535,160 @@ describe('device challenge as a confirm flow (INTX-AUTH-009, D55)', () => {
     )
     const { outcome } = await run
     expect(outcome).toBe('failed')
+  })
+})
+
+/**
+ * The specimen passport of the BSI reference data set (tests/document.test.ts). It expired in 2023, so the read
+ * of a valid document uses the same zone with a later date of expiry and its check digits made again.
+ */
+const documentFixture = (name: string) =>
+  readFileSync(fileURLToPath(new URL(`./fixtures/document/${name}`, import.meta.url)))
+function checkDigit(text: string): string {
+  const value = (c: string) => (c === '<' ? 0 : /\d/.test(c) ? Number(c) : c.charCodeAt(0) - 55)
+  return String([...text].reduce((sum, c, i) => sum + value(c) * [7, 3, 1][i % 3], 0) % 10)
+}
+function dg1ExpiringOn(yymmdd: string): Buffer {
+  const line1 = 'P<D<<MUSTERMANN<<ERIKA<<<<<<<<<<<<<<<<<<<<<<'
+  const number = 'C11T002JM4'
+  const birth = '9608122'
+  const expiry = yymmdd + checkDigit(yymmdd)
+  const personal = '<<<<<<<<<<<<<<<'
+  const line2 = `${number}D<<${birth}F${expiry}${personal}`
+  const zone = line1 + line2 + checkDigit(number + birth + expiry + personal)
+  return Buffer.concat([Buffer.from([0x61, zone.length + 3, 0x5f, 0x1f, zone.length]), Buffer.from(zone, 'latin1')])
+}
+const chipData = (dg1: Buffer, verification?: object) => ({
+  raw: { DG1: dg1.toString('base64'), DG2: documentFixture('DG2.bin').toString('base64') },
+  ...(verification ? { verification } : {}),
+})
+
+describe('the document read as an nfc-read flow (INTX-AUTH-010, PRIV-EVID-011, D73)', () => {
+  const connectionId = 'conn-confirm'
+  async function challenge() {
+    const bound = await running.agent.didcommSession(connectionId)
+    if (!bound) throw new Error('no bound connection')
+    const uiSessions = await running.agent.store.sessions.listByPrincipal(bound.principal.id, ['bound'])
+    const uiSession = uiSessions.find((s) => s.channelType === 'ag-ui') as Session
+    const run = running.agent.challenges.run({
+      principal: bound.principal,
+      originSession: uiSession,
+      toolName: 'issue_credential',
+      policy: { type: 'document' },
+      purpose: 'Badge from a passport',
+    })
+    await settle()
+    return { run, principal: bound.principal }
+  }
+  const lastRead = async (principalId: string) =>
+    (await running.agent.store.evidence.list(principalId)).filter((e) => e.kind === 'document').at(-1)
+
+  it('is not asked of a phone that did not say it can read a chip', async () => {
+    const before = callsOf('requestEmrtd').length
+    const { run } = await challenge()
+    expect((await run).outcome).toBe('unavailable')
+    expect(callsOf('requestEmrtd')).toHaveLength(before)
+  })
+
+  it('one request for the chip under the flow; a valid document that verifies is kept and passes', async () => {
+    // the phone now says it speaks the protocol
+    await events.handle(
+      envelope('didcomm.connections.state-updated', {
+        id: connectionId,
+        state: 'updated',
+        metadata: {
+          [AYNI_FLOW_PROTOCOL]: feature(AYNI_FLOW_PROTOCOL),
+          'https://didcomm.org/confirm/1.0': feature('https://didcomm.org/confirm/1.0'),
+          'https://didcomm.org/link-session/1.0': feature('https://didcomm.org/link-session/1.0'),
+          [MRTD_PROTOCOL]: feature(MRTD_PROTOCOL),
+        },
+      })
+    )
+    const { run, principal } = await challenge()
+    const open = last<[{ kind: string; expiresTime: string }]>('openFlow')[0]
+    expect(open.kind).toBe('nfc-read')
+    // five minutes to read a document
+    expect(Date.parse(open.expiresTime) - Date.now()).toBeGreaterThan(4 * 60_000)
+    const [asked, flowId] = last<[string, string]>('requestEmrtd')
+    expect(asked).toBe(connectionId)
+    const pending = (await running.agent.store.challenges.listPending()).find((c) => c.details?.flowId === flowId)
+    if (!pending) throw new Error('challenge not pending')
+    await events.handle(
+      envelope('didcomm.mrtd.emrtd-data-received', {
+        connectionId,
+        threadId: pending.details?.threadId,
+        dataGroups: chipData(dg1ExpiringOn('351031'), { authenticity: true, integrity: true }),
+      })
+    )
+    expect((await run).outcome).toBe('completed')
+    const close = last<[string, { outcome: string; references?: { type: string; id: string }[] }]>('closeFlow')
+    expect(close[0]).toBe(flowId)
+    expect(close[1]).toMatchObject({ outcome: 'completed', references: [{ type: 'document', id: 'passport' }] })
+    const record = await lastRead(principal.id)
+    expect(record).toMatchObject({ kind: 'document', entry: 'document', outcome: 'verified' })
+    // the audit names what was read; no value is in it
+    expect(record?.revealed).toContain('documentNumber')
+    expect(JSON.stringify(record)).not.toMatch(/MUSTERMANN|C11T002JM/)
+  })
+
+  it('an expired document is recorded with its reason and no value, and the flow is closed as not valid', async () => {
+    const { run, principal } = await challenge()
+    const [, flowId] = last<[string, string]>('requestEmrtd')
+    const pending = (await running.agent.store.challenges.listPending()).find((c) => c.details?.flowId === flowId)
+    await events.handle(
+      envelope('didcomm.mrtd.emrtd-data-received', {
+        connectionId,
+        threadId: pending?.details?.threadId,
+        // the specimen as it is: expired on 2023-10-31
+        dataGroups: chipData(documentFixture('DG1.bin'), { authenticity: true, integrity: true }),
+      })
+    )
+    const { outcome, record } = await run
+    expect(outcome).toBe('failed')
+    expect(record?.details?.reason).toBe('document-expired')
+    const report = last<[string, { code: string }]>('flowProblemReport')
+    expect(report[0]).toBe(flowId)
+    expect(report[1].code).toBe('not-valid')
+    expect(await lastRead(principal.id)).toMatchObject({ outcome: 'refused', reason: 'expired', stored: [] })
+  })
+
+  it('a document the DIDComm agent did not verify is not kept, whatever it says', async () => {
+    for (const [verification, reason] of [
+      [{ authenticity: true, integrity: false }, 'document-not-verified'],
+      [{ authenticity: false, integrity: true }, 'document-not-verified'],
+      [undefined, 'document-no-verification'],
+    ] as const) {
+      const { run, principal } = await challenge()
+      const [, flowId] = last<[string, string]>('requestEmrtd')
+      const pending = (await running.agent.store.challenges.listPending()).find((c) => c.details?.flowId === flowId)
+      await events.handle(
+        envelope('didcomm.mrtd.emrtd-data-received', {
+          connectionId,
+          threadId: pending?.details?.threadId,
+          dataGroups: chipData(dg1ExpiringOn('351031'), verification),
+        })
+      )
+      const { outcome, record } = await run
+      expect(outcome).toBe('failed')
+      expect(record?.details?.reason).toBe(reason)
+      expect((await lastRead(principal.id))?.outcome).toBe('refused')
+    }
+  })
+
+  it('a person who declines on the phone fails the challenge as declined', async () => {
+    const { run } = await challenge()
+    const [, flowId] = last<[string, string]>('requestEmrtd')
+    const pending = (await running.agent.store.challenges.listPending()).find((c) => c.details?.flowId === flowId)
+    await events.handle(
+      envelope('didcomm.mrtd.problem-report-received', {
+        connectionId,
+        threadId: pending?.details?.threadId,
+        reason: 'e.p.emrtd-refused',
+      })
+    )
+    const { outcome, record } = await run
+    expect(outcome).toBe('failed')
+    expect(record?.details?.reason).toBe('declined')
   })
 })
 

@@ -128,7 +128,7 @@ export class BundledToolSource implements ToolSource {
         key: 'bundled:credential_requirements',
         name: 'credential_requirements',
         description:
-          'Tells which credentials this agent can issue to the person, and for each whether it is held, ready or incomplete. For an incomplete one, each claim has a status and, when something can be done, an action: do what it says (for example request_presentation with the entry it names), then look again. You never see or supply a value: the agent fills the credential itself.',
+          'Tells which credentials this agent can issue to the person, and for each whether it is held, ready or incomplete. For an incomplete one, each claim has a status and, when something can be done, an action: do what it says (for example request_presentation with the entry it names), then look again. A credential is ready when the only thing missing is what its own issuance obtains: an action issue_credential means that issuing it starts with the person reading their passport or identity card on their phone. You never see or supply a value: the agent fills the credential itself.',
         parameters: { type: 'object', properties: {}, additionalProperties: false },
         access: ALWAYS_ALLOWED,
         when: (principal) => offeredProfiles(pack, principal).length > 0,
@@ -146,7 +146,7 @@ export class BundledToolSource implements ToolSource {
           key: 'bundled:issue_credential',
           name: 'issue_credential',
           description: [
-            'Issues a credential of this agent to the person, to their wallet. Call credential_requirements first: issue only when the state is ready. The agent fills every claim from what it verified; you give the name of the credential and nothing else. The call sends the offer and waits for the person to answer it in their wallet, up to two minutes: it returns whether they accepted, declined, did not answer, or their wallet refused it. Before you call, nothing has been sent: do not say it was. After it returns, tell the person what happened.',
+            'Issues a credential of this agent to the person, to their wallet. Call credential_requirements first: issue only when the state is ready. For a credential made from a passport or an identity card, the call first asks the person to read the chip of their document with their phone, and can take up to five minutes; tell them before you call that their phone will ask for it. The agent fills every claim from what it verified; you give the name of the credential and nothing else. The call sends the offer and waits for the person to answer it in their wallet, up to two minutes: it returns whether they accepted, declined, did not answer, or their wallet refused it. Before you call, nothing has been sent: do not say it was. After it returns, tell the person what happened.',
             undefined,
             ...byModel.map(([name, p]) => `${name}${p.label ? `: ${p.label}` : ''}`),
           ].join('\n'),

@@ -29,8 +29,16 @@ export interface CapabilityChannelOps {
   ): Promise<{ threadId: string; flowId?: string }>
   /** call offer whose room the face-verification service joins (INTX-AUTH-007); returns the call thread id */
   offerFaceMatchCall(connectionId: string, challenge: AuthChallengeRecord, description: string): Promise<string>
-  /** NFC document read request (INTX-AUTH-001) */
-  requestDocument(connectionId: string): Promise<string>
+  /**
+   * The document read: an `nfc-read` flow with one request for the data of the chip, of a peer that said it can
+   * read one (INTX-AUTH-010); returns the request thread id and the flow id, and throws when the peer cannot.
+   */
+  requestDocument(
+    connectionId: string,
+    challenge: AuthChallengeRecord,
+    purpose: string,
+    originSession: Session
+  ): Promise<{ threadId: string; flowId: string }>
 }
 
 export interface ChallengeRequest {
@@ -40,6 +48,9 @@ export interface ChallengeRequest {
   policy: NonNullable<ActionPolicy['authChallenge']>
   purpose: string
 }
+
+/** How long a person has to read their document once asked (INTX-AUTH-010). */
+export const DOCUMENT_READ_SECONDS = 300
 
 export class ChallengeService {
   private readonly pending = new Map<string, Deferred<ChallengeOutcome>>()
@@ -80,7 +91,9 @@ export class ChallengeService {
       })
       return { outcome }
     }
-    const timeoutSeconds = req.policy.timeoutSeconds ?? this.defaultTimeoutSeconds
+    // a document read takes a person longer than a confirmation: five minutes unless the action says otherwise
+    const timeoutSeconds =
+      req.policy.timeoutSeconds ?? (req.policy.type === 'document' ? DOCUMENT_READ_SECONDS : this.defaultTimeoutSeconds)
     const record: AuthChallengeRecord = {
       id: prefixedId('chl'),
       type: req.policy.type,
@@ -114,8 +127,9 @@ export class ChallengeService {
         const threadId = await this.ops.offerFaceMatchCall(connectionId, record, `Face check for: ${req.purpose}`)
         record.details = { ...(record.details ?? {}), threadId, connectionId }
       } else {
-        const threadId = await this.ops.requestDocument(connectionId)
-        record.details = { threadId, connectionId }
+        const sent = await this.ops.requestDocument(connectionId, record, req.purpose, req.originSession)
+        record.details = { threadId: sent.threadId, connectionId, flowId: sent.flowId }
+        await this.router.notifyOrigin(req.originSession.id, routed(record, 'pending'))
       }
       await this.store.challenges.save(record)
     } catch (error) {

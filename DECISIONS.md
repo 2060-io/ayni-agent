@@ -567,3 +567,36 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     - My tests of entry 53 declined through the close of the flow alone, which is the second of the two
       messages a wallet sends. The new test sends both, in their order; it fails without the fix. A record
       `abandoned` for another reason ("Invalid proof") is still answered `not-valid` and asked again.
+55. **A badge may be issued from a passport or an identity card** (2026-11-16, decided by Fabrice; ayni-spec
+    D73, INTX-AUTH-010, PRIV-EVID-011/012, INTX-ISSUE-019). Until now the `document` challenge sent a bare
+    request and kept "document read: yes".
+    - **The read** is the `document` challenge of an issuance profile, run as an `nfc-read` flow: one
+      request for the data of the chip under the flow id, valid five minutes, asked only of a phone that
+      disclosed `mrtd/1.0` (`DidcommAdapter.requestDocument`). No request for the machine-readable zone:
+      the phone reads it itself to open the chip, and it comes back in the chip's data, signed.
+    - **What is kept** (`src/core/document.ts`). The agent reads the raw data groups the DIDComm agent
+      reports, DG1 and DG2, and only when that agent says both that the signer chains to a state it
+      trusts and that the data matches the signature, and the document has not expired. Otherwise the
+      read is recorded with its reason and no value, the flow is closed `not-valid`, and the challenge
+      fails with the reason, which the model is told in words. The attributes are a closed list
+      (`DOCUMENT_ATTRIBUTES`), declared under `evidence.document` in the pack.
+    - **The portrait.** A chip usually holds it as JPEG 2000, which the Badge schema refuses. It is decoded
+      with OpenJPEG as WebAssembly (`@cornerstonejs/codec-openjpeg`), reduced to 240 pixels on its longer
+      side, and encoded as JPEG (`jpeg-js`) under 24 kB: a credential that carries a full picture is heavy
+      to deliver. The specimen's 413 by 531 portrait weighs 42 kB as a JPEG before the reduction.
+    - **The number** (`documentId`): a keyed digest of the profile, the issuing state and the number of
+      the document, written as `subjectId` is. One document gives one number through any connection: a
+      guest is a new Principal each time, and `subjectId` would number them again. A renewed document
+      gives another number, and so another identity; Fabrice: "for this first version it will be ok".
+    - **The issuance** no longer needs every claim before it starts: what its own document challenge
+      reads is `missing` with the action `issue_credential`, and the credential is `ready`. A read that
+      is still good is not asked again, so a person who declined the offer is not sent back to the chip.
+    - **Not done by the agent, because it cannot know:** the specification says the agent warns at start
+      when the DIDComm agent has no list of state certificates. The agent does not see that
+      configuration: it says so in its log when a read arrives with no verification result. The
+      specification is to be corrected.
+    - **What this proves:** that the document was in hand. No chip authentication, no face match.
+    - By tests, on the public specimen of the BSI reference data set (TR-03105-5, Erika Mustermann), with
+      no data of a real person: the zone and its check digits, the portrait conversion, each reason a
+      read is not kept, the flow and its close, the issuance and the number, the rules of the pack. Not
+      run against a phone: the app cannot read a chip yet.

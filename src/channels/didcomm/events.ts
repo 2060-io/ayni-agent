@@ -7,9 +7,12 @@
  * peer is told where it stands with the agent as its Principal is resolved, refused or changes (D71).
  */
 import type { FastifyInstance } from 'fastify'
+import { DOCUMENT_ENTRY } from '../../config/pack.js'
 import type { AyniAgent } from '../../core/agent.js'
+import { documentRefusalForPerson, readDocument } from '../../core/document.js'
 import type { TurnSink } from '../../core/orchestrator.js'
 import type { MessageAttachment, Principal, Session } from '../../core/types.js'
+import { nowIso } from '../../util/ids.js'
 import type { Logger } from '../../util/logger.js'
 import { clientOfConnection, DidcommAdapter } from './adapter.js'
 import { type IdentityFlow, isServicePeer } from './identity.js'
@@ -933,19 +936,57 @@ export class DidcommEvents {
     if (challenge && rejected) await this.agent.challenges.complete(challenge.id, 'failed', { reason: 'call-rejected' })
   }
 
+  /**
+   * The data of a document's chip, or the word of the phone that sends none (INTX-AUTH-010, PRIV-EVID-011).
+   * The read is kept as evidence, and the challenge passes, only when the DIDComm agent verified the data and
+   * the document is valid; otherwise the read is recorded with its reason and no value, the flow is closed as
+   * failed, and the challenge fails with the reason. The challenge is settled before the flow is closed: the
+   * close of the flow then finds no challenge left to fail.
+   */
   private async onDocument(
     connectionId: string,
     threadId: string,
-    ok: boolean,
+    received: boolean,
     data: Record<string, unknown>
   ): Promise<void> {
     const challenge = await this.agent.challenges.findPendingByThread(connectionId, threadId)
     if (!challenge) return
-    const groups = (data.dataGroups as { dg1?: unknown } | undefined) ?? {}
-    await this.agent.challenges.complete(
-      challenge.id,
-      ok ? 'completed' : 'failed',
-      ok ? { documentRead: true, hasDg1: 'dg1' in groups } : { reason: String(data.reason ?? 'refused') }
-    )
+    const flowId = typeof challenge.details?.flowId === 'string' ? challenge.details.flowId : undefined
+    if (!received) {
+      // the person refused, or the phone gave up on the chip: the phone closes its flow itself when it can
+      const reason = /refus/.test(String(data.reason ?? '')) ? 'declined' : 'read-failed'
+      await this.agent.challenges.complete(challenge.id, 'failed', { reason })
+      if (flowId) await this.agent.flows.close(flowId, reason === 'declined' ? 'declined' : 'failed')
+      return
+    }
+    const read = await readDocument(data.dataGroups, nowIso().slice(0, 10))
+    const audit = {
+      kind: 'document' as const,
+      entry: DOCUMENT_ENTRY,
+      requestRef: threadId,
+      connectionRef: connectionId,
+    }
+    if (!read.ok) {
+      this.logger.warn(
+        { connectionId, reason: read.reason, detail: read.detail },
+        read.reason === 'no-verification'
+          ? 'document read not kept: the DIDComm agent verified nothing, it has no list of state certificates (MRTD_MASTER_LIST_CSCA_LOCATION)'
+          : 'document read not kept'
+      )
+      await this.agent.evidence.record(
+        { id: challenge.principalId },
+        { ...audit, outcome: 'refused', reason: read.reason, values: {} }
+      )
+      await this.agent.challenges.complete(challenge.id, 'failed', { reason: `document-${read.reason}` })
+      if (flowId) await this.agent.flows.problemReport(flowId, 'not-valid', documentRefusalForPerson(read.reason))
+      return
+    }
+    await this.agent.evidence.record({ id: challenge.principalId }, { ...audit, values: read.values })
+    await this.agent.challenges.complete(challenge.id, 'completed', { documentRead: true })
+    if (flowId) {
+      await this.agent.flows.close(flowId, 'completed', {
+        references: [{ type: 'document', id: read.values.documentType }],
+      })
+    }
   }
 }

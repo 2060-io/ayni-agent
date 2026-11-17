@@ -294,8 +294,12 @@ export class VsAgentClient {
     return this.request('POST', '/didcomm/calls/end', { connectionId, threadId })
   }
 
-  public requestEmrtd(connectionId: string): Promise<{ id: string }> {
-    return this.request('POST', '/didcomm/mrtd/request-emrtd', { connectionId })
+  /** Asks for the data of a document's chip; `parentThreadId` is the flow the request belongs to (CC-VSA-014). */
+  public requestEmrtd(connectionId: string, parentThreadId?: string): Promise<{ id: string }> {
+    return this.request('POST', '/didcomm/mrtd/request-emrtd', {
+      connectionId,
+      ...(parentThreadId ? { parentThreadId } : {}),
+    })
   }
 
   /** `parentThreadId` makes the request a step of a flow (`~thread.pthid` = flow id, FLOW-CORE-001). */

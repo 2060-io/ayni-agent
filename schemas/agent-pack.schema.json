@@ -718,6 +718,25 @@
         }
       }
     },
+    "evidence": {
+      "description": "The evidence that is not a credential (D73, PRIV-EVID-003): what is kept of a document read, the document challenge of an action, and what the model may read of it. Its attributes are a closed list: documentType, documentNumber, issuingState, nationality, lastName, firstName, fullName, dateOfBirth, dateOfExpiry, sex, portrait.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "document": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "store": {
+              "$ref": "#/$defs/evidenceStore"
+            },
+            "modelVisible": {
+              "$ref": "#/$defs/evidenceModelVisible"
+            }
+          }
+        }
+      }
+    },
     "issuance": {
       "description": "The credentials the agent may issue: a closed list by name, each claim with one source that is never the model (D70, INTX-ISSUE-001).",
       "type": "object",
@@ -818,7 +837,10 @@
                   "required": ["from", "fn"],
                   "properties": {
                     "from": { "const": "computed" },
-                    "fn": { "type": "string", "enum": ["today", "now", "addDays", "constant", "subjectId"] },
+                    "fn": {
+                      "type": "string",
+                      "enum": ["today", "now", "addDays", "constant", "subjectId", "documentId"]
+                    },
                     "days": { "type": "integer" },
                     "value": { "type": "string" }
                   }

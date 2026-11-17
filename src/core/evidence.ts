@@ -5,7 +5,7 @@
  * the retention the pack gives, then archived or erased. The model reads the attributes the pack makes
  * visible, and nothing else.
  */
-import { AUTHENTICATION_ENTRY } from '../config/pack.js'
+import { AUTHENTICATION_ENTRY, DOCUMENT_ENTRY } from '../config/pack.js'
 import type { AgentPack, EvidencePolicy } from '../config/packTypes.js'
 import { type EntryCrypto, openJson, sealJson } from '../memory/crypto.js'
 import type { Store, StoredEvidence } from '../store/types.js'
@@ -24,6 +24,7 @@ export function evidencePolicyOf(pack: AgentPack, entry: string): EvidencePolicy
     const authentication = pack.identity.authentication?.[0]
     return { store: authentication?.store, modelVisible: authentication?.modelVisible }
   }
+  if (entry === DOCUMENT_ENTRY) return pack.evidence?.document ?? {}
   const catalog = pack.presentations?.[entry]
   return catalog ? { store: catalog.store, modelVisible: catalog.modelVisible } : {}
 }
@@ -68,6 +69,8 @@ export interface EvidenceInput {
   issuerDid?: string
   issuerOrganization?: { key: string; name?: string }
   outcome?: EvidenceRecord['outcome']
+  /** why what was received is not kept, when it is not: a word, never a value */
+  reason?: string
   values: Record<string, string>
   unrevealed?: string[]
   requestRef?: string
@@ -125,6 +128,7 @@ export class EvidenceService {
       issuerDid: input.issuerDid,
       issuerOrganization: input.issuerOrganization,
       outcome,
+      reason: input.reason,
       revealed: Object.keys(input.values),
       unrevealed: [...(input.unrevealed ?? [])],
       stored,
