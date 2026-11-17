@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.1](https://github.com/2060-io/ayni-agent/compare/v0.21.0...v0.21.1) (2026-11-17)
+
+
+### Bug Fixes
+
+* **history:** what the system did is told to the model as a record, never in the agent's voice ([#85](https://github.com/2060-io/ayni-agent/issues/85)) ([5b8330b](https://github.com/2060-io/ayni-agent/commit/5b8330b91b3ef2e0388aa33d84ff859958925baf))
+
 ## [0.21.0](https://github.com/2060-io/ayni-agent/compare/v0.20.1...v0.21.0) (2026-11-17)
 
 
