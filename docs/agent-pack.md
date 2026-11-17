@@ -38,6 +38,7 @@ directory.
 | `memory` | | context window, working memory, summarization, retrieval | D9, D10, D24, D25 |
 | `rag` | | corpus sources with visibility | D42, MEM-RAG |
 | `presentations` | | the credentials the agent may ask for, with what is kept and what the model reads | D69, INTX-PRES, PRIV-EVID |
+| `evidence` | | what is kept of a document read, and what the model reads of it | D73, PRIV-EVID |
 | `issuance` | | the credentials the agent may issue, each claim with its source | D70, INTX-ISSUE |
 | `tools` | | declarative HTTP tools, bundled tools, their access policy | TOOL-HTTP, TOOL-ACCESS |
 | `mcp` | | MCP servers and per-server tool access | TOOL-MCP, D41 |
@@ -304,17 +305,63 @@ issuance:
   is not kept cannot be issued from. `computed` is `today`, `now`, `addDays` (with `days`), `constant`
   (with `value`) or `subjectId`; the list is closed, and another name is refused. A system of record, a
   human attestation and a value declared by the peer are named by the specification and not available in
-  this version; neither is a value read from a document.
+  this version. `evidence` also reads a **document**: see below.
 - **An identifier of the subject.** `subjectId` gives a claim that numbers the holders of an issuer, such
   as `badgeNumber`: 16 characters derived from the Principal and the name of the profile with a key of the
   deployment (from `ENTRY_ENCRYPTION_KEY`). The same person gets the same number under the same profile at
   every issuance, two persons never the same one, and the number shows nothing of the Principal. It
   follows the Principal: a person who connects again unidentified is another Principal, with another
   number.
+- **A credential from a passport or an identity card (D73).** The entry `document` is the read of a
+  document's chip. It is declared once, under `evidence`, and read by the challenge of the profile:
+
+  ```yaml
+  evidence:
+    document:
+      store: { attributes: [documentNumber, issuingState, fullName, dateOfBirth, portrait], retention: { days: 1, onExpiry: erase } }
+      modelVisible: []
+  issuance:
+    badge:
+      credential: { jsonSchemaCredentialId: <schema> }
+      authChallenge: { type: document }          # the read: the phone asks the person for their document
+      evidenceMaxAgeMinutes: 15                  # a read older than this is done again
+      claims:
+        badgeNumber: { from: computed, fn: documentId }
+        name:        { from: evidence, entry: document, attribute: fullName }
+        birthDate:   { from: evidence, entry: document, attribute: dateOfBirth }
+        photo:       { from: evidence, entry: document, attribute: portrait }
+  ```
+
+  - **The attributes** are a closed list, the same for every document: `documentType` (`passport`,
+    `identity-card` or `travel-document`), `documentNumber`, `issuingState`, `nationality`, `lastName`,
+    `firstName`, `fullName` (first names, then last name), `dateOfBirth`, `dateOfExpiry`, `sex` (`M`, `F`
+    or `X`) and `portrait`. Names are those of the machine-readable zone: in capitals, without accents.
+    Dates are `YYYY-MM-DD`. The portrait is a JPEG data URL, at most 240 pixels on its longer side.
+  - **What is kept.** The read is kept only when the VS Agent says that the data is signed under a
+    certificate of the issuing state it trusts and that the data matches the signature, and when the
+    document has not expired. Otherwise it is recorded with its reason and no value, and nothing is
+    issued. The VS Agent needs the list of state certificates for this
+    (`MRTD_MASTER_LIST_CSCA_LOCATION`) and the image that carries the passport module: without the list
+    every read fails as not verified.
+  - **How it runs.** The model, or the person from the menu, asks for the credential. The agent opens a
+    passport flow on the phone, valid five minutes, and waits. A phone that did not say it can read a chip
+    is not asked: the issuance answers that the phone cannot. A read that is still good, by
+    `evidenceMaxAgeMinutes` and by the retention, is not asked again.
+  - **`documentId`** numbers the holders by their document: 16 characters derived from the issuing state
+    and the number of the document with the key of the deployment. One document gives one number through
+    any connection, so a person who lost their wallet reads the same passport and is the same holder; a
+    renewed document gives another number. It needs `documentNumber` and `issuingState` among the stored
+    attributes.
+  - **Refused by the loader:** a profile that takes a claim from a document without the `document`
+    challenge, or with the trigger `automatic`; `documentId` without the two attributes stored; a stored
+    attribute that is not of the list; a presentation entry named `document`.
+  - **What it proves:** that the document was in hand. The chip is not checked against a copy, and nobody
+    compares the holder with the portrait.
 - **Two tools.** `credential_requirements` is read-only and passes no gate. For each credential the person
   may receive it answers `held`, `ready` or `incomplete`, and for each claim a status without any value:
   `available`, `missing`, `expired`, `not-revealed` or `unavailable`. A claim that is not available names
-  what obtains it: `request_presentation` with an entry, or nothing to do. `issue_credential` takes the
+  what obtains it: `request_presentation` with an entry, `issue_credential` when the issuance itself reads
+  the document it needs (the credential is then `ready`), or nothing to do. `issue_credential` takes the
   name of the credential and nothing else: the agent resolves the claims itself, for the person of the
   session, offers the credential to their wallet, and issues nothing when a claim cannot be resolved,
   answering with the same list.

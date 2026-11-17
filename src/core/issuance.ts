@@ -6,7 +6,7 @@
  * resolved, and leaves a record built as evidence is.
  */
 import { createHmac, hkdfSync } from 'node:crypto'
-import { AUTHENTICATION_ENTRY } from '../config/pack.js'
+import { AUTHENTICATION_ENTRY, DOCUMENT_ENTRY } from '../config/pack.js'
 import type { ActionPolicy, AgentPack, ClaimSource, IssuanceProfile } from '../config/packTypes.js'
 import { nowIso } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
@@ -19,7 +19,11 @@ export const issuanceEntry = (profile: string) => `issuance:${profile}`
 export type ClaimStatus = 'available' | 'missing' | 'expired' | 'not-revealed' | 'unavailable'
 
 /** One action of a closed list that obtains what is missing (INTX-ISSUE-006). */
-export type ClaimAction = { type: 'request_presentation'; entry: string } | { type: 'none'; note: string }
+export type ClaimAction =
+  | { type: 'request_presentation'; entry: string }
+  /** what the issuance itself obtains: the document read that the challenge of the profile runs (INTX-AUTH-010) */
+  | { type: 'issue_credential'; profile: string; note: string }
+  | { type: 'none'; note: string }
 
 export interface ClaimRequirement {
   name: string
@@ -62,13 +66,13 @@ export interface IssuanceDeps {
     reason?: string
     exchangeId?: string
   }>
-  /** runs the challenge of the profile and tells whether it passed */
+  /** runs the challenge of the profile and tells whether it passed, and in words for the model why it did not */
   challenge(
     principal: Principal,
     session: Session,
     policy: NonNullable<ActionPolicy['authChallenge']>,
     purpose: string
-  ): Promise<boolean>
+  ): Promise<{ passed: boolean; reason?: string }>
   /**
    * the credential definition of this agent for a schema, found or created; undefined while it cannot be
    * established (INTX-ISSUE-017)
@@ -99,7 +103,21 @@ const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
  * the values of two profiles cannot be linked without the key.
  */
 export function subjectId(key: Buffer, profile: string, principalId: string): string {
-  const digest = createHmac('sha256', key).update(`${profile}\u0000${principalId}`).digest()
+  return identifier(key, `${profile}\u0000${principalId}`)
+}
+
+/**
+ * An identifier of a document under a profile (INTX-ISSUE-019): the same digest, of the profile, the issuing
+ * state and the number of the document. One document has one value, to whichever Principal reads it: a guest is
+ * a new Principal at each connection, and a person who reads the same passport again is the same holder. Neither
+ * the number nor the state can be read from it. A renewed document has another number, and another value.
+ */
+export function documentId(key: Buffer, profile: string, issuingState: string, documentNumber: string): string {
+  return identifier(key, `document\u0000${profile}\u0000${issuingState}\u0000${documentNumber}`)
+}
+
+function identifier(key: Buffer, of: string): string {
+  const digest = createHmac('sha256', key).update(of).digest()
   let bits = 0n
   for (const byte of digest.subarray(0, 10)) bits = (bits << 8n) | BigInt(byte)
   let out = ''
@@ -147,7 +165,12 @@ export class IssuanceService {
       out.push({
         credential: name,
         ...(profile.label ? { label: profile.label } : {}),
-        state: held ? 'held' : claims.every((c) => c.status === 'available') ? 'ready' : 'incomplete',
+        // what the document read of the profile will give is not missing: the issuance starts with that read
+        state: held
+          ? 'held'
+          : claims.every((c) => c.status === 'available' || c.action?.type === 'issue_credential')
+            ? 'ready'
+            : 'incomplete',
         trigger: profile.trigger ?? 'model',
         claims,
       })
@@ -184,8 +207,15 @@ export class IssuanceService {
       // a profile that names a schema issues under the definition of this agent for it, or not at all
       const credentialDefinitionId = await this.definitionOf(profile)
       if (!credentialDefinitionId) return { outcome: 'not-ready' }
-      if (profile.authChallenge && !(await this.deps.challenge(principal, session, profile.authChallenge, label)))
-        return { outcome: 'challenge-failed' }
+      if (profile.authChallenge) {
+        // a document read that is still good is not asked again: the person declined the offer, or let it pass
+        const read = profile.authChallenge.type === 'document'
+        const needed = !read || requirements.claims.some((c) => c.status !== 'available')
+        const challenge = needed
+          ? await this.deps.challenge(principal, session, profile.authChallenge, label)
+          : { passed: true }
+        if (!challenge.passed) return { outcome: 'challenge-failed', reason: challenge.reason }
+      }
       // the claims are resolved now, by the code, from the sources the profile names and nothing else
       const claims: Record<string, string> = {}
       const evidenceRefs = new Set<string>()
@@ -246,13 +276,27 @@ export class IssuanceService {
   ): Promise<Resolution> {
     if (source.from === 'computed') {
       if (source.fn === 'subjectId') return { status: 'available', value: subjectId(this.idKey, name, principal.id) }
+      if (source.fn === 'documentId') {
+        // made of two attributes of the document read: missing, or too old, as they are
+        const of = (attribute: string) =>
+          this.resolve(principal, name, profile, { from: 'evidence', entry: DOCUMENT_ENTRY, attribute })
+        const [state, number] = [await of('issuingState'), await of('documentNumber')]
+        const gap = [state, number].find((r) => r.status !== 'available')
+        if (gap || state.value === undefined || number.value === undefined)
+          return { status: gap?.status ?? 'unavailable', action: gap?.action }
+        return {
+          status: 'available',
+          value: documentId(this.idKey, name, state.value, number.value),
+          evidenceRef: number.evidenceRef,
+        }
+      }
       if (source.fn === 'today') return { status: 'available', value: today() }
       if (source.fn === 'now') return { status: 'available', value: nowIso() }
       if (source.fn === 'constant') return { status: 'available', value: source.value ?? '' }
       const date = new Date(Date.now() + (source.days ?? 0) * 86_400_000).toISOString().slice(0, 10)
       return { status: 'available', value: date }
     }
-    const action = this.actionFor(principal, source.entry)
+    const action = this.actionFor(principal, source.entry, name, profile)
     const record = await this.evidence.latest(principal.id, source.entry)
     if (!record) return { status: 'missing', action }
     if (record.unrevealed.includes(source.attribute)) return { status: 'not-revealed', action }
@@ -290,7 +334,16 @@ export class IssuanceService {
   }
 
   /** What obtains the evidence of an entry: the request tool when the entry is asked on demand, else nothing to do. */
-  private actionFor(principal: Principal, entry: string): ClaimAction {
+  private actionFor(principal: Principal, entry: string, name: string, profile: IssuanceProfile): ClaimAction {
+    if (entry === DOCUMENT_ENTRY) {
+      return profile.authChallenge?.type === 'document'
+        ? {
+            type: 'issue_credential',
+            profile: name,
+            note: 'the person reads their passport or identity card on their phone when the issuance starts',
+          }
+        : { type: 'none', note: 'nothing reads a document for this credential' }
+    }
     if (entry === AUTHENTICATION_ENTRY) {
       return principal.identityCredentialRef
         ? { type: 'none', note: 'the identity credential is asked when the connection is established' }
@@ -317,7 +370,7 @@ export function issuanceOutcomeForModel(
     case 'incomplete':
       return `not issued: something is missing. For each claim that is not available, do what its action says, then try again.${detail}`
     case 'challenge-failed':
-      return 'not issued: the identity check before the issuance did not pass.'
+      return reason ? `not issued: ${reason}.` : 'not issued: the identity check before the issuance did not pass.'
     case 'declined':
       return 'not issued: the person declined the offer in their wallet.'
     case 'unanswered':
@@ -351,7 +404,7 @@ export function issuanceOutcomeForPerson(
       return `Something is missing before this credential can be issued${missing.length ? `: ${missing.join(', ')}` : ''}.`
     }
     case 'challenge-failed':
-      return 'The identity check did not pass. Nothing was issued.'
+      return reason ? `Nothing was issued: ${reason}.` : 'The identity check did not pass. Nothing was issued.'
     case 'declined':
       return 'You declined the offer. Nothing was issued.'
     case 'unanswered':

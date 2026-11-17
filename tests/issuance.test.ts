@@ -12,6 +12,7 @@ import type { AgentPack, IssuanceProfile, PresentationEntry } from '../src/confi
 import { type EvidenceInput, EvidenceService } from '../src/core/evidence.js'
 import { contextualMenuFor } from '../src/core/interaction.js'
 import {
+  documentId,
   type IssuanceDeps,
   IssuanceService,
   issuanceEntry,
@@ -51,8 +52,8 @@ const pass: IssuanceProfile = {
   trigger: 'request',
   claims: { validUntil: { from: 'computed', fn: 'addDays', days: 7 } },
 }
-const packWith = (issuance: Record<string, IssuanceProfile>): AgentPack =>
-  ({ identity: { roleRules: [] }, presentations: { diploma }, issuance }) as unknown as AgentPack
+const packWith = (issuance: Record<string, IssuanceProfile>, extra: Partial<AgentPack> = {}): AgentPack =>
+  ({ identity: { roleRules: [] }, presentations: { diploma }, issuance, ...extra }) as unknown as AgentPack
 
 const person = (over: Partial<Principal> = {}) =>
   ({
@@ -74,8 +75,12 @@ const presented = (over: Partial<EvidenceInput> = {}): EvidenceInput => ({
   ...over,
 })
 
-function setup(issuance: Record<string, IssuanceProfile>, deps: Partial<IssuanceDeps> = {}) {
-  const pack = packWith(issuance)
+function setup(
+  issuance: Record<string, IssuanceProfile>,
+  deps: Partial<IssuanceDeps> = {},
+  extra: Partial<AgentPack> = {}
+) {
+  const pack = packWith(issuance, extra)
   const store = new MemoryStore()
   const evidence = new EvidenceService(store, pack, crypto, silent as never)
   const offers: { connectionId: string; credentialDefinitionId: string; claims: Record<string, string> }[] = []
@@ -87,7 +92,7 @@ function setup(issuance: Record<string, IssuanceProfile>, deps: Partial<Issuance
         offers.push(input)
         return { outcome: 'issued', exchangeId: `cex-${offers.length}` }
       },
-      challenge: async () => true,
+      challenge: async () => ({ passed: true }),
       ...deps,
     },
     silent as never,
@@ -204,7 +209,7 @@ describe('issuing (INTX-ISSUE-003/004/008..014)', () => {
   it('enforces the challenge of the profile, and issues nothing when the offer is not accepted', async () => {
     const challenged = setup(
       { alumni: { ...alumni, authChallenge: { type: 'device' } } },
-      { challenge: async () => false }
+      { challenge: async () => ({ passed: false }) }
     )
     await challenged.evidence.record(person(), presented())
     expect((await challenged.service.issue(person(), session, 'alumni', 'model')).outcome).toBe('challenge-failed')
@@ -565,5 +570,179 @@ describe('the pack, the tools and the menu (INTX-ISSUE-001/003, RBAC-FILTER-003)
     // a service is offered nothing
     const service = { ...principal, connectionType: 'verifiable-service' as const }
     expect((await agent.registry.visible([], [], service)).map((t) => t.spec.name)).not.toContain('issue_credential')
+  })
+})
+
+describe('a credential from a document read (D73, INTX-AUTH-010, INTX-ISSUE-019)', () => {
+  const document = {
+    store: {
+      attributes: ['documentNumber', 'issuingState', 'fullName', 'dateOfBirth', 'portrait'],
+      retention: { days: 1, onExpiry: 'erase' as const },
+    },
+  }
+  const badge: IssuanceProfile = {
+    credential: { credentialDefinitionId: 'did:webvh:issuer/resources/badge' },
+    label: 'Badge from a passport',
+    authChallenge: { type: 'document' },
+    evidenceMaxAgeMinutes: 15,
+    claims: {
+      badgeNumber: { from: 'computed', fn: 'documentId' },
+      name: { from: 'evidence', entry: 'document', attribute: 'fullName' },
+      birthDate: { from: 'evidence', entry: 'document', attribute: 'dateOfBirth' },
+      photo: { from: 'evidence', entry: 'document', attribute: 'portrait' },
+      issuedOn: { from: 'computed', fn: 'today' },
+    },
+  }
+  /** what the event handler records of a read that verified: the specimen of the BSI reference data set */
+  const read = (over: Record<string, string> = {}): EvidenceInput => ({
+    kind: 'document',
+    entry: 'document',
+    values: {
+      documentType: 'passport',
+      documentNumber: 'C11T002JM',
+      issuingState: 'D',
+      nationality: 'D',
+      lastName: 'MUSTERMANN',
+      firstName: 'ERIKA',
+      fullName: 'ERIKA MUSTERMANN',
+      dateOfBirth: '1996-08-12',
+      dateOfExpiry: '2033-10-31',
+      sex: 'F',
+      portrait: 'data:image/jpeg;base64,AAAA',
+      ...over,
+    },
+    requestRef: 'thread-1',
+  })
+  /** an agent whose challenge is a read that succeeds, as the phone and the event handler make it */
+  function reading(values: Record<string, string> = {}) {
+    const asked: string[] = []
+    const made = setup(
+      { badge },
+      {
+        challenge: async (principal, _session, policy) => {
+          asked.push(policy.type)
+          await made.evidence.record(principal, read(values))
+          return { passed: true }
+        },
+      },
+      { evidence: { document } }
+    )
+    return { ...made, asked }
+  }
+
+  it('before the read the credential is ready: what is missing is what the issuance itself reads', async () => {
+    const { service } = reading()
+    const [requirements] = await service.requirements(person())
+    const byIssuing = {
+      type: 'issue_credential',
+      profile: 'badge',
+      note: 'the person reads their passport or identity card on their phone when the issuance starts',
+    }
+    expect(requirements.state).toBe('ready')
+    expect(requirements.claims).toEqual([
+      { name: 'badgeNumber', status: 'missing', action: byIssuing },
+      { name: 'name', status: 'missing', action: byIssuing },
+      { name: 'birthDate', status: 'missing', action: byIssuing },
+      { name: 'photo', status: 'missing', action: byIssuing },
+      { name: 'issuedOn', status: 'available' },
+    ])
+  })
+
+  it('the issuance runs the read, then issues from what it gave and from nothing else', async () => {
+    const { service, offers, asked } = reading()
+    expect((await service.issue(person(), session, 'badge', 'model')).outcome).toBe('issued')
+    expect(asked).toEqual(['document'])
+    expect(offers).toHaveLength(1)
+    expect(offers[0].claims).toMatchObject({
+      name: 'ERIKA MUSTERMANN',
+      birthDate: '1996-08-12',
+      photo: 'data:image/jpeg;base64,AAAA',
+    })
+    expect(offers[0].claims.badgeNumber).toBe(documentId(subjectIdKey(Buffer.alloc(32, 9)), 'badge', 'D', 'C11T002JM'))
+    // neither the number of the document nor its state is in the number of the badge
+    expect(offers[0].claims.badgeNumber).toMatch(/^[0-9A-HJKMNP-TV-Z]{16}$/)
+    expect(offers[0].claims.badgeNumber).not.toContain('C11T002JM')
+  })
+
+  it('a read that does not pass issues nothing, and the model is told why', async () => {
+    const failed = setup(
+      { badge },
+      {
+        challenge: async () => ({
+          passed: false,
+          reason: 'the document has expired; another, valid document is needed',
+        }),
+      },
+      { evidence: { document } }
+    )
+    const result = await failed.service.issue(person(), session, 'badge', 'model')
+    expect(result.outcome).toBe('challenge-failed')
+    expect(failed.offers).toHaveLength(0)
+    expect(issuanceOutcomeForModel(result.outcome, undefined, result.reason)).toBe(
+      'not issued: the document has expired; another, valid document is needed.'
+    )
+  })
+
+  it('a read that is still good is not asked again: the person declined the offer and asks once more', async () => {
+    let offered = 0
+    const asked: string[] = []
+    const made = setup(
+      { badge },
+      {
+        challenge: async (principal, _session, policy) => {
+          asked.push(policy.type)
+          await made.evidence.record(principal, read())
+          return { passed: true }
+        },
+        offer: async () => (++offered === 1 ? { outcome: 'declined' } : { outcome: 'issued', exchangeId: 'cex-2' }),
+      },
+      { evidence: { document } }
+    )
+    expect((await made.service.issue(person(), session, 'badge', 'model')).outcome).toBe('declined')
+    expect((await made.service.issue(person(), session, 'badge', 'model')).outcome).toBe('issued')
+    expect(asked).toEqual(['document'])
+  })
+
+  it('one document is one number through two connections; another document is another number', async () => {
+    const first = reading()
+    await first.service.issue(person({ id: 'prn_guest_1' }), session, 'badge', 'model')
+    const second = reading()
+    await second.service.issue(person({ id: 'prn_guest_2' }), session, 'badge', 'model')
+    const renewed = reading({ documentNumber: 'C11T002JN' })
+    await renewed.service.issue(person({ id: 'prn_guest_1' }), session, 'badge', 'model')
+    expect(first.offers[0].claims.badgeNumber).toBe(second.offers[0].claims.badgeNumber)
+    expect(renewed.offers[0].claims.badgeNumber).not.toBe(first.offers[0].claims.badgeNumber)
+  })
+
+  it('the pack refuses what could not work', () => {
+    const errorsOf = (issuance: Record<string, IssuanceProfile>, extra: Partial<AgentPack>) =>
+      crossFieldErrors({
+        ...packWith(issuance, extra),
+        privacy: { processingActivities: [] },
+        persona: {},
+      } as unknown as AgentPack).filter((e) =>
+        /INTX-AUTH-010|INTX-ISSUE-019|INTX-ISSUE-001|PRIV-EVID-006|document/.test(e)
+      )
+    expect(errorsOf({ badge }, { evidence: { document } })).toEqual([])
+    // nothing would read the document
+    expect(errorsOf({ badge: { ...badge, authChallenge: undefined } }, { evidence: { document } })[0]).toMatch(
+      /INTX-AUTH-010.*no document challenge/
+    )
+    // nobody asked for it
+    expect(errorsOf({ badge: { ...badge, trigger: 'automatic' } }, { evidence: { document } })[0]).toMatch(
+      /INTX-AUTH-010.*automatic/
+    )
+    // the number is made of two attributes that must be kept
+    const noNumber = { store: { attributes: ['fullName', 'dateOfBirth', 'portrait'] } }
+    expect(errorsOf({ badge }, { evidence: { document: noNumber } }).join(' ')).toMatch(
+      /INTX-ISSUE-019.*documentNumber, issuingState/
+    )
+    // a read gives a closed list of attributes
+    const unknown = { store: { attributes: [...document.store.attributes, 'eyeColour'] } }
+    expect(errorsOf({ badge }, { evidence: { document: unknown } }).join(' ')).toMatch(
+      /evidence\.document stores \[eyeColour\]/
+    )
+    // no entry of evidence.document at all
+    expect(errorsOf({ badge }, {}).join(' ')).toMatch(/unknown entry document/)
   })
 })

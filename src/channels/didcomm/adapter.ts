@@ -54,6 +54,9 @@ export class MediaLinks {
   }
 }
 
+/** The protocol a phone reads the chip of a travel document with (flow profile §3). */
+export const MRTD_PROTOCOL = 'https://didcomm.org/mrtd/1.0'
+
 export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, InvitationMinter {
   public readonly type = 'didcomm' as const
   public readonly capabilities = DIDCOMM_CAPABILITIES
@@ -219,9 +222,36 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
     return id
   }
 
-  public async requestDocument(connectionId: string): Promise<string> {
-    const { id } = await this.client.requestEmrtd(connectionId)
-    return id
+  /**
+   * INTX-AUTH-010: the chip of a passport or of an identity card, read in one request under an `nfc-read` flow
+   * (flow profile §6.3). Asked only of a phone that said it speaks the protocol, which it says only when it can
+   * read a chip (FLOW-SENSOR-004, FLOW-CAP-003).
+   */
+  public async requestDocument(
+    connectionId: string,
+    challenge: AuthChallengeRecord,
+    purpose: string,
+    originSession: Session
+  ): Promise<{ threadId: string; flowId: string }> {
+    if (!this.flows || !(await this.flowMode(connectionId))) throw new Error('the peer takes no flow')
+    if (!(await this.peers.supports(connectionId, MRTD_PROTOCOL)))
+      throw new Error('the phone did not say that it can read the chip of a document')
+    const name = this.agent?.pack.metadata.displayName ?? 'The agent'
+    const flow = await this.flows.open({
+      connectionId,
+      kind: 'nfc-read',
+      title: 'Read your passport or identity card',
+      description: `${name} asks to read the chip of your document: ${purpose}.`,
+      origin: originSession,
+      expiresAt: challenge.expiresAt,
+    })
+    try {
+      const { id } = await this.client.requestEmrtd(connectionId, flow.flowId)
+      return { threadId: id, flowId: flow.flowId }
+    } catch (error) {
+      await this.flows.close(flow.flowId, 'failed', { reason: 'The request to read the document could not be sent.' })
+      throw error
+    }
   }
 
   // ---- ChannelAdapter (CORE-MSG-008) ------------------------------------------------------------------

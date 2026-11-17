@@ -9,10 +9,12 @@ import { Ajv2020 } from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
 import { parse as parseYaml } from 'yaml'
 import type { AgentPack, AuthenticationEntry, EvidencePolicy, ToolAccess } from './packTypes.js'
-import { COMPUTED_FUNCTIONS, featuresOf } from './packTypes.js'
+import { COMPUTED_FUNCTIONS, DOCUMENT_ATTRIBUTES, featuresOf } from './packTypes.js'
 
 /** The entry of the credential that authenticates a person (D65): never the name of a catalog entry. */
 export const AUTHENTICATION_ENTRY = 'authentication'
+/** The entry under which a document read is kept as evidence: the `document` evidence kind (D73). */
+export const DOCUMENT_ENTRY = 'document'
 
 export class PackError extends Error {
   public constructor(
@@ -161,6 +163,7 @@ export function evidenceWarnings(pack: AgentPack): string[] {
   const policies: [string, EvidencePolicy][] = [
     ...(pack.identity.authentication ?? []).map((e): [string, EvidencePolicy] => ['identity.authentication', e]),
     ...Object.entries(pack.presentations ?? {}).map(([n, e]): [string, EvidencePolicy] => [`presentations.${n}`, e]),
+    ...(pack.evidence?.document ? [['evidence.document', pack.evidence.document] as [string, EvidencePolicy]] : []),
   ]
   for (const [where, entry] of policies) {
     const days = entry.store?.retention?.days
@@ -228,10 +231,26 @@ export function crossFieldErrors(pack: AgentPack): string[] {
   for (const [name, entry] of Object.entries(pack.presentations ?? {})) {
     if (name === AUTHENTICATION_ENTRY)
       errors.push('presentations: the name authentication is the entry of identity.authentication')
+    if (name === DOCUMENT_ENTRY) errors.push('presentations: the name document is the entry of evidence.document')
     errors.push(...evidencePolicyErrors(`presentations.${name}`, entry, entry.attributes))
   }
+  // a document read gives a closed list of attributes: only those can be stored (PRIV-EVID-012)
+  const document = pack.evidence?.document
+  if (document) errors.push(...evidencePolicyErrors('evidence.document', document, [...DOCUMENT_ATTRIBUTES]))
   // every claim of an issued credential has a source the agent can resolve (INTX-ISSUE-001/002)
   for (const [name, profile] of Object.entries(pack.issuance ?? {})) {
+    // what a profile takes from a document is read by its own challenge, or by nothing (INTX-AUTH-010)
+    const readsDocument = Object.values(profile.claims).some((s) =>
+      s.from === 'computed' ? s.fn === 'documentId' : s.entry === DOCUMENT_ENTRY
+    )
+    if (readsDocument && profile.trigger === 'automatic')
+      errors.push(
+        `INTX-AUTH-010: issuance.${name} takes claims from a document and is automatic: a person must ask before their document is read`
+      )
+    if (readsDocument && profile.authChallenge?.type !== 'document')
+      errors.push(
+        `INTX-AUTH-010: issuance.${name} takes claims from a document and declares no document challenge: nothing would read it`
+      )
     const named = [profile.credential.credentialDefinitionId, profile.credential.jsonSchemaCredentialId].filter(Boolean)
     if (named.length !== 1)
       errors.push(
@@ -245,14 +264,26 @@ export function crossFieldErrors(pack: AgentPack): string[] {
           errors.push(`INTX-ISSUE-001: issuance.${name}.claims.${claim} addDays needs days`)
         if (source.fn === 'constant' && source.value === undefined)
           errors.push(`INTX-ISSUE-001: issuance.${name}.claims.${claim} constant needs a value`)
+        // the identifier of a document is made of two of its attributes, which must be kept to make it
+        const unkept = ['documentNumber', 'issuingState'].filter((a) => !document?.store?.attributes.includes(a))
+        if (source.fn === 'documentId' && unkept.length)
+          errors.push(
+            `INTX-ISSUE-019: issuance.${name}.claims.${claim} documentId needs evidence.document to store [${unkept.join(', ')}]`
+          )
         continue
       }
       const stored =
         source.entry === AUTHENTICATION_ENTRY
           ? identity.authentication?.[0]?.store?.attributes
-          : pack.presentations?.[source.entry]?.store?.attributes
+          : source.entry === DOCUMENT_ENTRY
+            ? document?.store?.attributes
+            : pack.presentations?.[source.entry]?.store?.attributes
       const known =
-        source.entry === AUTHENTICATION_ENTRY ? authentication.length > 0 : !!pack.presentations?.[source.entry]
+        source.entry === AUTHENTICATION_ENTRY
+          ? authentication.length > 0
+          : source.entry === DOCUMENT_ENTRY
+            ? !!document
+            : !!pack.presentations?.[source.entry]
       if (!known)
         errors.push(`INTX-ISSUE-001: issuance.${name}.claims.${claim} names the unknown entry ${source.entry}`)
       else if (!stored?.includes(source.attribute))

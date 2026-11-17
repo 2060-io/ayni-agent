@@ -29,6 +29,24 @@ export interface CredentialRef {
   attributes?: string[]
 }
 
+/**
+ * The attributes of a document read, a closed list, the same for a passport and for an identity card
+ * (D73, PRIV-EVID-012): what the machine-readable zone and the portrait of the chip give.
+ */
+export const DOCUMENT_ATTRIBUTES = [
+  'documentType',
+  'documentNumber',
+  'issuingState',
+  'nationality',
+  'lastName',
+  'firstName',
+  'fullName',
+  'dateOfBirth',
+  'dateOfExpiry',
+  'sex',
+  'portrait',
+] as const
+
 /** What is kept of a piece of evidence and what the model may read of it (D67, PRIV-EVID-003). */
 export interface EvidencePolicy {
   /** the attributes whose values are kept, sealed, and for how long; none by default */
@@ -113,8 +131,10 @@ export type ClaimSource =
 /**
  * The functions of a `computed` source, a closed list (INTX-ISSUE-015). `subjectId` is an identifier of the
  * subject, derived from the Principal and the profile (INTX-ISSUE-016): the number of a badge, for one.
+ * `documentId` is an identifier of the document the Principal read, derived from its issuing state and its
+ * number (INTX-ISSUE-019): one document gives one value, through whichever connection it is read.
  */
-export const COMPUTED_FUNCTIONS = ['today', 'now', 'addDays', 'constant', 'subjectId'] as const
+export const COMPUTED_FUNCTIONS = ['today', 'now', 'addDays', 'constant', 'subjectId', 'documentId'] as const
 export type ComputedFunction = (typeof COMPUTED_FUNCTIONS)[number]
 
 /** A credential the agent may issue, and the source of each of its claims (D70, INTX-ISSUE-001). */
@@ -332,6 +352,11 @@ export interface AgentPack {
   rag?: { enabled?: boolean; sources: RagSource[]; chunkSize?: number; chunkOverlap?: number }
   /** the credentials the agent may ask for, by name; `authentication` is the entry of identity.authentication (D69) */
   presentations?: Record<string, PresentationEntry>
+  /**
+   * The evidence that is not a credential: what is kept of a document read, the `document` challenge of an
+   * action, and what the model may read of it (D73, PRIV-EVID-003).
+   */
+  evidence?: { document?: EvidencePolicy }
   /** the credentials the agent may issue, by name (D70) */
   issuance?: Record<string, IssuanceProfile>
   tools?: {

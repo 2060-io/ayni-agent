@@ -300,6 +300,8 @@ export interface EvidenceRecord {
   issuerDid?: string
   issuerOrganization?: { key: string; name?: string }
   outcome: 'verified' | 'refused'
+  /** why a read or a presentation that was received is not kept (PRIV-EVID-011): a word, never a value */
+  reason?: string
   /** the names of the attributes revealed and of the requested ones left unrevealed, never a value */
   revealed: string[]
   unrevealed: string[]
