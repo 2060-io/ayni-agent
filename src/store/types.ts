@@ -27,15 +27,30 @@ import type { ScopePredicate } from '../memory/scope.js'
 import type { ProcessLockOptions } from './processLock.js'
 
 /** An entry as persisted: text and payload are sealed in `cipher` (null when crypto-erased). */
-export type StoredEntry = Omit<MessageEntry, 'text' | 'payload'> & { cipher: Buffer | null; textPreview: string }
+/** what the store keeps of an entry: its content only as ciphertext, no preview (PRIV-ERASE-001, D77) */
+export type StoredEntry = Omit<MessageEntry, 'text' | 'payload'> & { cipher: Buffer | null }
+
+/** a place in a conversation's order: entries are ordered by (initiatedAt, id) */
+export interface EntryKey {
+  initiatedAt: string
+  id: string
+}
 
 export interface EntryQuery {
-  sessionId?: string
-  sessionIds?: string[]
+  /** the entries of one conversation (MEM-ENTRY-004) */
+  conversationId?: string
+  /** the entries before this one, by its id (history paging) */
   before?: string
+  /** the entries at or after this place (the window's first entry, MEM-CTX-003) */
+  from?: EntryKey
+  /** the entries before this place (what a summary covers) */
+  until?: EntryKey
+  /** newest first (the default), or oldest first */
+  order?: 'desc' | 'asc'
   limit: number
   sourceTypes?: string[]
   roles?: string[]
+  principalId?: string
 }
 
 export interface VectorHit<T> {
@@ -68,6 +83,8 @@ export interface ConversationRepo {
   get(id: string): Promise<Conversation | undefined>
   save(conversation: Conversation): Promise<void>
   listByPrincipal(principalId: string, states?: ConversationState[]): Promise<Conversation[]>
+  /** every conversation, for the start job that seals what an earlier version kept in the clear (D77) */
+  listAll(): Promise<Conversation[]>
 }
 
 export interface EntryRepo {
@@ -81,9 +98,17 @@ export interface EntryRepo {
     scope: ScopePredicate,
     vector: number[],
     topK: number,
-    excludeSessionId?: string
+    /** the entries the model already reads (the window, MEM-RET-007) */
+    excludeIds?: string[]
   ): Promise<VectorHit<StoredEntry>[]>
   setEmbedding(id: string, vector: number[] | null): Promise<void>
+  /**
+   * Every entry of a conversation or of a Principal, in every lifecycle state, oldest first: for the erasure cascade
+   * and the auditor's interface (RBAC-XSESS-006), never for the model
+   */
+  listAll(q: { conversationId?: string; principalId?: string; limit: number }): Promise<StoredEntry[]>
+  /** entries an earlier version stored with an attachment's text or name in the clear (D77) */
+  listWithPlainAttachments(limit: number): Promise<StoredEntry[]>
   listUnanchored(limit: number): Promise<StoredEntry[]>
   markAnchored(ids: string[], batchId: string): Promise<void>
   listOlderThan(cutoffIso: string, state: LifecycleState, limit: number): Promise<StoredEntry[]>
@@ -94,6 +119,9 @@ export interface EntryRepo {
 }
 
 export interface WorkingMemoryRepo {
+  /** a retrieval: through the scope predicate (PRIV-SCOPE-003) */
+  query(scope: ScopePredicate): Promise<WorkingMemoryNote[]>
+  /** the Principal's notes, for the writes of the working-memory tool */
   list(principalId: string): Promise<WorkingMemoryNote[]>
   save(note: WorkingMemoryNote): Promise<void>
   delete(id: string): Promise<void>
@@ -101,6 +129,8 @@ export interface WorkingMemoryRepo {
 }
 
 export interface PreferenceRepo {
+  /** a retrieval: through the scope predicate (PRIV-SCOPE-003) */
+  query(scope: ScopePredicate): Promise<PrincipalPreference[]>
   list(principalId: string): Promise<PrincipalPreference[]>
   set(pref: PrincipalPreference): Promise<void>
 }
@@ -119,7 +149,13 @@ export interface EvidenceRepo {
 export interface ApprovalRepo {
   get(id: string): Promise<ApprovalRecord | undefined>
   save(record: ApprovalRecord): Promise<void>
-  list(filter: { status?: ApprovalStatus; requesterId?: string; eligibleRole?: string }): Promise<ApprovalRecord[]>
+  list(filter: {
+    status?: ApprovalStatus
+    requesterId?: string
+    eligibleRole?: string
+    /** the approvals asked in the turn that answered this message (PRIV-ERASE-005) */
+    inboundId?: string
+  }): Promise<ApprovalRecord[]>
 }
 
 export interface GrantRepo {
@@ -164,6 +200,23 @@ export interface StatsRepo {
 export interface KvRepo {
   get(key: string): Promise<string | undefined>
   set(key: string, value: string): Promise<void>
+  delete(key: string): Promise<void>
+}
+
+/** A call to the admin interface (D78, PRIV-ERASE-008, RBAC-XSESS-006): who made it, why, and what it touched. */
+export interface AdminAuditRecord {
+  id: string
+  ts: string
+  action: 'erasure' | 'legal-hold' | 'legal-hold-release' | 'audit-read'
+  actor: string
+  reason: string
+  /** what it named and what came of it: entry ids, a conversation, a Principal, an evidence record, counts */
+  detail: Record<string, unknown>
+}
+
+export interface AdminAuditRepo {
+  insert(record: AdminAuditRecord): Promise<void>
+  list(limit: number): Promise<AdminAuditRecord[]>
 }
 
 export interface Store {
@@ -190,6 +243,7 @@ export interface Store {
   rag: RagRepo
   stats: StatsRepo
   kv: KvRepo
+  adminAudit: AdminAuditRepo
 }
 
 export function cosine(a: number[], b: number[]): number {

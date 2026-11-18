@@ -14,8 +14,16 @@ import type {
   StatEvent,
   WorkingMemoryNote,
 } from '../core/types.js'
-import { matchesScope, type ScopePredicate } from '../memory/scope.js'
-import { cosine, type EntryQuery, type Store, type StoredEntry, type StoredEvidence, type VectorHit } from './types.js'
+import { matchesScope, type ScopePredicate, STORE_SHAPES } from '../memory/scope.js'
+import {
+  type AdminAuditRecord,
+  cosine,
+  type EntryQuery,
+  type Store,
+  type StoredEntry,
+  type StoredEvidence,
+  type VectorHit,
+} from './types.js'
 
 /** A copy that keeps the ciphertext a Buffer (a JSON clone would not). */
 const copyEvidence = (e: StoredEvidence): StoredEvidence => {
@@ -107,6 +115,7 @@ export class MemoryStore implements Store {
     save: async (c: Conversation) => {
       this.conversationRows.set(c.id, clone(c))
     },
+    listAll: async () => clone([...this.conversationRows.values()]),
     listByPrincipal: async (principalId: string, states?: Conversation['state'][]) =>
       clone(
         [...this.conversationRows.values()]
@@ -117,13 +126,17 @@ export class MemoryStore implements Store {
 
   private scoped(scope: ScopePredicate): StoredEntry[] {
     return [...this.entryRows.values()].filter((e) =>
-      matchesScope(scope, {
-        visibility: e.visibility,
-        state: e.state,
-        sessionId: e.sessionId,
-        principalId: e.principalId,
-        backingIdentity: e.backingIdentity,
-      })
+      matchesScope(
+        scope,
+        {
+          visibility: e.visibility,
+          state: e.state,
+          conversationId: e.conversationId,
+          principalId: e.principalId,
+          backingIdentityId: e.backingIdentity?.id ?? null,
+        },
+        STORE_SHAPES.entries
+      )
     )
   }
 
@@ -140,31 +153,54 @@ export class MemoryStore implements Store {
       clone([...this.entryRows.values()].find((e) => e.sessionId === sessionId && e.externalId === externalId)),
     query: async (scope: ScopePredicate, q: EntryQuery) => {
       let rows = this.scoped(scope)
-      if (q.sessionId) rows = rows.filter((e) => e.sessionId === q.sessionId)
-      if (q.sessionIds) rows = rows.filter((e) => q.sessionIds?.includes(e.sessionId))
+      if (q.conversationId) rows = rows.filter((e) => e.conversationId === q.conversationId)
       if (q.sourceTypes) rows = rows.filter((e) => q.sourceTypes?.includes(e.sourceType))
       if (q.roles) rows = rows.filter((e) => q.roles?.includes(e.role))
-      rows.sort((a, b) =>
-        a.initiatedAt < b.initiatedAt ? 1 : a.initiatedAt > b.initiatedAt ? -1 : b.id.localeCompare(a.id)
-      )
+      if (q.principalId) rows = rows.filter((e) => e.principalId === q.principalId)
+      const key = (e: { initiatedAt: string; id: string }) => [Date.parse(e.initiatedAt), e.id] as const
+      const cmp = (a: readonly [number, string], b: readonly [number, string]) =>
+        a[0] !== b[0] ? a[0] - b[0] : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0
       if (q.before) {
         const pivot = this.entryRows.get(q.before)
-        if (pivot)
-          rows = rows.filter(
-            (e) => e.initiatedAt < pivot.initiatedAt || (e.initiatedAt === pivot.initiatedAt && e.id < pivot.id)
-          )
+        if (pivot) rows = rows.filter((e) => cmp(key(e), key(pivot)) < 0)
       }
+      if (q.from) {
+        const from = key(q.from)
+        rows = rows.filter((e) => cmp(key(e), from) >= 0)
+      }
+      if (q.until) {
+        const until = key(q.until)
+        rows = rows.filter((e) => cmp(key(e), until) < 0)
+      }
+      rows.sort((a, b) => (q.order === 'asc' ? cmp(key(a), key(b)) : cmp(key(b), key(a))))
       return clone(rows.slice(0, q.limit))
     },
-    vectorSearch: async (scope: ScopePredicate, vector: number[], topK: number, excludeSessionId?: string) => {
+    vectorSearch: async (scope: ScopePredicate, vector: number[], topK: number, excludeIds?: string[]) => {
       const hits: VectorHit<StoredEntry>[] = []
       for (const e of this.scoped(scope)) {
-        if (excludeSessionId && e.sessionId === excludeSessionId) continue
+        if (excludeIds?.includes(e.id)) continue
         const v = this.embeddings.get(e.id)
         if (v) hits.push({ item: clone(e), score: cosine(vector, v) })
       }
       return hits.sort((a, b) => b.score - a.score).slice(0, topK)
     },
+    listWithPlainAttachments: async (limit: number) =>
+      clone(
+        [...this.entryRows.values()]
+          .filter((e) => e.attachments.some((a) => a.textRepr || a.filename !== undefined))
+          .slice(0, limit)
+      ),
+    listAll: async (q: { conversationId?: string; principalId?: string; limit: number }) =>
+      clone(
+        [...this.entryRows.values()]
+          .filter(
+            (e) =>
+              (!q.conversationId || e.conversationId === q.conversationId) &&
+              (!q.principalId || e.principalId === q.principalId)
+          )
+          .sort((a, b) => Date.parse(a.initiatedAt) - Date.parse(b.initiatedAt) || a.id.localeCompare(b.id))
+          .slice(0, q.limit)
+      ),
     setEmbedding: async (id: string, vector: number[] | null) => {
       if (vector) this.embeddings.set(id, vector)
       else this.embeddings.delete(id)
@@ -209,6 +245,16 @@ export class MemoryStore implements Store {
   }
 
   public notes = {
+    query: async (scope: ScopePredicate) =>
+      clone(
+        [...this.noteRows.values()].filter((n) =>
+          matchesScope(
+            scope,
+            { visibility: n.visibility, state: n.state, principalId: n.principalId },
+            STORE_SHAPES.notes
+          )
+        )
+      ),
     list: async (principalId: string) =>
       clone([...this.noteRows.values()].filter((n) => n.principalId === principalId)),
     save: async (n: WorkingMemoryNote) => {
@@ -230,6 +276,16 @@ export class MemoryStore implements Store {
   }
 
   public preferences = {
+    query: async (scope: ScopePredicate) =>
+      clone(
+        [...this.prefRows.values()].filter((p) =>
+          matchesScope(
+            scope,
+            { visibility: 'principal-private', state: 'active', principalId: p.principalId },
+            STORE_SHAPES.preferences
+          )
+        )
+      ),
     list: async (principalId: string) =>
       clone([...this.prefRows.values()].filter((p) => p.principalId === principalId)),
     set: async (p: PrincipalPreference) => {
@@ -261,10 +317,16 @@ export class MemoryStore implements Store {
     save: async (r: ApprovalRecord) => {
       this.approvalRows.set(r.id, clone(r))
     },
-    list: async (f: { status?: ApprovalRecord['status']; requesterId?: string; eligibleRole?: string }) =>
+    list: async (f: {
+      status?: ApprovalRecord['status']
+      requesterId?: string
+      eligibleRole?: string
+      inboundId?: string
+    }) =>
       clone(
         [...this.approvalRows.values()].filter(
           (r) =>
+            (!f.inboundId || r.inboundId === f.inboundId) &&
             (!f.status || r.status === f.status) &&
             (!f.requesterId || r.requesterId === f.requesterId) &&
             (!f.eligibleRole || r.eligibleRoles.includes(f.eligibleRole))
@@ -312,7 +374,15 @@ export class MemoryStore implements Store {
     vectorSearch: async (scope: ScopePredicate, vector: number[], topK: number) => {
       const hits: VectorHit<RagChunk>[] = []
       for (const c of this.chunks.values()) {
-        if (!c.vector || !matchesScope(scope, { visibility: c.visibility, state: c.state })) continue
+        if (
+          !c.vector ||
+          !matchesScope(
+            scope,
+            { visibility: c.visibility, state: c.state, backingIdentityId: c.partner ?? null },
+            STORE_SHAPES.documents
+          )
+        )
+          continue
         const { vector: _v, ...item } = c
         hits.push({ item: clone(item), score: cosine(vector, c.vector) })
       }
@@ -349,5 +419,16 @@ export class MemoryStore implements Store {
     set: async (key: string, value: string) => {
       this.kvRows.set(key, value)
     },
+    delete: async (key: string) => {
+      this.kvRows.delete(key)
+    },
+  }
+
+  private readonly auditRows: AdminAuditRecord[] = []
+  public adminAudit = {
+    insert: async (r: AdminAuditRecord) => {
+      this.auditRows.push(clone(r))
+    },
+    list: async (limit: number) => clone([...this.auditRows].sort((a, b) => b.ts.localeCompare(a.ts)).slice(0, limit)),
   }
 }

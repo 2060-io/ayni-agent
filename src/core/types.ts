@@ -8,7 +8,7 @@ export type { ConnectionType, Relation, Visibility }
 
 export type LifecycleState = 'active' | 'archived' | 'legal-hold' | 'crypto-erased' | 'deleted'
 export const VISIBILITIES: readonly Visibility[] = [
-  'session-private',
+  'conversation-private',
   'principal-private',
   'organization-shared',
   'partner-shared',
@@ -79,6 +79,11 @@ export interface Conversation {
   title: string
   state: ConversationState
   lastPreview?: string
+  /**
+   * the title and the last text, sealed under a key of the conversation (D77): what the store keeps of them. The
+   * service opens it into `title` and `lastPreview`, which the store never holds in the clear
+   */
+  sealed?: { keyRef: string; cipher: string }
   createdAt: string
   lastActivityAt: string
   /** every session that served it, newest first; the lineage of the next one */
@@ -152,6 +157,11 @@ export interface Session {
   resumedFromSessionId?: string
   /** ids of every session in the resume chain, oldest last */
   lineage?: string[]
+  /**
+   * the first session of a conversation that no AG-UI conversation names (MEM-ENTRY-004): the sessions that resume
+   * it carry it, and their entries belong to it
+   */
+  rootSessionId?: string
   tokenHash?: string
   lastActivityAt: string
   createdAt: string
@@ -240,6 +250,8 @@ export type Completion = 'complete' | 'interrupted'
 export interface MessageEntry {
   id: string
   sessionId: string
+  /** the conversation it belongs to (MEM-ENTRY-004, D76): what `conversation-private` keys on */
+  conversationId: string
   principalId: string | null
   role: EntryRole
   sourceType: SourceType
@@ -342,6 +354,10 @@ export interface ApprovalRecord {
   serverName?: string
   toolName: string
   actionArgs?: Record<string, unknown>
+  /** the arguments were erased with the message whose turn asked for the approval (PRIV-ERASE-005) */
+  argsErased?: boolean
+  /** the person's message whose turn asked for it: the erasure cascade follows it (PRIV-ERASE-005) */
+  inboundId?: string
   requesterId: string
   requesterName: string
   requesterRole: string
@@ -413,6 +429,8 @@ export interface MemoryAccessLog {
   roles: string[]
   activeGrantId?: string
   scopePredicate: Record<string, unknown>
+  /** the store the retrieval read (PRIV-SCOPE-003): entries, working_memory, preferences or rag_chunks */
+  store?: string
   matchedEntryIds: string[]
   fromSessionIds: string[]
   shownToLlm: boolean
@@ -429,6 +447,8 @@ export interface RagChunk {
   chunkText: string
   position: number
   createdAt: string
+  /** the organization key of the partner of a `partner-shared` source (MEM-RAG-005) */
+  partner?: string
 }
 
 export interface StatEvent {

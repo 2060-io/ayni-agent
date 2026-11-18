@@ -7,6 +7,10 @@ export interface Env {
   agentPackPath: string
   publicBaseUrl: string
   port: number
+  /** listener of the admin interface (D78): erasure, legal hold, audit reads; 0 turns it off; never exposed */
+  adminPort?: number
+  /** when set, every admin call carries it as a bearer token */
+  adminToken?: string
   logLevel: string
   nodeEnv: string
 
@@ -102,6 +106,8 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
     agentPackPath: required('AGENT_PACK_PATH'),
     publicBaseUrl: required('PUBLIC_BASE_URL').replace(/\/+$/, ''),
     port: num(source.PORT, 3010) as number,
+    adminPort: num(source.ADMIN_PORT, 3011) as number,
+    adminToken: source.ADMIN_TOKEN || undefined,
     logLevel: source.LOG_LEVEL ?? 'info',
     nodeEnv: source.NODE_ENV ?? 'development',
 

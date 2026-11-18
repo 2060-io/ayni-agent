@@ -26,12 +26,20 @@ export interface ChatRequest {
   temperature?: number
   maxOutputTokens?: number
   signal?: AbortSignal
+  /** the provider's cache key, for a provider that caches by prefix: the conversation (LLM-CACHE-001) */
+  cacheKey?: string
+  /** the lifetime of what the request writes to the provider's cache (LLM-CACHE-001) */
+  cacheTtl?: '5m' | '1h'
 }
 
 export type ChatDelta =
   | { type: 'text'; text: string }
   | { type: 'tool_call'; call: ToolCallRequest }
-  | { type: 'usage'; inputTokens: number; outputTokens: number }
+  /**
+   * what the provider counted for the call (LLM-USAGE-001): the input (every token of it), the part of it served from
+   * the provider's cache, the part written to it, and the output; the cache parts are parts of the input
+   */
+  | { type: 'usage'; inputTokens: number; outputTokens: number; cachedTokens?: number; cacheWriteTokens?: number }
 
 export interface ChatModel {
   readonly id: string

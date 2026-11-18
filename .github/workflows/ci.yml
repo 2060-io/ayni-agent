@@ -39,3 +39,42 @@ jobs:
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # The reference relational store (PostgreSQL with pgvector): the scope predicate compiled for each store, the
+  # migrations, no plaintext beside the ciphertext (PRIV-SCOPE-003, MEM-RAG-005, PRIV-ERASE-001).
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Node.js v24
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the profile package
+        run: pnpm --filter @ayni.org/ayni-agui-profile build
+
+      - name: Test against PostgreSQL
+        run: pnpm exec vitest run tests/postgres.test.ts
+        env:
+          PG_TEST_URL: postgres://postgres:postgres@localhost:5432/postgres

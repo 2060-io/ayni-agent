@@ -468,6 +468,27 @@
         "provider_options": {
           "type": "object",
           "description": "Provider-specific settings as the adapter documents (deployment name, region, project)."
+        },
+        "maxInputTokens": {
+          "type": "integer",
+          "minimum": 1024,
+          "description": "The model's input limit (MEM-CTX-006). The agent refuses to start when memory.contextWindowTokens plus maxOutputTokens exceeds it."
+        },
+        "cache": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Provider caching by prefix (LLM-CACHE-001): the conversation is sent as the cache key, with the lifetime below. Kimi (openai-compatible) first.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "ttl": {
+              "type": "string",
+              "enum": ["5m", "1h"],
+              "default": "5m"
+            }
+          }
         }
       }
     },
@@ -510,7 +531,7 @@
           "type": "integer",
           "minimum": 1024,
           "default": 12000,
-          "description": "Token budget of the active window (MEM-TIER-003)."
+          "description": "Token budget of the context window (MEM-RET-001, MEM-CTX-002); CONTEXT_WINDOW_TOKENS sets it in the Welcome pack."
         },
         "workingMemory": {
           "type": "object",
@@ -532,9 +553,30 @@
             }
           }
         },
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The window moves in steps (MEM-CTX-003).",
+          "properties": {
+            "keepRatio": {
+              "type": "number",
+              "minimum": 0.1,
+              "maximum": 0.95,
+              "default": 0.6,
+              "description": "A step drops the oldest entries until the context fits this share of the budget."
+            },
+            "maxEntries": {
+              "type": "integer",
+              "minimum": 10,
+              "default": 400,
+              "description": "The number of entries the window reads; a step also drops the entries beyond it."
+            }
+          }
+        },
         "summarization": {
           "type": "object",
           "additionalProperties": false,
+          "description": "The conversation summary (MEM-CTX-004): the entries a step drops, compressed with the previous summary.",
           "properties": {
             "enabled": {
               "type": "boolean",
@@ -543,7 +585,13 @@
             "triggerTokens": {
               "type": "integer",
               "minimum": 512,
-              "description": "Compress the window when it exceeds this many tokens; defaults to contextWindowTokens."
+              "description": "The window steps when the context would exceed this many tokens; defaults to contextWindowTokens."
+            },
+            "maxSummaryTokens": {
+              "type": "integer",
+              "minimum": 100,
+              "default": 4000,
+              "description": "The output limit of a summary."
             }
           }
         },
@@ -613,6 +661,11 @@
                 "type": "string",
                 "enum": ["public", "organization-shared", "partner-shared"],
                 "default": "public"
+              },
+              "partner": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The organization key of the partner (org:<country>:<registry id>) whose Principals may read a partner-shared source (MEM-RAG-005)."
               },
               "refreshHours": {
                 "type": "integer",

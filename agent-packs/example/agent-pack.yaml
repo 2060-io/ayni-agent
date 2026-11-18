@@ -138,6 +138,7 @@ rag:
       type: url
       url: https://partners.northwind.example/sla.md
       visibility: partner-shared
+      partner: "org:EE:14000000"     # the organization key of the partner above (MEM-RAG-005)
       refreshHours: 24
 
 # The other credentials this agent may ask for: a closed list by name (D69). What comes back is evidence of the

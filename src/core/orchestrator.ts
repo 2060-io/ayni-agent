@@ -5,17 +5,19 @@
  */
 import type { AgentPack } from '../config/packTypes.js'
 import { featuresOf } from '../config/packTypes.js'
-import type { ChatMessage, ChatModel, ContentPart, ToolCallRequest } from '../llm/types.js'
+import type { ChatDelta, ChatMessage, ChatModel, ContentPart, ToolCallRequest } from '../llm/types.js'
 import type { ObjectStore } from '../media/objectStore.js'
-import type { MemoryService, NewEntry } from '../memory/service.js'
+import type { MemoryService, NewEntry, Recalled } from '../memory/service.js'
 import type { StatsSink } from '../platform/stats.js'
 import type { ApprovalService } from '../policy/approvals.js'
 import type { ToolRegistry, VisibleTool } from '../tools/registry.js'
 import type { ToolContext } from '../tools/types.js'
 import { prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
-import { estimateTokens } from '../util/tokens.js'
+import { estimateRequestTokens } from '../util/tokens.js'
 import type { ChallengeService } from './challenges.js'
+import type { ContextAssembler } from './context.js'
+import { conversationOf } from './conversationOf.js'
 import { nameForModel } from './evidence.js'
 import type { PrincipalService } from './principals.js'
 import { addonTokenCount, renderPromptAddon } from './promptAddon.js'
@@ -86,6 +88,40 @@ export interface OrchestratorHooks {
   onApprovalPending(session: Session, principal: Principal, record: ApprovalRecord, entry: MessageEntry): Promise<void>
 }
 
+/** What a turn's model calls cost (LLM-USAGE-002): the sums, and the input of the last call, the context figure. */
+export interface TurnUsage {
+  calls: number
+  inputTokens: number
+  cachedTokens: number
+  cacheWriteTokens: number
+  outputTokens: number
+  /** the input of the turn's last call: the size of the context */
+  contextTokens: number
+  /** the part of it the provider served from its cache */
+  contextCached: number
+}
+
+/** What one recalled entry may cost in the request: its date, its origin and at most 300 characters. */
+export const RECALLED_ITEM_TOKENS = 100
+
+/** The recalled entries as a record of the system, each with where it comes from (MEM-RET-007). */
+export function recallRecord(recalled: Recalled[]): string | undefined {
+  if (!recalled.length) return undefined
+  const lines = recalled.map(({ entry, origin }) => {
+    const where = origin === 'this-conversation' ? 'earlier in this conversation' : 'another conversation'
+    const who = entry.role === 'agent' ? 'you' : entry.role === 'principal' ? 'the person' : 'the system'
+    return `- (${entry.createdAt.slice(0, 10)}, ${where}, ${who}) ${entry.text.slice(0, 300)}`
+  })
+  return `[system record, written by the system, not by the person and not by you: earlier messages that may be relevant, already authorized:\n${lines.join('\n')}]`
+}
+
+/** The turn's message with what was retrieved for it before its words. */
+export function withRetrieved(turn: ChatMessage, record: string | undefined): ChatMessage {
+  if (!record || turn.role !== 'user') return turn
+  if (typeof turn.content === 'string') return { role: 'user', content: `${record}\n\n${turn.content}` }
+  return { role: 'user', content: [{ type: 'text', text: record }, ...turn.content] }
+}
+
 export class TurnCancelled extends Error {
   public constructor() {
     super('turn cancelled')
@@ -136,7 +172,8 @@ export class Orchestrator {
     private readonly objects: ObjectStore,
     private readonly stats: StatsSink,
     private readonly hooks: OrchestratorHooks,
-    private readonly logger: Logger
+    private readonly logger: Logger,
+    private readonly context: ContextAssembler
   ) {
     const features = featuresOf(pack)
     this.addon = renderPromptAddon({
@@ -163,10 +200,10 @@ export class Orchestrator {
   private async systemMessages(principal: Principal, session: Session): Promise<ChatMessage[]> {
     const features = featuresOf(this.pack)
     const parts: string[] = []
-    const prefs = features.preferences ? await this.memory.preferences(principal) : []
+    const prefs = features.preferences ? await this.memory.preferences(principal, session) : []
     if (prefs.length) parts.push(`Preferences of the person: ${prefs.map((p) => `${p.key}=${p.value}`).join('; ')}`)
     if (features.workingMemory) {
-      const notes = await this.memory.notes(principal)
+      const notes = await this.memory.notes(principal, session)
       if (notes.length)
         parts.push(
           `Working memory notes:\n${notes.map((n) => `- [${n.id}]${n.needsRevision ? ' (needs revision)' : ''} ${n.content}`).join('\n')}`
@@ -312,39 +349,41 @@ export class Orchestrator {
     const notYet = (await context.notYet?.()) ?? new Set<string>()
 
     const features = featuresOf(this.pack)
-    const budget = this.pack.memory?.contextWindowTokens ?? 12000
+    const conversationId = conversationOf(session)
     const system = await this.systemMessages(principal, session)
-    const systemTokens = system.reduce((n, m) => n + estimateTokens(m.role === 'system' ? m.content : ''), 0)
-    const windowEntries = (
-      await this.memory.window(principal, session, Math.max(1000, budget - systemTokens - 1500))
-    ).filter((e) => !answered.has(e.id) && !notYet.has(e.id))
-    const recalled = features.semanticRecall
-      ? await this.memory.recall(
-          principal,
-          session,
-          inbounds.map((e) => e.text).join('\n'),
-          this.pack.memory?.retrieval?.topK ?? 8
-        )
-      : []
-    const messages: ChatMessage[] = [...system]
-    if (recalled.length) {
-      messages.push({
-        role: 'system',
-        content: `Relevant earlier messages (other conversations, already authorized):\n${recalled.map((e) => `- (${e.createdAt.slice(0, 10)}, ${e.role}) ${e.text.slice(0, 300)}`).join('\n')}`,
-      })
-    }
-    for (const e of windowEntries) messages.push(...this.entryToMessages(e))
-    messages.push(await this.userTurn(inbounds, imageBytes))
-
     const grants = await this.approvals.activeGrants(principal.id)
     const visible = await this.registry.visible(principal.roles, grants, principal)
-    const tools = this.registry.toDefinitions(visible)
+    // a fixed order: the start of the request stays the same from one turn to the next (MEM-CTX-001)
+    const tools = this.registry.toDefinitions(visible).sort((a, b) => a.name.localeCompare(b.name))
+    const userTurn = await this.userTurn(inbounds, imageBytes)
+    const topK = this.pack.memory?.retrieval?.topK ?? 8
+    const assembled = await this.context.assemble({
+      principal,
+      session,
+      system,
+      tools,
+      userTurn,
+      exclude: new Set([...answered, ...notYet]),
+      render: (entry) => this.entryToMessages(entry),
+      retrievedReserve: features.semanticRecall ? topK * RECALLED_ITEM_TOKENS : 0,
+      signal,
+    })
+    // what is retrieved for this turn comes after the window, with the message it answers (MEM-CTX-001, MEM-RET-007)
+    const recalled = features.semanticRecall
+      ? await this.memory.recall(principal, session, inbounds.map((e) => e.text).join('\n'), topK, [
+          ...assembled.window.map((e) => e.id),
+          ...answered,
+        ])
+      : []
+    const messages: ChatMessage[] = [...assembled.messages, withRetrieved(userTurn, recallRecord(recalled))]
+
     const toolCtx: ToolContext = {
       principal,
       session,
       roles: principal.roles,
       logger: this.logger,
       language: inbound.language,
+      inboundId: inbound.id,
     }
 
     let messageId = prefixedId('msg')
@@ -403,26 +442,46 @@ export class Orchestrator {
       await sink.emit({ type: 'text-delta', messageId, delta: more })
     }
 
+    const usage: TurnUsage = {
+      calls: 0,
+      inputTokens: 0,
+      cachedTokens: 0,
+      cacheWriteTokens: 0,
+      outputTokens: 0,
+      contextTokens: 0,
+      contextCached: 0,
+    }
     try {
       for (let round = 0; round < this.maxToolRounds; round++) {
         if (signal.aborted) throw new TurnCancelled()
         const calls: ToolCallRequest[] = []
         let roundText = ''
+        const estimate = estimateRequestTokens(messages, tools)
+        let reported: Extract<ChatDelta, { type: 'usage' }> | undefined
         for await (const delta of this.llm.stream({
           messages,
           tools,
           temperature: this.pack.llm.temperature,
           maxOutputTokens: this.pack.llm.maxOutputTokens,
           signal,
+          ...(this.pack.llm.cache?.enabled
+            ? { cacheKey: conversationId, cacheTtl: this.pack.llm.cache.ttl ?? '5m' }
+            : {}),
         })) {
           if (signal.aborted) throw new TurnCancelled()
           if (delta.type === 'text') {
             roundText += delta.text
             await emitText(delta.text)
           } else if (delta.type === 'tool_call') calls.push(delta.call)
-          else if (delta.type === 'usage')
-            this.stats.emit('llm-tokens', delta.inputTokens + delta.outputTokens, { model: this.llm.id })
+          else if (delta.type === 'usage') reported = delta
         }
+        await this.account(usage, reported, {
+          conversationId,
+          session,
+          round,
+          estimate: Math.ceil(estimate * assembled.factor),
+        })
+        if (round === 0 && reported) await this.context.calibrate(conversationId, reported.inputTokens, estimate)
         if (calls.length === 0) break
         messages.push({ role: 'assistant', content: roundText, toolCalls: calls })
         if (pausedAt === undefined) pausedAt = Date.now()
@@ -450,9 +509,64 @@ export class Orchestrator {
             text.trim() || (cancelled ? '(stopped before any text)' : '(no reply)')
           )
         : (written[written.length - 1] as MessageEntry)
+    // the turn keeps its usage with its reply (LLM-USAGE-002), and the conversation its figure (LLM-USAGE-003)
+    if (usage.calls > 0) {
+      reply.payload = { ...(reply.payload ?? {}), usage }
+      await this.memory.rewrite(reply)
+      await this.context.setFigure(conversationId, {
+        used: usage.contextTokens,
+        cached: usage.contextCached,
+        max: this.context.budget,
+        at: new Date().toISOString(),
+      })
+    }
     this.reactionPolicies.delete(session.id)
     this.stats.emit('message-out', 1, { channel: session.channelType, cancelled: String(cancelled) })
     return { inbound, reply, replies: written, cancelled, inbounds }
+  }
+
+  /** One model call: added to the turn, logged, counted (LLM-USAGE-001/002, PLAT-STATS-004). */
+  private async account(
+    usage: TurnUsage,
+    reported: Extract<ChatDelta, { type: 'usage' }> | undefined,
+    call: { conversationId: string; session: Session; round: number; estimate: number }
+  ): Promise<void> {
+    const counts = {
+      inputTokens: reported?.inputTokens ?? 0,
+      cachedTokens: reported?.cachedTokens ?? 0,
+      cacheWriteTokens: reported?.cacheWriteTokens ?? 0,
+      outputTokens: reported?.outputTokens ?? 0,
+    }
+    this.logger.info(
+      {
+        model: this.llm.id,
+        conversationId: call.conversationId,
+        sessionId: call.session.id,
+        round: call.round,
+        ...counts,
+        estimatedTokens: call.estimate,
+        reported: !!reported,
+      },
+      'model call'
+    )
+    if (!reported) return
+    usage.calls++
+    usage.inputTokens += counts.inputTokens
+    usage.cachedTokens += counts.cachedTokens
+    usage.cacheWriteTokens += counts.cacheWriteTokens
+    usage.outputTokens += counts.outputTokens
+    usage.contextTokens = counts.inputTokens
+    usage.contextCached = counts.cachedTokens
+    const dims = {
+      model: this.llm.id,
+      agent: this.pack.metadata.id,
+      conversation: call.conversationId,
+      session: call.session.id,
+    }
+    this.stats.emit('llm-input', counts.inputTokens, dims)
+    this.stats.emit('llm-cached', counts.cachedTokens, dims)
+    this.stats.emit('llm-cache-write', counts.cacheWriteTokens, dims)
+    this.stats.emit('llm-output', counts.outputTokens, dims)
   }
 
   /** Runs a tool directly (contextual-menu tool items, approved actions) with the same gates. */
@@ -504,6 +618,7 @@ export class Orchestrator {
           serverName: tool.spec.serverName,
           args: call.arguments,
           rule,
+          inboundId: inbound?.id,
         })
         const entry = await this.memory.append({
           sessionId: session.id,

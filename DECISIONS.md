@@ -624,3 +624,45 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     - What fills the window is still bounded by the 200 newest entries the window reads, and the budget
       is still an estimate (characters / 4 of the text of each entry): the measure of what the model
       receives comes with the usage accounting of the context work.
+58. **The context, measured and assembled for caching; scope by conversation; erasure reachable** (2026-11-18,
+    ayni-spec D74 to D78; Fabrice: "I want to see context size / context max size in all conversations, just below
+    the message form, in small chars", "if summarization is better, then directly summarization", "for now focus
+    only on Kimi model").
+    - **Usage:** every model call reports what the provider counted; the Kimi adapter reads `prompt_tokens`,
+      `prompt_tokens_details.cached_tokens` and `cache_write_tokens` (parts of `prompt_tokens`, as Moonshot's
+      documentation says). A turn keeps its sums with its reply (`payload.usage`), logs one `model call` line per
+      call and records `llm-input`, `llm-cached`, `llm-cache-write` and `llm-output`; the conversation's figure is
+      in `state.ayni.context`, the same on every device.
+    - **Caching:** `llm.cache` sends the conversation as `prompt_cache_key` and `prompt_cache_options.ttl` (5m). The
+      request goes from what changes least to what changes most, tools sorted, what recall finds after the window,
+      inside the person's turn as a record. Live on Kimi K3: from the second turn most of the input is served from
+      the cache (71% at turn 2, 96% at turn 8 of a test conversation).
+    - **Summarization in steps, not trimming first:** the window keeps its first entry until the budget is reached,
+      then drops its oldest entries down to 60% of it in one step; what it drops is folded with the previous summary
+      by the same model. The summary is sealed in the key-value table, never an entry, discarded when an entry it
+      covers is erased and made again at the next turn; a failed summary leaves the turn within the budget. Live on
+      Kimi K3 with a small budget, a question about facts that had left the window was answered from the summary.
+    - **The estimate** counts what the model receives (tool results, file text, tool definitions, what recall adds,
+      a fixed cost per image) and is scaled by the ratio between Kimi's last reported input and its estimate.
+    - **Scope by conversation (D76):** `conversation-private` replaces `session-private`; an entry carries its
+      conversation (`conversation_id`), so a conversation reads whole whatever the number of its sessions (the list of
+      earlier sessions was capped at 30, and at 10 on the resume path). A session outside AG-UI conversations is its
+      own conversation, continued by the sessions that resume it (`rootSessionId`). Each store declares the
+      visibilities it holds and the predicate is compiled for it: the document search compiled the entries'
+      predicate and failed on PostgreSQL (`column c.session_id does not exist`, reproduced on pgvector 16).
+      Working memory and preferences are read through it and logged.
+    - **No plaintext beside the ciphertext (D77):** no preview of an entry; an attachment's text (a transcription,
+      a description, the text of a file) and its file name are sealed with the entry, its reference and measures
+      stay beside it; a conversation's title and last text are sealed, the last text recomputed after an erasure.
+      What an earlier version kept in the clear is sealed at start (an erased entry loses it).
+    - **Erasure reachable (D78):** `DELETE /sessions/:id/messages/:messageId` and `POST
+      /sessions/conversations/:id/erasure` for the person's own messages, `ayni.messages.erased` to every device;
+      the cascade reaches the tool calls of the turn, the notes that cite the message, the arguments of its
+      approvals, the summary and the last text. The admin interface (`ADMIN_PORT`, 3011, loopback only, optional
+      `ADMIN_TOKEN`) erases, sets and releases legal hold and serves the auditor's reads, each call recorded with
+      its operator and reason.
+    - **Tests:** the in-memory suites, plus `pnpm test:postgres` against pgvector in Docker (also a CI job): the
+      migration from 3.3.0, the document search of each organization, no plaintext of a message or a conversation,
+      the conversation read in order.
+    - **Not done here (Kimi first):** the Anthropic adapter still reports no input and sends `budget_tokens`; other
+      providers follow.

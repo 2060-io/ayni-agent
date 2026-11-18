@@ -6,10 +6,12 @@
 
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import type { AgentPack } from '../config/packTypes.js'
+import { type EntryCrypto, openJson } from '../memory/crypto.js'
 import { buildScope } from '../memory/scope.js'
 import type { Store } from '../store/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
+import { type SealedConversations, sealedConversations } from './conversationSeal.js'
 import type { ChannelType, ClientDescription, ClosureReason, Conversation, Principal, Session } from './types.js'
 
 export interface InvitationMinter {
@@ -84,7 +86,8 @@ const READ_RECEIPT_LIMIT = 200
 /** the unread count stops here: beyond it a list shows the ceiling */
 const UNREAD_CEILING = 99
 /** the entries a transcript shows as messages (the others are steps, cards and bookkeeping) */
-const TRANSCRIPT_MESSAGE_TYPES = ['text', 'voice', 'media']
+/** the entries of a transcript a person or the agent wrote: what a person erases of theirs (PRIV-ERASE-007) */
+export const TRANSCRIPT_MESSAGE_TYPES = ['text', 'voice', 'media']
 const GRANT_PREFIX = 'session-grant:'
 const MAX_GRANT_SECONDS = 60
 
@@ -93,6 +96,8 @@ export class SessionService {
   public readonly bindingExpirySeconds: number
   public readonly grantExpirySeconds: number
   private readonly siblingsAllowed: boolean
+  /** the store's conversations, their title and last text sealed (D77) */
+  private readonly conversations: SealedConversations
 
   public constructor(
     private readonly store: Store,
@@ -101,8 +106,11 @@ export class SessionService {
     private readonly minter: InvitationMinter,
     private readonly events: SessionEvents,
     private readonly logger: Logger,
+    private readonly crypto: EntryCrypto,
     overrides: { idleTimeoutSeconds?: number; bindingExpirySeconds?: number; grantExpirySeconds?: number } = {}
   ) {
+    // a conversation's title and last text are sealed in the store (D77)
+    this.conversations = sealedConversations(store.conversations, crypto)
     this.idleTimeoutSeconds = overrides.idleTimeoutSeconds ?? pack.sessions?.idleTimeoutSeconds ?? 1800
     this.bindingExpirySeconds = overrides.bindingExpirySeconds ?? pack.sessions?.bindingExpirySeconds ?? 300
     this.grantExpirySeconds = Math.min(
@@ -408,6 +416,8 @@ export class SessionService {
       return
     }
     session.lineage = [old.id, ...(old.lineage ?? [])].slice(0, 10)
+    // outside AG-UI conversations, the chain of resumed sessions is one conversation (MEM-ENTRY-004)
+    session.rootSessionId = old.rootSessionId ?? old.id
     if (!session.client.name && old.client.name) session.client = old.client
   }
 
@@ -464,7 +474,7 @@ export class SessionService {
     if (!wanted && session.resumedFromSessionId) {
       wanted = (await this.store.sessions.get(session.resumedFromSessionId))?.conversationId
     }
-    let conversation = wanted ? await this.store.conversations.get(wanted) : undefined
+    let conversation = wanted ? await this.conversations.get(wanted) : undefined
     if (conversation && (conversation.principalId !== principal.id || conversation.state === 'final')) {
       this.logger.warn({ sessionId: session.id, conversationId: wanted }, 'conversation not open to this session')
       conversation = undefined
@@ -473,7 +483,7 @@ export class SessionService {
     }
     // nothing named and no new conversation asked: a pairing continues the latest active one (PROF-CONV-006)
     if (!conversation && !wanted && !session.newConversation) {
-      const latest = (await this.store.conversations.listByPrincipal(principal.id, ['active']))[0]
+      const latest = (await this.conversations.listByPrincipal(principal.id, ['active']))[0]
       if (latest) conversation = latest
     }
     const now = nowIso()
@@ -512,7 +522,7 @@ export class SessionService {
     conversation.sessionIds = [session.id, ...earlier]
     // opening a conversation is not activity in it: its time and its place in the person's lists move with a
     // message (IDENT-SESS-013), where a device that merely opened one sent it to the top on every other device
-    await this.store.conversations.save(conversation)
+    await this.conversations.save(conversation)
   }
 
   /**
@@ -530,12 +540,12 @@ export class SessionService {
   /** The Principal's conversations, active and archived, newest activity first (PROF-CONV-001). */
   public async listConversations(principalId: string): Promise<(Conversation & { open: boolean })[]> {
     const open = new Set((await this.store.sessions.listByPrincipal(principalId, ['bound'])).map((s) => s.id))
-    const list = await this.store.conversations.listByPrincipal(principalId, ['active', 'archived'])
+    const list = await this.conversations.listByPrincipal(principalId, ['active', 'archived'])
     return list.map((c) => ({ ...c, open: c.sessionIds.some((id) => open.has(id)) }))
   }
 
   public async conversationOf(principal: Principal, id: string): Promise<Conversation> {
-    const conversation = await this.store.conversations.get(id)
+    const conversation = await this.conversations.get(id)
     if (!conversation || conversation.principalId !== principal.id)
       throw new SessionError('conversation not found', 'not-found')
     return conversation
@@ -546,7 +556,7 @@ export class SessionService {
     let id = conversationId
     if (!id && resumeSessionId) id = (await this.store.sessions.get(resumeSessionId))?.conversationId
     if (!id) return undefined
-    const conversation = await this.store.conversations.get(id)
+    const conversation = await this.conversations.get(id)
     if (!conversation) throw new SessionError('conversation not found', 'not-found')
     if (conversation.state === 'final') throw new SessionError('conversation is final', 'final')
     return id
@@ -554,7 +564,7 @@ export class SessionService {
 
   public async renameConversation(conversation: Conversation, title: string): Promise<Conversation> {
     conversation.title = title.trim().slice(0, 120)
-    await this.store.conversations.save(conversation)
+    await this.conversations.save(conversation)
     await this.conversationChanged(conversation)
     return conversation
   }
@@ -570,7 +580,7 @@ export class SessionService {
   public async setConversationState(conversation: Conversation, state: 'active' | 'archived'): Promise<Conversation> {
     if (conversation.state === 'final') throw new SessionError('conversation is final', 'final')
     conversation.state = state
-    await this.store.conversations.save(conversation)
+    await this.conversations.save(conversation)
     // announced before its sessions close, so the devices that had it open learn why
     await this.conversationChanged(conversation)
     if (state === 'archived') await this.closeConversationSessions(conversation)
@@ -580,7 +590,7 @@ export class SessionService {
   /** Close for good (PROF-CONV-004): final, sessions closed, never listed or resumed again. */
   public async finalizeConversation(conversation: Conversation): Promise<Conversation> {
     conversation.state = 'final'
-    await this.store.conversations.save(conversation)
+    await this.conversations.save(conversation)
     await this.conversationChanged(conversation)
     await this.closeConversationSessions(conversation)
     this.logger.info({ conversationId: conversation.id }, 'conversation closed for good')
@@ -602,7 +612,7 @@ export class SessionService {
   /** A device showed these messages to the person: the marker moves to the newest of them. */
   public async markViewed(session: Session, messageIds: string[]): Promise<void> {
     if (!session.conversationId) return
-    const conversation = await this.store.conversations.get(session.conversationId)
+    const conversation = await this.conversations.get(session.conversationId)
     if (!conversation || conversation.state === 'final') return
     let newest: { id: string; createdAt: string } | undefined
     for (const id of messageIds.slice(0, READ_RECEIPT_LIMIT)) {
@@ -644,7 +654,7 @@ export class SessionService {
     seen?: { id: string; createdAt: string },
     stored = false
   ): Promise<void> {
-    const held = await this.store.conversations.get(conversationId)
+    const held = await this.conversations.get(conversationId)
     if (!held || held.state === 'final') return
     let marker = held.readUpTo ? await this.store.entries.get(held.readUpTo) : undefined
     // a conversation older than the marker starts from the last message the person wrote: what precedes it they
@@ -663,32 +673,62 @@ export class SessionService {
     }
     const unread = await this.countUnread(held, marker?.createdAt)
     // read again at the last moment: a rename or a message may have been written meanwhile
-    const conversation = (await this.store.conversations.get(conversationId)) ?? held
+    const conversation = (await this.conversations.get(conversationId)) ?? held
     const readUpTo = marker?.id ?? null
     const counted = (conversation.unread ?? 0) !== unread
     if ((conversation.readUpTo ?? null) === readUpTo && !counted) return
     conversation.readUpTo = readUpTo
     conversation.unread = unread
-    await this.store.conversations.save(conversation)
+    await this.conversations.save(conversation)
     // the devices are told when the count changes; a marker that moves under the same count changes nothing they show
     if (counted) await this.conversationChanged(conversation)
   }
 
-  /** What the conversation's own sessions hold, and nothing else (PRIV-SCOPE-001). */
+  /** What the conversation holds, and nothing else (PRIV-SCOPE-001, D76). */
   private scopeOf(conversation: Conversation) {
     return buildScope({
       principalId: conversation.principalId,
-      sessionIds: conversation.sessionIds,
+      conversationId: conversation.id,
       backingIdentity: null,
       relation: 'unrecognized',
       crossSession: 'own-sessions',
     })
   }
 
+  /**
+   * An entry of the conversation was erased: its last text is the newest message that remains (PRIV-ERASE-005, D77).
+   */
+  public async refreshPreview(conversationId: string): Promise<void> {
+    const conversation = await this.conversations.get(conversationId)
+    if (!conversation) return
+    const [row] = await this.store.entries.query(this.scopeOf(conversation), {
+      conversationId: conversation.id,
+      roles: ['principal', 'agent'],
+      sourceTypes: TRANSCRIPT_MESSAGE_TYPES,
+      limit: 1,
+    })
+    let preview: string | undefined
+    if (row?.cipher && row.encKeyRef) {
+      try {
+        preview =
+          openJson<{ text: string }>(this.crypto, row.encKeyRef, row.cipher).text.trim().slice(0, 120) || undefined
+      } catch (error) {
+        this.logger.warn({ err: error, conversationId }, 'the newest message of the conversation cannot be opened')
+      }
+    }
+    conversation.lastPreview = preview
+    await this.conversations.save(conversation)
+  }
+
+  /** Seals the titles and last texts an earlier version kept in the clear (D77); run once at start. */
+  public async sealPlainConversations(): Promise<number> {
+    return this.conversations.sealPlain()
+  }
+
   /** The newest message the person wrote in the conversation. */
   private async lastWritten(conversation: Conversation) {
     const [row] = await this.store.entries.query(this.scopeOf(conversation), {
-      sessionIds: conversation.sessionIds,
+      conversationId: conversation.id,
       roles: ['principal'],
       sourceTypes: TRANSCRIPT_MESSAGE_TYPES,
       limit: 1,
@@ -700,7 +740,7 @@ export class SessionService {
   private async countUnread(conversation: Conversation, after?: string): Promise<number> {
     const scope = this.scopeOf(conversation)
     const rows = await this.store.entries.query(scope, {
-      sessionIds: conversation.sessionIds,
+      conversationId: conversation.id,
       roles: ['agent'],
       sourceTypes: TRANSCRIPT_MESSAGE_TYPES,
       limit: UNREAD_CEILING,
@@ -716,14 +756,14 @@ export class SessionService {
   /** A turn on a conversation keeps its title, preview and activity current (IDENT-SESS-013). */
   public async noteActivity(session: Session, text: string, opts: { title?: boolean } = {}): Promise<void> {
     if (!session.conversationId) return
-    const conversation = await this.store.conversations.get(session.conversationId)
+    const conversation = await this.conversations.get(session.conversationId)
     if (!conversation || conversation.state === 'final') return
     const before = { title: conversation.title, state: conversation.state }
     if (conversation.state === 'archived') conversation.state = 'active' // writing unarchives (UI-SESS-012)
     if (opts.title && !conversation.title) conversation.title = text.trim().slice(0, 60)
     if (text.trim()) conversation.lastPreview = text.trim().slice(0, 120)
     conversation.lastActivityAt = nowIso()
-    await this.store.conversations.save(conversation)
+    await this.conversations.save(conversation)
     // the first message names the conversation, a message unarchives it: the other devices' lists follow
     if (conversation.title !== before.title || conversation.state !== before.state)
       await this.conversationChanged(conversation)

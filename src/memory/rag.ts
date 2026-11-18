@@ -91,6 +91,8 @@ export class RagService {
               sourceId: source.id,
               uri: doc.uri,
               visibility: source.visibility ?? 'public',
+              // a partner-shared source carries its partner's organization key (MEM-RAG-005)
+              ...(source.partner ? { partner: source.partner } : {}),
               state: 'active',
               chunkText,
               position: i,

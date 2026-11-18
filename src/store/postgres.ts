@@ -15,11 +15,11 @@ import type {
   StatEvent,
   WorkingMemoryNote,
 } from '../core/types.js'
-import { type ScopePredicate, scopeToSql } from '../memory/scope.js'
+import { type ScopePredicate, STORE_SHAPES, scopeToSql } from '../memory/scope.js'
 import { MemoryStore } from './memory.js'
 import { MIGRATIONS } from './migrations.js'
 import { holdProcessLock, type ProcessLockOptions } from './processLock.js'
-import type { EntryQuery, Store, StoredEntry, StoredEvidence, VectorHit } from './types.js'
+import type { AdminAuditRecord, EntryQuery, Store, StoredEntry, StoredEvidence, VectorHit } from './types.js'
 
 const vec = (v: number[]): string => `[${v.join(',')}]`
 
@@ -162,6 +162,7 @@ export class PostgresStore implements Store {
 
   public conversations = {
     get: (id: string) => this.one<Conversation>('SELECT data FROM conversations WHERE id = $1', [id]),
+    listAll: () => this.many<Conversation>('SELECT data FROM conversations'),
     save: async (c: Conversation) => {
       await this.pool.query(
         `INSERT INTO conversations (id, principal_id, state, last_activity_at, data) VALUES ($1,$2,$3,$4,$5)
@@ -183,23 +184,58 @@ export class PostgresStore implements Store {
 
   private entryFromRow(r: Row): StoredEntry {
     const data = r.data as StoredEntry
-    return { ...data, cipher: (r.cipher as Buffer | null) ?? null, textPreview: String(r.text_preview ?? '') }
+    return {
+      ...data,
+      conversationId: String(r.conversation_id ?? data.conversationId),
+      cipher: (r.cipher as Buffer | null) ?? null,
+    }
   }
 
-  private entryData(e: StoredEntry): Omit<StoredEntry, 'cipher' | 'textPreview'> {
-    const { cipher: _c, textPreview: _t, ...data } = e
+  private entryData(e: StoredEntry): Omit<StoredEntry, 'cipher'> {
+    const { cipher: _c, ...data } = e
     return data
+  }
+
+  /** the WHERE of an entry query beyond its scope: its conversation, roles, author, and its place in the order */
+  private entryFilters(q: EntryQuery, alias: string, params: unknown[]): string[] {
+    const where: string[] = []
+    const next = (v: unknown) => {
+      params.push(v)
+      return `$${params.length}`
+    }
+    if (q.conversationId) where.push(`${alias}.conversation_id = ${next(q.conversationId)}`)
+    if (q.sourceTypes) where.push(`${alias}.source_type = ANY(${next(q.sourceTypes)})`)
+    if (q.roles) where.push(`${alias}.role = ANY(${next(q.roles)})`)
+    if (q.principalId) where.push(`${alias}.principal_id = ${next(q.principalId)}`)
+    if (q.before) {
+      where.push(
+        `(${alias}.initiated_at, ${alias}.id) < (SELECT initiated_at, id FROM entries WHERE id = ${next(q.before)})`
+      )
+    }
+    if (q.from) {
+      where.push(
+        `(${alias}.initiated_at, ${alias}.id) >= (${next(q.from.initiatedAt)}::timestamptz, ${next(q.from.id)})`
+      )
+    }
+    if (q.until) {
+      where.push(
+        `(${alias}.initiated_at, ${alias}.id) < (${next(q.until.initiatedAt)}::timestamptz, ${next(q.until.id)})`
+      )
+    }
+    return where
   }
 
   public entries = {
     insert: async (e: StoredEntry) => {
       await this.pool.query(
-        `INSERT INTO entries (id, session_id, principal_id, role, source_type, completion, visibility, state, backing_identity_id,
-           language, content_digest, enc_key_ref, cipher, text_preview, external_id, initiated_at, created_at, anchor_batch_id, data)
+        `INSERT INTO entries (id, session_id, conversation_id, principal_id, role, source_type, completion, visibility, state,
+           backing_identity_id, language, content_digest, enc_key_ref, cipher, external_id, initiated_at, created_at,
+           anchor_batch_id, data)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
         [
           e.id,
           e.sessionId,
+          e.conversationId,
           e.principalId,
           e.role,
           e.sourceType,
@@ -211,7 +247,6 @@ export class PostgresStore implements Store {
           e.contentDigest,
           e.encKeyRef,
           e.cipher,
-          e.textPreview,
           e.externalId ?? null,
           e.initiatedAt,
           e.createdAt,
@@ -229,14 +264,13 @@ export class PostgresStore implements Store {
       if (!current) return
       const next = { ...current, ...patch }
       await this.pool.query(
-        `UPDATE entries SET state=$2, completion=$3, enc_key_ref=$4, cipher=$5, text_preview=$6, content_digest=$7, anchor_batch_id=$8, external_id=$9, data=$10 WHERE id=$1`,
+        `UPDATE entries SET state=$2, completion=$3, enc_key_ref=$4, cipher=$5, content_digest=$6, anchor_batch_id=$7, external_id=$8, data=$9 WHERE id=$1`,
         [
           id,
           next.state,
           next.completion,
           next.encKeyRef,
           next.cipher,
-          next.textPreview,
           next.contentDigest,
           next.anchorBatchId ?? null,
           next.externalId ?? null,
@@ -252,50 +286,60 @@ export class PostgresStore implements Store {
       return row ? this.entryFromRow(row) : undefined
     },
     query: async (scope: ScopePredicate, q: EntryQuery) => {
-      const { sql: scopeSql, params } = scopeToSql(scope, 'e', 1)
-      const where = [scopeSql]
-      let i = params.length + 1
-      if (q.sessionId) {
-        where.push(`e.session_id = $${i++}`)
-        params.push(q.sessionId)
-      }
-      if (q.sessionIds) {
-        where.push(`e.session_id = ANY($${i++})`)
-        params.push(q.sessionIds)
-      }
-      if (q.sourceTypes) {
-        where.push(`e.source_type = ANY($${i++})`)
-        params.push(q.sourceTypes)
-      }
-      if (q.roles) {
-        where.push(`e.role = ANY($${i++})`)
-        params.push(q.roles)
-      }
-      if (q.before) {
-        where.push(`(e.initiated_at, e.id) < (SELECT initiated_at, id FROM entries WHERE id = $${i++})`)
-        params.push(q.before)
-      }
+      const { sql: scopeSql, params } = scopeToSql(scope, STORE_SHAPES.entries, 'e', 1)
+      const where = [scopeSql, ...this.entryFilters(q, 'e', params)]
       params.push(q.limit)
+      const direction = q.order === 'asc' ? 'ASC' : 'DESC'
       const rows = await this.rows(
-        `SELECT * FROM entries e WHERE ${where.join(' AND ')} ORDER BY e.initiated_at DESC, e.id DESC LIMIT $${i}`,
+        `SELECT * FROM entries e WHERE ${where.join(' AND ')} ORDER BY e.initiated_at ${direction}, e.id ${direction} LIMIT $${params.length}`,
         params
       )
       return rows.map((r) => this.entryFromRow(r))
     },
-    vectorSearch: async (scope: ScopePredicate, vector: number[], topK: number, excludeSessionId?: string) => {
-      const { sql: scopeSql, params } = scopeToSql(scope, 'e', 1)
-      let i = params.length + 1
-      const extra = excludeSessionId ? ` AND e.session_id <> $${i++}` : ''
-      if (excludeSessionId) params.push(excludeSessionId)
-      const vIdx = i++
+    vectorSearch: async (scope: ScopePredicate, vector: number[], topK: number, excludeIds?: string[]) => {
+      const { sql: scopeSql, params } = scopeToSql(scope, STORE_SHAPES.entries, 'e', 1)
+      let extra = ''
+      if (excludeIds?.length) {
+        params.push(excludeIds)
+        extra = ` AND NOT (e.id = ANY($${params.length}))`
+      }
       params.push(vec(vector))
+      const vIdx = params.length
       params.push(topK)
       const rows = await this.rows(
         `SELECT *, 1 - (e.embedding <=> $${vIdx}::vector) AS score FROM entries e
-         WHERE ${scopeSql}${extra} AND e.embedding IS NOT NULL ORDER BY e.embedding <=> $${vIdx}::vector LIMIT $${i}`,
+         WHERE ${scopeSql}${extra} AND e.embedding IS NOT NULL ORDER BY e.embedding <=> $${vIdx}::vector LIMIT $${params.length}`,
         params
       )
       return rows.map((r) => ({ item: this.entryFromRow(r), score: Number(r.score) }) as VectorHit<StoredEntry>)
+    },
+    listWithPlainAttachments: async (limit: number) => {
+      const rows = await this.rows(
+        `SELECT * FROM entries e WHERE EXISTS (
+           SELECT 1 FROM jsonb_array_elements(COALESCE(e.data->'attachments', '[]'::jsonb)) a
+           WHERE COALESCE(a->>'textRepr', '') <> '' OR a ? 'filename'
+         ) LIMIT $1`,
+        [limit]
+      )
+      return rows.map((r) => this.entryFromRow(r))
+    },
+    listAll: async (q: { conversationId?: string; principalId?: string; limit: number }) => {
+      const where: string[] = ['true']
+      const params: unknown[] = []
+      if (q.conversationId) {
+        params.push(q.conversationId)
+        where.push(`conversation_id = $${params.length}`)
+      }
+      if (q.principalId) {
+        params.push(q.principalId)
+        where.push(`principal_id = $${params.length}`)
+      }
+      params.push(q.limit)
+      const rows = await this.rows(
+        `SELECT * FROM entries WHERE ${where.join(' AND ')} ORDER BY initiated_at ASC, id ASC LIMIT $${params.length}`,
+        params
+      )
+      return rows.map((r) => this.entryFromRow(r))
     },
     setEmbedding: async (id: string, vector: number[] | null) => {
       await this.pool.query('UPDATE entries SET embedding = $2::vector WHERE id = $1', [
@@ -350,12 +394,17 @@ export class PostgresStore implements Store {
   }
 
   public notes = {
+    query: (scope: ScopePredicate) => {
+      const { sql, params } = scopeToSql(scope, STORE_SHAPES.notes, 'n', 1)
+      return this.many<WorkingMemoryNote>(`SELECT data FROM working_memory n WHERE ${sql}`, params)
+    },
     list: (principalId: string) =>
       this.many<WorkingMemoryNote>('SELECT data FROM working_memory WHERE principal_id = $1', [principalId]),
     save: async (n: WorkingMemoryNote) => {
       await this.pool.query(
-        'INSERT INTO working_memory (id, principal_id, data) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET data = $3',
-        [n.id, n.principalId, n]
+        `INSERT INTO working_memory (id, principal_id, visibility, state, data) VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (id) DO UPDATE SET visibility = $3, state = $4, data = $5`,
+        [n.id, n.principalId, n.visibility, n.state, n]
       )
     },
     delete: async (id: string) => {
@@ -370,14 +419,20 @@ export class PostgresStore implements Store {
     },
   }
 
+  private preferenceOf = (r: Row): PrincipalPreference => ({
+    principalId: String(r.principal_id),
+    key: String(r.key),
+    value: String(r.value),
+    updatedAt: new Date(r.updated_at as string).toISOString(),
+  })
+
   public preferences = {
+    query: async (scope: ScopePredicate) => {
+      const { sql, params } = scopeToSql(scope, STORE_SHAPES.preferences, 'p', 1)
+      return (await this.rows(`SELECT * FROM preferences p WHERE ${sql}`, params)).map(this.preferenceOf)
+    },
     list: async (principalId: string) =>
-      (await this.rows('SELECT * FROM preferences WHERE principal_id = $1', [principalId])).map((r) => ({
-        principalId: String(r.principal_id),
-        key: String(r.key),
-        value: String(r.value),
-        updatedAt: new Date(r.updated_at as string).toISOString(),
-      })) as PrincipalPreference[],
+      (await this.rows('SELECT * FROM preferences WHERE principal_id = $1', [principalId])).map(this.preferenceOf),
     set: async (p: PrincipalPreference) => {
       await this.pool.query(
         'INSERT INTO preferences (principal_id, key, value, updated_at) VALUES ($1,$2,$3,$4) ON CONFLICT (principal_id, key) DO UPDATE SET value = $3, updated_at = $4',
@@ -426,9 +481,18 @@ export class PostgresStore implements Store {
         [r.id, r.status, r.requesterId, r.eligibleRoles, r]
       )
     },
-    list: (f: { status?: ApprovalRecord['status']; requesterId?: string; eligibleRole?: string }) => {
+    list: (f: {
+      status?: ApprovalRecord['status']
+      requesterId?: string
+      eligibleRole?: string
+      inboundId?: string
+    }) => {
       const where: string[] = ['true']
       const params: unknown[] = []
+      if (f.inboundId) {
+        params.push(f.inboundId)
+        where.push(`data->>'inboundId' = $${params.length}`)
+      }
       if (f.status) {
         params.push(f.status)
         where.push(`status = $${params.length}`)
@@ -503,8 +567,8 @@ export class PostgresStore implements Store {
         for (const c of chunks) {
           const { vector, ...data } = c
           await client.query(
-            'INSERT INTO rag_chunks (id, source_id, visibility, state, position, embedding, data) VALUES ($1,$2,$3,$4,$5,$6::vector,$7)',
-            [c.id, c.sourceId, c.visibility, c.state, c.position, vector ? vec(vector) : null, data]
+            'INSERT INTO rag_chunks (id, source_id, visibility, state, position, embedding, backing_identity_id, data) VALUES ($1,$2,$3,$4,$5,$6::vector,$7,$8)',
+            [c.id, c.sourceId, c.visibility, c.state, c.position, vector ? vec(vector) : null, c.partner ?? null, data]
           )
         }
         await client.query('COMMIT')
@@ -516,7 +580,7 @@ export class PostgresStore implements Store {
       }
     },
     vectorSearch: async (scope: ScopePredicate, vector: number[], topK: number) => {
-      const { sql: scopeSql, params } = scopeToSql(scope, 'c', 1)
+      const { sql: scopeSql, params } = scopeToSql(scope, STORE_SHAPES.documents, 'c', 1)
       const vIdx = params.length + 1
       params.push(vec(vector), topK)
       const rows = await this.rows(
@@ -570,6 +634,23 @@ export class PostgresStore implements Store {
         value,
       ])
     },
+    delete: async (key: string) => {
+      await this.pool.query('DELETE FROM kv WHERE key = $1', [key])
+    },
+  }
+
+  public adminAudit = {
+    insert: async (r: AdminAuditRecord) => {
+      await this.pool.query('INSERT INTO admin_audit (id, ts, action, actor, data) VALUES ($1,$2,$3,$4,$5)', [
+        r.id,
+        r.ts,
+        r.action,
+        r.actor,
+        r,
+      ])
+    },
+    list: (limit: number) =>
+      this.many<AdminAuditRecord>('SELECT data FROM admin_audit ORDER BY ts DESC, id DESC LIMIT $1', [limit]),
   }
 }
 

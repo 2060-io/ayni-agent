@@ -63,6 +63,10 @@ export interface DescriptorFeatures {
    * for a session grant only once a status lists `ag-ui` as open (PROF-DESC-007, flow profile §4.1)
    */
   peerStatus?: boolean
+  /** the agent publishes the context figure in `state.ayni.context` (PROF-DESC-008, PROF-STREAM-007) */
+  context?: boolean
+  /** a Principal may erase what they wrote (PROF-DESC-008, PROF-HIST-010, PROF-CONV-009) */
+  erasure?: boolean
 }
 
 export type BindingMode = 'cross-device' | 'same-device'
@@ -225,7 +229,21 @@ export const CUSTOM_EVENT = {
   receipt: 'ayni.receipt',
   /** a conversation of the Principal was renamed, archived, unarchived or closed for good (PROF-CONV-007) */
   conversationChanged: 'ayni.conversation.changed',
+  /** messages of a conversation were erased for good: a UI removes them (PROF-STREAM-008) */
+  messagesErased: 'ayni.messages.erased',
 } as const
+
+/** `ayni.messages.erased` (PROF-STREAM-008). */
+export interface MessagesErasedValue {
+  conversationId: string
+  messageIds: string[]
+}
+
+/** The answer of `POST {sessions}/conversations/{id}/erasure` (PROF-CONV-009). */
+export interface ConversationErasureResult {
+  erased: number
+  held: number
+}
 
 export type CustomEventName = (typeof CUSTOM_EVENT)[keyof typeof CUSTOM_EVENT]
 
@@ -384,7 +402,21 @@ export interface WaitingMessage {
   at: string
 }
 
+/**
+ * The context figure of a conversation after its latest turn (PROF-STREAM-007): the input tokens of the turn's last
+ * model call, the part of them the provider served from its cache, the token budget of the context window, and when
+ * the turn ended.
+ */
+export interface ContextFigure {
+  used: number
+  cached: number
+  max: number
+  at: string
+}
+
 export interface AyniState {
+  /** absent before the first turn, and from an agent that does not declare `features.context` */
+  context?: ContextFigure
   contextualMenu: { items: ContextualMenuItem[] }
   pendingApprovals: number
   generating: GeneratingEntry[]

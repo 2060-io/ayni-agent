@@ -10,6 +10,8 @@ export interface ToolContext {
   logger: Logger
   /** language of the conversation, for human-facing tool output */
   language: string
+  /** the person's message the turn answers: what a note cites, so that its erasure flags the note (PRIV-ERASE-005) */
+  inboundId?: string
 }
 
 export interface ToolResult {
