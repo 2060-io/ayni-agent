@@ -91,6 +91,12 @@ llm:
   apiKeyEnv: LLM_API_KEY
   maxOutputTokens: 2048
   multimodal: ${LLM_MULTIMODAL:-true}
+  # Kimi K3's window is 1M tokens; the budget below plus the output limit must fit in it (MEM-CTX-006)
+  maxInputTokens: ${LLM_MAX_INPUT_TOKENS:-1000000}
+  # Kimi caches by prefix: the conversation is the cache key (LLM-CACHE-001)
+  cache:
+    enabled: true
+    ttl: ${LLM_CACHE_TTL:-5m}
 
 embeddings:
   provider: stub

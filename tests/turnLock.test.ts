@@ -79,6 +79,9 @@ describe('the messages that wait, in the store', () => {
         set: async (key: string, value: string) => {
           values.set(key, value)
         },
+        delete: async (key: string) => {
+          values.delete(key)
+        },
       },
     }
   }

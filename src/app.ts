@@ -25,6 +25,7 @@ import { admitsUnidentified, featuresOf } from './config/packTypes.js'
 import { AyniAgent } from './core/agent.js'
 import { ChallengeService } from './core/challenges.js'
 import { CapabilityRouter } from './core/channel.js'
+import { ContextAssembler } from './core/context.js'
 import { documentOutcomeForModel } from './core/document.js'
 import { EvidenceService } from './core/evidence.js'
 import { FlowService } from './core/flows.js'
@@ -43,7 +44,9 @@ import { createTranscriber } from './media/stt.js'
 import { createImageDescriber } from './media/vision.js'
 import { createEntryCrypto } from './memory/crypto.js'
 import { RagService } from './memory/rag.js'
+import { storeShapeFaults } from './memory/scope.js'
 import { MemoryService } from './memory/service.js'
+import { buildAdmin } from './platform/admin.js'
 import { RetentionService } from './platform/retention.js'
 import { HttpStats, NoopStats, RedisStreamStats, type StatsSink, StoreStats } from './platform/stats.js'
 import { ApprovalService } from './policy/approvals.js'
@@ -61,6 +64,8 @@ const RUNS_END_WITHIN_MS = 2000
 
 export interface RunningAgent {
   app: FastifyInstance
+  /** the admin interface (D78), when ADMIN_PORT is not 0; never exposed */
+  admin?: FastifyInstance
   agent: AyniAgent
   /** the session streams of the AG-UI channel, for the tests that read what a session received */
   streams: SessionStreams
@@ -116,6 +121,10 @@ export async function buildAgent(
       }),
   })
   await store.init()
+  // every store a retrieval reads holds the columns its predicate compares, or the agent does not start (PRIV-SCOPE-003)
+  const shapeFaults = storeShapeFaults()
+  if (shapeFaults.length)
+    throw new Error(`the stores do not hold what the scope predicate needs: ${shapeFaults.join('; ')}`)
   const crypto = createEntryCrypto(env.entryEncryptionKey)
   const llm = createChatModel(pack.llm)
   const embeddings = createEmbeddings(pack.embeddings)
@@ -141,6 +150,8 @@ export async function buildAgent(
     else if (redis) stats = new RedisStreamStats(redis, store, logger)
     else stats = new StoreStats(store, logger)
   }
+  // the context of a turn: the window in steps, the sealed summary, the figure of a conversation (D74, D75)
+  const context = new ContextAssembler(pack, llm, memory, store.kv, crypto, stats, logger)
 
   const router = new CapabilityRouter(store, logger)
   const vsAgent = new VsAgentClient(env.vsAgentAdminUrl, logger)
@@ -195,6 +206,7 @@ export async function buildAgent(
       },
     },
     logger,
+    crypto,
     {
       idleTimeoutSeconds: env.sessionIdleTimeoutSeconds,
       bindingExpirySeconds: env.bindingExpirySeconds,
@@ -204,6 +216,15 @@ export async function buildAgent(
 
   // a message the agent adds outside a turn counts as unread until a device reports it viewed (IDENT-SESS-017)
   router.onAgentMessage = (session) => sessions.agentMessageAdded(session)
+  // a conversation that loses an entry loses its summary and recomputes its last text (PRIV-ERASE-005)
+  memory.hooks.conversationErased = async (conversationId) => {
+    await context.discardSummary(conversationId)
+    await sessions.refreshPreview(conversationId)
+  }
+  const sealed = await sessions.sealPlainConversations()
+  if (sealed) logger.info({ sealed }, 'conversation titles and previews sealed (D77)')
+  const resealed = await memory.sealPlainAttachments()
+  if (resealed) logger.info({ resealed }, 'attachment texts and names sealed with their entries (D77)')
 
   let agentRef: AyniAgent | undefined
   const approvals = new ApprovalService(store, pack, {
@@ -272,7 +293,8 @@ export async function buildAgent(
         await router.deliver(session, { kind: 'approval', entry, approval: record })
       },
     },
-    logger
+    logger,
+    context
   )
   orchestratorRef = orchestrator
 
@@ -281,6 +303,7 @@ export async function buildAgent(
     pack,
     store,
     memory,
+    context,
     media,
     rag,
     principals,
@@ -331,6 +354,19 @@ export async function buildAgent(
   }
 
   aguiRoutes = new AgUiRoutes(agent, agui, streams, logger)
+  // the admin interface (D78): erasure, legal hold, the auditor's reads; served by start() on the loopback
+  const admin =
+    env.adminPort === 0
+      ? undefined
+      : buildAdmin({
+          store,
+          memory,
+          evidence,
+          logger,
+          token: env.adminToken,
+          announceErased: (principalId, conversationId, ids, clientIds) =>
+            aguiRoutes?.announceErased(principalId, conversationId, ids, clientIds) ?? Promise.resolve(),
+        })
   aguiRoutes.register(app, did)
   // what the person sends during a turn waits in the store and is answered next (D63): its devices are told what
   // waits, and the turn the agent starts for it goes to their streams
@@ -497,6 +533,7 @@ export async function buildAgent(
 
   return {
     app,
+    admin,
     agent,
     streams,
     stop: async () => {
@@ -508,6 +545,7 @@ export async function buildAgent(
       // the streams of the devices stay open for as long as they are served: they are closed, not waited for
       app.server.closeAllConnections()
       await app.close()
+      await admin?.close()
       await registry.close()
       await redis?.quit().catch(() => undefined)
       // the last thing but one: from here the next process may take the store
@@ -523,6 +561,11 @@ export async function start(): Promise<RunningAgent> {
   const running = await buildAgent(env, logger)
   await running.app.listen({ port: env.port, host: '0.0.0.0' })
   logger.info({ port: env.port, publicBaseUrl: env.publicBaseUrl }, 'ayni-agent listening')
+  // the admin interface listens on the loopback only: an operator reaches it with a port-forward (D78)
+  if (running.admin && env.adminPort) {
+    await running.admin.listen({ port: env.adminPort, host: '127.0.0.1' })
+    logger.info({ port: env.adminPort }, 'admin interface listening on the loopback')
+  }
   return running
 }
 

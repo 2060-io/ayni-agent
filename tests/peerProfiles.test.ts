@@ -9,7 +9,11 @@ const silent = { info: () => undefined, warn: () => undefined, error: () => unde
 
 function kv() {
   const rows = new Map<string, string>()
-  return { get: async (k: string) => rows.get(k), set: async (k: string, v: string) => void rows.set(k, v) }
+  return {
+    get: async (k: string) => rows.get(k),
+    set: async (k: string, v: string) => void rows.set(k, v),
+    delete: async (k: string) => void rows.delete(k),
+  }
 }
 
 const feature = (id: string, roles?: string[]) =>

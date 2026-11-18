@@ -59,6 +59,8 @@ export class ApprovalService {
     serverName?: string
     args: Record<string, unknown>
     rule: ApprovalRule
+    /** the person's message whose turn asks for it: an erasure of that message erases the arguments (PRIV-ERASE-005) */
+    inboundId?: string
   }): Promise<ApprovalRecord> {
     const timeout = (opts.rule.timeoutMinutes ?? this.pack.approvals?.timeoutMinutes ?? 60) * 60_000
     const record: ApprovalRecord = {
@@ -67,6 +69,7 @@ export class ApprovalService {
       serverName: opts.serverName,
       toolName: opts.toolName,
       actionArgs: opts.args,
+      inboundId: opts.inboundId,
       requesterId: opts.principal.id,
       requesterName: displayName(opts.principal),
       requesterRole: opts.role,

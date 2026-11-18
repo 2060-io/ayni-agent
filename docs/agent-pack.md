@@ -227,14 +227,36 @@ embeddings endpoint: keep another `embeddings.provider`. `apiKeyEnv` names the e
 key; keys never appear in the pack. `multimodal: true` lets a capable model receive referenced media;
 the agent never depends on it. Embeddings are configured independently and may use another provider.
 
+`maxInputTokens` is the model's input limit (Kimi K3: 1M); the agent refuses to start when
+`memory.contextWindowTokens` plus `maxOutputTokens` exceeds it (MEM-CTX-006). `cache` turns on the provider's
+caching by prefix (LLM-CACHE-001): `enabled: true` sends the conversation as the cache key and `ttl` (`5m` by
+default, or `1h`) as the lifetime of what each call writes. Kimi first: `prompt_cache_key` and
+`prompt_cache_options.ttl`. Every call reports what the provider counted (input, cached, written to the cache,
+output): the turn keeps it with its reply, the statistics count it, and the conversation shows its context figure
+below the message form (D74).
+
 ## memory, rag
 
-- `memory.contextWindowTokens` is the token budget of the active window (token-based, D25).
-- `workingMemory` is the LLM-curated, principal-scoped note store; `summarization` compresses the
-  window transiently; `retrieval` tunes the semantic index (`topK`, chunking, ambient descriptions).
+- `memory.contextWindowTokens` is the token budget of the context window (token-based, D25), counted over what
+  the model receives: every message as rendered, the system parts, the tool definitions, what retrieval adds,
+  scaled by the ratio the provider last reported (MEM-CTX-002). The Welcome pack reads it from
+  `CONTEXT_WINDOW_TOKENS`.
+- `memory.window` makes the window move in steps (MEM-CTX-003): it keeps its first entry while the context fits;
+  past the budget (or `summarization.triggerTokens`), it drops its oldest entries in one step, down to `keepRatio`
+  of the budget (0.6), and never reads more than `maxEntries` entries (400). Between steps the start of the
+  request does not change, so the provider serves it from its cache.
+- `memory.summarization` (on by default) compresses what a step drops, with the previous summary, into the
+  conversation summary (MEM-CTX-004), which the model reads after the system parts as a record of the system.
+  `maxSummaryTokens` (4000) bounds it. The summary is sealed apart from the entries, never an entry, and made again
+  when an entry it covers is erased (MEM-TIER-004).
+- `workingMemory` is the LLM-curated, principal-scoped note store; a note cites the message it came from, so that
+  the erasure of that message flags it. `retrieval` tunes the semantic index (`topK`, chunking, ambient
+  descriptions); recall never repeats the window and says whether an entry comes from this conversation or another
+  (MEM-RET-007).
 - `rag.sources` are agent-level knowledge, chunked and embedded. Each source declares a `visibility`
-  (`public` default, `organization-shared`, `partner-shared`) and is retrieved through the same scope
-  predicate as memory (MEM-RAG-005). `url` sources may be refreshed on an interval.
+  (`public` default, `organization-shared` for the Principals of the agent's own organization, `partner-shared`
+  with `partner`, the organization key of the partner) and is retrieved through the same scope predicate as
+  memory, compiled for the documents' store (MEM-RAG-005, D76). `url` sources may be refreshed on an interval.
 
 ## presentations
 
@@ -479,6 +501,8 @@ enables crypto-erasure with its lineage cascade.
    `media.imageGeneration`.
 8. `tools.bundled.generateImage.provider` names a `media.imageGeneration.providers[].name`.
 9. `channels.agui.walletLinkTemplate` starts with `https://` and contains `{oob}`.
+10. `memory.contextWindowTokens` plus `llm.maxOutputTokens` fits in `llm.maxInputTokens` when it is set (MEM-CTX-006).
+11. A `partner-shared` RAG source names its `partner`, and only a `partner-shared` source names one (MEM-RAG-005).
 
 ## Differences from the previous generation of packs
 

@@ -1,5 +1,5 @@
 /** Memory schema versions (CORE-VER-001/002). Each migration is applied once, in order. */
-export const MEMORY_SCHEMA_VERSION = '3.3.0'
+export const MEMORY_SCHEMA_VERSION = '3.4.0'
 
 export const MIGRATIONS: { version: string; sql: string }[] = [
   {
@@ -194,6 +194,49 @@ CREATE TABLE IF NOT EXISTS evidence (
 CREATE INDEX IF NOT EXISTS evidence_principal ON evidence (principal_id, verified_at);
 CREATE INDEX IF NOT EXISTS evidence_expiry ON evidence (expires_at) WHERE state = 'active';
 DROP TABLE IF EXISTS credential_presentations;
+`,
+  },
+  {
+    // D76: an entry carries its conversation, and `conversation-private` replaces `session-private`; working memory,
+    // preferences and documents are read through the one predicate, compiled for each (PRIV-SCOPE-003). D77: no
+    // preview of an entry in the clear. D78: the record of every call to the admin interface.
+    version: '3.4.0',
+    sql: `
+ALTER TABLE entries ADD COLUMN IF NOT EXISTS conversation_id TEXT;
+UPDATE entries e SET conversation_id = COALESCE(s.data->>'conversationId', s.data->>'rootSessionId', e.session_id)
+  FROM sessions s WHERE s.id = e.session_id AND e.conversation_id IS NULL;
+UPDATE entries SET conversation_id = session_id WHERE conversation_id IS NULL;
+ALTER TABLE entries ALTER COLUMN conversation_id SET NOT NULL;
+ALTER TABLE entries DROP CONSTRAINT IF EXISTS entries_visibility_check;
+UPDATE entries SET visibility = 'conversation-private' WHERE visibility = 'session-private';
+ALTER TABLE entries ADD CONSTRAINT entries_visibility_check
+  CHECK (visibility IN ('conversation-private','principal-private','organization-shared','partner-shared','public'));
+DROP INDEX IF EXISTS entries_scope;
+CREATE INDEX IF NOT EXISTS entries_scope ON entries (state, visibility, conversation_id, principal_id, backing_identity_id);
+CREATE INDEX IF NOT EXISTS entries_conversation ON entries (conversation_id, initiated_at DESC, id DESC);
+ALTER TABLE entries DROP COLUMN IF EXISTS text_preview;
+
+ALTER TABLE working_memory ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'principal-private';
+ALTER TABLE working_memory ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'active';
+UPDATE working_memory SET state = COALESCE(data->>'state', 'active'), visibility = COALESCE(data->>'visibility', 'principal-private');
+CREATE INDEX IF NOT EXISTS working_memory_scope ON working_memory (state, visibility, principal_id);
+
+ALTER TABLE preferences ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'principal-private';
+ALTER TABLE preferences ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'active';
+CREATE INDEX IF NOT EXISTS preferences_scope ON preferences (state, visibility, principal_id);
+
+ALTER TABLE rag_chunks ADD COLUMN IF NOT EXISTS backing_identity_id TEXT;
+DROP INDEX IF EXISTS rag_scope;
+CREATE INDEX IF NOT EXISTS rag_scope ON rag_chunks (state, visibility, backing_identity_id);
+
+CREATE TABLE IF NOT EXISTS admin_audit (
+  id TEXT PRIMARY KEY,
+  ts TIMESTAMPTZ NOT NULL,
+  action TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  data JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS admin_audit_ts ON admin_audit (ts DESC);
 `,
   },
 ]

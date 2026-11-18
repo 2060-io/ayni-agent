@@ -202,7 +202,8 @@ export class BundledToolSource implements ToolSource {
             })
             return { content: `preference ${args.key} stored` }
           }
-          const prefs = await this.deps.store.preferences.list(ctx.principal.id)
+          // a retrieval: through the scope predicate, logged (PRIV-SCOPE-003/006)
+          const prefs = await this.deps.memory.preferences(ctx.principal, ctx.session)
           return { content: JSON.stringify(Object.fromEntries(prefs.map((p) => [p.key, p.value]))) }
         },
       })
@@ -229,7 +230,8 @@ export class BundledToolSource implements ToolSource {
           const content = typeof args.content === 'string' ? args.content.trim() : ''
           if (args.action === 'add') {
             if (!content) return { content: 'content is required', isError: true }
-            const note = await this.deps.memory.addNote(ctx.principal, content, [])
+            // the note cites the message it came from: its erasure flags the note (PRIV-ERASE-005)
+            const note = await this.deps.memory.addNote(ctx.principal, content, ctx.inboundId ? [ctx.inboundId] : [])
             return { content: `note ${note.id} added` }
           }
           if (typeof args.id !== 'string') return { content: 'id is required', isError: true }

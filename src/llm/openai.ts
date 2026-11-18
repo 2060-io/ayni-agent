@@ -61,6 +61,25 @@ export function toOpenAiMessages(messages: ChatMessage[], multimodal: boolean): 
   })
 }
 
+/**
+ * The four counts of a call (LLM-USAGE-001), from the final usage of a chat-completions stream. Kimi: `prompt_tokens`
+ * is every input token, and `prompt_tokens_details.cached_tokens` (cache read) and `cache_write_tokens` (cache write)
+ * are parts of it; a top-level `cached_tokens` stands in for the first when the details are absent.
+ */
+export function usageOf(usage: OpenAI.Completions.CompletionUsage): Extract<ChatDelta, { type: 'usage' }> {
+  const raw = usage as OpenAI.Completions.CompletionUsage & {
+    cached_tokens?: number
+    prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number } | null
+  }
+  return {
+    type: 'usage',
+    inputTokens: raw.prompt_tokens ?? 0,
+    outputTokens: raw.completion_tokens ?? 0,
+    cachedTokens: raw.prompt_tokens_details?.cached_tokens ?? raw.cached_tokens ?? 0,
+    cacheWriteTokens: raw.prompt_tokens_details?.cache_write_tokens ?? 0,
+  }
+}
+
 export class OpenAiChatModel implements ChatModel {
   public readonly id: string
   public readonly multimodal: boolean
@@ -126,7 +145,17 @@ export class OpenAiChatModel implements ChatModel {
           stream: true,
           stream_options: { include_usage: true },
           ...(this.reasoningEffort ? { reasoning_effort: this.reasoningEffort as 'low' } : {}),
-        },
+          // caching by prefix (LLM-CACHE-001): the conversation as the key, the lifetime of what the call writes
+          // (Kimi: prompt_cache_key, prompt_cache_options; OpenAI takes prompt_cache_key)
+          ...(req.cacheKey
+            ? {
+                prompt_cache_key: req.cacheKey,
+                ...(this.provider === 'openai-compatible'
+                  ? { prompt_cache_options: { mode: 'implicit', ttl: req.cacheTtl ?? '5m' } }
+                  : {}),
+              }
+            : {}),
+        } as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming,
         { signal: req.signal }
       )
     } catch (error) {
@@ -150,13 +179,7 @@ export class OpenAiChatModel implements ChatModel {
         }
         pending.clear()
       }
-      if (chunk.usage) {
-        yield {
-          type: 'usage',
-          inputTokens: chunk.usage.prompt_tokens ?? 0,
-          outputTokens: chunk.usage.completion_tokens ?? 0,
-        }
-      }
+      if (chunk.usage) yield usageOf(chunk.usage)
     }
     for (const slot of pending.values()) {
       yield { type: 'tool_call', call: { id: slot.id, name: slot.name, arguments: parseArguments(slot.args) } }

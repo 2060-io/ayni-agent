@@ -1,6 +1,12 @@
 /** TypeScript view of schemas/agent-pack.schema.json (schema 3.0). Field names follow the schema. */
 
-export type Visibility = 'session-private' | 'principal-private' | 'organization-shared' | 'partner-shared' | 'public'
+/** `conversation-private` replaces v3's `session-private`: visible to every session of the entry's conversation (D76) */
+export type Visibility =
+  | 'conversation-private'
+  | 'principal-private'
+  | 'organization-shared'
+  | 'partner-shared'
+  | 'public'
 export type Relation = 'home' | 'partner' | 'unrecognized'
 export type ConnectionType = 'verifiable-user-agent' | 'verifiable-service'
 export type ToolNameOrStar = string
@@ -210,6 +216,10 @@ export interface LlmConfig {
   reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'max'
   multimodal?: boolean
   provider_options?: Record<string, unknown>
+  /** the model's input limit; the window budget plus the output limit must fit in it (MEM-CTX-006) */
+  maxInputTokens?: number
+  /** provider caching by prefix (LLM-CACHE-001): the conversation is the cache key; Kimi first */
+  cache?: { enabled?: boolean; ttl?: '5m' | '1h' }
 }
 
 export interface EmbeddingsConfig {
@@ -304,6 +314,8 @@ export interface RagSource {
   path?: string
   url?: string
   visibility?: 'public' | 'organization-shared' | 'partner-shared'
+  /** the organization key of the partner whose Principals may read a `partner-shared` source (MEM-RAG-005) */
+  partner?: string
   refreshHours?: number
 }
 
@@ -346,7 +358,10 @@ export interface AgentPack {
   memory?: {
     contextWindowTokens?: number
     workingMemory?: { enabled?: boolean; maxNotes?: number; maxNoteChars?: number }
-    summarization?: { enabled?: boolean; triggerTokens?: number }
+    /** the window moves in steps (MEM-CTX-003): down to keepRatio of the budget, never more than maxEntries entries */
+    window?: { keepRatio?: number; maxEntries?: number }
+    /** the conversation summary (MEM-CTX-004): what a step drops, compressed with the previous summary */
+    summarization?: { enabled?: boolean; triggerTokens?: number; maxSummaryTokens?: number }
     retrieval?: { topK?: number; ambientDescriptions?: boolean; chunkSize?: number; chunkOverlap?: number }
   }
   rag?: { enabled?: boolean; sources: RagSource[]; chunkSize?: number; chunkOverlap?: number }

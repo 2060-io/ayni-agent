@@ -12,6 +12,7 @@
     "fix-format": "biome check --write --unsafe",
     "check-types": "pnpm --filter @ayni.org/ayni-agui-profile build && tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
+    "test:postgres": "node scripts/test-postgres.mjs",
     "validate": "pnpm check-types && pnpm check-format",
     "pack:validate": "tsx src/cli/validate-pack.ts"
   },

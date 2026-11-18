@@ -52,6 +52,9 @@ llm:
   apiKeyEnv: LLM_API_KEY
   maxOutputTokens: 2048
   multimodal: ${LLM_MULTIMODAL:-false}
+  # the conversation is the provider's cache key (LLM-CACHE-001); the stub model simulates the cache
+  cache:
+    enabled: true
 
 embeddings:
   provider: stub

@@ -374,6 +374,26 @@ export function crossFieldErrors(pack: AgentPack): string[] {
   if (template && (!template.startsWith('https://') || !template.includes('{oob}'))) {
     errors.push('rule 9: channels.agui.walletLinkTemplate must start with https:// and contain {oob}')
   }
+  // rule 10: the window budget and the output limit fit in the model's input limit (MEM-CTX-006)
+  const limit = pack.llm?.maxInputTokens
+  if (limit !== undefined) {
+    const budget = pack.memory?.contextWindowTokens ?? 12000
+    const output = pack.llm?.maxOutputTokens ?? 1024
+    if (budget + output > limit) {
+      errors.push(
+        `rule 10: memory.contextWindowTokens (${budget}) plus llm.maxOutputTokens (${output}) exceeds llm.maxInputTokens (${limit}) (MEM-CTX-006)`
+      )
+    }
+  }
+  // rule 11: a partner-shared source names its partner, and only it (MEM-RAG-005)
+  for (const source of pack.rag?.sources ?? []) {
+    if (source.visibility === 'partner-shared' && !source.partner) {
+      errors.push(`rule 11: rag source "${source.id}" is partner-shared and names no partner (MEM-RAG-005)`)
+    }
+    if (source.partner && source.visibility !== 'partner-shared') {
+      errors.push(`rule 11: rag source "${source.id}" names a partner but is not partner-shared (MEM-RAG-005)`)
+    }
+  }
   const activities = new Set(pack.privacy.processingActivities.map((a) => a.id))
   const needed: [boolean, string][] = [
     [true, 'conversation-memory'],

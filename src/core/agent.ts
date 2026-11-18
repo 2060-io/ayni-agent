@@ -22,6 +22,8 @@ import { nowIso } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import type { ChallengeService } from './challenges.js'
 import type { CapabilityRouter } from './channel.js'
+import type { ContextAssembler } from './context.js'
+import { conversationOf } from './conversationOf.js'
 import type { EvidenceService } from './evidence.js'
 import type { FlowService } from './flows.js'
 import { contextualMenuFor, describeDevices, describeSessions, greetingFor, PLATFORM_MENU } from './interaction.js'
@@ -35,7 +37,7 @@ import {
   type TurnSink,
 } from './orchestrator.js'
 import type { PrincipalService, VerifiedFacts } from './principals.js'
-import { SessionError, type SessionService } from './sessions.js'
+import { SessionError, type SessionService, TRANSCRIPT_MESSAGE_TYPES } from './sessions.js'
 import { TurnLock } from './turnLock.js'
 import type { ApprovalRecord, ClientDescription, ClosureReason, MessageEntry, Principal, Session } from './types.js'
 import { ProcessEnding, TooManyWaiting, type WaitingItem, WaitingList } from './waiting.js'
@@ -56,6 +58,8 @@ export interface AgentParts {
   flows: FlowService
   challenges: ChallengeService
   orchestrator: Orchestrator
+  /** the context of a turn and the figure of a conversation (D74, D75) */
+  context: ContextAssembler
   llm: ChatModel
   stats: StatsSink
   logger: Logger
@@ -100,6 +104,7 @@ export class AyniAgent {
   public readonly pack: AgentPack
   public readonly store: Store
   public readonly memory: MemoryService
+  public readonly context: ContextAssembler
   public readonly media: MediaService
   public readonly rag?: RagService
   public readonly principals: PrincipalService
@@ -131,6 +136,7 @@ export class AyniAgent {
     this.pack = parts.pack
     this.store = parts.store
     this.memory = parts.memory
+    this.context = parts.context
     this.media = parts.media
     this.rag = parts.rag
     this.principals = parts.principals
@@ -206,7 +212,10 @@ export class AyniAgent {
   public async ayniState(session: Session): Promise<AyniState> {
     const principal = await this.principalOf(session)
     const pending = principal && this.features.approvals ? (await this.approvals.pendingFor(principal)).length : 0
+    // the context figure of the conversation's latest turn, the same on every device (D74, PROF-STREAM-007)
+    const context = session.state === 'bound' ? await this.context.figure(conversationOf(session)) : undefined
     return {
+      ...(context ? { context } : {}),
       contextualMenu: { items: contextualMenuFor(this.pack, principal, session, pending) },
       pendingApprovals: pending,
       generating: this.media
@@ -219,6 +228,62 @@ export class AyniAgent {
         ? (this.pack.purposes ?? []).map((p) => ({ id: p.id, label: p.label, description: p.description }))
         : [],
     }
+  }
+
+  // ---- erasure (D78, PRIV-ERASE-007) -------------------------------------------------------------
+
+  /**
+   * A message the Principal wrote in the session's conversation, erased for good (PROF-HIST-010): named by the
+   * agent's id or by the client's id. Any other message is not found; a message on legal hold is held.
+   */
+  public async eraseOwnMessage(
+    session: Session,
+    principal: Principal,
+    messageId: string
+  ): Promise<{
+    outcome: 'erased' | 'not-found' | 'legal-hold'
+    conversationId: string
+    messageIds: string[]
+    /** the ids the client gave the erased messages, when it gave one (PROF-STREAM-008) */
+    clientIds: string[]
+  }> {
+    const conversationId = conversationOf(session)
+    const own = (
+      await this.store.entries.listAll({ conversationId, principalId: principal.id, limit: 100_000 })
+    ).filter((e) => e.role === 'principal' && TRANSCRIPT_MESSAGE_TYPES.includes(e.sourceType))
+    const target = own.find((e) => e.id === messageId) ?? own.find((e) => e.externalId === messageId)
+    if (!target) return { outcome: 'not-found', conversationId, messageIds: [], clientIds: [] }
+    const result = await this.memory.erase(target.id)
+    if (result.reason === 'legal-hold') return { outcome: 'legal-hold', conversationId, messageIds: [], clientIds: [] }
+    return {
+      outcome: 'erased',
+      conversationId,
+      messageIds: [target.id],
+      clientIds: target.externalId ? [target.externalId] : [],
+    }
+  }
+
+  /** Every message the Principal wrote in a conversation, erased for good (PROF-CONV-009); the agent's stay. */
+  public async eraseOwnConversation(
+    principal: Principal,
+    conversationId: string
+  ): Promise<{ erased: string[]; held: string[]; clientIds: string[] }> {
+    const own = (
+      await this.store.entries.listAll({ conversationId, principalId: principal.id, limit: 100_000 })
+    ).filter(
+      (e) => e.role === 'principal' && TRANSCRIPT_MESSAGE_TYPES.includes(e.sourceType) && e.state !== 'crypto-erased'
+    )
+    const erased: string[] = []
+    const held: string[] = []
+    const clientIds: string[] = []
+    for (const entry of own) {
+      const result = await this.memory.erase(entry.id)
+      if (result.erased) {
+        erased.push(entry.id)
+        if (entry.externalId) clientIds.push(entry.externalId)
+      } else if (result.reason === 'legal-hold') held.push(entry.id)
+    }
+    return { erased, held, clientIds }
   }
 
   // ---- sessions ----------------------------------------------------------------------------------
@@ -759,7 +824,7 @@ export class AyniAgent {
         // The target is a message of this conversation: of this session or of an earlier one it continues
         // (IDENT-SESS-009), as for the quote of a reply. Checking this session alone dropped, without a
         // word, every reaction on a message older than the last idle timeout
-        if (target && [session.id, ...(session.lineage ?? [])].includes(target.sessionId)) {
+        if (target && target.conversationId === conversationOf(session)) {
           const reactions = { ...((target.payload?.reactions as Record<string, unknown> | undefined) ?? {}) }
           if (action.action === 'add')
             reactions[principal.id] = { emoji: action.emoji, by: displayName(principal), at: new Date().toISOString() }

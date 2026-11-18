@@ -18,6 +18,7 @@ import { Ajv2020 } from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type { AyniAgent, QueuedRun } from '../../core/agent.js'
+import { conversationOf } from '../../core/conversationOf.js'
 import { conversationKey, type TurnEvent, type TurnSink } from '../../core/orchestrator.js'
 import { normalizeClient, SessionError } from '../../core/sessions.js'
 import type { ClientDescription, Conversation, MessageEntry, Session } from '../../core/types.js'
@@ -120,6 +121,10 @@ export class AgUiRoutes {
         // a wallet waits for the agent's status before it asks for a session grant (D71, PROF-DESC-007):
         // declared only when the DIDComm agent can send one
         peerStatus: this.agent.peerStatus?.declared === true,
+        // the context figure of a conversation in state.ayni.context (D74, PROF-DESC-008)
+        context: true,
+        // a Principal erases what they wrote (D78, PROF-DESC-008)
+        erasure: true,
       },
       locales: [this.agent.pack.language.agent],
     }
@@ -358,6 +363,23 @@ export class AgUiRoutes {
       }
     })
 
+    // PROF-CONV-009: every message the Principal wrote in a conversation, erased for good
+    app.post(`${base}/conversations/:conversationId/erasure`, async (request, reply) => {
+      const session = await this.session(request, reply, true)
+      if (!session) return
+      const { conversationId: id } = request.params as { conversationId: string }
+      try {
+        const principal = await this.agent.principalOf(session)
+        if (!principal) return reply.code(404).send({ error: 'not-found' })
+        const conversation = await this.agent.sessions.conversationOf(principal, id)
+        const { erased, held, clientIds } = await this.agent.eraseOwnConversation(principal, conversation.id)
+        if (erased.length) await this.announceErased(principal.id, conversation.id, erased, clientIds)
+        return { erased: erased.length, held: held.length }
+      } catch (error) {
+        return this.sendError(reply, error)
+      }
+    })
+
     // PROF-SESS-011: the Principal's paired devices
     app.get(`${base}/devices`, async (request, reply) => {
       const session = await this.session(request, reply, true)
@@ -491,6 +513,20 @@ export class AgUiRoutes {
       if (!run || !own) return reply.code(409).send({ error: 'conflict', message: 'run already ended' })
       run.controller.abort()
       return reply.code(202).send()
+    })
+
+    // PROF-HIST-010: a message the Principal wrote, erased for good
+    app.delete(`${base}/:id/messages/:messageId`, async (request, reply) => {
+      const session = await this.session(request, reply, true)
+      if (!session) return
+      const { messageId } = request.params as { messageId: string }
+      const principal = await this.agent.principalOf(session)
+      if (!principal) return reply.code(404).send({ error: 'not-found' })
+      const result = await this.agent.eraseOwnMessage(session, principal, messageId)
+      if (result.outcome === 'not-found') return reply.code(404).send({ error: 'not-found' })
+      if (result.outcome === 'legal-hold') return reply.code(409).send({ error: 'legal-hold' })
+      await this.announceErased(principal.id, result.conversationId, result.messageIds, result.clientIds)
+      return reply.code(204).send()
     })
 
     // PROF-HIST-001/002
@@ -839,6 +875,23 @@ export class AgUiRoutes {
           readUpTo: conversation.readUpTo ?? null,
         })
       )
+    }
+  }
+
+  /** Messages erased for good, told to every bound session of the conversation, the requesting one included (PROF-STREAM-008). */
+  public async announceErased(
+    principalId: string,
+    conversationId: string,
+    messageIds: string[],
+    clientIds: string[] = []
+  ): Promise<void> {
+    if (!messageIds.length) return
+    // a client holds a message it sent under its own id until it reads the history again: it is named both ways
+    const value = { conversationId, messageIds, ...(clientIds.length ? { clientIds } : {}) }
+    const sessions = await this.agent.store.sessions.listByPrincipal(principalId, ['bound'])
+    for (const session of sessions) {
+      if (session.channelType !== 'ag-ui' || conversationOf(session) !== conversationId) continue
+      await this.streams.publish(session.id, ev.custom(CUSTOM_EVENT.messagesErased, value))
     }
   }
 
