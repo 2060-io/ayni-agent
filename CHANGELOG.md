@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.0](https://github.com/2060-io/ayni-agent/compare/v0.22.0...v0.23.0) (2026-11-18)
+
+
+### Features
+
+* **context:** the context measured and shown, assembled for Kimi's cache and summarized in steps; memory scoped by conversation; erasure, audit and legal hold reachable ([#90](https://github.com/2060-io/ayni-agent/issues/90)) ([8d5a63d](https://github.com/2060-io/ayni-agent/commit/8d5a63db3b4e7b10e9edc5d9504eb5f1b7b7606d))
+
 ## [0.22.0](https://github.com/2060-io/ayni-agent/compare/v0.21.1...v0.22.0) (2026-11-18)
 
 
