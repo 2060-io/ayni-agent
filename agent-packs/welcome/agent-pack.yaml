@@ -97,7 +97,7 @@ embeddings:
   model: hash
 
 memory:
-  contextWindowTokens: 8000
+  contextWindowTokens: ${CONTEXT_WINDOW_TOKENS:-8000}
 
 rag:
   enabled: false

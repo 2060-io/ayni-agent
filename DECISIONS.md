@@ -617,3 +617,10 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       will now ask you" to a tool that had just said the phone could not.
     - By test: the record of a request in each state, and that no record starts as a line of the agent.
       That the model no longer copies it is to be seen on devnet: it is a behaviour of the model.
+57. **A deployment sets the token budget of the context window** (2026-11-17, Fabrice: "we should increase it
+    to max 100k for now, so that we can see the effect of caching and other improvements").
+    - The Welcome pack reads `memory.contextWindowTokens` from `CONTEXT_WINDOW_TOKENS`, `8000` when it is
+      unset (ayni-spec reference profile). Devnet sets `100000`; testnet keeps `8000`.
+    - What fills the window is still bounded by the 200 newest entries the window reads, and the budget
+      is still an estimate (characters / 4 of the text of each entry): the measure of what the model
+      receives comes with the usage accounting of the context work.
