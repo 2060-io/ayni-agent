@@ -288,7 +288,7 @@ describe('a person erases what they wrote (PRIV-ERASE-007, PROF-HIST-010, PROF-C
       .slice(seen)
       .filter((e) => e.type === 'CUSTOM' && e.name === 'ayni.messages.erased')
     expect(told).toHaveLength(1)
-    expect(told[0]?.value).toEqual({ conversationId, messageIds: [own.id] })
+    expect(told[0]?.value).toEqual({ conversationId, messageIds: [own.id], clientIds: ['u-door'] })
   })
 
   it('erases with the message the tool calls of its turn, and flags the note that cites it (PRIV-ERASE-005)', async () => {

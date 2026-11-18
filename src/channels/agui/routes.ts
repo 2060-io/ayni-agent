@@ -372,8 +372,8 @@ export class AgUiRoutes {
         const principal = await this.agent.principalOf(session)
         if (!principal) return reply.code(404).send({ error: 'not-found' })
         const conversation = await this.agent.sessions.conversationOf(principal, id)
-        const { erased, held } = await this.agent.eraseOwnConversation(principal, conversation.id)
-        if (erased.length) await this.announceErased(principal.id, conversation.id, erased)
+        const { erased, held, clientIds } = await this.agent.eraseOwnConversation(principal, conversation.id)
+        if (erased.length) await this.announceErased(principal.id, conversation.id, erased, clientIds)
         return { erased: erased.length, held: held.length }
       } catch (error) {
         return this.sendError(reply, error)
@@ -525,7 +525,7 @@ export class AgUiRoutes {
       const result = await this.agent.eraseOwnMessage(session, principal, messageId)
       if (result.outcome === 'not-found') return reply.code(404).send({ error: 'not-found' })
       if (result.outcome === 'legal-hold') return reply.code(409).send({ error: 'legal-hold' })
-      await this.announceErased(principal.id, result.conversationId, result.messageIds)
+      await this.announceErased(principal.id, result.conversationId, result.messageIds, result.clientIds)
       return reply.code(204).send()
     })
 
@@ -879,12 +879,19 @@ export class AgUiRoutes {
   }
 
   /** Messages erased for good, told to every bound session of the conversation, the requesting one included (PROF-STREAM-008). */
-  public async announceErased(principalId: string, conversationId: string, messageIds: string[]): Promise<void> {
+  public async announceErased(
+    principalId: string,
+    conversationId: string,
+    messageIds: string[],
+    clientIds: string[] = []
+  ): Promise<void> {
     if (!messageIds.length) return
+    // a client holds a message it sent under its own id until it reads the history again: it is named both ways
+    const value = { conversationId, messageIds, ...(clientIds.length ? { clientIds } : {}) }
     const sessions = await this.agent.store.sessions.listByPrincipal(principalId, ['bound'])
     for (const session of sessions) {
       if (session.channelType !== 'ag-ui' || conversationOf(session) !== conversationId) continue
-      await this.streams.publish(session.id, ev.custom(CUSTOM_EVENT.messagesErased, { conversationId, messageIds }))
+      await this.streams.publish(session.id, ev.custom(CUSTOM_EVENT.messagesErased, value))
     }
   }
 

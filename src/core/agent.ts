@@ -240,23 +240,34 @@ export class AyniAgent {
     session: Session,
     principal: Principal,
     messageId: string
-  ): Promise<{ outcome: 'erased' | 'not-found' | 'legal-hold'; conversationId: string; messageIds: string[] }> {
+  ): Promise<{
+    outcome: 'erased' | 'not-found' | 'legal-hold'
+    conversationId: string
+    messageIds: string[]
+    /** the ids the client gave the erased messages, when it gave one (PROF-STREAM-008) */
+    clientIds: string[]
+  }> {
     const conversationId = conversationOf(session)
     const own = (
       await this.store.entries.listAll({ conversationId, principalId: principal.id, limit: 100_000 })
     ).filter((e) => e.role === 'principal' && TRANSCRIPT_MESSAGE_TYPES.includes(e.sourceType))
     const target = own.find((e) => e.id === messageId) ?? own.find((e) => e.externalId === messageId)
-    if (!target) return { outcome: 'not-found', conversationId, messageIds: [] }
+    if (!target) return { outcome: 'not-found', conversationId, messageIds: [], clientIds: [] }
     const result = await this.memory.erase(target.id)
-    if (result.reason === 'legal-hold') return { outcome: 'legal-hold', conversationId, messageIds: [] }
-    return { outcome: 'erased', conversationId, messageIds: [target.id] }
+    if (result.reason === 'legal-hold') return { outcome: 'legal-hold', conversationId, messageIds: [], clientIds: [] }
+    return {
+      outcome: 'erased',
+      conversationId,
+      messageIds: [target.id],
+      clientIds: target.externalId ? [target.externalId] : [],
+    }
   }
 
   /** Every message the Principal wrote in a conversation, erased for good (PROF-CONV-009); the agent's stay. */
   public async eraseOwnConversation(
     principal: Principal,
     conversationId: string
-  ): Promise<{ erased: string[]; held: string[] }> {
+  ): Promise<{ erased: string[]; held: string[]; clientIds: string[] }> {
     const own = (
       await this.store.entries.listAll({ conversationId, principalId: principal.id, limit: 100_000 })
     ).filter(
@@ -264,12 +275,15 @@ export class AyniAgent {
     )
     const erased: string[] = []
     const held: string[] = []
+    const clientIds: string[] = []
     for (const entry of own) {
       const result = await this.memory.erase(entry.id)
-      if (result.erased) erased.push(entry.id)
-      else if (result.reason === 'legal-hold') held.push(entry.id)
+      if (result.erased) {
+        erased.push(entry.id)
+        if (entry.externalId) clientIds.push(entry.externalId)
+      } else if (result.reason === 'legal-hold') held.push(entry.id)
     }
-    return { erased, held }
+    return { erased, held, clientIds }
   }
 
   // ---- sessions ----------------------------------------------------------------------------------

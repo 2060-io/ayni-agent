@@ -364,8 +364,8 @@ export async function buildAgent(
           evidence,
           logger,
           token: env.adminToken,
-          announceErased: (principalId, conversationId, ids) =>
-            aguiRoutes?.announceErased(principalId, conversationId, ids) ?? Promise.resolve(),
+          announceErased: (principalId, conversationId, ids, clientIds) =>
+            aguiRoutes?.announceErased(principalId, conversationId, ids, clientIds) ?? Promise.resolve(),
         })
   aguiRoutes.register(app, did)
   // what the person sends during a turn waits in the store and is answered next (D63): its devices are told what

@@ -19,7 +19,7 @@ export interface AdminDeps {
   /** when set, every call carries it as a bearer token */
   token?: string
   /** erased messages are told to the devices of their conversation (PROF-STREAM-008) */
-  announceErased(principalId: string, conversationId: string, messageIds: string[]): Promise<void>
+  announceErased(principalId: string, conversationId: string, messageIds: string[], clientIds: string[]): Promise<void>
 }
 
 const LIMIT = 100_000
@@ -104,19 +104,20 @@ export function buildAdmin(deps: AdminDeps): FastifyInstance {
     )
     const erased: string[] = []
     const held: string[] = []
-    const byConversation = new Map<string, { principalId: string | null; ids: string[] }>()
+    const byConversation = new Map<string, { principalId: string | null; ids: string[]; clientIds: string[] }>()
     for (const row of rows) {
       if (row.state === 'crypto-erased') continue
       const result = await memory.erase(row.id)
       if (result.erased) {
         erased.push(row.id, ...result.cascaded)
-        const group = byConversation.get(row.conversationId) ?? { principalId: row.principalId, ids: [] }
+        const group = byConversation.get(row.conversationId) ?? { principalId: row.principalId, ids: [], clientIds: [] }
         group.ids.push(row.id)
+        if (row.externalId) group.clientIds.push(row.externalId)
         byConversation.set(row.conversationId, group)
       } else if (result.reason === 'legal-hold') held.push(row.id)
     }
     for (const [conversationId, group] of byConversation) {
-      if (group.principalId) await deps.announceErased(group.principalId, conversationId, group.ids)
+      if (group.principalId) await deps.announceErased(group.principalId, conversationId, group.ids, group.clientIds)
     }
     const auditId = await record({
       action: 'erasure',

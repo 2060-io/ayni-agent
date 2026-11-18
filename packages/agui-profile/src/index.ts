@@ -236,7 +236,10 @@ export const CUSTOM_EVENT = {
 /** `ayni.messages.erased` (PROF-STREAM-008). */
 export interface MessagesErasedValue {
   conversationId: string
+  /** the agent's ids of the erased messages */
   messageIds: string[]
+  /** the ids the client gave those it sent: a client holds them so until it reads the history again */
+  clientIds?: string[]
 }
 
 /** The answer of `POST {sessions}/conversations/{id}/erasure` (PROF-CONV-009). */
