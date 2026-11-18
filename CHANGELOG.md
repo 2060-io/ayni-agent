@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.0](https://github.com/2060-io/ayni-agent/compare/v0.21.1...v0.22.0) (2026-11-18)
+
+
+### Features
+
+* **welcome:** a deployment sets the token budget of the context window (CONTEXT_WINDOW_TOKENS) ([#88](https://github.com/2060-io/ayni-agent/issues/88)) ([054011b](https://github.com/2060-io/ayni-agent/commit/054011b4daa07ca656589458a2f791d2fbee95ed))
+
 ## [0.21.1](https://github.com/2060-io/ayni-agent/compare/v0.21.0...v0.21.1) (2026-11-17)
 
 
