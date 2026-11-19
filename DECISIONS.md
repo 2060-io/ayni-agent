@@ -843,9 +843,9 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     - **Choices of mine, to flag:** the 403 of the picker is `not-creator` (§9 gives no other for it); the admin change
       items carry their audit `id`, the cursor of `before`; the first load ever records every entry as `added`; the poll
       default is 10 seconds; a credential issued under a definition without revocation cannot be revoked and is logged
-      once (no such badge from the directory is issued by this version); the existing definition of the badge schema on
-      devnet was created without revocation and must be deleted in the VS Agent before badges are issued from the
-      directory.
+      once (no such badge from the directory is issued by this version); every definition an earlier version created
+      has no revocation (it never asked for it), so on devnet the definition of the badge schema, if the agent created
+      one, must be deleted in the VS Agent before badges are issued from the directory (not checked on devnet).
     - **Not done here (phase 2b):** the `record: directory` claim source and its loader rules (IDENT-DIR-002,
       INTX-ISSUE-021), the passport match (IDENT-DIR-003), the email code and `emailId` (IDENT-DIR-004, INTX-AUTH-011
       to 015, INTX-ISSUE-020), `as: dateint` (IDENT-DIR-005), SMTP (PLAT-MAIL), invitations (SPACE-INV) and
