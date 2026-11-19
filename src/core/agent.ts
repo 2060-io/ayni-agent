@@ -367,7 +367,12 @@ export class AyniAgent {
     const none = { conversationId, messageIds: [], clientIds: [], memoryIds: [] }
     const own = (
       await this.store.entries.listAll({ conversationId, principalId: principal.id, limit: 100_000 })
-    ).filter((e) => e.role === 'principal' && TRANSCRIPT_MESSAGE_TYPES.includes(e.sourceType))
+    ).filter(
+      // a message of the person's email check is a message they wrote too (PROF-HIST-010, PROF-RUN-015): the only
+      // `auth-challenge` entries of the person are what they typed while a check waited (INTX-AUTH-013)
+      (e) =>
+        e.role === 'principal' && (TRANSCRIPT_MESSAGE_TYPES.includes(e.sourceType) || e.sourceType === 'auth-challenge')
+    )
     const target = own.find((e) => e.id === messageId) ?? own.find((e) => e.externalId === messageId)
     if (!target) return { outcome: 'not-found', ...none }
     // deleted already, from another device: nothing more to do

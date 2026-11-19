@@ -323,19 +323,41 @@ describe('the email code of a badge from the directory (D89)', () => {
       ['user', code],
       ['assistant', 'Your email address is ve'],
     ])
-    // the outcome is a record of the system, an activity of the transcript
-    expect(history).toContainEqual(
-      expect.objectContaining({
-        role: 'activity',
-        content: expect.objectContaining({ kind: 'auth-challenge', challengeType: 'email', status: 'completed' }),
-      })
-    )
+    // the outcome is a record for the model: the code's message told the person; no capability card (profile §6)
+    expect(history.filter((m) => m.role === 'activity' && m.metadata.sourceType === 'auth-challenge')).toEqual([])
     const events = await runText(running, ana, 'thanks, what did you check?')
     expect(textOf(events)).toMatch(/^You said:/)
     const request = JSON.stringify(model().requests.at(-1)?.messages)
     expect(request).toContain('Identity check (email) for issue_credential: passed')
     for (const secret of [code, 'ana.rios', 'Ana.Rios', 'Which email address', 'six-digit'])
       expect(request).not.toContain(secret)
+  })
+
+  it("lets the person delete what they typed in the check within the window, with the code's answer to it (PROF-HIST-010)", async () => {
+    const before = await historyOf(running, ana)
+    const typed = before.find((m) => m.role === 'user' && String(m.content) === 'Ana.Rios@Northwind.example')
+    const answer = before.find(
+      (m) => m.role === 'assistant' && String(m.content).startsWith('If this address is on th')
+    )
+    if (!typed || !answer) throw new Error('the check is not in history')
+    const response = await running.app.inject({
+      method: 'DELETE',
+      url: `/agui/v3/sessions/${ana.sessionId}/messages/${typed.id}`,
+      headers: { authorization: `Bearer ${ana.sessionToken}` },
+    })
+    expect(response.statusCode).toBe(204)
+    const after = (await historyOf(running, ana)).map((m) => m.id)
+    expect(after).not.toContain(typed.id)
+    expect(after).not.toContain(answer.id)
+    // the rest of the check stays, and so does what it verified
+    expect((await historyOf(running, ana)).some((m) => String(m.content).startsWith('Your email address is ve'))).toBe(
+      true
+    )
+    expect(
+      (
+        await running.agent.evidence.list((await running.agent.sessions.get(ana.sessionId))?.principalId as string)
+      ).some((r) => r.kind === 'email')
+    ).toBe(true)
   })
 
   it('keeps neither the code nor the address in the clear in the store (INTX-AUTH-014)', async () => {

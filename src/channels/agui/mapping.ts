@@ -192,6 +192,10 @@ export function entryToMessages(entry: MessageEntry): Record<string, unknown>[] 
         ]
       // a challenge served as a `confirm` flow is shown by its flow card; the note stays for the model (D55)
       if (entry.payload?.flowId) return []
+      // the outcome of an email check is a record for the model: the check ran in the conversation, never on the
+      // capability channel, and the code's own message told the person how it ended (PROF-RUN-015); it is no
+      // `ayni.capability` card, whose challengeType is device, face-match or document (profile §6)
+      if (entry.payload?.type === 'email') return []
       return [
         {
           id: entry.id,

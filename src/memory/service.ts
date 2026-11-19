@@ -590,7 +590,17 @@ export class MemoryService {
       from: { initiatedAt: stored.initiatedAt, id: '' },
       order: 'asc',
       roles: ['agent', 'system'],
-      sourceTypes: ['text', 'voice', 'media', 'tool-call', 'state-update', 'refusal'],
+      // the reply to a message of an email check is the code's answer, an `auth-challenge` entry that names it; the
+      // flow, approval and auth-challenge entries of a turn of the model stay (PRIV-ERASE-011)
+      sourceTypes: [
+        'text',
+        'voice',
+        'media',
+        'tool-call',
+        'state-update',
+        'refusal',
+        ...(stored.sourceType === 'auth-challenge' ? (['auth-challenge'] as const) : []),
+      ],
       limit: 2000,
     })
     const turn = after.filter((row) => row.id !== stored.id && answers(this.open(row).payload, entryId))
