@@ -1,6 +1,15 @@
 /**
- * Ayni AG-UI Profile 3.1 (2060-io/ayni-spec, v4/ayni-agui-profile/profile.md).
+ * Ayni AG-UI Profile 3.3 (2060-io/ayni-spec, v4/ayni-agui-profile/profile.md).
  * Every name below cites the section or the PROF-* requirement it implements.
+ *
+ * 3.3 over 3.2 (ayni-spec agent D80 to D93; ayni-agent decision 60): spaces, their templates, members, activity,
+ * ownership and handover (§3.7, PROF-SPACE-*); a conversation belongs to a space (`spaceId`, `shared`,
+ * `state.ayni.space`; PROF-CONV-010..012, PROF-STREAM-009); the person's memories and preferences (`/memories`,
+ * `/preferences`, `/about-me`; §3.8, PROF-MEM-*), the memories a reply used (`metadata.usedMemories`,
+ * `usedPreferences`, PROF-HIST-011), a memory update as `ayni.memory.updated` and the `ayni.memory-update` history
+ * item (PROF-STREAM-010, PROF-HIST-012); a person deletes their own message within a window (`features.erasure:
+ * { windowSeconds }`, PROF-HIST-010); a run in a space the person left answers `409 space-left` (PROF-RUN-014).
+ * `POST {sessions}/conversations/{id}/erasure` is withdrawn (PROF-CONV-009).
  *
  * 3.1 over 3.0: the session grant (`CreateSessionRequest.grant`, `features.sessionGrant`, §4.1), `features.flows`,
  * `client.platform` as `web` | `ios` | `android` with `client.description` (PROF-SESS-014), the `ayni.flow` activity
@@ -8,9 +17,9 @@
  * `grant-expired` errors (§9), app links (§10, PROF-LINK-*). A 3.0 UI keeps working against a 3.1 agent.
  */
 
-export const PROFILE_VERSION = '3.1'
+export const PROFILE_VERSION = '3.3'
 export const PROFILE_MAJOR = 3
-export const PROFILE_MINOR = 1
+export const PROFILE_MINOR = 3
 
 /** DID Document service type that references the descriptor (PROF-DESC-001). */
 export const DID_SERVICE_TYPE = 'AyniAgUI'
@@ -65,8 +74,12 @@ export interface DescriptorFeatures {
   peerStatus?: boolean
   /** the agent publishes the context figure in `state.ayni.context` (PROF-DESC-008, PROF-STREAM-007) */
   context?: boolean
-  /** a Principal may erase what they wrote (PROF-DESC-008, PROF-HIST-010, PROF-CONV-009) */
-  erasure?: boolean
+  /**
+   * a Principal deletes a message they wrote, with the agent's reply to it, while the message is younger than
+   * `windowSeconds` (3.3; PROF-DESC-008, PROF-HIST-010); absent when the agent lets nobody delete. A 3.2 agent declared
+   * `true` here: a UI reads a boolean as no window it knows, and offers no deletion.
+   */
+  erasure?: { windowSeconds: number }
 }
 
 export type BindingMode = 'cross-device' | 'same-device'
@@ -152,6 +165,12 @@ export interface CreateSessionRequest {
    * `pairing-expired` / `pairing-invalid`, creates no session and asks the phone nothing
    */
   silent?: boolean
+  /**
+   * with `newConversation: true`, the space of the new conversation (3.3, PROF-CONV-011): one in which the Principal is
+   * an active member, else `404`; Personal when absent. For a session the phone binds later, a space the person may
+   * not use leaves the new conversation in Personal.
+   */
+  spaceId?: string
 }
 
 export interface BindingMaterial {
@@ -231,6 +250,8 @@ export const CUSTOM_EVENT = {
   conversationChanged: 'ayni.conversation.changed',
   /** messages of a conversation were erased for good: a UI removes them (PROF-STREAM-008) */
   messagesErased: 'ayni.messages.erased',
+  /** the agent added, changed or removed one of the person's memories in a conversation (3.3) */
+  memoryUpdated: 'ayni.memory.updated',
 } as const
 
 /** `ayni.messages.erased` (PROF-STREAM-008). */
@@ -242,10 +263,20 @@ export interface MessagesErasedValue {
   clientIds?: string[]
 }
 
-/** The answer of `POST {sessions}/conversations/{id}/erasure` (PROF-CONV-009). */
-export interface ConversationErasureResult {
-  erased: number
-  held: number
+/** What became of a memory (3.3). */
+export type MemoryAction = 'added' | 'changed' | 'removed'
+
+/**
+ * `ayni.memory.updated` (3.3): the agent changed one of the person's memories during a turn. The same item is in
+ * the history as an `ayni.memory-update` activity, under the agent's id `entryId`; it never carries the memory's
+ * content, which the person reads at `GET {sessions}/memories`.
+ */
+export interface MemoryUpdatedValue {
+  conversationId: string
+  entryId: string
+  memoryId: string
+  spaceId: string
+  action: MemoryAction
 }
 
 export type CustomEventName = (typeof CUSTOM_EVENT)[keyof typeof CUSTOM_EVENT]
@@ -352,6 +383,10 @@ export interface MessageMetadata {
   replyTo?: ReplyReference
   /** on an `ayni.flow` activity, the flow it records (section 8) */
   flowId?: string
+  /** on a message of the agent's reply: the ids of the person's memories the turn was given (3.3) */
+  usedMemories?: string[]
+  /** on a message of the agent's reply: the names of the person's preferences the turn was given (3.3) */
+  usedPreferences?: string[]
 }
 
 export type ReceiptState = 'received' | 'viewed'
@@ -370,6 +405,8 @@ export interface CustomEventValueMap {
   'ayni.approval.update': ApprovalUpdateValue
   'ayni.reaction': ReactionValue
   'ayni.receipt': ReceiptValue
+  'ayni.messages.erased': MessagesErasedValue
+  'ayni.memory.updated': MemoryUpdatedValue
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -417,9 +454,18 @@ export interface ContextFigure {
   at: string
 }
 
+/** The space of the session's conversation, as its header shows it (3.3). */
+export interface SpaceRef {
+  id: string
+  title: string
+  kind: SpaceKind
+}
+
 export interface AyniState {
   /** absent before the first turn, and from an agent that does not declare `features.context` */
   context?: ContextFigure
+  /** the space of the conversation, `{ id, title, kind }` (3.3, PROF-STREAM-009); absent from an earlier agent */
+  space?: SpaceRef
   contextualMenu: { items: ContextualMenuItem[] }
   pendingApprovals: number
   generating: GeneratingEntry[]
@@ -494,6 +540,8 @@ export const ACTIVITY = {
   capability: 'ayni.capability',
   flow: 'ayni.flow',
   generating: 'ayni.generating',
+  /** a line of the transcript: the agent added, changed or removed a memory of the person (3.3) */
+  memoryUpdate: 'ayni.memory-update',
 } as const
 
 export type ActivityType = (typeof ACTIVITY)[keyof typeof ACTIVITY]
@@ -564,6 +612,13 @@ export interface GeneratingActivity {
   kind: 'image'
 }
 
+/** The `ayni.memory-update` activity (3.3): which memory changed and how, never its content. */
+export interface MemoryUpdateActivity {
+  memoryId: string
+  spaceId: string
+  action: MemoryAction
+}
+
 /** Interrupt reasons the agent uses (PROF-RUN-006). */
 export const INTERRUPT_REASON = {
   menu: 'ayni.menu',
@@ -628,6 +683,10 @@ export interface ConversationInfo {
   unread?: number
   /** the read marker: the newest message the person has seen on any device, null while none */
   readUpTo?: string | null
+  /** the space it belongs to (3.3) */
+  spaceId?: string
+  /** its author shares it, read-only, with the members of its space (3.3) */
+  shared?: boolean
 }
 
 /** The value of `ayni.conversation.changed` (PROF-CONV-007). */
@@ -637,6 +696,9 @@ export interface ConversationChangedValue {
   state: ConversationState | 'final'
   unread?: number
   readUpTo?: string | null
+  /** the space it belongs to, and whether it is shared with it (3.3) */
+  spaceId?: string
+  shared?: boolean
 }
 
 export interface ConversationsResponse {
@@ -646,6 +708,8 @@ export interface ConversationsResponse {
 export interface ConversationPatch {
   title?: string
   state?: ConversationState
+  /** another space, only before the conversation's first message: 409 `conversation-started` after it (3.3) */
+  spaceId?: string
 }
 
 /** A paired device of the Principal (PROF-SESS-011). */
@@ -693,12 +757,46 @@ export type ErrorCode =
   | 'grant-used'
   /** `POST {sessions}` with a grant past its sixty seconds */
   | 'grant-expired'
+  /** 3.3: a message older than the deletion window (`features.erasure.windowSeconds`) */
+  | 'window-passed'
+  /** 3.3: a message whose reply is being written */
+  | 'turn-in-progress'
+  /** 3.3: a run on a conversation of a space the person is no longer a member of: readable, no run (PROF-RUN-014) */
+  | 'space-left'
+  /** 3.3: only an admin of the agent reads the admin view (PROF-DIR-003) */
+  | 'not-admin'
+  /** 3.3: the person is a member already */
+  | 'already-member'
+  /** 3.3: a conversation that has a message of the person keeps its space */
+  | 'has-messages'
+  /** 3.3: the person holds no creator role of the template */
+  | 'not-creator'
+  /** 3.3: only the owner of the space does this */
+  | 'not-owner'
+  /** 3.3: the Personal space has no settings, members or owner */
+  | 'personal-space'
+  /** 3.3: a value outside the bounds of the space's template, with `field` */
+  | 'out-of-bounds'
+  /** 3.3: the members of a rule space follow its rule */
+  | 'rule-membership'
+  /** 3.3: the owner is not removed: they give the space first */
+  | 'owner'
+  /** 3.3: the space is given to an active member of the organization only */
+  | 'not-eligible'
+  /** 3.3: the space takes no handover (Personal included) */
+  | 'handover-not-allowed'
+  /** 3.3: a conversation closed for good is not shared */
+  | 'final'
+  /** 3.3: the operation comes in a later version of the agent */
+  | 'not-implemented'
 
 export interface ErrorBody {
   error: ErrorCode | string
   reason?: ClosureReason
   message?: string
   binding?: BindingMaterial
+  /** the field an `out-of-bounds` refusal names (3.3) */
+  field?: string
 }
 
 /** Binding code format: two letters, a dash, two letters or digits, derived from the nonce (section 3.2). */
@@ -785,4 +883,197 @@ export function parseAppLink(url: string, domain: string): AppLink | null {
 /** Whether a URL is a link on the app-link domain, whatever its path. */
 export function isAppLink(url: string, domain: string): boolean {
   return parseAppLink(url, domain) !== null
+}
+
+// ---------------------------------------------------------------------------------------------
+// Spaces (3.3): `{sessions}/spaces`, a bound session's token
+
+export type SpaceKind = 'personal' | 'team' | 'organization'
+export type SpaceRole = 'owner' | 'member' | 'guest'
+export type LawfulBasis = 'consent' | 'contract' | 'legitimate-interest'
+
+/** What a space keeps and how (3.3): its conversations' retention, lawful basis, models, handover. */
+export interface SpaceRules {
+  /** days the entries of its conversations stay active, then they are archived (PRIV-RETN-008) */
+  retentionDays: number
+  lawfulBasis: LawfulBasis
+  /** the model providers that may process its conversations (an agent-pack `llm.provider`) */
+  allowedProviders: string[]
+  /** its members may read the conversations their authors share with it */
+  handover: boolean
+}
+
+/** Membership by rule, over verified facts: a department, a group, or the whole organization. */
+export interface SpaceMembershipRule {
+  department?: string
+  group?: string
+  organization?: true
+}
+
+export interface SpaceMembership {
+  mode: 'rule' | 'list'
+  rule?: SpaceMembershipRule
+  /** the people the rule gives, or the listed members invited or active */
+  memberCount: number
+}
+
+export interface SpaceInfo {
+  id: string
+  kind: SpaceKind
+  /** Personal's is `Personal`: a UI writes its own word for it */
+  title: string
+  purpose: string
+  brief: string
+  /** null for Personal */
+  templateId: string | null
+  /** the language the agent writes the space's own data in; null: the agent's default language */
+  language: string | null
+  rules: SpaceRules
+  membership: SpaceMembership
+  owner: { name: string }
+  /** the caller's role in it */
+  role: SpaceRole
+  /** `left`: the caller's own conversations of it stay readable, and take no run (409 `space-left`) */
+  state: 'active' | 'left'
+  /** the agent messages the caller has not read in their conversations of it */
+  unread: number
+  lastActivityAt: string
+}
+
+/** A template the caller may create from (PROF-SPACE-001); `rules`, the bounds an owner works within, is additive. */
+export interface SpaceTemplateInfo {
+  id: string
+  title: string
+  kind: Exclude<SpaceKind, 'personal'>
+  membership: 'rule' | 'list'
+  /** the rule of a rule template */
+  rule?: SpaceMembershipRule
+  rules?: {
+    retentionDays: { default: number; min?: number; max?: number }
+    lawfulBasis: { default: LawfulBasis; allowed: LawfulBasis[] }
+    allowedProviders: { default: string[]; allowed: string[] }
+    handover: { default: boolean; allowed: boolean[] }
+  }
+}
+
+/** `GET {sessions}/spaces`: Personal first, then the others; the templates the caller may create from. */
+export interface SpacesResponse {
+  spaces: SpaceInfo[]
+  templates: SpaceTemplateInfo[]
+}
+
+/** `POST {sessions}/spaces` (PROF-SPACE-002). */
+export interface CreateSpaceRequest {
+  templateId: string
+  title: string
+  purpose: string
+  brief?: string
+}
+
+export interface SpaceMemberInfo {
+  memberId: string
+  name: string
+  organization: string | null
+  state: 'active' | 'invited' | 'left'
+  role: SpaceRole
+}
+
+/** `GET {sessions}/spaces/{id}`: the space, and, for an active member of a list space, its members. */
+export interface SpaceDetail extends SpaceInfo {
+  members?: SpaceMemberInfo[]
+  createdAt: string
+  updatedAt: string
+}
+
+/** `PATCH {sessions}/spaces/{id}` (an owner): within the template's bounds, 400 `out-of-bounds` outside. */
+export interface SpacePatch {
+  title?: string
+  purpose?: string
+  brief?: string
+  language?: string | null
+  rules?: Partial<SpaceRules>
+}
+
+/** `POST {sessions}/spaces/{id}/members`: a person of the employee list, or of another organization. */
+export type AddMemberRequest = { directoryId: string } | { organizationKey: string; email: string }
+
+/** `POST {sessions}/spaces/{id}/owner`: a member of a list space, or a person of the directory for a rule space. */
+export type OwnerTransferRequest = { memberId: string } | { directoryId: string }
+
+export type SpaceActivityKind =
+  | 'created'
+  | 'joined'
+  | 'left'
+  | 'invited'
+  | 'removed'
+  | 'owner-changed'
+  | 'rules-changed'
+  | 'shared'
+  | 'unshared'
+
+/** One line of `GET {sessions}/spaces/{id}/activity?before=&limit=` (the owner): never the value of a field. */
+export interface SpaceActivityItem {
+  id: string
+  at: string
+  kind: SpaceActivityKind
+  by?: { name: string }
+  member?: { name: string }
+  /** the names of the fields a `rules-changed` changed */
+  fields?: string[]
+  conversationId?: string
+}
+
+export interface SpaceActivityPage {
+  activity: SpaceActivityItem[]
+  nextBefore: string | null
+}
+
+/** `POST {sessions}/conversations/{id}/share`: the author shares a conversation with its own space. */
+export interface ShareResponse {
+  shared: true
+  sharedAt: string
+  conversationId: string
+  spaceId: string
+}
+
+/** One line of `GET {sessions}/spaces/{id}/shared`: a conversation its author shares with the space. */
+export interface SharedConversationInfo {
+  id: string
+  title: string
+  author: { name: string }
+  sharedAt: string
+  lastActivityAt: string
+}
+
+// ---------------------------------------------------------------------------------------------
+// Memories and preferences (3.3): the person's own, never another's
+
+export interface PreferenceInfo {
+  key: string
+  value: string
+  updatedAt: string
+}
+
+export interface MemoryInfo {
+  id: string
+  spaceId: string
+  content: string
+  createdAt: string
+  updatedAt: string
+  /** the conversation it was taken from, while the person can still read it */
+  source?: { conversationId: string; title: string }
+}
+
+/** `GET {sessions}/memories?spaceId=`: every preference, and the memories of the space (of every space without it). */
+export interface MemoriesResponse {
+  preferences: PreferenceInfo[]
+  memories: MemoryInfo[]
+}
+
+/** `GET {sessions}/about-me`: what the agent keeps about the person. */
+export interface AboutMeResponse {
+  preferences: PreferenceInfo[]
+  memoriesBySpace: { spaceId: string; title: string; count: number }[]
+  conversations: { spaceId: string; title: string; count: number; retentionDays: number | null }[]
+  verified: { label: string; source: string | null; verifiedAt: string; expiresAt: string | null }[]
 }
