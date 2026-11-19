@@ -299,8 +299,11 @@ describe('a person erases what they wrote (PRIV-ERASE-007, PROF-HIST-010, PROF-C
     const message = all.find((e) => e.role === 'principal' && e.text.includes('remember')) as MessageEntry
     const call = all.find((e) => e.sourceType === 'tool-call') as MessageEntry
     expect((call.payload as { inboundId?: string }).inboundId).toBe(message.id)
-    const note = (await running.agent.store.notes.list(d.principal.id)).find((n) => n.content === 'lives in Lyon')
+    // the store holds the note sealed (D77): found by its lineage, its content only in the ciphertext
+    const note = (await running.agent.store.notes.list(d.principal.id)).find((n) => n.lineageRefs.includes(message.id))
     expect(note?.lineageRefs).toEqual([message.id])
+    expect(note?.content).toBe('')
+    expect(JSON.stringify(note)).not.toContain('Lyon')
     const response = await running.app.inject({
       method: 'DELETE',
       url: `/agui/v3/sessions/${d.sessionId}/messages/${message.id}`,

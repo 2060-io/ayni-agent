@@ -1,5 +1,5 @@
 /** Memory schema versions (CORE-VER-001/002). Each migration is applied once, in order. */
-export const MEMORY_SCHEMA_VERSION = '3.4.0'
+export const MEMORY_SCHEMA_VERSION = '3.5.0'
 
 export const MIGRATIONS: { version: string; sql: string }[] = [
   {
@@ -237,6 +237,16 @@ CREATE TABLE IF NOT EXISTS admin_audit (
   data JSONB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS admin_audit_ts ON admin_audit (ts DESC);
+`,
+  },
+  {
+    // D77: a preference keeps its name and value only as ciphertext under a key of its own, found by a keyed index
+    // of its name; the agent seals at start what an earlier version kept in the clear (working-memory notes keep
+    // theirs in `data`, which needs no column)
+    version: '3.5.0',
+    sql: `
+ALTER TABLE preferences ADD COLUMN IF NOT EXISTS enc_key_ref TEXT;
+ALTER TABLE preferences ADD COLUMN IF NOT EXISTS cipher BYTEA;
 `,
   },
 ]

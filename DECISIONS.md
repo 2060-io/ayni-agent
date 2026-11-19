@@ -666,3 +666,23 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       the conversation read in order.
     - **Not done here (Kimi first):** the Anthropic adapter still reports no input and sends `budget_tokens`; other
       providers follow.
+
+59. **Working-memory notes and preferences, sealed** (2026-11-18, found while reviewing data visibility; ayni-spec
+    D77 and PRIV-ERASE-009). Decision 58 sealed what an entry and a conversation kept in the clear, but a note's
+    content and a preference's name and value were still plain text in `working_memory` and `preferences`, and a
+    note says what the model learnt from a conversation. They are now sealed like the rest.
+    - **A note** keeps its content as ciphertext under a key of its own (`sealed` in its record, `content` empty).
+      The owner, visibility, state, lineage and dates stay in the clear: the scope predicate and the erasure
+      cascade read them.
+    - **A preference** keeps its name and value as ciphertext under a new key at every write. The table's `key` holds
+      a keyed index of the owner and the name (`EntryCrypto.blindIndex`, HMAC-SHA-256 under a key derived from the
+      master key), so a preference is found and replaced by its name without the name being stored. A preference's
+      name is free text the model chooses and can say as much as its value. The access log names a preference by
+      that index.
+    - **Through the memory service only:** the preferences tool now writes through `MemoryService.setPreference`;
+      the sealed repositories are in `src/memory/sealedMemory.ts`.
+    - **At start,** what an earlier version kept in the clear is sealed (`sealPlainNotesAndPreferences`); a plain
+      preference row is stored again under its index and the plain row removed. Schema 3.5.0 adds `enc_key_ref` and
+      `cipher` to `preferences`.
+    - **Tests:** `tests/sealedMemory.test.ts`, and a PostgreSQL test that finds no canary of a note, a preference
+      name, a preference value or a legacy row in the tables or the access log.

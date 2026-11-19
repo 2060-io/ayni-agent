@@ -225,6 +225,9 @@ export async function buildAgent(
   if (sealed) logger.info({ sealed }, 'conversation titles and previews sealed (D77)')
   const resealed = await memory.sealPlainAttachments()
   if (resealed) logger.info({ resealed }, 'attachment texts and names sealed with their entries (D77)')
+  const plainMemory = await memory.sealPlainNotesAndPreferences()
+  if (plainMemory.notes || plainMemory.preferences)
+    logger.info(plainMemory, 'working-memory notes and preferences sealed (D77)')
 
   let agentRef: AyniAgent | undefined
   const approvals = new ApprovalService(store, pack, {

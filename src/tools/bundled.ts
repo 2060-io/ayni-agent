@@ -194,12 +194,8 @@ export class BundledToolSource implements ToolSource {
           if (args.action === 'set') {
             if (typeof args.key !== 'string' || typeof args.value !== 'string')
               return { content: 'key and value are required', isError: true }
-            await this.deps.store.preferences.set({
-              principalId: ctx.principal.id,
-              key: args.key,
-              value: args.value,
-              updatedAt: nowIso(),
-            })
+            // through the memory service, which seals it (D77)
+            await this.deps.memory.setPreference(ctx.principal, args.key, args.value)
             return { content: `preference ${args.key} stored` }
           }
           // a retrieval: through the scope predicate, logged (PRIV-SCOPE-003/006)

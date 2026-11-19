@@ -2,7 +2,7 @@
  * Per-entry keys wrapped by the deployment master key (D19, PRIV-ERASE-001/002).
  * Digest = SHA-256 over ciphertext. Crypto-erasure destroys the wrapped key only.
  */
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
+import { createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync, randomBytes } from 'node:crypto'
 
 const ALG = 'aes-256-gcm'
 
@@ -11,6 +11,12 @@ export interface EntryCrypto {
   newWrappedKey(): string
   encrypt(wrappedKey: string, plaintext: Buffer): Buffer
   decrypt(wrappedKey: string, ciphertext: Buffer): Buffer
+  /**
+   * A keyed index of a value, under a key derived from the master key: the store finds a record by it without
+   * holding the value (a preference by its name, D77). Equal values give equal indexes; without the master key an
+   * index tells nothing of the value, not even of a short or common one.
+   */
+  blindIndex(value: string): string
 }
 
 export function sha256Hex(data: Buffer | string): string {
@@ -35,7 +41,9 @@ function open(key: Buffer, sealed: Buffer): Buffer {
 
 export function createEntryCrypto(masterKey: Buffer): EntryCrypto {
   if (masterKey.length !== 32) throw new Error('master key must be 32 bytes')
+  const indexKey = Buffer.from(hkdfSync('sha256', masterKey, Buffer.alloc(0), 'ayni-agent blind index', 32))
   return {
+    blindIndex: (value) => createHmac('sha256', indexKey).update(value, 'utf8').digest('hex'),
     newWrappedKey: () => seal(masterKey, randomBytes(32)).toString('base64'),
     encrypt: (wrappedKey, plaintext) => seal(open(masterKey, Buffer.from(wrappedKey, 'base64')), plaintext),
     decrypt: (wrappedKey, ciphertext) => open(open(masterKey, Buffer.from(wrappedKey, 'base64')), ciphertext),

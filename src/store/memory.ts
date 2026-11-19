@@ -273,6 +273,7 @@ export class MemoryStore implements Store {
       }
       return n
     },
+    listAll: async () => clone([...this.noteRows.values()]),
   }
 
   public preferences = {
@@ -291,6 +292,10 @@ export class MemoryStore implements Store {
     set: async (p: PrincipalPreference) => {
       this.prefRows.set(`${p.principalId}:${p.key}`, clone(p))
     },
+    delete: async (principalId: string, key: string) => {
+      this.prefRows.delete(`${principalId}:${key}`)
+    },
+    listAll: async () => clone([...this.prefRows.values()]),
   }
 
   public evidence = {
