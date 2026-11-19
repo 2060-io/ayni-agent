@@ -49,6 +49,8 @@ export class CredentialOffers {
     credentialDefinitionId: string
     claims: Record<string, string>
     title: string
+    /** under a revocable definition: the registry and the index the credential takes (decision 61) */
+    revocation?: { registryDefinitionId: string; index: number }
   }): Promise<OfferOutcome> {
     const flowMode = !!this.flows && (await this.isFlowCapable(input.connectionId))
     const handle = flowMode
@@ -68,6 +70,12 @@ export class CredentialOffers {
           claims: Object.entries(input.claims).map(([name, value]) => ({ name, value })),
           autoAccept: true,
           ...(handle ? { parentThreadId: handle.flowId } : {}),
+          ...(input.revocation
+            ? {
+                revocationRegistryDefinitionId: input.revocation.registryDefinitionId,
+                revocationRegistryIndex: input.revocation.index,
+              }
+            : {}),
         })
       ).credentialExchangeId
     } catch (error) {
