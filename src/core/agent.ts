@@ -682,7 +682,7 @@ export class AyniAgent {
     const signal = this.untilCut(caller)
     // while an email check waits in this conversation, the message is the code's: it starts no turn and never reaches
     // the model (INTX-AUTH-013, PROF-RUN-015)
-    if (this.emailChecks) {
+    if (this.emailChecks?.waitsFor(principal.id)) {
       await this.orchestrator.live(principal)
       const taken = await this.emailChecks.take(session, principal, input, sink)
       if (taken) {

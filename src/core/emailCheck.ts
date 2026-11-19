@@ -173,6 +173,11 @@ export class EmailChecks {
     }
   }
 
+  /** Whether a check of the Principal waits, in any of its conversations: what every message is first compared with. */
+  public waitsFor(principalId: string): boolean {
+    return this.waiting.has(principalId)
+  }
+
   /** The check that waits in a conversation for a Principal, if any. */
   public async waitingIn(principalId: string, conversationId: string): Promise<AuthChallengeRecord | undefined> {
     const record = await this.current(principalId)
