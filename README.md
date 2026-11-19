@@ -11,7 +11,7 @@ other agents reach it over A2A. Identity comes from Verifiable Trust v4 credenti
 | Path | What it holds | Spec areas |
 |------|---------------|------------|
 | `src/config/` | environment (`env.ts`), agent-pack types and loader (`pack.ts`: placeholders, coercion, schema, cross-field rules) | CORE-PACK, PRIV-RETN-006 |
-| `src/core/` | the channel-agnostic core: types, principals and role rules, sessions and binding, capability router, challenges, orchestrator (the LLM turn), prompt add-on, interaction, the agent facade | CORE, IDENT, CHAN-ROUTE, CHAN-BIND, INTX, D1 to D47 |
+| `src/core/` | the channel-agnostic core: types, principals and role rules, sessions and binding, spaces (`spaces.ts`: templates, membership, handover), capability router, challenges, orchestrator (the LLM turn), prompt add-on, interaction, the agent facade | CORE, IDENT, CHAN-ROUTE, CHAN-BIND, INTX, SPACE, D1 to D47 |
 | `src/memory/` | per-entry crypto, the scope query-builder, the memory service (entries, window, recall, working memory, erasure), RAG | MEM, PRIV |
 | `src/store/` | the persistence interface, PostgreSQL (+pgvector) and in-memory stores, memory schema migrations | TOOL-HTTP-004, PRIV-SCOPE-005, CORE-VER |
 | `src/policy/` | tool tiers (RBAC) and the approval workflow | RBAC, INTX-APPR, PRIV-ELEV |
@@ -19,7 +19,7 @@ other agents reach it over A2A. Identity comes from Verifiable Trust v4 credenti
 | `src/llm/` | chat model adapters (OpenAI, generic chat-completions, Anthropic, Ollama, Azure, Bedrock, Vertex, stub) and embeddings | LLM |
 | `src/media/` | object store, speech-to-text, vision, image generation, the media service | MEDIA, MEM-ATT |
 | `src/channels/didcomm/` | VS Agent client, identity flow, DIDComm adapter, webhook events, face-match and WebRTC callbacks | CHAN-ADP, IDENT-RES, INTX-AUTH |
-| `src/channels/agui/` | the AG-UI profile: descriptor, sessions, binding, stream, runs, history, attachments | CHAN-ADP-004, PROF-* |
+| `src/channels/agui/` | the AG-UI profile: descriptor, sessions, binding, stream, runs, history, attachments, spaces, memories | CHAN-ADP-004, PROF-* |
 | `src/channels/a2a/` | agent card and JSON-RPC endpoint | CHAN-ADP-001, CHAN-BIND-007 |
 | `src/integrity/`, `src/platform/` | Verana anchoring, statistics, retention | INTEG, PLAT |
 | `packages/agui-profile/` | `@ayni.org/ayni-agui-profile`: types, constants and JSON schemas of the wire contract, consumed by the UI | PROF-* |

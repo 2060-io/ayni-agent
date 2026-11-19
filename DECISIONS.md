@@ -686,3 +686,82 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       `cipher` to `preferences`.
     - **Tests:** `tests/sealedMemory.test.ts`, and a PostgreSQL test that finds no canary of a note, a preference
       name, a preference value or a legacy row in the tables or the access log.
+60. **Spaces, memories per space, and deleting a message within its window: phase 1** (2026-11-19, Fabrice's decisions
+    of the design review of spaces, memories, people and erasure; ayni-spec D80 to D93, PR #94). Phase 1 is everything
+    but the people: the user directory, invitations, the email code and the admin view come in phase 2.
+    - **Deleting a message (PRIV-ERASE-007, PRIV-ERASE-010 to 012, PROF-HIST-010):** a person deletes a message they
+      wrote while it is younger than `conversations.messageDeletionWindowSeconds` (600 by default; 0: nobody, and the
+      descriptor declares no `erasure`), `409 window-passed` after it. With it go, crypto-erased, the agent's messages,
+      the tool calls and the memory lines of the turn that answered it: every entry of a turn now names the messages it
+      answers (`inboundId`, `inboundIds`), the reply and the code's refusal included. The memories whose lineage cites
+      the message or an entry of its reply are deleted, not flagged, with no line of their own; a memory the message
+      changed is deleted, not reverted (its previous content is kept nowhere). A message that waits for its turn leaves
+      the list; one whose reply is being written cancels that turn first (the runs of the conversation are stopped as
+      the person would stop them), and what the turn recorded is erased once it has stopped (15 seconds at most, else
+      `409 turn-in-progress`). The flow, approval and auth-challenge cards of the turn stay, and preferences are not
+      touched. `ayni.messages.erased` names every message erased. A person cannot erase a conversation any more: the
+      endpoint answers 404, `eraseOwnConversation` is gone, and an operator erases through the admin interface, which
+      keeps the flagging of PRIV-ERASE-005.
+    - **No role reads other people's conversations (RBAC-XSESS-001/005/007):** `crossSession` is withdrawn; a pack that
+      declares it, whatever its value, is refused at start with a message that says why. `conversation-private` is the
+      conversation and nothing else. The pack accepts `roles.<name>.admin` (IDENT-DIR-008), unused before phase 2.
+    - **Spaces (SPACE-DEF-001 to 007):** a space (`spc_…`, of the agent) has a kind, a template, a title, a purpose, a
+      brief, a language, its rules (`retentionDays`, `lawfulBasis`, `allowedProviders`, `handover`), a membership (a
+      list, or a rule of exactly one of `department`, `group`, `organization: true`) and an owner. The store seals the
+      title, the purpose and the brief, and an invited person's email (found by a keyed index), as D77 seals a
+      conversation's title; the lists and the membership read what stays in the clear. Templates come from
+      `spaces.templates` (`id`, `title`, `kind`, `creators`, `membership`, `rules` with a default and `min`/`max` or
+      `allowed`); a template of kind `organization` has the rule `organization: true`. Personal, `personal:<principalId>`,
+      is never stored: its rules are `spaces.personal` (365 days, or `RETENTION_HISTORY_DAYS`; the conversation memory's
+      basis; `llm.providerName`), and it takes no handover. Schema 3.6.0 adds `spaces`, `space_members` and
+      `space_activity`, and a `space_id` to conversations, entries and notes, those of an earlier version in Personal.
+    - **Members (SPACE-MEMB-001 to 008):** the owner is always a member. A rule matches the department or the groups of
+      the Principal's directory entry, never a claim; phase 1 has no directory, so a department or group rule gives the
+      owner only, and `organization: true` every Principal whose relation is `home`. A member the rule no longer
+      matches, or the owner removes, is `left`: their own conversations of the space stay readable, a run on them
+      answers `409 space-left` and records nothing, and they open no new conversation there. Adding a member answers
+      501 for an owner (409 `rule-membership` in a rule space); the owner gives the space to an active member, and
+      every action is in the space's activity, by field name, never by value.
+    - **Conversations in a space (SPACE-CONV-001 to 003, PROF-CONV-010/011, PROF-STREAM-009):** `POST {sessions}` with
+      `newConversation` and `spaceId` starts the conversation there for an active member, `404` otherwise (bound later
+      by the phone, it goes to Personal); `PATCH {sessions}/conversations/{id}` changes its space, and its entries',
+      until the person's first message (`409 has-messages`). The list carries `spaceId` and `shared`, filters by space,
+      and every session gets `state.ayni.space`, again when the space or its title changes. A guest who identifies
+      takes their Personal conversations, entries and memories to the identified Principal's Personal space.
+    - **Memories per space, preferences global (MEM-SPACE-001 to 007):** a note carries the space of the conversation it
+      was written in. The scope predicate has a space: a store that declares a space column (entries, notes) reads its
+      `principal-private` items in that space only, a store that does not (preferences) in every space. The
+      working-memory tool lists, changes and removes the notes of the conversation's space only (`maxNotes` per space);
+      a change adds the message to the note's lineage. The platform rules (add-on 3.2.0) tell the model to write notes
+      in the person's language and to change one when the person says it is wrong. `GET {sessions}/memories`,
+      `DELETE {sessions}/memories/{id}`, `DELETE {sessions}/preferences/{key}` and `GET {sessions}/about-me` serve the
+      person alone. Each message of a reply records `usedMemories` and `usedPreferences`, which the person's own
+      history returns in `metadata` (empty lists for a message outside a turn; no live field). A memory the model adds,
+      changes or removes is a `state-update` entry after the reply (`{ kind: 'memory', memoryId, spaceId, action }`,
+      never its content), live as `ayni.memory.updated` and in history as `ayni.memory-update`; the model never reads it.
+    - **Handover (SPACE-SHARE-001 to 004, PROF-CONV-012, PROF-SPACE-007):** the author shares a conversation with its own
+      space while the space takes handovers (`409 handover-not-allowed`, Personal included; `409 final`); its active
+      members list it and read its transcript and attachments as they are now, without the author's memory lines and
+      `used…` lists; one who left, and an unshared conversation, get 404. **My choices, H1 and H2 being unanswered:**
+      only within the conversation's own space; live until the author stops sharing, whatever their membership.
+    - **Allowed providers (SPACE-CONV-004, PROF-RUN-014):** before any model call the turn checks that
+      `llm.providerName` (`llm.provider` when absent) is among the space's `allowedProviders`; when it is not, the
+      person's message is kept and the code answers with a `refusal` entry, a message of the agent in history: no model
+      call, no summary, no memory.
+    - **Retention (PRIV-RETN-008/009):** the job archives the entries of each space older than its retention, Personal's
+      by `spaces.personal`, never an entry on legal hold; it replaces the one threshold of every history.
+    - **Profile package 3.3.0:** the types, endpoints, errors and events above; `features.erasure` is
+      `{ windowSeconds }`; the descriptor says `3.3`.
+    - **Choices of mine, beyond the spec:** Personal is computed, never written (the spec's "created when first
+      needed" is the same on the wire); the list of templates carries their bounds (`rules`) for the owner's form, and
+      the share answers its conversation and space beside `{ shared, sharedAt }`; the deletion waits 15 seconds for a
+      cancelled turn.
+    - **Not done here (phase 2):** the user directory (D79, IDENT-ROLE-012 to 014, IDENT-DIR), the department and
+      group facts it gives the rules (`SpaceService.directory` is the hook), adding members and invitations
+      (SPACE-MEMB-002, SPACE-INV), `GET {sessions}/directory` and `/organizations`, the email code and SMTP, the admin
+      view, `joined` and `left` on a reload, and the issuing state as the `source` of a document in `about-me`.
+    - **Tests:** `tests/spaces.test.ts` (the space endpoints, membership, leaving, a conversation's space, memories,
+      handover, providers, retention), the deletion and its cancellation in `tests/turns.test.ts`, the pack rules in
+      `tests/pack.test.ts`, the space of the predicate in `tests/policy.test.ts`, and on PostgreSQL the migration to
+      3.6.0, the space stores, no plaintext of a space or an invited email, and the agent served from PostgreSQL with
+      no plaintext of a space in any table.
