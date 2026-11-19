@@ -500,7 +500,9 @@ issuance:
     guest who receives the badge is asked at once to present it, which identifies them (issuing identifies nobody).
   - **`emailId`** numbers a badge by the verified address, as `documentId` does by the document: the same address gives
     the same number to whoever proves it, an address that changes in the directory gives another one.
-  - **Email** goes through the SMTP server of the deployment (`SMTP_URL`, `SMTP_FROM`). Without both, the email code
+  - **Email** goes through the SMTP server of the deployment (`MAIL_HOST`, `MAIL_PORT`, `MAIL_ENCRYPTION`, `MAIL_USERNAME`,
+    `MAIL_PASSWORD`, `MAIL_FROM_ADDRESS`, `MAIL_FROM_NAME`: the variables of the 2060.io website). Without `MAIL_HOST`
+    and `MAIL_FROM_ADDRESS`, the email code
     is unavailable: the claims it serves are `unavailable`, and the agent says so at start, naming the profiles.
   - **Refused by the loader:** a profile that takes a claim from the directory with no challenge, another challenge or
     another order; a directory claim with no `identity.directory`; a passport without `nationality`, `lastName`,

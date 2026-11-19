@@ -908,8 +908,10 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       agent verified about them and what it issued them follow them to the identified Principal
       (`EvidenceService.reassign`; PostgreSQL now updates `principal_id` of a record saved again): about-me shows the
       address, and the badge is `held`.
-    - **Email (PLAT-MAIL-001/002, `src/platform/mail.ts`):** nodemailer 10.3.1, pinned, through `SMTP_URL` (`smtp://`,
-      STARTTLS when offered, or `smtps://`) from `SMTP_FROM`; without both, the email code is unavailable (its claims
+    - **Email (PLAT-MAIL-001/002, `src/platform/mail.ts`):** nodemailer 10.3.1, pinned, configured with the variables of
+      the 2060.io website (Fabrice, 2026-11-19): `MAIL_HOST`, `MAIL_PORT` (587, STARTTLS when offered), `MAIL_ENCRYPTION`
+      (`ssl`, or port 465: TLS from the start), `MAIL_USERNAME` and `MAIL_PASSWORD` (together, or neither),
+      `MAIL_FROM_ADDRESS` and `MAIL_FROM_NAME`; without `MAIL_HOST` and `MAIL_FROM_ADDRESS`, the email code is unavailable (its claims
       `unavailable`, INTX-AUTH-011) and invitations answer `503 email-unavailable`, which the agent says at start, naming
       the profiles and the templates. An email carries what its purpose needs and nothing else. `pnpm test:mail` sends
       through a throwaway Mailpit (`axllent/mailpit:v1.32.0`) and reads it back from its API.
@@ -962,5 +964,5 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       revocation: delete it in its VS Agent (`DELETE /v2/anoncreds/credential-definitions/{id}`) before a badge is issued
       from the directory. The flow plugin's `POST /v2/didcomm/revocation-notification` is in the plugin since its first
       release (`V2DidcommRevocationNotificationController`, registered by `AyniFlowPlugin`), so in the devnet image
-      `io2060/vs-agent-ayni:v2.0.0-ayni.5-ayni.0.1.7`. New environment: `SMTP_URL` (a Secret), `SMTP_FROM`,
+      `io2060/vs-agent-ayni:v2.0.0-ayni.5-ayni.0.1.7`. New environment: `MAIL_*` (`MAIL_USERNAME` and `MAIL_PASSWORD` in a Secret),
       `VERANA_GRAPH_URL`.

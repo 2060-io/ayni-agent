@@ -145,9 +145,10 @@ docker run --rm -p 3010:3010 --env-file .env io2060/ayni-agent:local
   `unknown-reference` (this agent issues no credential; an issuing agent plugs its policy into
   `DidcommEvents.onReissueStateChanged`), and revocation notifications come with issuance (INTX-FLOW-006/007).
 - Email (ayni-spec D89, PLAT-MAIL-001): the email code of a badge from the user directory and the invitations of people
-  of other organizations go through the SMTP server of `SMTP_URL` (`smtp://user:password@host:587`, STARTTLS when the
-  server offers it, or `smtps://…:465`) from `SMTP_FROM`. Without both, both are disabled and the agent says so at
-  start. `pnpm test:mail` runs the email tests against a throwaway Mailpit in Docker.
+  of other organizations go through the SMTP server of the deployment, named by the variables of the 2060.io website:
+  `MAIL_HOST`, `MAIL_PORT` (587, STARTTLS when the server offers it; 465 or `MAIL_ENCRYPTION=ssl`: TLS from the start),
+  `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_FROM_ADDRESS`, `MAIL_FROM_NAME`. Without `MAIL_HOST` and `MAIL_FROM_ADDRESS`
+  both are disabled and the agent says so at start. `pnpm test:mail` runs the email tests against a throwaway Mailpit in Docker.
 - The Verana Graph (`VERANA_GRAPH_URL`, `https://graph.devnet.verana.network` on devnet): its search
   (`POST /v4/graph/search`, the `Did` surface, operators of kind `Organization`) finds the organizations a list space
   invites people from (`GET {sessions}/organizations`, ayni-spec D90, PROF-DIR-002); an invitation is refused for an

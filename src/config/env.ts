@@ -2,6 +2,7 @@
  * Deployment values and secrets (spec reference-implementation-profile, "Container configuration").
  * Everything behavioral lives in the agent-pack (CORE-PACK-001); these are the deployment knobs.
  */
+import type { MailConfig } from '../platform/mail.js'
 
 export interface Env {
   agentPackPath: string
@@ -79,13 +80,11 @@ export interface Env {
   directoryPollSeconds?: number
 
   /**
-   * the SMTP server the agent sends email through, with its credentials (PLAT-MAIL-001): `smtp://user:password@host:587`
-   * (STARTTLS) or `smtps://user:password@host:465`. Without it, or without `smtpFrom`, the email code and the
-   * invitations of other organizations are disabled
+   * the SMTP server the agent sends email through (PLAT-MAIL-001), from the variables of the 2060.io website:
+   * MAIL_HOST, MAIL_PORT (587), MAIL_ENCRYPTION (ssl), MAIL_USERNAME, MAIL_PASSWORD, MAIL_FROM_ADDRESS, MAIL_FROM_NAME.
+   * Absent without MAIL_HOST and MAIL_FROM_ADDRESS: the email code and the invitations of other organizations are disabled
    */
-  smtpUrl?: string
-  /** the sender of the agent's email, `Fleet support <fleet@northwind.example>` */
-  smtpFrom?: string
+  mail?: MailConfig
   /** the Verana Graph, whose search finds the organizations a person of another organization is invited from (PROF-DIR-002) */
   veranaGraphUrl?: string
 }
@@ -186,8 +185,18 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
 
     directoryPollSeconds: num(source.DIRECTORY_POLL_SECONDS, 10),
 
-    smtpUrl: source.SMTP_URL || undefined,
-    smtpFrom: source.SMTP_FROM || undefined,
+    mail:
+      source.MAIL_HOST && source.MAIL_FROM_ADDRESS
+        ? {
+            host: source.MAIL_HOST,
+            port: num(source.MAIL_PORT, 587) ?? 587,
+            encryption: source.MAIL_ENCRYPTION || undefined,
+            username: source.MAIL_USERNAME || undefined,
+            password: source.MAIL_PASSWORD || undefined,
+            fromAddress: source.MAIL_FROM_ADDRESS,
+            fromName: source.MAIL_FROM_NAME || undefined,
+          }
+        : undefined,
     veranaGraphUrl: (source.VERANA_GRAPH_URL || '').replace(/\/+$/, '') || undefined,
   }
 

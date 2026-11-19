@@ -89,11 +89,7 @@
             "name": "Northwind Logistics"
           }
         },
-        "creatableTemplates": [
-          "project",
-          "sales",
-          "organization"
-        ],
+        "creatableTemplates": ["project", "sales", "organization"],
         "ms": 256
       }
     },
@@ -109,10 +105,7 @@
             "handover": true,
             "lawfulBasis": "contract",
             "retentionDays": 90,
-            "allowedProviders": [
-              "stub",
-              "openai-compatible"
-            ]
+            "allowedProviders": ["stub", "openai-compatible"]
           },
           "members": [
             {
@@ -129,10 +122,7 @@
           "message": "retentionDays is outside the bounds of the template",
           "field": "rules.retentionDays"
         },
-        "activity": [
-          "rules-changed",
-          "created"
-        ],
+        "activity": ["rules-changed", "created"],
         "ms": 49
       }
     },
@@ -347,9 +337,7 @@
           "unlistedAddress": [],
           "invitedEmail": []
         },
-        "verifiedAddressAlsoIn": [
-          "principals"
-        ],
+        "verifiedAddressAlsoIn": ["principals"],
         "ms": 5801
       }
     },

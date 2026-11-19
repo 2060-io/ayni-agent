@@ -98,7 +98,7 @@ export async function buildAgent(
     storeLost?: (error?: Error) => void
     /** how long the turns in progress are given to end when the process stops */
     drainMs?: number
-    /** the email of the agent, in place of the SMTP server of `SMTP_URL` (the tests read what it sends) */
+    /** the email of the agent, in place of the SMTP server of `MAIL_HOST` (the tests read what it sends) */
     mailer?: Mailer
     /** how the trust graph is asked, in place of the network (the tests answer it) */
     graphFetch?: typeof fetch
@@ -168,7 +168,7 @@ export async function buildAgent(
   const evidence = new EvidenceService(store, pack, crypto, logger)
   for (const warning of evidenceWarnings(pack)) logger.warn(`agent-pack: ${warning} (PRIV-EVID-006)`)
   // email: the email code and the invitations of other organizations, only through the deployment's SMTP server
-  const mailer = hooks.mailer ?? createMailer(env.smtpUrl, env.smtpFrom, logger)
+  const mailer = hooks.mailer ?? createMailer(env.mail, logger)
   for (const warning of mailWarnings(pack, !!mailer, !!env.veranaGraphUrl)) logger.warn(warning)
   const s3 = env.objectStore ? new S3ObjectStore(env.objectStore, crypto) : undefined
   const objects: ObjectStore = s3 ?? new MemoryObjectStore(crypto)
@@ -737,7 +737,7 @@ export function mailWarnings(pack: AgentPack, smtp: boolean, graph: boolean): st
   const lists = (pack.spaces?.templates ?? []).filter((t) => t.membership.mode === 'list').map((t) => t.id)
   if (!smtp && (profiles.length || lists.length))
     warnings.push(
-      `email: SMTP_URL and SMTP_FROM are not both set: the email code is disabled for the issuance profiles [${profiles.join(', ')}] and the invitations of other organizations for the templates [${lists.join(', ')}] (PLAT-MAIL-001)`
+      `email: MAIL_HOST and MAIL_FROM_ADDRESS are not both set: the email code is disabled for the issuance profiles [${profiles.join(', ')}] and the invitations of other organizations for the templates [${lists.join(', ')}] (PLAT-MAIL-001)`
     )
   if (lists.length) {
     const authentication = pack.identity.authentication?.[0]

@@ -16,7 +16,18 @@ try {
   if (!smtp || !api) {
     execFileSync(
       'docker',
-      ['run', '-d', '--rm', '--name', name, '-p', `${smtpPort}:1025`, '-p', `${apiPort}:8025`, 'axllent/mailpit:v1.32.0'],
+      [
+        'run',
+        '-d',
+        '--rm',
+        '--name',
+        name,
+        '-p',
+        `${smtpPort}:1025`,
+        '-p',
+        `${apiPort}:8025`,
+        'axllent/mailpit:v1.32.0',
+      ],
       { stdio: 'ignore' }
     )
     started = true

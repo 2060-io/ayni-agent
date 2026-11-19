@@ -4,24 +4,41 @@
  */
 import nodemailer from 'nodemailer'
 import { describe, expect, it } from 'vitest'
-import { createMailer, isEmailAddress, TransportMailer } from '../src/platform/mail.js'
+import { createMailer, isEmailAddress, type MailConfig, senderOf, TransportMailer } from '../src/platform/mail.js'
 import { createLogger } from '../src/util/logger.js'
 
 const logger = createLogger('silent')
 const FROM = 'Fleet support <fleet@northwind.example>'
+const CONFIG: MailConfig = {
+  host: 'mail.example',
+  port: 587,
+  username: 'user',
+  password: 'secret',
+  fromAddress: 'fleet@northwind.example',
+  fromName: 'Fleet support',
+}
 
-describe('the mailer (PLAT-MAIL-001)', () => {
-  it('sends nothing without both SMTP_URL and SMTP_FROM', () => {
-    expect(createMailer(undefined, FROM, logger)).toBeUndefined()
-    expect(createMailer('smtp://mail.example:587', undefined, logger)).toBeUndefined()
-    expect(createMailer('', '', logger)).toBeUndefined()
+describe('the mailer (PLAT-MAIL-001), from the MAIL_* variables of the 2060.io website', () => {
+  it('sends nothing without MAIL_HOST and MAIL_FROM_ADDRESS', () => {
+    expect(createMailer(undefined, logger)).toBeUndefined()
+    expect(createMailer({ ...CONFIG, host: '' }, logger)).toBeUndefined()
+    expect(createMailer({ ...CONFIG, fromAddress: '' }, logger)).toBeUndefined()
   })
 
-  it('takes an smtp:// or smtps:// address, and refuses anything else', () => {
-    expect(createMailer('smtp://user:secret@mail.example:587', FROM, logger)).toBeInstanceOf(TransportMailer)
-    expect(createMailer('smtps://user:secret@mail.example:465', FROM, logger)?.from).toBe(FROM)
-    expect(() => createMailer('mail.example:587', FROM, logger)).toThrow(/SMTP_URL/)
-    expect(() => createMailer('https://mail.example', FROM, logger)).toThrow(/smtp:\/\/ .*smtps:\/\//)
+  it('writes the sender as MAIL_FROM_NAME <MAIL_FROM_ADDRESS>, or the address alone', () => {
+    expect(createMailer(CONFIG, logger)).toBeInstanceOf(TransportMailer)
+    expect(createMailer(CONFIG, logger)?.from).toBe(FROM)
+    expect(senderOf({ fromAddress: 'fleet@northwind.example' })).toBe('fleet@northwind.example')
+  })
+
+  it('refuses a port, a sender or credentials it cannot use', () => {
+    expect(() => createMailer({ ...CONFIG, port: 0 }, logger)).toThrow(/MAIL_PORT/)
+    expect(() => createMailer({ ...CONFIG, fromAddress: 'fleet' }, logger)).toThrow(/MAIL_FROM_ADDRESS/)
+    expect(() => createMailer({ ...CONFIG, password: undefined }, logger)).toThrow(/MAIL_USERNAME and MAIL_PASSWORD/)
+    // no credentials at all: a relay that takes mail without them, as a Mailpit does
+    expect(createMailer({ ...CONFIG, username: undefined, password: undefined }, logger)).toBeInstanceOf(
+      TransportMailer
+    )
   })
 
   it('sends one plain-text message from the sender of the deployment (a JSON transport)', async () => {
@@ -65,12 +82,20 @@ describe('the mailer (PLAT-MAIL-001)', () => {
   })
 })
 
-const smtp = process.env.MAILPIT_SMTP_URL
+const smtp = process.env.MAILPIT_SMTP_URL ? new URL(process.env.MAILPIT_SMTP_URL) : undefined
 const api = process.env.MAILPIT_API_URL
 
 describe.skipIf(!smtp || !api)('a real SMTP server (Mailpit, pnpm test:mail)', () => {
-  it('delivers the message to the SMTP server of SMTP_URL', async () => {
-    const mailer = createMailer(smtp, FROM, logger)
+  it('delivers the message to the SMTP server of MAIL_HOST', async () => {
+    const mailer = createMailer(
+      {
+        host: smtp?.hostname ?? '',
+        port: Number(smtp?.port || 1025),
+        fromAddress: CONFIG.fromAddress,
+        fromName: CONFIG.fromName,
+      },
+      logger
+    )
     const subject = `Your code for the test ${Date.now()}`
     await mailer?.send({ to: 'ana.rios@northwind.example', subject, text: 'Your code is 482913.\n' })
     mailer?.close?.()
