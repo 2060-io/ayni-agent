@@ -831,9 +831,9 @@ export class AgUiRoutes {
     }
     /** A shared conversation of a space, for one of its active members (PROF-SPACE-007); 404 for anything else. */
     const sharedConversation = async (principal: Principal, spaceId: string, conversationId: string) => {
-      await this.agent.spaces.readsHandovers(principal, spaceId)
+      const takes = await this.agent.spaces.readsHandovers(principal, spaceId)
       const conversation = await this.agent.sessions.conversationById(conversationId)
-      if (!conversation || spaceIdOf(conversation) !== spaceId || !conversation.sharedAt)
+      if (!takes || !conversation || spaceIdOf(conversation) !== spaceId || !conversation.sharedAt)
         throw new SpaceError('conversation not found', 'not-found')
       return conversation
     }
@@ -982,7 +982,8 @@ export class AgUiRoutes {
       `${base}/spaces/:spaceId/shared`,
       handle(async ({ principal }, request) => {
         const { spaceId } = request.params as { spaceId: string }
-        await this.agent.spaces.readsHandovers(principal, spaceId)
+        // a space that takes no handover has nothing shared (PROF-SPACE-007)
+        if (!(await this.agent.spaces.readsHandovers(principal, spaceId))) return { conversations: [] }
         const principals = await this.agent.store.principals.list()
         const shared = await this.agent.sessions.conversationsOfSpace(spaceId, true)
         return {

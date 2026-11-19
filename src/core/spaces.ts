@@ -858,12 +858,11 @@ export class SpaceService {
 
   /**
    * An active member reads the handovers of a space while it takes them; one who left reads none (404, profile
-   * PROF-SPACE-007).
+   * PROF-SPACE-007). A space that takes no handover has nothing shared: null, which lists nothing and reads 404.
    */
-  public async readsHandovers(principal: Principal, spaceId: string): Promise<Space> {
+  public async readsHandovers(principal: Principal, spaceId: string): Promise<Space | null> {
     const access = await this.access(principal, spaceId)
     if (!access || access.left || isPersonalSpace(spaceId)) throw new SpaceError('space not found', 'not-found')
-    if (!access.space.rules.handover) throw new SpaceError('this space takes no handover', 'handover-not-allowed')
-    return access.space
+    return access.space.rules.handover ? access.space : null
   }
 }

@@ -657,7 +657,11 @@ describe('handover: the author shares a conversation with its own space (SPACE-S
 
     // the space stops taking handovers: nothing is readable; the author stops sharing: nothing is listed
     await call(ana, 'PATCH', `/spaces/${space.id}`, { rules: { handover: false } })
-    expect((await call(bob, 'GET', `/spaces/${space.id}/shared`)).body.error).toBe('handover-not-allowed')
+    expect(await call(bob, 'GET', `/spaces/${space.id}/shared`)).toMatchObject({
+      status: 200,
+      body: { conversations: [] },
+    })
+    expect((await call(bob, 'GET', `/spaces/${space.id}/shared/${work.conversationId}/messages`)).status).toBe(404)
     await call(ana, 'PATCH', `/spaces/${space.id}`, { rules: { handover: true } })
     expect((await call(ana, 'DELETE', `/conversations/${work.conversationId}/share`)).status).toBe(204)
     expect((await call(bob, 'GET', `/spaces/${space.id}/shared`)).body.conversations).toEqual([])
