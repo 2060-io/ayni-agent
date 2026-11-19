@@ -271,12 +271,7 @@
               "description": {
                 "type": "string"
               },
-              "crossSession": {
-                "type": "string",
-                "enum": ["own-sessions", "own-backing-identity", "all"],
-                "default": "own-sessions",
-                "description": "Scope of cross-session memory reads for this role (RBAC-XSESS)."
-              },
+
               "canApprove": {
                 "type": "boolean",
                 "default": false,
@@ -286,6 +281,11 @@
                 "type": "boolean",
                 "default": false,
                 "description": "Read-only access to the whole persistent store, outside LLM retrieval (RBAC-XSESS)."
+              },
+              "admin": {
+                "type": "boolean",
+                "default": false,
+                "description": "The role reads the admin view of roles and changes (IDENT-DIR-008). A role carries no scope of conversation reads: crossSession is withdrawn and refused (RBAC-XSESS-005)."
               }
             }
           }
@@ -428,6 +428,11 @@
           "type": "string",
           "enum": ["openai", "anthropic", "ollama", "openai-compatible", "azure-openai", "bedrock", "vertex", "stub"],
           "description": "Adapter: native (openai, anthropic, ollama), generic chat-completions (openai-compatible), special-protocol (azure-openai, bedrock, vertex). stub is a deterministic offline model for development and tests only."
+        },
+        "providerName": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The name of the model provider the allowedProviders of spaces list, such as kimi for openai-compatible on Moonshot (ayni-agent decision 60); provider when absent."
         },
         "model": {
           "type": "string",
@@ -1698,6 +1703,130 @@
         "history": {
           "type": "boolean",
           "default": true
+        }
+      }
+    },
+    "conversations": {
+      "description": "What a person may do with their conversations (ayni-agent decision 60).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "messageDeletionWindowSeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 600,
+          "description": "A person deletes their own message, with the agent's reply to it and the memories taken from it, while the message is younger than this many seconds."
+        }
+      }
+    },
+    "spaces": {
+      "description": "The rules of the Personal space and the templates of the spaces people may create (SPACE-DEF-002/003, ayni-agent decision 60).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "personal": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The rules of every Personal space (SPACE-DEF-002): 365 days, the lawful basis of the conversation-memory activity and the agent's provider by default; no handover.",
+          "properties": {
+            "retentionDays": { "type": "integer", "minimum": 1, "default": 365 },
+            "lawfulBasis": { "type": "string", "enum": ["consent", "contract", "legitimate-interest"] },
+            "allowedProviders": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+          }
+        },
+        "templates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "title", "kind", "creators", "membership"],
+            "properties": {
+              "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+              "title": { "type": "string", "minLength": 1 },
+              "kind": { "type": "string", "enum": ["team", "organization"] },
+              "creators": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string" },
+                "description": "The roles of the people who may create a space from the template."
+              },
+              "membership": {
+                "description": "A list the owner keeps, or a rule with exactly one of department, group or organization: true; a template of kind organization has the rule organization: true.",
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["mode"],
+                    "properties": { "mode": { "const": "list" } }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["mode", "rule"],
+                    "properties": {
+                      "mode": { "const": "rule" },
+                      "rule": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "minProperties": 1,
+                        "maxProperties": 1,
+                        "properties": {
+                          "department": { "type": "string", "minLength": 1 },
+                          "group": { "type": "string", "minLength": 1 },
+                          "organization": { "const": true }
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              "rules": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "The default of each rule of a space and the bounds within which its owner may change it; a rule without bounds keeps its default.",
+                "properties": {
+                  "retentionDays": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "default": { "type": "integer", "minimum": 1 },
+                      "min": { "type": "integer", "minimum": 1 },
+                      "max": { "type": "integer", "minimum": 1 }
+                    }
+                  },
+                  "lawfulBasis": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "default": { "type": "string", "enum": ["consent", "contract", "legitimate-interest"] },
+                      "allowed": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": { "type": "string", "enum": ["consent", "contract", "legitimate-interest"] }
+                      }
+                    }
+                  },
+                  "allowedProviders": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "description": "Provider names as llm.providerName gives them (llm.provider when it is absent).",
+                    "properties": {
+                      "default": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+                      "allowed": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+                    }
+                  },
+                  "handover": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "default": { "type": "boolean" },
+                      "allowed": { "type": "array", "minItems": 1, "items": { "type": "boolean" } }
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }

@@ -11,11 +11,16 @@ export type Relation = 'home' | 'partner' | 'unrecognized'
 export type ConnectionType = 'verifiable-user-agent' | 'verifiable-service'
 export type ToolNameOrStar = string
 
+/**
+ * A role: approval rights and flags, never a scope of conversation reads (RBAC-XSESS-005, decision 60): `crossSession`
+ * is withdrawn and a pack that declares it is refused at start.
+ */
 export interface RoleDefinition {
   description?: string
-  crossSession?: 'own-sessions' | 'own-backing-identity' | 'all'
   canApprove?: boolean
   auditor?: boolean
+  /** the role reads the admin view of roles and changes (IDENT-DIR-008, phase 2) */
+  admin?: boolean
 }
 
 export interface RoleRule {
@@ -208,6 +213,11 @@ export interface MenuItemDef {
 
 export interface LlmConfig {
   provider: 'openai' | 'anthropic' | 'ollama' | 'openai-compatible' | 'azure-openai' | 'bedrock' | 'vertex' | 'stub'
+  /**
+   * the name of the model provider the spaces' `allowedProviders` list (SPACE-CONV-004), `kimi` for `openai-compatible` on
+   * Moonshot for example; `provider` when absent
+   */
+  providerName?: string
   model: string
   baseUrl?: string
   apiKeyEnv?: string
@@ -336,6 +346,35 @@ export interface Features {
   history: boolean
 }
 
+export type LawfulBasis = 'consent' | 'contract' | 'legitimate-interest'
+
+/**
+ * A kind of space the pack lets people create (SPACE-DEF-003, decision 60): who may create one, how its members are
+ * given, and the rules an owner may set, with their bounds. A rule without bounds keeps its default.
+ */
+export interface SpaceTemplate {
+  id: string
+  title: string
+  kind: 'team' | 'organization'
+  /** the roles of the people who may create a space from it */
+  creators: string[]
+  /** by a list the owner keeps, or by a rule over verified facts of the people of the home organization */
+  membership: { mode: 'list' } | { mode: 'rule'; rule: { department?: string; group?: string; organization?: true } }
+  rules?: {
+    retentionDays?: { default?: number; min?: number; max?: number }
+    lawfulBasis?: { default?: LawfulBasis; allowed?: LawfulBasis[] }
+    allowedProviders?: { default?: string[]; allowed?: string[] }
+    handover?: { default?: boolean; allowed?: boolean[] }
+  }
+}
+
+/** The rules of every Personal space (SPACE-DEF-002): 365 days, the conversation memory's basis, the agent's provider. */
+export interface PersonalSpaceRules {
+  retentionDays?: number
+  lawfulBasis?: LawfulBasis
+  allowedProviders?: string[]
+}
+
 export interface ImageProviderDef {
   name: string
   type: 'openai-image' | 'openai-compatible-image'
@@ -435,6 +474,26 @@ export interface AgentPack {
   integrity?: { anchoring?: { enabled?: boolean; batchIntervalSeconds?: number; maxBatchEntries?: number } }
   statistics?: { enabled?: boolean; sink?: 'redis-stream' | 'http'; httpUrl?: string }
   features?: Partial<Features>
+  /** what a person may do with their conversations (PRIV-ERASE-010) */
+  conversations?: {
+    /** a person deletes their own message, with the agent's reply, while it is younger than this; 600 by default */
+    messageDeletionWindowSeconds?: number
+  }
+  /** the rules of Personal and the spaces people may create in this agent (SPACE-DEF-002/003) */
+  spaces?: { personal?: PersonalSpaceRules; templates?: SpaceTemplate[] }
+}
+
+/** The retention of a space whose template or `spaces.personal` gives none (SPACE-DEF-002). */
+export const PERSONAL_RETENTION_DAYS = 365
+
+/** The model provider a space allows or not (SPACE-CONV-004): `llm.providerName`, else `llm.provider`. */
+export function providerNameOf(pack: Pick<AgentPack, 'llm'>): string {
+  return pack.llm.providerName ?? pack.llm.provider
+}
+
+/** The deletion window of a message (PRIV-ERASE-010), in seconds. */
+export function messageDeletionWindowSeconds(pack: Pick<AgentPack, 'conversations'>): number {
+  return pack.conversations?.messageDeletionWindowSeconds ?? 600
 }
 
 export const DEFAULT_FEATURES: Features = {

@@ -8,8 +8,14 @@ import { fileURLToPath } from 'node:url'
 import { Ajv2020 } from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
 import { parse as parseYaml } from 'yaml'
-import type { AgentPack, AuthenticationEntry, EvidencePolicy, ToolAccess } from './packTypes.js'
-import { COMPUTED_FUNCTIONS, DOCUMENT_ATTRIBUTES, featuresOf } from './packTypes.js'
+import type { AgentPack, AuthenticationEntry, EvidencePolicy, SpaceTemplate, ToolAccess } from './packTypes.js'
+import {
+  COMPUTED_FUNCTIONS,
+  DOCUMENT_ATTRIBUTES,
+  featuresOf,
+  PERSONAL_RETENTION_DAYS,
+  providerNameOf,
+} from './packTypes.js'
 
 /** The entry of the credential that authenticates a person (D65): never the name of a catalog entry. */
 export const AUTHENTICATION_ENTRY = 'authentication'
@@ -208,6 +214,68 @@ export function authenticationErrors(entry: AuthenticationEntry): string[] {
   return errors
 }
 
+/**
+ * What a role may no longer say (RBAC-XSESS-005, decision 60): a role carries no scope of conversation reads, so
+ * `crossSession` is withdrawn, whatever its value. Said in words before the schema, which would only name the key.
+ */
+export function removedCrossSessionErrors(doc: unknown): string[] {
+  const roles = (doc as { identity?: { roles?: Record<string, { crossSession?: unknown }> } })?.identity?.roles
+  if (!roles || typeof roles !== 'object') return []
+  return Object.entries(roles)
+    .filter(([, role]) => role && typeof role === 'object' && role.crossSession !== undefined)
+    .map(
+      ([name, role]) =>
+        `identity.roles.${name}.crossSession (${JSON.stringify(role.crossSession)}) is withdrawn: no role reads other people's conversations (RBAC-XSESS-005); remove it. A conversation is read by its author, by the active members of its space when its author shares it, and by an auditor through the admin interface (RBAC-XSESS-007)`
+    )
+}
+
+/** What a space template may not say (SPACE-DEF-003): its defaults lie within its bounds. */
+export function spaceTemplateErrors(pack: AgentPack): string[] {
+  const errors: string[] = []
+  const seen = new Set<string>()
+  for (const template of pack.spaces?.templates ?? []) {
+    const where = `spaces.templates.${template.id}`
+    if (seen.has(template.id)) errors.push(`rule 12: ${where} is declared twice`)
+    seen.add(template.id)
+    // a space of the whole organization has every person of it as a member (SPACE-DEF-003)
+    const m = template.membership
+    if (template.kind === 'organization' && !(m.mode === 'rule' && m.rule.organization))
+      errors.push(`rule 12: ${where} is of kind organization: its membership is the rule organization: true`)
+    errors.push(...templateBoundsErrors(pack, template, where))
+  }
+  return errors
+}
+
+function templateBoundsErrors(pack: AgentPack, template: SpaceTemplate, where: string): string[] {
+  const errors: string[] = []
+  const rules = template.rules ?? {}
+  const retention = rules.retentionDays
+  if (retention) {
+    if (retention.min !== undefined && retention.max !== undefined && retention.min > retention.max)
+      errors.push(`rule 12: ${where}.rules.retentionDays min is above max`)
+    const value = retention.default ?? PERSONAL_RETENTION_DAYS
+    if (retention.min !== undefined && value < retention.min)
+      errors.push(`rule 12: ${where}.rules.retentionDays default is below min`)
+    if (retention.max !== undefined && value > retention.max)
+      errors.push(`rule 12: ${where}.rules.retentionDays default is above max`)
+  }
+  const conversation = pack.privacy.processingActivities.find((a) => a.id === 'conversation-memory')
+  const lawful = rules.lawfulBasis?.default ?? conversation?.lawfulBasis ?? 'contract'
+  if (rules.lawfulBasis?.allowed && !rules.lawfulBasis.allowed.includes(lawful))
+    errors.push(`rule 12: ${where}.rules.lawfulBasis default is not among the allowed`)
+  const handover = rules.handover?.default ?? false
+  if (rules.handover?.allowed && !rules.handover.allowed.includes(handover))
+    errors.push(`rule 12: ${where}.rules.handover default is not among the allowed`)
+  const providers = rules.allowedProviders
+  const defaults = providers?.default ?? [providerNameOf(pack)]
+  if (providers?.allowed) {
+    const outside = defaults.filter((p) => !providers.allowed?.includes(p))
+    if (outside.length)
+      errors.push(`rule 12: ${where}.rules.allowedProviders default [${outside.join(', ')}] is not among the allowed`)
+  }
+  return errors
+}
+
 /** Cross-field rules 1 to 9 of docs/agent-pack.md plus PRIV-RETN-006. */
 export function crossFieldErrors(pack: AgentPack): string[] {
   const errors: string[] = []
@@ -311,6 +379,9 @@ export function crossFieldErrors(pack: AgentPack): string[] {
   for (const [i, o] of (identity.perActorOverrides ?? []).entries()) check(o.roles, `identity.perActorOverrides[${i}]`)
   for (const p of pack.purposes ?? []) check(p.permittedRoles, `purposes.${p.id}.permittedRoles`)
   for (const m of pack.persona.menu ?? []) check(m.roles, `persona.menu.${m.id}.roles`)
+  for (const t of pack.spaces?.templates ?? []) check(t.creators, `spaces.templates.${t.id}.creators`)
+  // rule 12: the defaults of a space template lie within its bounds (SPACE-DEF-003)
+  errors.push(...spaceTemplateErrors(pack))
 
   const purposeIds = new Set((pack.purposes ?? []).map((p) => p.id))
   const declaredTools = new Set<string>([...(pack.tools?.http ?? []).map((t) => t.name), ...bundledToolNames(pack)])
@@ -426,6 +497,9 @@ export function validatePackDocument(doc: unknown, env: Record<string, string | 
   if (!/^3\.\d+$/.test(version)) {
     throw new PackError(`schemaVersion "${version}" is not supported (CORE-PACK-004, major 3 required)`)
   }
+  // RBAC-XSESS-005: a role that declares crossSession is refused in words, before the schema names the key
+  const removed = removedCrossSessionErrors(coerced)
+  if (removed.length) throw new PackError('agent-pack names a cross-session scope that was removed', removed)
   const ajv = new Ajv2020({ allErrors: true, strict: false, useDefaults: true })
   addFormats.default(ajv)
   const validate = ajv.compile(schema)

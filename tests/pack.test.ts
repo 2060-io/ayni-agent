@@ -7,6 +7,7 @@ import {
   substitutePlaceholders,
   validatePackDocument,
 } from '../src/config/pack.js'
+import { messageDeletionWindowSeconds, type SpaceTemplate } from '../src/config/packTypes.js'
 
 const env = { HOME_BACKING_IDENTITY: 'did:webvh:x:home', AGUI_ALLOWED_ORIGINS: 'https://a.example,https://b.example' }
 
@@ -67,5 +68,100 @@ describe('agent-pack loader (CORE-PACK-001..004)', () => {
     const noBasis = structuredClone(dev.pack)
     noBasis.privacy.processingActivities = noBasis.privacy.processingActivities.filter((a) => a.id !== 'rag-corpus')
     expect(() => validatePackDocument(noBasis, env)).toThrow(/PRIV-RETN-006.*rag-corpus/)
+  })
+})
+
+describe("no role reads other people's conversations (RBAC-XSESS-005)", () => {
+  it('refuses a pack whose role declares crossSession, whatever its value, in words', () => {
+    const dev = loadPack('agent-packs/dev', { ...process.env, ...env })
+    for (const scope of ['own-backing-identity', 'all', 'own-sessions']) {
+      const bad = structuredClone(dev.pack) as unknown as {
+        identity: { roles: Record<string, Record<string, unknown>> }
+      }
+      bad.identity.roles.manager = { ...bad.identity.roles.manager, crossSession: scope }
+      let message = ''
+      try {
+        validatePackDocument(bad, env)
+      } catch (error) {
+        expect(error).toBeInstanceOf(PackError)
+        message = (error as Error).message
+      }
+      expect(message).toContain(`identity.roles.manager.crossSession ("${scope}") is withdrawn`)
+      expect(message).toContain("no role reads other people's conversations")
+    }
+    // the admin flag is a role's (IDENT-DIR-008)
+    const admin = structuredClone(dev.pack) as unknown as {
+      identity: { roles: Record<string, Record<string, unknown>> }
+    }
+    admin.identity.roles.manager = { ...admin.identity.roles.manager, admin: true }
+    expect(() => validatePackDocument(admin, env)).not.toThrow()
+  })
+})
+
+describe('space templates and the deletion window (SPACE-DEF-002/003, PRIV-ERASE-010)', () => {
+  it('reads the templates and the window of the dev pack, the window 600 by default', () => {
+    const dev = loadPack('agent-packs/dev', { ...process.env, ...env })
+    expect(dev.pack.spaces?.templates?.map((t) => t.id)).toEqual(['project', 'sales', 'organization'])
+    expect(dev.pack.spaces?.personal?.retentionDays).toBe(365)
+    expect(dev.pack.conversations?.messageDeletionWindowSeconds).toBe(600)
+    const short = loadPack('agent-packs/dev', { ...process.env, ...env, MESSAGE_DELETION_WINDOW_SECONDS: '30' })
+    expect(short.pack.conversations?.messageDeletionWindowSeconds).toBe(30)
+    const without = structuredClone(dev.pack)
+    without.conversations = undefined
+    expect(messageDeletionWindowSeconds(validatePackDocument(without, env))).toBe(600)
+  })
+
+  it('refuses a template whose roles are not declared, whose defaults lie outside its bounds, or that says too much', () => {
+    const dev = loadPack('agent-packs/dev', { ...process.env, ...env })
+    const template = (over: Record<string, unknown>) => {
+      const pack = structuredClone(dev.pack)
+      pack.spaces = {
+        templates: [
+          { id: 'p', title: 'P', kind: 'team', creators: ['employee'], membership: { mode: 'list' }, ...over },
+        ],
+      } as never
+      return pack
+    }
+    expect(() => validatePackDocument(template({}), env)).not.toThrow()
+    expect(() => validatePackDocument(template({ creators: ['ghost'] }), env)).toThrow(/rule 2.*ghost.*spaces/)
+    expect(() => validatePackDocument(template({ rules: { retentionDays: { default: 10, min: 30 } } }), env)).toThrow(
+      /rule 12.*retentionDays default is below min/
+    )
+    // without a default, a retention is of 365 days: above a max of 60
+    expect(() => validatePackDocument(template({ rules: { retentionDays: { min: 30, max: 60 } } }), env)).toThrow(
+      /rule 12.*retentionDays default is above max/
+    )
+    expect(() =>
+      validatePackDocument(template({ rules: { lawfulBasis: { default: 'consent', allowed: ['contract'] } } }), env)
+    ).toThrow(/rule 12.*lawfulBasis/)
+    expect(() =>
+      validatePackDocument(template({ rules: { allowedProviders: { allowed: ['anthropic'] } } }), env)
+    ).toThrow(/rule 12.*allowedProviders default \[stub\]/)
+    expect(() => validatePackDocument(template({ rules: { allowedProviders: { default: [] } } }), env)).toThrow(
+      /schema/
+    )
+    // a provider is named as llm.providerName names it: kimi for openai-compatible on Moonshot
+    const kimi = template({ rules: { allowedProviders: { default: ['kimi'] } } })
+    kimi.llm = { ...kimi.llm, providerName: 'kimi' }
+    expect(() => validatePackDocument(kimi, env)).not.toThrow()
+    const twice = template({})
+    twice.spaces?.templates?.push(structuredClone(twice.spaces.templates[0] as SpaceTemplate))
+    expect(() => validatePackDocument(twice, env)).toThrow(/declared twice/)
+    expect(() =>
+      validatePackDocument(template({ membership: { mode: 'rule', rule: { department: 'Sales', group: 'x' } } }), env)
+    ).toThrow(/schema/)
+    expect(() =>
+      validatePackDocument(template({ membership: { mode: 'rule', rule: { department: 'Sales' } } }), env)
+    ).not.toThrow()
+    // a space of the whole organization is the organization's rule
+    expect(() =>
+      validatePackDocument(template({ kind: 'organization', membership: { mode: 'rule', rule: { group: 'x' } } }), env)
+    ).toThrow(/kind organization/)
+    // the creation picks no rule: a template names its own
+    expect(() => validatePackDocument(template({ membership: { mode: 'rule', by: 'department' } }), env)).toThrow(
+      /schema/
+    )
+    // the names of an earlier draft are not read
+    expect(() => validatePackDocument(template({ label: 'P' }), env)).toThrow(/schema/)
   })
 })

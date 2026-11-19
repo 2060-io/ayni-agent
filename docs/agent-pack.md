@@ -46,6 +46,8 @@ directory.
 | `approvals` | | default approval and elevation policy | INTX-APPR |
 | `actions` | | per-tool auth challenge and credential freshness | D7, D28, INTX-AUTH |
 | `sessions` | | idle timeout, binding expiry, liveness TTL, sibling sessions, device pairing window | D6, D7, D36, D51 |
+| `conversations` | | the window within which a person deletes a message of theirs | decision 60 of the agent |
+| `spaces` | | the templates people with a role create spaces from | decision 60 of the agent |
 | `channels` | | AG-UI and A2A adapters | D1, D2, CHAN-* |
 | `privacy` | yes | processing activities with lawful basis and retention, erasure | D18, PRIV-RETN |
 | `media` | | speech-to-text, vision, image generation, face verification | D45, INTX-AUTH-007 |
@@ -78,7 +80,7 @@ identity:
       relation: unrecognized
       roles: [visitor]
   roles:
-    finance-manager: { canApprove: true, crossSession: own-backing-identity }
+    finance-manager: { canApprove: true }
     auditor:         { auditor: true }
   roleRules:
     - when: { relation: home, claims: { department: [Finance, Treasury] } }
@@ -141,10 +143,13 @@ identity:
   organization gives no backing identity and `public` visibility only.
 - `perActorOverrides` apply before the rules, for named actors: a service by its DID, a person by the key
   above.
-- `roles` declares every role used anywhere in the pack. `crossSession` sets the role's cross-session
-  memory scope (RBAC-XSESS): `own-sessions` (default), `own-backing-identity`, `all`. `canApprove`
-  marks roles that may appear in `approvers`. `auditor` grants read-only access to the whole
-  persistent store outside LLM retrieval.
+- `roles` declares every role used anywhere in the pack. **No role reads other people's conversations**
+  (RBAC-XSESS-005/007): `crossSession`, the role-wide conversation reads of an earlier version, is withdrawn, and a
+  pack that declares it, whatever its value, is refused with a message that says so. A conversation is read by its
+  author, by the active members of its space once its author shares it with the space, and by an auditor through
+  the admin interface. `canApprove` marks roles that may appear in `approvers`. `auditor` grants read-only access to
+  the whole persistent store outside LLM retrieval. `admin` lets the role read the admin view of roles and changes
+  (IDENT-DIR-008, with the user directory).
 - **Who enters unidentified follows from `authentication`, and from nothing else** (D53, D72). A pack that
   names no authentication schema lets every wallet in, unidentified. One that names a schema is in one of
   three modes:
@@ -226,6 +231,9 @@ API does not list it) and use `reasoningEffort: low | high | max` if wanted. Kim
 embeddings endpoint: keep another `embeddings.provider`. `apiKeyEnv` names the environment variable holding the
 key; keys never appear in the pack. `multimodal: true` lets a capable model receive referenced media;
 the agent never depends on it. Embeddings are configured independently and may use another provider.
+
+`providerName` names the model provider as the spaces' `allowedProviders` list it: `kimi` for `openai-compatible` on
+Moonshot, for example; `provider` when absent (SPACE-CONV-004).
 
 `maxInputTokens` is the model's input limit (Kimi K3: 1M); the agent refuses to start when
 `memory.contextWindowTokens` plus `maxOutputTokens` exceeds it (MEM-CTX-006). `cache` turns on the provider's
@@ -465,6 +473,72 @@ one of them the whole conversation (D61, IDENT-SESS-016). The idle timeout still
 on its own; a device whose session was closed opens a new one on the same conversation and reads what it
 missed.
 
+## conversations
+
+`conversations.messageDeletionWindowSeconds` (600 by default) is how long a person may delete a message they
+wrote: with it go the agent's reply to it (its messages, the tool calls and the memory lines of the turn that
+answered it) and the memories the agent took from it, at once and on every device; a reply still being written is
+cancelled first (PRIV-ERASE-010..012). `0` turns deletion off: the descriptor then declares no `erasure`. After the
+window the message stays; an operator erases through the admin interface, which respects legal hold. A person
+cannot delete a conversation.
+
+```yaml
+conversations:
+  messageDeletionWindowSeconds: ${MESSAGE_DELETION_WINDOW_SECONDS:-600}
+```
+
+## spaces
+
+A space holds one piece of work in the agent: a title, a purpose, a brief, a language and its rules (ayni-spec D80,
+D84). Every conversation, and every entry of it, belongs to exactly one space; the default is the person's
+**Personal** space, which everyone has without its being declared (SPACE-DEF-002). People who hold a role create the
+others from the templates of `spaces.templates` (SPACE-DEF-003):
+
+```yaml
+spaces:
+  personal:                             # the rules of every Personal space
+    retentionDays: ${RETENTION_HISTORY_DAYS:-365}
+    # lawfulBasis: the one of conversation-memory by default
+    # allowedProviders: [<llm.providerName>] by default
+  templates:
+    - id: project                       # lowercase letters, digits and dashes
+      title: Project
+      kind: team                        # team or organization
+      creators: [employee]              # the roles of who may create one
+      membership: { mode: list }        # a list kept by the owner
+      rules:
+        retentionDays: { default: 365, min: 30, max: 1825 }
+        lawfulBasis: { default: contract, allowed: [contract, consent] }
+        allowedProviders: { default: [kimi], allowed: [kimi, anthropic] }
+        handover: { default: true, allowed: [true, false] }
+    - id: rotterdam
+      title: Depot Rotterdam
+      kind: team
+      creators: [manager]
+      membership: { mode: rule, rule: { department: Depot Rotterdam } }
+    - id: everyone
+      title: Northwind Logistics
+      kind: organization                # always the rule organization: true
+      creators: [manager]
+      membership: { mode: rule, rule: { organization: true } }
+```
+
+- **Membership** is a list the owner keeps (`mode: list`), or a rule over verified facts of the people of the
+  agent's own organization (`relation: home`): exactly one of a `department`, a `group`, or the whole
+  `organization`. A member list is a share, never a role: no role makes anyone a member (SPACE-MEMB-003). The owner
+  is always a member. Someone a rule no longer matches, or the owner removes from a list, is `left`: they keep
+  reading their own conversations of the space, and run nothing in it (`409 space-left`).
+- **Rules** have a default and the bounds an owner may change them within: `min` and `max` days for the retention,
+  the `allowed` values of the others. A rule with no bounds keeps its default. `retentionDays` (365 by default): the
+  entries of the space's conversations older than this are archived, never an entry on legal hold (PRIV-RETN-008).
+  `lawfulBasis` defaults to the one of `conversation-memory`. `allowedProviders`, as `llm.providerName` names a
+  provider, defaults to the agent's own: in a space that does not allow it the agent's code answers, with no model
+  call (SPACE-CONV-004). `handover` lets an author share a conversation with the members of its space, read-only; it
+  is off by default, and Personal takes none.
+- Personal's rules are `spaces.personal`; without it, 365 days (the deployment's `RETENTION_HISTORY_DAYS`), the
+  lawful basis of `conversation-memory` and the agent's provider.
+- The title, the purpose and the brief of a space are stored sealed, like a conversation's title (D77).
+
 ## privacy
 
 `processingActivities` enumerates the personal-data processing this agent performs and declares, for
@@ -489,7 +563,8 @@ enables crypto-erasure with its lineage cascade.
 1. `identity.authentication` holds at most one entry, whose `subjectKey` is among the `attributes` it asks;
    no `identity.organizations` pattern sets `relation: home`.
 2. Every role named in `roleRules`, `perActorOverrides`, `toolAccess.roles`, `approvers`,
-   `purposes[].permittedRoles` and `persona.menu[].roles` is declared in `identity.roles`.
+   `purposes[].permittedRoles`, `persona.menu[].roles` and `spaces.templates[].creators` is declared in
+   `identity.roles`.
 3. Every role in an `approvers` list has `canApprove: true`.
 4. Every id in `toolAccess.elevation[].purposes` exists in `purposes`.
 5. Tool names in `toolAccess`, `actions` and `persona.menu[].action.tool` refer to a declared HTTP or
@@ -503,6 +578,11 @@ enables crypto-erasure with its lineage cascade.
 9. `channels.agui.walletLinkTemplate` starts with `https://` and contains `{oob}`.
 10. `memory.contextWindowTokens` plus `llm.maxOutputTokens` fits in `llm.maxInputTokens` when it is set (MEM-CTX-006).
 11. A `partner-shared` RAG source names its `partner`, and only a `partner-shared` source names one (MEM-RAG-005).
+12. A space template is declared once; its `creators` are declared in `identity.roles` (rule 2); the default of
+    each of its rules lies within its bounds; a template of kind `organization` has the rule `organization: true`
+    (SPACE-DEF-003).
+
+Before the schema, a role that declares `crossSession` is refused in words (RBAC-XSESS-005).
 
 ## Differences from the previous generation of packs
 

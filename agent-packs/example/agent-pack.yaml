@@ -40,19 +40,18 @@ identity:
   roles:
     employee:
       description: Any verified Northwind employee.
+    # no role reads other people's conversations (decision 60): a conversation is read by its author, by the
+    # members of its space when its author shares it, and by an auditor through the admin interface
     finance:
       description: Finance department.
-      crossSession: own-backing-identity
     finance-manager:
       description: Approves refunds.
-      crossSession: own-backing-identity
       canApprove: true
     security-officer:
       description: Approves out-of-role access for investigations.
       canApprove: true
     operator:
       description: Support operators.
-      crossSession: all
     partner:
       description: Baseline for recognized partner organizations.
     visitor:
@@ -256,6 +255,43 @@ channels:
       types: ["image/*", "audio/webm", "audio/ogg", "audio/mp4", "application/pdf"]
   a2a:
     enabled: false
+
+# a person deletes their own message, with the agent's reply and the memories taken from it, for ten minutes
+conversations:
+  messageDeletionWindowSeconds: 600
+
+# spaces (SPACE-DEF-002/003): one piece of work each; every conversation belongs to one, Personal by default
+spaces:
+  personal:
+    retentionDays: 365
+  templates:
+    - id: project                                          # a list kept by its owner
+      title: Project
+      kind: team
+      creators: [employee]
+      membership: { mode: list }
+      rules:
+        retentionDays: { default: 365, min: 30, max: 1825 }
+        lawfulBasis: { default: contract }
+        allowedProviders: { default: [openai] }
+        handover: { default: true, allowed: [true, false] }
+    - id: finance                                          # everyone of the finance department
+      title: Finance
+      kind: team
+      creators: [finance-manager]
+      membership: { mode: rule, rule: { department: Finance } }
+      rules:
+        retentionDays: { default: 730 }
+        lawfulBasis: { default: legitimate-interest }
+        handover: { default: true }
+    - id: northwind                                        # the whole organization
+      title: Northwind Logistics
+      kind: organization
+      creators: [security-officer]
+      membership: { mode: rule, rule: { organization: true } }
+      rules:
+        lawfulBasis: { default: legitimate-interest }
+        handover: { default: false }
 
 privacy:
   processingActivities:
