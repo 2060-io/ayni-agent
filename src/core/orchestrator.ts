@@ -11,8 +11,8 @@ import type { MemoryService, NewEntry, Recalled } from '../memory/service.js'
 import type { StatsSink } from '../platform/stats.js'
 import type { ApprovalService } from '../policy/approvals.js'
 import type { ToolRegistry, VisibleTool } from '../tools/registry.js'
-import type { ToolContext } from '../tools/types.js'
-import { prefixedId } from '../util/ids.js'
+import type { MemoryChange, ToolContext } from '../tools/types.js'
+import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import { estimateRequestTokens } from '../util/tokens.js'
 import type { ChallengeService } from './challenges.js'
@@ -21,7 +21,14 @@ import { conversationOf } from './conversationOf.js'
 import { nameForModel } from './evidence.js'
 import type { PrincipalService } from './principals.js'
 import { addonTokenCount, renderPromptAddon } from './promptAddon.js'
+import { personalSpaceId } from './spaces.js'
 import type { ApprovalRecord, MessageEntry, Principal, ReactionPolicy, Session } from './types.js'
+
+/** The memories and preferences a turn was given (MEM-SPACE-006): what an answer's Info lists. */
+export interface UsedMemory {
+  memories: string[]
+  preferences: string[]
+}
 
 export type TurnEvent =
   | { type: 'text-start'; messageId: string }
@@ -33,6 +40,8 @@ export type TurnEvent =
   | { type: 'inbound'; entry: MessageEntry }
   /** the turn starts: until then it may have waited for another to end (D63) */
   | { type: 'turn-start' }
+  /** a CUSTOM event of the conversation: a memory the turn changed (MEM-SPACE-005, PROF-STREAM-010) */
+  | { type: 'custom'; name: string; value: Record<string, unknown> }
 
 export interface TurnSink {
   emit(event: TurnEvent): Promise<void> | void
@@ -160,6 +169,19 @@ export class Orchestrator {
    * not be the end of a message they already read. Under it the reply goes on, in a new paragraph.
    */
   public resumeAsNewMessageMs = 5_000
+  /**
+   * The space of a session's conversation (MEM-SPACE-001): its notes are the ones the model reads and writes. Set by the
+   * composition root; Personal without it.
+   */
+  public spaceOf: (session: Session, principal: Principal) => Promise<string> = async (_session, principal) =>
+    personalSpaceId(principal.id)
+  /**
+   * What the agent's code answers instead of the model in a space that does not allow the model provider it is
+   * configured with (SPACE-CONV-004); set by the composition root. Undefined: the space allows it.
+   */
+  public providerRefusal?: (session: Session, principal: Principal, spaceId: string) => Promise<string | undefined>
+  /** the messages each conversation's turn in progress answers: deleting one cancels the turn first (PRIV-ERASE-011) */
+  private readonly answering = new Map<string, Set<string>>()
 
   public constructor(
     private readonly pack: AgentPack,
@@ -195,19 +217,35 @@ export class Orchestrator {
     this.reactionPolicies.set(sessionId, policy)
   }
 
+  /** The messages the turn in progress of a conversation answers. */
+  public answeringIn(conversationId: string): ReadonlySet<string> {
+    return this.answering.get(conversationId) ?? new Set()
+  }
+
   // ---- context assembly -----------------------------------------------------------------------
 
-  private async systemMessages(principal: Principal, session: Session): Promise<ChatMessage[]> {
+  /**
+   * Parts 1 to 3 of the request, and what of the person's memory they hold (MEM-SPACE-001): every preference, which is
+   * global, and the notes of the space of the conversation only.
+   */
+  private async systemMessages(
+    principal: Principal,
+    session: Session,
+    spaceId: string
+  ): Promise<{ messages: ChatMessage[]; used: UsedMemory }> {
     const features = featuresOf(this.pack)
     const parts: string[] = []
+    const used: UsedMemory = { memories: [], preferences: [] }
     const prefs = features.preferences ? await this.memory.preferences(principal, session) : []
     if (prefs.length) parts.push(`Preferences of the person: ${prefs.map((p) => `${p.key}=${p.value}`).join('; ')}`)
+    used.preferences = prefs.map((p) => p.key)
     if (features.workingMemory) {
-      const notes = await this.memory.notes(principal, session)
+      const notes = await this.memory.notes(principal, session, spaceId)
       if (notes.length)
         parts.push(
           `Working memory notes:\n${notes.map((n) => `- [${n.id}]${n.needsRevision ? ' (needs revision)' : ''} ${n.content}`).join('\n')}`
         )
+      used.memories = notes.map((n) => n.id)
     }
     // a person identified by a credential is named only when the pack lets the model read the name (D68)
     const name = nameForModel(this.pack, principal)
@@ -216,11 +254,14 @@ export class Orchestrator {
       ? `, backed by ${principal.backingIdentity.name} (${principal.backingRelation})`
       : ''
     parts.push(`${display}${backing}. Roles: ${principal.roles.join(', ') || 'none'}. Channel: ${session.channelType}.`)
-    return [
-      { role: 'system', content: this.pack.persona.systemPrompt },
-      { role: 'system', content: this.addon },
-      { role: 'system', content: parts.join('\n\n') },
-    ]
+    return {
+      messages: [
+        { role: 'system', content: this.pack.persona.systemPrompt },
+        { role: 'system', content: this.addon },
+        { role: 'system', content: parts.join('\n\n') },
+      ],
+      used,
+    }
   }
 
   private entryToMessages(entry: MessageEntry): ChatMessage[] {
@@ -342,15 +383,43 @@ export class Orchestrator {
     context: TurnContext = {},
     imageBytes?: Map<string, Buffer>
   ): Promise<TurnResult> {
+    const conversationId = conversationOf(session)
+    // the messages this turn answers: deleting one of them cancels the turn first (PRIV-ERASE-011)
+    const inProgress = this.answering.get(conversationId) ?? new Set<string>()
+    for (const entry of inbounds) inProgress.add(entry.id)
+    this.answering.set(conversationId, inProgress)
+    try {
+      return await this.answerTurn(session, principal, inbounds, sink, signal, context, imageBytes)
+    } finally {
+      for (const entry of inbounds) inProgress.delete(entry.id)
+      if (!inProgress.size && this.answering.get(conversationId) === inProgress) this.answering.delete(conversationId)
+    }
+  }
+
+  private async answerTurn(
+    session: Session,
+    principal: Principal,
+    inbounds: MessageEntry[],
+    sink: TurnSink,
+    signal: AbortSignal,
+    context: TurnContext,
+    imageBytes?: Map<string, Buffer>
+  ): Promise<TurnResult> {
     for (const entry of inbounds) await sink.emit({ type: 'inbound', entry })
     // tools, the reply's language and what is recalled follow the latest message
     const inbound = inbounds[inbounds.length - 1] as MessageEntry
     const answered = new Set(inbounds.map((e) => e.id))
     const notYet = (await context.notYet?.()) ?? new Set<string>()
+    // every entry of the turn names the messages it answers: deleting one of them deletes the turn (PRIV-ERASE-011)
+    const inboundIds = inbounds.map((e) => e.id)
 
     const features = featuresOf(this.pack)
     const conversationId = conversationOf(session)
-    const system = await this.systemMessages(principal, session)
+    const spaceId = await this.spaceOf(session, principal)
+    // a space that does not allow this agent's model: no model call, no reply, no summary, no memory (SPACE-CONV-004)
+    const refusal = await this.providerRefusal?.(session, principal, spaceId)
+    if (refusal) return this.refuse(session, principal, inbounds, refusal, sink, context)
+    const { messages: system, used } = await this.systemMessages(principal, session, spaceId)
     const grants = await this.approvals.activeGrants(principal.id)
     const visible = await this.registry.visible(principal.roles, grants, principal)
     // a fixed order: the start of the request stays the same from one turn to the next (MEM-CTX-001)
@@ -370,13 +439,19 @@ export class Orchestrator {
     })
     // what is retrieved for this turn comes after the window, with the message it answers (MEM-CTX-001, MEM-RET-007)
     const recalled = features.semanticRecall
-      ? await this.memory.recall(principal, session, inbounds.map((e) => e.text).join('\n'), topK, [
-          ...assembled.window.map((e) => e.id),
-          ...answered,
-        ])
+      ? await this.memory.recall(
+          principal,
+          session,
+          inbounds.map((e) => e.text).join('\n'),
+          topK,
+          [...assembled.window.map((e) => e.id), ...answered],
+          spaceId
+        )
       : []
     const messages: ChatMessage[] = [...assembled.messages, withRetrieved(userTurn, recallRecord(recalled))]
 
+    /** the memories the turn changed: told as lines of the conversation once its reply is written (MEM-SPACE-005) */
+    const changes: MemoryChange[] = []
     const toolCtx: ToolContext = {
       principal,
       session,
@@ -384,6 +459,11 @@ export class Orchestrator {
       logger: this.logger,
       language: inbound.language,
       inboundId: inbound.id,
+      inboundIds,
+      spaceId,
+      memoryChanged: async (change) => {
+        changes.push(change)
+      },
     }
 
     let messageId = prefixedId('msg')
@@ -412,6 +492,13 @@ export class Orchestrator {
         completion,
         backingIdentity: principal.backingIdentity,
         reactionPolicy: this.reactionPolicies.get(session.id) ?? 'historize',
+        // what it answers, and what of the person's memory it was given (PRIV-ERASE-011, MEM-SPACE-006)
+        payload: {
+          inboundId: inbound.id,
+          inboundIds,
+          usedMemories: used.memories,
+          usedPreferences: used.preferences,
+        },
       })
       written.push(entry)
       return entry
@@ -520,9 +607,105 @@ export class Orchestrator {
         at: new Date().toISOString(),
       })
     }
+    // a memory the turn changed is a line of the conversation, after the reply (MEM-SPACE-005, PROF-HIST-012)
+    await this.recordMemoryChanges(session, principal, changes, sink, {
+      after: written[written.length - 1]?.initiatedAt,
+      inboundIds,
+    })
     this.reactionPolicies.delete(session.id)
     this.stats.emit('message-out', 1, { channel: session.channelType, cancelled: String(cancelled) })
     return { inbound, reply, replies: written, cancelled, inbounds }
+  }
+
+  /**
+   * The turn of a space whose rules do not allow the model this agent uses (SPACE-CONV-004, PROF-RUN-014): the person's
+   * message is kept, and the code answers it with a `refusal` entry, which names the messages it answers as a reply
+   * does, so that deleting the message takes it too.
+   */
+  private async refuse(
+    session: Session,
+    principal: Principal,
+    inbounds: MessageEntry[],
+    text: string,
+    sink: TurnSink,
+    context: TurnContext
+  ): Promise<TurnResult> {
+    const inbound = inbounds[inbounds.length - 1] as MessageEntry
+    const messageId = prefixedId('msg')
+    await sink.emit({ type: 'text-start', messageId })
+    await sink.emit({ type: 'text-delta', messageId, delta: text })
+    await sink.emit({ type: 'text-end', messageId })
+    const reply = await this.memory.append({
+      id: messageId,
+      initiatedAt: await context.replyAt?.(),
+      sessionId: session.id,
+      principalId: principal.id,
+      role: 'agent',
+      sourceType: 'refusal',
+      text,
+      backingIdentity: principal.backingIdentity,
+      payload: {
+        kind: 'space-rules',
+        inboundId: inbound.id,
+        inboundIds: inbounds.map((e) => e.id),
+        usedMemories: [],
+        usedPreferences: [],
+      },
+    })
+    this.logger.info(
+      { sessionId: session.id, conversationId: reply.conversationId },
+      'turn refused by the rules of its space'
+    )
+    this.stats.emit('message-out', 1, { channel: session.channelType, cancelled: 'false', refused: 'space-rules' })
+    return { inbound, reply, replies: [reply], cancelled: false, inbounds }
+  }
+
+  /**
+   * A memory the agent added, changed or removed is a line of the conversation (MEM-SPACE-005): an entry (`state-update`,
+   * `{ kind: 'memory', memoryId, spaceId, action }`, never the memory's content), told to the conversation's devices as
+   * CUSTOM `ayni.memory.updated`. It names the messages of its turn: their deletion takes it with them.
+   */
+  private async recordMemoryChanges(
+    session: Session,
+    principal: Principal,
+    changes: MemoryChange[],
+    sink: TurnSink,
+    place: { after?: string; inboundIds?: string[] }
+  ): Promise<void> {
+    let at = place.after ? Date.parse(place.after) : Date.now()
+    for (const change of changes) {
+      at = Math.max(Date.now(), at + 1)
+      const entry = await this.memory.append({
+        initiatedAt: new Date(at).toISOString(),
+        sessionId: session.id,
+        principalId: principal.id,
+        role: 'agent',
+        sourceType: 'state-update',
+        text: `A memory was ${change.action}`,
+        backingIdentity: principal.backingIdentity,
+        payload: {
+          kind: 'memory',
+          memoryId: change.memoryId,
+          spaceId: change.spaceId,
+          action: change.action,
+          ...(place.inboundIds?.length ? { inboundId: place.inboundIds.at(-1), inboundIds: place.inboundIds } : {}),
+        },
+      })
+      await sink.emit({
+        type: 'custom',
+        name: 'ayni.memory.updated',
+        value: {
+          conversationId: entry.conversationId,
+          entryId: entry.id,
+          memoryId: change.memoryId,
+          spaceId: change.spaceId,
+          action: change.action,
+        },
+      })
+    }
+    // a line placed a millisecond after the reply may be ahead of the clock: what is recorded next must come after it
+    const ahead = at - Date.now() + 1
+    if (changes.length && ahead > 0) await new Promise((resolve) => setTimeout(resolve, ahead))
   }
 
   /** One model call: added to the turn, logged, counted (LLM-USAGE-001/002, PLAT-STATS-004). */
@@ -580,15 +763,22 @@ export class Orchestrator {
   ): Promise<string> {
     const grants = await this.approvals.activeGrants(principal.id)
     const visible = await this.registry.visible(principal.roles, grants, principal)
+    const changes: MemoryChange[] = []
     const ctx: ToolContext = {
       principal,
       session,
       roles: principal.roles,
       logger: this.logger,
       language: this.pack.language.agent,
+      spaceId: await this.spaceOf(session, principal),
+      memoryChanged: async (change) => {
+        changes.push(change)
+      },
     }
     const call = { id: prefixedId('call'), name, arguments: args }
-    return this.executeToolCall(call, visible, session, principal, undefined, ctx, sink, skipApproval)
+    const result = await this.executeToolCall(call, visible, session, principal, undefined, ctx, sink, skipApproval)
+    await this.recordMemoryChanges(session, principal, changes, sink, { after: nowIso() })
+    return result
   }
 
   private async executeToolCall(
@@ -703,6 +893,7 @@ export class Orchestrator {
         result: content.slice(0, 20000),
         isError,
         inboundId: inbound?.id,
+        ...(ctx.inboundIds?.length ? { inboundIds: ctx.inboundIds } : {}),
       },
     })
     return content.slice(0, 20000)

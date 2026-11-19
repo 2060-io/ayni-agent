@@ -12,6 +12,19 @@ export interface ToolContext {
   language: string
   /** the person's message the turn answers: what a note cites, so that its erasure flags the note (PRIV-ERASE-005) */
   inboundId?: string
+  /** every message the turn answers, when several waited together (PRIV-ERASE-011) */
+  inboundIds?: string[]
+  /** the space of the conversation: the notes the tool reads and writes are of it (MEM-SPACE-002) */
+  spaceId?: string
+  /** a memory of the person changed: the turn tells the conversation, never its content (MEM-SPACE-005) */
+  memoryChanged?: (change: MemoryChange) => Promise<void>
+}
+
+/** What became of a memory of the person in a turn (MEM-SPACE-005). */
+export interface MemoryChange {
+  memoryId: string
+  spaceId: string
+  action: 'added' | 'changed' | 'removed'
 }
 
 export interface ToolResult {
