@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.24.0](https://github.com/2060-io/ayni-agent/compare/v0.23.1...v0.24.0) (2026-11-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* an agent-pack whose role declares crossSession no longer loads.
+
+### Features
+
+* spaces, personal memories per space, the employee list, badges from it, invitations; erasure within a window (ayni-spec [#94](https://github.com/2060-io/ayni-agent/issues/94)) ([#94](https://github.com/2060-io/ayni-agent/issues/94)) ([45874ef](https://github.com/2060-io/ayni-agent/commit/45874efc92b6a536d8777b670b186297b73d8f69))
+
 ## [0.23.1](https://github.com/2060-io/ayni-agent/compare/v0.23.0...v0.23.1) (2026-11-19)
 
 
