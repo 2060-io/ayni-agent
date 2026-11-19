@@ -4,10 +4,20 @@
  * and no connection. `requirements` tells, without any value, what a peer may receive and what is missing;
  * `issue` resolves the claims in code for the Principal of the session, issues nothing when one cannot be
  * resolved, and leaves a record built as evidence is.
+ *
+ * Decision 61: a credential issued under a revocable definition takes a revocation registry and an index, which its
+ * record keeps; a credential whose claims came from the user directory must be revocable, and its record names the
+ * entry (IDENT-DIR-006) and a keyed index of the actor it will identify once presented (IDENT-ROLE-012).
  */
 import { createHmac, hkdfSync } from 'node:crypto'
 import { AUTHENTICATION_ENTRY, DOCUMENT_ENTRY } from '../config/pack.js'
-import type { ActionPolicy, AgentPack, ClaimSource, IssuanceProfile } from '../config/packTypes.js'
+import {
+  type ActionPolicy,
+  type AgentPack,
+  type ClaimSource,
+  type IssuanceProfile,
+  mustBeRevocable,
+} from '../config/packTypes.js'
 import { nowIso } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import type { EvidenceService } from './evidence.js'
@@ -53,6 +63,12 @@ export type IssuanceOutcome =
   | 'not-ready'
   | 'failed'
 
+/** Where an issued credential's status is kept, for its revocation (D91): a registry and an index in it. */
+export interface RevocationSlot {
+  registryDefinitionId: string
+  index: number
+}
+
 export interface IssuanceDeps {
   /** offers the credential on the connection and waits for the wallet: the exchange it ended in */
   offer(input: {
@@ -60,6 +76,8 @@ export interface IssuanceDeps {
     credentialDefinitionId: string
     claims: Record<string, string>
     title: string
+    /** under a revocable definition: the registry and the index the credential takes */
+    revocation?: RevocationSlot
   }): Promise<{
     outcome: 'issued' | 'declined' | 'unanswered' | 'refused' | 'failed'
     /** why the wallet refused, when it did: the code of its problem report */
@@ -74,17 +92,50 @@ export interface IssuanceDeps {
     purpose: string
   ): Promise<{ passed: boolean; reason?: string }>
   /**
-   * the credential definition of this agent for a schema, found or created; undefined while it cannot be
-   * established (INTX-ISSUE-017)
+   * the credential definition of this agent for a schema, found or created, with revocation when `revocable` asks for
+   * it; undefined while it cannot be established (INTX-ISSUE-017, decision 61)
    */
-  definitionFor?(jsonSchemaCredentialId: string): Promise<string | undefined>
+  definitionFor?(jsonSchemaCredentialId: string, options: { revocable: boolean }): Promise<string | undefined>
+  /**
+   * the registry and the index of the next credential issued under a definition; undefined when the definition does not
+   * support revocation. Throws when it does and none can be had (decision 61)
+   */
+  allocateRevocation?(credentialDefinitionId: string): Promise<RevocationSlot | undefined>
+  /**
+   * the actor the issued credential identifies once presented, when it is the identity credential (the home
+   * organization, the schema, the subject key: D59); its record keeps a keyed index of it (IDENT-ROLE-012)
+   */
+  holderOf?(profileName: string, profile: IssuanceProfile, claims: Record<string, string>): Promise<string | undefined>
+  /** after the record of an issuance: a Principal that already is the actor of the credential holds its entry */
+  issued?(principal: Principal, record: EvidenceRecord, holder: string | undefined): Promise<void>
+  /**
+   * a claim of a system of record (`{ from: record, record, field }`, INTX-ISSUE-002): the user directory, whose entry
+   * is found from the Principal's evidence (INTX-ISSUE-021, IDENT-DIR-003/004; agent phase 2b). Its resolution names
+   * the entry, which the record of the issuance keeps (IDENT-DIR-006). Without it such a claim is `unavailable`
+   */
+  record?(
+    principal: Principal,
+    profileName: string,
+    profile: IssuanceProfile,
+    source: RecordSource
+  ): Promise<Resolution>
 }
 
-interface Resolution {
+/** A claim of a system of record, as the loader of phase 2b accepts it (INTX-ISSUE-002, INTX-ISSUE-021). */
+export interface RecordSource {
+  from: 'record'
+  record: string
+  field: string
+}
+
+/** How a claim resolved: its status, its value when available, and where it came from. */
+export interface Resolution {
   status: ClaimStatus
   value?: string
   evidenceRef?: string
   action?: ClaimAction
+  /** a claim taken from the user directory: the entry it came from (INTX-ISSUE-021, IDENT-DIR-006) */
+  directoryEntryId?: string
 }
 
 const today = () => nowIso().slice(0, 10)
@@ -136,6 +187,8 @@ export function offeredProfiles(pack: AgentPack, principal: Principal): [string,
 export class IssuanceService {
   /** one issuance at a time for a Principal and a profile */
   private readonly running = new Set<string>()
+  /** the schemas whose definition must support revocation: those of a profile that must be revocable (decision 61) */
+  private readonly revocableSchemas: Set<string>
 
   public constructor(
     private readonly pack: AgentPack,
@@ -144,7 +197,13 @@ export class IssuanceService {
     private readonly logger: Logger,
     /** derives the identifiers of subjects (INTX-ISSUE-016); see `subjectIdKey` */
     private readonly idKey: Buffer
-  ) {}
+  ) {
+    this.revocableSchemas = new Set(
+      Object.values(pack.issuance ?? {})
+        .filter((p) => mustBeRevocable(p) && p.credential.jsonSchemaCredentialId)
+        .map((p) => p.credential.jsonSchemaCredentialId as string)
+    )
+  }
 
   /** The profiles a Principal may receive: a person, of a role the profile names when it names some. */
   public offered(principal: Principal): [string, IssuanceProfile][] {
@@ -156,7 +215,9 @@ export class IssuanceService {
     const out: CredentialRequirements[] = []
     for (const [name, profile] of this.offered(principal)) {
       if (only && name !== only) continue
-      const held = !!(await this.evidence.latest(principal.id, issuanceEntry(name)))
+      // a credential revoked since (its entry left the directory) is held no more (D91)
+      const latest = await this.evidence.latest(principal.id, issuanceEntry(name))
+      const held = !!latest && !latest.revocation?.revokedAt
       const claims: ClaimRequirement[] = []
       for (const [claim, source] of Object.entries(profile.claims)) {
         const { status, action } = await this.resolve(principal, name, profile, source)
@@ -219,6 +280,7 @@ export class IssuanceService {
       // the claims are resolved now, by the code, from the sources the profile names and nothing else
       const claims: Record<string, string> = {}
       const evidenceRefs = new Set<string>()
+      const entries = new Set<string>()
       for (const [claim, source] of Object.entries(profile.claims)) {
         const resolved = await this.resolve(principal, name, profile, source)
         if (resolved.status !== 'available' || resolved.value === undefined) {
@@ -226,16 +288,51 @@ export class IssuanceService {
         }
         claims[claim] = resolved.value
         if (resolved.evidenceRef) evidenceRefs.add(resolved.evidenceRef)
+        if (resolved.directoryEntryId) entries.add(resolved.directoryEntryId)
+      }
+      // the claims of one credential come from one entry of the directory (IDENT-DIR-004)
+      if (entries.size > 1) {
+        this.logger.warn({ profile: name, entries: entries.size }, 'claims from several directory entries: not issued')
+        return { outcome: 'incomplete', requirements: (await this.requirements(principal, name))[0] }
+      }
+      const directoryEntryId = [...entries][0]
+      // under a revocable definition the credential takes a registry and an index; one that must be revocable is not
+      // issued without them (D91, decision 61)
+      let revocation: RevocationSlot | undefined
+      try {
+        revocation = await this.deps.allocateRevocation?.(credentialDefinitionId)
+      } catch (error) {
+        this.logger.warn({ err: error, profile: name }, 'no revocation registry for the credential: not issued')
+        return { outcome: 'not-ready' }
+      }
+      if (!revocation && (mustBeRevocable(profile) || directoryEntryId)) {
+        this.logger.error(
+          { profile: name, credentialDefinitionId },
+          'a credential from the user directory must be revocable, and its definition supports no revocation: not issued (IDENT-ROLE-013)'
+        )
+        return { outcome: 'not-ready' }
+      }
+      // the actor the credential identifies once presented: a badge from the directory that could never find its entry
+      // again is not issued (IDENT-DIR-006)
+      const holder = await this.deps.holderOf?.(name, profile, claims)
+      if (directoryEntryId && !holder) {
+        this.logger.error(
+          { profile: name },
+          'a badge from the directory must identify its holder (the home organization, the authentication schema, the subject key): not issued (IDENT-DIR-006)'
+        )
+        return { outcome: 'not-ready' }
       }
       const offer = await this.deps.offer({
         connectionId,
         credentialDefinitionId,
         claims,
         title: label,
+        ...(revocation ? { revocation } : {}),
       })
       if (offer.outcome !== 'issued') return { outcome: offer.outcome, reason: offer.reason }
-      // one record per issuance: audit fields always, the claims only when the profile keeps them (INTX-ISSUE-014)
-      await this.evidence.record(
+      // one record per issuance: audit fields always, the claims only when the profile keeps them (INTX-ISSUE-014); the
+      // entry it came from, the actor it identifies (as a keyed index) and its registry and index, in the clear
+      const record = await this.evidence.record(
         principal,
         {
           kind: 'issuance',
@@ -245,12 +342,27 @@ export class IssuanceService {
           requestRef: offer.exchangeId,
           connectionRef: connectionId,
           evidenceRefs: [...evidenceRefs],
+          ...(directoryEntryId ? { directoryEntryId } : {}),
+          ...(holder ? { holder } : {}),
+          ...(revocation ? { revocation } : {}),
         },
         profile.record?.storeClaims
           ? { store: { attributes: Object.keys(claims), retention: profile.record.retention } }
           : {}
       )
-      this.logger.info({ principalId: principal.id, profile: name, by }, 'credential issued')
+      this.logger.info(
+        {
+          principalId: principal.id,
+          profile: name,
+          by,
+          ...(directoryEntryId ? { directoryEntryId } : {}),
+          revocable: !!revocation,
+        },
+        'credential issued'
+      )
+      await this.deps
+        .issued?.(principal, record, holder)
+        .catch((err) => this.logger.warn({ err, principalId: principal.id }, 'what follows an issuance failed'))
       return { outcome: 'issued' }
     } finally {
       this.running.delete(key)
@@ -274,6 +386,12 @@ export class IssuanceService {
     profile: IssuanceProfile,
     source: ClaimSource
   ): Promise<Resolution> {
+    if ((source as { from: string }).from === 'record') {
+      const record = source as unknown as RecordSource
+      return this.deps.record
+        ? this.deps.record(principal, name, profile, record)
+        : { status: 'unavailable', action: { type: 'none', note: `this agent reads no ${record.record}` } }
+    }
     if (source.from === 'computed') {
       if (source.fn === 'subjectId') return { status: 'available', value: subjectId(this.idKey, name, principal.id) }
       if (source.fn === 'documentId') {
@@ -315,7 +433,9 @@ export class IssuanceService {
     const { credentialDefinitionId, jsonSchemaCredentialId } = profile.credential
     if (credentialDefinitionId) return credentialDefinitionId
     if (!jsonSchemaCredentialId || !this.deps.definitionFor) return undefined
-    return this.deps.definitionFor(jsonSchemaCredentialId)
+    return this.deps.definitionFor(jsonSchemaCredentialId, {
+      revocable: this.revocableSchemas.has(jsonSchemaCredentialId),
+    })
   }
 
   /** Establishes the definitions of the profiles that name a schema, ahead of the first issuance. */

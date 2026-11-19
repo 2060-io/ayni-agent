@@ -1,6 +1,8 @@
 /**
  * Relying party: Principals from verified facts (D30..D34, IDENT-PRIN, IDENT-RES, IDENT-ROLE) and
- * the credential-liveness cache (D7, IDENT-LIVE).
+ * the credential-liveness cache (D7, IDENT-LIVE). With a user directory (D79, D87), a Principal whose identity
+ * credential this agent issued from an entry holds that entry, and the entry's roles, typed by hand, join those of
+ * its verified facts (IDENT-ROLE-002, IDENT-ROLE-012); no rule over claims reads such a Principal (IDENT-ROLE-014).
  */
 import type { AgentPack } from '../config/packTypes.js'
 import type { Store } from '../store/types.js'
@@ -63,14 +65,22 @@ function claimMatches(expected: string | string[], actual: unknown): boolean {
 
 /**
  * Rules over verified facts, first match wins; overrides first; the roles of the organization's pattern
- * are added to those of the rule (D34, D64; IDENT-ROLE-001..006, IDENT-ROLE-010).
+ * are added to those of the rule (D34, D64; IDENT-ROLE-001..006, IDENT-ROLE-010). A rule that names claims does not
+ * match a Principal whose identity credential this agent issued from a directory entry: those claims are the entry's
+ * fields, and the entry gives its roles by hand (IDENT-ROLE-014, D87).
  */
-export function assignRoles(pack: AgentPack, facts: VerifiedFacts, recognition: Recognition): string[] {
+export function assignRoles(
+  pack: AgentPack,
+  facts: VerifiedFacts,
+  recognition: Recognition,
+  options: { issuedFromDirectory?: boolean } = {}
+): string[] {
   const override = pack.identity.perActorOverrides?.find((o) => o.actor === facts.actorIdentity)
   if (override) return [...override.roles]
   let ruleRoles: string[] = []
   for (const rule of pack.identity.roleRules) {
     const w = rule.when
+    if (w.claims && options.issuedFromDirectory) continue
     if (w.relation && w.relation !== recognition.relation) continue
     if (w.connectionType && w.connectionType !== facts.connectionType) continue
     if (w.userAgentVerified !== undefined && w.userAgentVerified !== facts.userAgentVerified) continue
@@ -81,8 +91,24 @@ export function assignRoles(pack: AgentPack, facts: VerifiedFacts, recognition: 
   return [...new Set([...recognition.roles, ...ruleRoles])]
 }
 
+/** The roles of a Principal: those of its verified facts and those of its directory entry (IDENT-ROLE-002). */
+export const unionRoles = (facts: string[], entry: string[] = []): string[] => [...new Set([...facts, ...entry])]
+
+/**
+ * How the user directory reaches the Principals (IDENT-ROLE-012): the entry this agent issued a presented identity
+ * credential from, and the roles an entry gives as the directory is loaded.
+ */
+export interface DirectoryLink {
+  /** the entry this agent issued the identity credential of these facts from (IDENT-DIR-006), if any */
+  entryOf(facts: VerifiedFacts): Promise<string | undefined>
+  /** the roles of an entry, undefined when the directory does not hold it */
+  rolesOf(entryId: string): string[] | undefined
+}
+
 export class PrincipalService {
   private readonly ttlSeconds: number
+  /** the user directory, when the agent-pack names one (D79); set once the directory is loaded */
+  public directory?: DirectoryLink
 
   public constructor(
     private readonly store: Store,
@@ -118,13 +144,20 @@ export class PrincipalService {
       ? storedIdentityAttributes(this.pack, { ...facts.evidence.values, issuerDid: facts.evidence.issuerDid })
       : { ...(existing?.identityAttributes ?? {}), ...attributes }
     const now = nowIso()
+    // the entry this agent issued the presented credential from: its roles join those of the facts (IDENT-ROLE-012)
+    const issuedFrom = facts.evidence ? await this.directory?.entryOf(facts) : undefined
+    const factRoles = assignRoles(this.pack, facts, recognition, { issuedFromDirectory: issuedFrom !== undefined })
+    const entryRoles = issuedFrom ? this.directory?.rolesOf(issuedFrom) : undefined
     const principal: Principal = {
       id: existing?.id ?? prefixedId('prn'),
       connectionType: facts.connectionType,
       actorIdentity: facts.actorIdentity,
       backingIdentity: backing,
       backingRelation: relation,
-      roles: assignRoles(this.pack, facts, recognition),
+      roles: unionRoles(factRoles, entryRoles),
+      factRoles,
+      // held while the directory holds the entry; a Principal with no entry receives no role from it
+      ...(issuedFrom && entryRoles ? { directoryEntryId: issuedFrom } : {}),
       identityAttributes,
       capabilityChannelId: existing?.capabilityChannelId ?? null,
       identityCredentialRef: facts.identityCredentialRef ?? existing?.identityCredentialRef ?? null,
@@ -136,9 +169,63 @@ export class PrincipalService {
     if (facts.identityCredentialRef) principal.livenessCache[facts.identityCredentialRef] = { ok: true, checkedAt: now }
     await this.store.principals.save(principal)
     this.logger.info(
-      { principalId: principal.id, relation, roles: principal.roles, connectionType: facts.connectionType },
+      {
+        principalId: principal.id,
+        relation,
+        roles: principal.roles,
+        connectionType: facts.connectionType,
+        ...(principal.directoryEntryId ? { directoryEntryId: principal.directoryEntryId } : {}),
+      },
       'principal resolved'
     )
+    return principal
+  }
+
+  /**
+   * A Principal holds a directory entry: it was issued its identity credential from it and holds that credential
+   * (IDENT-DIR-006). Its roles are those of its facts and of the entry (IDENT-ROLE-002).
+   */
+  public async holdEntry(principal: Principal, entryId: string, entryRoles: string[]): Promise<Principal> {
+    principal.factRoles ??= [...principal.roles]
+    principal.directoryEntryId = entryId
+    principal.roles = unionRoles(principal.factRoles, entryRoles)
+    await this.save(principal)
+    return principal
+  }
+
+  /**
+   * The roles of a Principal that holds an entry, after a reload of the directory changed them: they hold from its next
+   * turn, which reads the Principal again (IDENT-ROLE-013). Returns whether they changed.
+   */
+  public async applyEntryRoles(principal: Principal, entryRoles: string[]): Promise<boolean> {
+    const next = unionRoles(principal.factRoles ?? principal.roles, entryRoles)
+    if ([...next].sort().join('\n') === [...principal.roles].sort().join('\n')) return false
+    principal.roles = next
+    await this.save(principal)
+    return true
+  }
+
+  /**
+   * A Principal of an agent whose pack names no user directory any more holds no entry: the roles its entry gave are
+   * gone, and nothing else changes (IDENT-ROLE-012: a Principal with no entry receives no role from the directory).
+   */
+  public async forgetEntry(principal: Principal): Promise<Principal> {
+    principal.roles = [...(principal.factRoles ?? principal.roles)]
+    principal.directoryEntryId = undefined
+    await this.save(principal)
+    return principal
+  }
+
+  /**
+   * A Principal whose entry left the directory loses it and the roles it gave (IDENT-ROLE-013), and its identity
+   * credential, revoked, is invalid from now on: the cached verdict says so, whatever the liveness interval.
+   */
+  public async releaseEntry(principal: Principal): Promise<Principal> {
+    principal.roles = [...(principal.factRoles ?? [])]
+    principal.directoryEntryId = undefined
+    if (principal.identityCredentialRef)
+      principal.livenessCache[principal.identityCredentialRef] = { ok: false, checkedAt: nowIso(), reason: 'revoked' }
+    await this.save(principal)
     return principal
   }
 

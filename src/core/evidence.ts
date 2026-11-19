@@ -11,7 +11,7 @@ import { type EntryCrypto, openJson, sealJson } from '../memory/crypto.js'
 import type { Store, StoredEvidence } from '../store/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
-import type { EvidenceRecord, Principal } from './types.js'
+import type { EvidenceRecord, IssuedRevocation, Principal } from './types.js'
 
 export { AUTHENTICATION_ENTRY }
 
@@ -76,6 +76,15 @@ export interface EvidenceInput {
   requestRef?: string
   connectionRef?: string
   evidenceRefs?: string[]
+  /** an issuance: the directory entry its claims came from (IDENT-DIR-006) */
+  directoryEntryId?: string
+  /**
+   * an issuance of the identity credential: the actor it identifies once presented (D59). Kept only as a keyed index
+   * (`holderIndex`), by which the presented credential finds its record (IDENT-ROLE-012)
+   */
+  holder?: string
+  /** an issuance under a revocable definition: the registry and the index of the credential (D91) */
+  revocation?: IssuedRevocation
 }
 
 /** What the model is told of a record: its audit fields and the visible attributes, when it is usable. */
@@ -135,6 +144,9 @@ export class EvidenceService {
       requestRef: input.requestRef,
       connectionRef: input.connectionRef,
       evidenceRefs: input.evidenceRefs,
+      ...(input.directoryEntryId ? { directoryEntryId: input.directoryEntryId } : {}),
+      ...(input.holder ? { holderIndex: this.holderIndex(input.holder) } : {}),
+      ...(input.revocation ? { revocation: { ...input.revocation } } : {}),
       verifiedAt,
       state: 'active',
       expiresAt:
@@ -161,6 +173,43 @@ export class EvidenceService {
       'evidence recorded'
     )
     return auditOf(record)
+  }
+
+  /** The keyed index of the actor an identity credential identifies: the actor itself is never kept with the record. */
+  public holderIndex(actorIdentity: string): string {
+    return this.crypto.blindIndex(`holder\n${actorIdentity}`)
+  }
+
+  /**
+   * The entry of the user directory the presented identity credential of an actor was issued from, by this agent
+   * (IDENT-DIR-006, IDENT-ROLE-012): the newest issuance to that actor whose claims came from the directory and which is
+   * not revoked, under the credential definition presented when the presentation names it.
+   */
+  public async issuedFromDirectoryTo(
+    actorIdentity: string,
+    credentialDefinitionId?: string
+  ): Promise<EvidenceRecord | undefined> {
+    const found = (await this.store.evidence.listIssuedTo(this.holderIndex(actorIdentity))).find(
+      (r) =>
+        !!r.directoryEntryId &&
+        !r.revocation?.revokedAt &&
+        (!credentialDefinitionId || !r.credentialDefinitionId || r.credentialDefinitionId === credentialDefinitionId)
+    )
+    return found ? auditOf(found) : undefined
+  }
+
+  /** The issuances whose claims came from the directory: of one entry, or of every entry (IDENT-ROLE-013). */
+  public async issuedFromDirectory(directoryEntryId?: string): Promise<EvidenceRecord[]> {
+    return (await this.store.evidence.listIssuedFromDirectory(directoryEntryId)).map(auditOf)
+  }
+
+  /** Records what became of the revocation of an issued credential: audit fields only (D91). */
+  public async setRevocation(id: string, revocation: IssuedRevocation): Promise<EvidenceRecord | undefined> {
+    const stored = await this.store.evidence.get(id)
+    if (stored?.kind !== 'issuance') return undefined
+    const next: StoredEvidence = { ...stored, revocation: { ...revocation } }
+    await this.store.evidence.save(next)
+    return auditOf(next)
   }
 
   /** The audit fields of the records of a Principal, oldest first. */

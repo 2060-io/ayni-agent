@@ -1,5 +1,5 @@
 /** Memory schema versions (CORE-VER-001/002). Each migration is applied once, in order. */
-export const MEMORY_SCHEMA_VERSION = '3.6.0'
+export const MEMORY_SCHEMA_VERSION = '3.7.0'
 
 export const MIGRATIONS: { version: string; sql: string }[] = [
   {
@@ -312,6 +312,25 @@ UPDATE working_memory SET data = jsonb_set(data, '{spaceId}', to_jsonb(space_id)
 ALTER TABLE working_memory ALTER COLUMN space_id SET NOT NULL;
 DROP INDEX IF EXISTS working_memory_scope;
 CREATE INDEX IF NOT EXISTS working_memory_scope ON working_memory (state, visibility, principal_id, space_id);
+`,
+  },
+  {
+    // decision 61 (IDENT-DIR-006, IDENT-ROLE-012/013, D91): an issuance record names, in its audit fields, the entry of the
+    // user directory its claims came from and a keyed index of the actor its identity credential identifies; both are
+    // columns, so that a removal from the directory finds what to revoke and a presented badge finds its entry. The
+    // members of a space are found by their entry, and a reload's changes are listed from the admin audit, newest first
+    // (IDENT-DIR-009): its rows get the order they were written in
+    version: '3.7.0',
+    sql: `
+ALTER TABLE evidence ADD COLUMN IF NOT EXISTS directory_entry_id TEXT;
+ALTER TABLE evidence ADD COLUMN IF NOT EXISTS holder_index TEXT;
+CREATE INDEX IF NOT EXISTS evidence_directory_entry ON evidence (directory_entry_id) WHERE directory_entry_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS evidence_holder ON evidence (holder_index) WHERE holder_index IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS space_members_directory ON space_members (directory_id) WHERE directory_id IS NOT NULL;
+
+ALTER TABLE admin_audit ADD COLUMN IF NOT EXISTS seq BIGSERIAL;
+CREATE INDEX IF NOT EXISTS admin_audit_action ON admin_audit (action, ts DESC, seq DESC);
 `,
   },
 ]

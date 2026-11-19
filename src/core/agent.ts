@@ -36,6 +36,7 @@ import {
   type TurnResult,
   type TurnSink,
 } from './orchestrator.js'
+import type { PeopleService } from './people.js'
 import type { PrincipalService, VerifiedFacts } from './principals.js'
 import { SessionError, type SessionService, TRANSCRIPT_MESSAGE_TYPES } from './sessions.js'
 import { isPersonalSpace, personalSpaceId, type SpaceError, type SpaceService, spaceIdOf } from './spaces.js'
@@ -126,6 +127,8 @@ export class AyniAgent {
   public identityRequests?: Pick<IdentityRequests, 'request' | 'present' | 'onConnect'>
   /** tells each peer where it stands with the agent; set once the DIDComm side is wired (D71, IDENT-STAT) */
   public peerStatus?: PeerStatusNotifier
+  /** the people of the user directory: who holds an entry, the member picker, the admin view (decision 61) */
+  public people?: PeopleService
   /** the agent's own DID, read from the DIDComm agent at start (IDENT-SELF-001) */
   public did = 'did:unknown'
   public readonly challenges: ChallengeService
@@ -1235,6 +1238,8 @@ export class AyniAgent {
     const principal = await this.principals.resolve(facts)
     // the presentation that identified the peer is evidence of the Principal (PRIV-EVID-001)
     if (facts.evidence) await this.evidence.record(principal, { ...facts.evidence, connectionRef: connectionId })
+    // a person of the directory added to a list while invited is a member from now (SPACE-MEMB-002)
+    await this.spaces.bindDirectoryMember(principal)
     await this.sessions.supersede(principal, connectionId)
     principal.capabilityChannelId = connectionId
     await this.principals.save(principal)
@@ -1266,11 +1271,13 @@ export class AyniAgent {
       }
       const principal = await this.principals.resolve(facts)
       if (facts.evidence) await this.evidence.record(principal, { ...facts.evidence, connectionRef: connectionId })
+      await this.spaces.bindDirectoryMember(principal)
       this.issueAutomatically(principal)
       return { outcome: 'refreshed', principal }
     }
     const target = await this.principals.resolve(facts)
     if (facts.evidence) await this.evidence.record(target, { ...facts.evidence, connectionRef: connectionId })
+    await this.spaces.bindDirectoryMember(target)
     // the identified Principal may hold another channel: the device policy applies, as at a connection
     await this.sessions.supersede(target, connectionId)
     const sessions = await this.store.sessions.listByPrincipal(current.id)

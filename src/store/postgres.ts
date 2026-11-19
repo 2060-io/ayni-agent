@@ -516,10 +516,21 @@ export class PostgresStore implements Store {
     save: async (e: StoredEvidence) => {
       const { cipher, ...data } = e
       await this.pool.query(
-        `INSERT INTO evidence (id, principal_id, state, verified_at, expires_at, data, cipher)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)
-         ON CONFLICT (id) DO UPDATE SET state = $3, expires_at = $5, data = $6, cipher = $7`,
-        [e.id, e.principalId, e.state, e.verifiedAt, e.expiresAt ?? null, data, cipher]
+        `INSERT INTO evidence (id, principal_id, state, verified_at, expires_at, data, cipher, directory_entry_id, holder_index)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         ON CONFLICT (id) DO UPDATE SET state = $3, expires_at = $5, data = $6, cipher = $7, directory_entry_id = $8,
+           holder_index = $9`,
+        [
+          e.id,
+          e.principalId,
+          e.state,
+          e.verifiedAt,
+          e.expiresAt ?? null,
+          data,
+          cipher,
+          e.kind === 'issuance' ? (e.directoryEntryId ?? null) : null,
+          e.kind === 'issuance' ? (e.holderIndex ?? null) : null,
+        ]
       )
     },
     listExpired: async (nowIso: string) =>
@@ -527,6 +538,22 @@ export class PostgresStore implements Store {
         await this.rows(
           "SELECT data, cipher FROM evidence WHERE state = 'active' AND expires_at IS NOT NULL AND expires_at <= $1",
           [nowIso]
+        )
+      ).map(this.evidenceOf),
+    listIssuedFromDirectory: async (directoryEntryId?: string) =>
+      (directoryEntryId === undefined
+        ? await this.rows(
+            'SELECT data, cipher FROM evidence WHERE directory_entry_id IS NOT NULL ORDER BY verified_at, id'
+          )
+        : await this.rows('SELECT data, cipher FROM evidence WHERE directory_entry_id = $1 ORDER BY verified_at, id', [
+            directoryEntryId,
+          ])
+      ).map(this.evidenceOf),
+    listIssuedTo: async (holderIndex: string) =>
+      (
+        await this.rows(
+          'SELECT data, cipher FROM evidence WHERE holder_index = $1 ORDER BY verified_at DESC, id DESC',
+          [holderIndex]
         )
       ).map(this.evidenceOf),
   }
@@ -707,8 +734,24 @@ export class PostgresStore implements Store {
         r,
       ])
     },
-    list: (limit: number) =>
-      this.many<AdminAuditRecord>('SELECT data FROM admin_audit ORDER BY ts DESC, id DESC LIMIT $1', [limit]),
+    // newest first; of two at the same time, the one written last first (seq)
+    list: (limit: number, filter: { action?: AdminAuditRecord['action']; before?: string } = {}) => {
+      const params: unknown[] = []
+      const where: string[] = ['true']
+      if (filter.action) {
+        params.push(filter.action)
+        where.push(`action = $${params.length}`)
+      }
+      if (filter.before) {
+        params.push(filter.before)
+        where.push(`(ts, seq) < (SELECT ts, seq FROM admin_audit WHERE id = $${params.length})`)
+      }
+      params.push(limit)
+      return this.many<AdminAuditRecord>(
+        `SELECT data FROM admin_audit WHERE ${where.join(' AND ')} ORDER BY ts DESC, seq DESC LIMIT $${params.length}`,
+        params
+      )
+    },
   }
 
   public spaces = {
@@ -761,6 +804,13 @@ export class PostgresStore implements Store {
       this.many<SpaceMember>('SELECT data FROM space_members WHERE space_id = $1 ORDER BY created_at, id', [spaceId]),
     listByPrincipal: (principalId: string) =>
       this.many<SpaceMember>('SELECT data FROM space_members WHERE principal_id = $1', [principalId]),
+    listByDirectoryId: (directoryId: string) =>
+      this.many<SpaceMember>('SELECT data FROM space_members WHERE directory_id = $1 ORDER BY created_at, id', [
+        directoryId,
+      ]),
+    delete: async (id: string) => {
+      await this.pool.query('DELETE FROM space_members WHERE id = $1', [id])
+    },
   }
 
   public spaceActivity = {

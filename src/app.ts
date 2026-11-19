@@ -1,5 +1,6 @@
 /** Composition root: configuration, persistence, models, core, channels, jobs. */
 
+import { resolve as resolvePath } from 'node:path'
 import { DESCRIPTOR_PATH, DID_SERVICE_TYPE } from '@ayni.org/ayni-agui-profile'
 import cors from '@fastify/cors'
 import multipart from '@fastify/multipart'
@@ -14,24 +15,27 @@ import { registerDidcommCallbacks } from './channels/didcomm/callbacks.js'
 import { CredentialDefinitions } from './channels/didcomm/credentialDefinitions.js'
 import { CredentialOffers } from './channels/didcomm/credentialOffers.js'
 import { DidcommEvents } from './channels/didcomm/events.js'
-import { IdentityFlow, TrustResolver } from './channels/didcomm/identity.js'
+import { actorIdentityOf, IdentityFlow, TrustResolver } from './channels/didcomm/identity.js'
 import { IdentityRequests } from './channels/didcomm/identityRequests.js'
 import { PeerProfiles } from './channels/didcomm/peerProfiles.js'
 import { PeerStatusNotifier } from './channels/didcomm/peerStatus.js'
+import { CredentialRevocations } from './channels/didcomm/revocations.js'
 import { VsAgentClient } from './channels/didcomm/vsAgentClient.js'
 import { type Env, loadEnv } from './config/env.js'
 import { evidenceWarnings, loadPack } from './config/pack.js'
-import { admitsUnidentified, featuresOf } from './config/packTypes.js'
+import { admitsUnidentified, directoryReadsDocuments, featuresOf } from './config/packTypes.js'
 import { AyniAgent } from './core/agent.js'
 import { ChallengeService } from './core/challenges.js'
 import { CapabilityRouter } from './core/channel.js'
 import { ContextAssembler } from './core/context.js'
+import { UserDirectory } from './core/directory.js'
 import { documentOutcomeForModel } from './core/document.js'
 import { EvidenceService } from './core/evidence.js'
 import { FlowService } from './core/flows.js'
 import { IssuanceService, subjectIdKey } from './core/issuance.js'
 import { Orchestrator } from './core/orchestrator.js'
 import { HomeOrganization } from './core/organization.js'
+import { PeopleService } from './core/people.js'
 import { PrincipalService } from './core/principals.js'
 import { PROMPT_ADDON_VERSION } from './core/promptAddon.js'
 import { SessionService } from './core/sessions.js'
@@ -112,6 +116,21 @@ export async function buildAgent(
   )
 
   const store = createStore(env.store, env.databaseUrl)
+  const crypto = createEntryCrypto(env.entryEncryptionKey)
+  // the user directory (D79, IDENT-ROLE-012): read before anything else, and a file that does not validate stops the
+  // start, naming the entry and the field (IDENT-DIR-001)
+  const directoryFile = pack.identity.directory?.file
+  const directory = directoryFile
+    ? new UserDirectory(
+        resolvePath(packDir, directoryFile),
+        { roles: Object.keys(pack.identity.roles ?? {}), passport: directoryReadsDocuments(pack) },
+        store.kv,
+        store.adminAudit,
+        crypto,
+        logger
+      )
+    : undefined
+  directory?.open()
   // one agent process at a time on a store (PLAT-DEPLOY-004): this one waits here until the one before is gone
   const releaseStore = await store.exclusive({
     onWaiting: () => logger.info('another agent process serves this store: waiting for it to end'),
@@ -128,7 +147,6 @@ export async function buildAgent(
   const shapeFaults = storeShapeFaults()
   if (shapeFaults.length)
     throw new Error(`the stores do not hold what the scope predicate needs: ${shapeFaults.join('; ')}`)
-  const crypto = createEntryCrypto(env.entryEncryptionKey)
   const llm = createChatModel(pack.llm)
   const embeddings = createEmbeddings(pack.embeddings)
   const memory = new MemoryService(store, crypto, embeddings, pack, logger)
@@ -435,12 +453,50 @@ export async function buildAgent(
   const credentialOffers = new CredentialOffers(vsAgent, flows, (c) => peerProfiles.isFlowCapable(c), logger)
   agent.credentialOffers = credentialOffers
   const credentialDefinitions = new CredentialDefinitions(vsAgent, logger)
+  // the registry and the index of each credential issued under a revocable definition, and its revocation (decision 61)
+  const credentialRevocations = new CredentialRevocations(
+    vsAgent,
+    store.kv,
+    (definition) => credentialDefinitions.supportsRevocation(definition),
+    logger
+  )
+  // the people of the user directory: who holds an entry, what a reload changes, the picker and the admin view
+  const people = new PeopleService({
+    pack,
+    store,
+    directory,
+    principals,
+    evidence,
+    spaces,
+    revocations: credentialRevocations,
+    homeKey: () => home.key(),
+    endAccess: (principal) => agent.onCredentialInvalid(principal),
+    logger,
+  })
+  agent.people = people
+  if (directory) principals.directory = people
+  // a rule space reads the department and the groups of the entry a Principal holds, and nothing else (SPACE-MEMB-001)
+  spaces.directory = (principal) => people.factsOf(principal)
+  if (directory) spaces.people = directory
   issuanceRef = new IssuanceService(
     pack,
     evidence,
     {
       offer: (input) => credentialOffers.offer(input),
-      definitionFor: (schema) => credentialDefinitions.forSchema(schema),
+      definitionFor: (schema, options) => credentialDefinitions.forSchema(schema, options),
+      allocateRevocation: (definition) => credentialRevocations.allocate(definition),
+      // the actor the issued identity credential identifies once presented: the home organization, the schema and the
+      // subject key (D59), of which its record keeps a keyed index (IDENT-ROLE-012)
+      holderOf: async (_name, profile, claims) => {
+        const authentication = pack.identity.authentication?.[0]
+        const schema = profile.credential.jsonSchemaCredentialId
+        if (!authentication || !schema || schema !== authentication.credential.jsonSchemaCredentialId) return undefined
+        const subject = authentication.subjectKey.map((attribute) => claims[attribute])
+        if (subject.some((value) => !value)) return undefined
+        const key = await home.key()
+        return key ? actorIdentityOf(key, schema, subject as string[]) : undefined
+      },
+      issued: (principal, record, holder) => people.onIssued(principal, record, holder),
       challenge: async (principal, session, policy, purpose) => {
         const { outcome, record } = await challenges.run({
           principal,
@@ -547,6 +603,16 @@ export async function buildAgent(
     const every = rag.refreshIntervalMs()
     if (every) stops.push(schedule('rag-refresh', every, () => rag.ingestAll(), onJobError))
   }
+  if (directory) {
+    // what the file changed since the agent last loaded it, removals while it was down included, is recorded and acted
+    // on now; then every change of the file while it runs (IDENT-ROLE-013)
+    await people.apply(await directory.settle())
+    directory.onReload(async (reload) => void (await people.apply(reload)))
+    directory.watch((env.directoryPollSeconds ?? 10) * 1000)
+    stops.push(() => directory.stop())
+    // a revocation the DIDComm agent could not make is made again (D91)
+    stops.push(schedule('directory-revocations', 60_000, () => people.retry(), onJobError))
+  } else await people.reconcile()
 
   return {
     app,

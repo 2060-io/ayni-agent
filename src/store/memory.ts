@@ -350,6 +350,21 @@ export class MemoryStore implements Store {
       [...this.evidenceRows.values()]
         .filter((e) => e.state === 'active' && !!e.expiresAt && e.expiresAt <= nowIso)
         .map(copyEvidence),
+    listIssuedFromDirectory: async (directoryEntryId?: string) =>
+      [...this.evidenceRows.values()]
+        .filter(
+          (e) =>
+            e.kind === 'issuance' &&
+            !!e.directoryEntryId &&
+            (directoryEntryId === undefined || e.directoryEntryId === directoryEntryId)
+        )
+        .sort((a, b) => a.verifiedAt.localeCompare(b.verifiedAt))
+        .map(copyEvidence),
+    listIssuedTo: async (holderIndex: string) =>
+      [...this.evidenceRows.values()]
+        .filter((e) => e.kind === 'issuance' && e.holderIndex === holderIndex)
+        .sort((a, b) => b.verifiedAt.localeCompare(a.verifiedAt))
+        .map(copyEvidence),
   }
 
   public approvals = {
@@ -492,6 +507,15 @@ export class MemoryStore implements Store {
       ),
     listByPrincipal: async (principalId: string) =>
       clone([...this.memberRows.values()].filter((m) => m.principalId === principalId)),
+    listByDirectoryId: async (directoryId: string) =>
+      clone(
+        [...this.memberRows.values()]
+          .filter((m) => m.directoryId === directoryId)
+          .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      ),
+    delete: async (id: string) => {
+      this.memberRows.delete(id)
+    },
   }
 
   private readonly activityRows: SpaceActivity[] = []
@@ -515,6 +539,15 @@ export class MemoryStore implements Store {
     insert: async (r: AdminAuditRecord) => {
       this.auditRows.push(clone(r))
     },
-    list: async (limit: number) => clone([...this.auditRows].sort((a, b) => b.ts.localeCompare(a.ts)).slice(0, limit)),
+    list: async (limit: number, filter: { action?: AdminAuditRecord['action']; before?: string } = {}) => {
+      // newest first; of two at the same time, the one written last first (the sort is stable)
+      const rows = [...this.auditRows]
+        .reverse()
+        .sort((a, b) => b.ts.localeCompare(a.ts))
+        .filter((r) => !filter.action || r.action === filter.action)
+      const from = filter.before ? rows.findIndex((r) => r.id === filter.before) + 1 : 0
+      if (filter.before && from === 0) return []
+      return clone(rows.slice(from, from + limit))
+    },
   }
 }

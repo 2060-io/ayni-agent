@@ -5,8 +5,11 @@
  *
  * MEM-RAG-005 (document search compiles for its store), PRIV-SCOPE-003 (every store through the predicate),
  * PRIV-ERASE-001 and D77 (no plaintext beside the ciphertext), MEM-ENTRY-004 and D76 (the migration to conversations),
- * decision 60 (spaces: the migration to 3.6.0, the stores, no plaintext of a space, the agent served from PostgreSQL).
+ * decision 60 (spaces: the migration to 3.6.0, the stores, no plaintext of a space, the agent served from PostgreSQL),
+ * decision 61 (the user directory: the migration to 3.7.0, the issuances of an entry and of a holder, the members of an
+ * entry, the changes newest first, nothing of a person of the directory in the clear but its id and audited name).
  */
+import { rmSync } from 'node:fs'
 import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { buildAgent } from '../src/app.js'
@@ -21,6 +24,7 @@ import { MemoryService } from '../src/memory/service.js'
 import { MIGRATIONS } from '../src/store/migrations.js'
 import { PostgresStore } from '../src/store/postgres.js'
 import { createLogger } from '../src/util/logger.js'
+import { directoryPack, mintLocally, mockServices, present } from './directoryFixtures.js'
 import { parseSse, testEnv } from './helpers.js'
 
 const serverUrl = process.env.PG_TEST_URL
@@ -742,6 +746,219 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
         await raw.end()
       } finally {
         await running.stop()
+      }
+    }, 30_000)
+  })
+  describe('the migration to the user directory (decision 61, schema 3.7.0)', () => {
+    let url: string
+    beforeAll(async () => {
+      url = await freshDatabase()
+      const client = new pg.Client({ connectionString: url })
+      await client.connect()
+      await client.query(
+        'CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())'
+      )
+      for (const m of MIGRATIONS.filter((m) => m.version < '3.7.0')) {
+        await client.query(m.sql)
+        await client.query('INSERT INTO schema_migrations (version) VALUES ($1)', [m.version])
+      }
+      // two records of the admin audit at one time, and an evidence record, of the previous version
+      for (const id of ['adm_first', 'adm_second'])
+        await client.query(
+          `INSERT INTO admin_audit (id, ts, action, actor, data) VALUES ($1, '2026-11-18T10:00:00Z', 'erasure', 'op',
+             jsonb_build_object('id', $1::text, 'ts', '2026-11-18T10:00:00Z', 'action', 'erasure', 'actor', 'op'))`,
+          [id]
+        )
+      await client.query(
+        `INSERT INTO evidence (id, principal_id, state, verified_at, data)
+         VALUES ('evd_old', 'p1', 'active', now(), '{"id":"evd_old","kind":"issuance","entry":"issuance:badge"}')`
+      )
+      await client.end()
+    })
+
+    it('adds the columns of the entry and the holder, and keeps the order the audit was written in', async () => {
+      const store = new PostgresStore(url)
+      await store.init()
+      const client = new pg.Client({ connectionString: url })
+      await client.connect()
+      const columns = (
+        await client.query(
+          "SELECT table_name, column_name FROM information_schema.columns WHERE column_name IN ('directory_entry_id', 'holder_index', 'seq') ORDER BY 1, 2"
+        )
+      ).rows.map((r) => `${r.table_name}.${r.column_name}`)
+      expect(columns).toEqual(
+        expect.arrayContaining(['admin_audit.seq', 'evidence.directory_entry_id', 'evidence.holder_index'])
+      )
+      const old = (await client.query("SELECT directory_entry_id, holder_index FROM evidence WHERE id = 'evd_old'"))
+        .rows[0]
+      expect(old).toEqual({ directory_entry_id: null, holder_index: null })
+      await client.end()
+      // of two records at one time, the one written last first
+      expect((await store.adminAudit.list(10)).map((r) => r.id)).toEqual(['adm_second', 'adm_first'])
+      expect(await store.evidence.listIssuedFromDirectory()).toEqual([])
+      await store.close()
+    })
+  })
+
+  describe('the user directory in the store (decision 61)', () => {
+    let store: PostgresStore
+    beforeAll(async () => {
+      store = new PostgresStore(await freshDatabase())
+      await store.init()
+    })
+    afterAll(async () => {
+      await store.close()
+    })
+
+    it('finds the issuances of an entry and of a holder, the members of an entry, and the changes newest first', async () => {
+      const issued = (id: string, at: string, over: Record<string, unknown>) => ({
+        id,
+        principalId: 'p1',
+        kind: 'issuance' as const,
+        entry: 'issuance:badge',
+        outcome: 'verified' as const,
+        revealed: [],
+        unrevealed: [],
+        stored: [],
+        verifiedAt: at,
+        state: 'active' as const,
+        contentDigest: '',
+        encKeyRef: null,
+        cipher: null,
+        ...over,
+      })
+      await store.evidence.save(
+        issued('evd_1', '2026-11-19T01:00:00.000Z', {
+          directoryEntryId: 'p-0042',
+          holderIndex: 'h-ana',
+          revocation: { registryDefinitionId: 'rr', index: 0 },
+        })
+      )
+      await store.evidence.save(
+        issued('evd_2', '2026-11-19T02:00:00.000Z', { directoryEntryId: 'p-0043', holderIndex: 'h-jonas' })
+      )
+      await store.evidence.save(
+        issued('evd_3', '2026-11-19T03:00:00.000Z', { directoryEntryId: 'p-0042', holderIndex: 'h-ana' })
+      )
+      // a presentation never names an entry in its columns
+      await store.evidence.save({
+        ...issued('evd_4', '2026-11-19T04:00:00.000Z', { directoryEntryId: 'p-0042' }),
+        kind: 'presentation',
+      })
+      expect((await store.evidence.listIssuedFromDirectory()).map((r) => r.id)).toEqual(['evd_1', 'evd_2', 'evd_3'])
+      expect((await store.evidence.listIssuedFromDirectory('p-0042')).map((r) => r.id)).toEqual(['evd_1', 'evd_3'])
+      expect((await store.evidence.listIssuedTo('h-ana')).map((r) => r.id)).toEqual(['evd_3', 'evd_1'])
+      expect((await store.evidence.get('evd_1'))?.revocation).toEqual({ registryDefinitionId: 'rr', index: 0 })
+
+      const now = new Date().toISOString()
+      for (const [id, directoryId] of [
+        ['mem_1', 'p-0044'],
+        ['mem_2', 'p-0044'],
+        ['mem_3', 'p-0045'],
+      ])
+        await store.spaceMembers.save({
+          id,
+          spaceId: `spc_${id}`,
+          principalId: null,
+          directoryId,
+          state: 'invited',
+          role: 'member',
+          createdAt: now,
+          updatedAt: now,
+        })
+      expect((await store.spaceMembers.listByDirectoryId('p-0044')).map((m) => m.id)).toEqual(['mem_1', 'mem_2'])
+      await store.spaceMembers.delete('mem_1')
+      expect((await store.spaceMembers.listByDirectoryId('p-0044')).map((m) => m.id)).toEqual(['mem_2'])
+
+      for (const [id, action] of [
+        ['adm_a', 'directory-change'],
+        ['adm_b', 'erasure'],
+        ['adm_c', 'directory-change'],
+        ['adm_d', 'directory-change'],
+      ] as const)
+        await store.adminAudit.insert({
+          id,
+          ts: '2026-11-19T05:00:00.000Z',
+          action,
+          actor: 'directory',
+          reason: 'reload',
+          detail: {},
+        })
+      const changes = await store.adminAudit.list(2, { action: 'directory-change' })
+      expect(changes.map((r) => r.id)).toEqual(['adm_d', 'adm_c'])
+      expect(
+        (await store.adminAudit.list(10, { action: 'directory-change', before: 'adm_c' })).map((r) => r.id)
+      ).toEqual(['adm_a'])
+    })
+  })
+
+  describe('the agent and its user directory, served from PostgreSQL (decision 61)', () => {
+    it('keeps nothing of a person of the directory in the clear but the id, and the name the admin audit holds', async () => {
+      const services = await mockServices()
+      const canary = {
+        id: 'p-canary',
+        firstName: 'Canaryfirst',
+        lastName: 'Canarylast',
+        email: 'canary.mail.4471@northwind.example',
+        birthDate: '19770412',
+        nationality: 'QQX',
+        department: 'CANARY-DEPT-5821',
+        groups: ['canary-group-9930'],
+        roles: ['dispatcher'],
+      }
+      const other = { id: 'p-other', firstName: 'Ana', lastName: 'Ríos', email: 'ana@northwind.example', roles: [] }
+      const fixture = directoryPack([canary, other])
+      const url = await freshDatabase()
+      const running = await buildAgent(
+        testEnv({
+          store: 'postgres',
+          databaseUrl: url,
+          agentPackPath: fixture.pack,
+          vsAgentAdminUrl: services.url,
+          veranaApiUrl: services.url,
+          directoryPollSeconds: 0,
+        }),
+        logger,
+        { drainMs: 200 }
+      )
+      try {
+        mintLocally(running)
+        // the badge's own name, which the pack stores, is not the directory's
+        const person = await present(running, 'BN-CANARY', 'Badge Holder', { entry: 'p-canary' })
+        expect(person.principal.directoryEntryId).toBe('p-canary')
+        expect(person.principal.roles).toContain('dispatcher')
+        // a change, then the removal: the admin audit, the revocation, the sessions closed
+        fixture.swap([{ ...canary, department: 'CANARY-DEPT-NEW-1170' }, other])
+        await running.agent.people?.directory?.check()
+        fixture.swap([other])
+        await running.agent.people?.directory?.check()
+        const record = (await running.agent.evidence.issuedFromDirectory('p-canary'))[0]
+        expect(record?.revocation?.revokedAt).toBeDefined()
+        const sessions = await running.agent.store.sessions.listByPrincipal(person.principal.id)
+        expect(sessions.every((s) => s.state === 'closed' && s.closedReason === 'credential-invalid')).toBe(true)
+
+        const raw = new pg.Client({ connectionString: url })
+        await raw.connect()
+        const tables = (
+          await raw.query(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
+          )
+        ).rows.map((r) => String(r.table_name))
+        const named: string[] = []
+        for (const table of tables) {
+          for (const { row } of (await raw.query(`SELECT t::text AS row FROM ${table} t`)).rows) {
+            // never an email, a birthdate, a nationality, a department or a group (IDENT-DIR-007)
+            expect(row, table).not.toMatch(/canary\.mail|4471|19770412|1977-04-12|QQX|CANARY-DEPT|canary-group/)
+            if (/Canaryfirst|Canarylast/.test(row)) named.push(table)
+          }
+        }
+        // the name is in the records of the admin audit (IDENT-DIR-009), and nowhere else
+        expect([...new Set(named)]).toEqual(['admin_audit'])
+        await raw.end()
+      } finally {
+        await running.stop()
+        await services.app.close()
+        rmSync(fixture.root, { recursive: true, force: true })
       }
     }, 30_000)
   })

@@ -1,6 +1,7 @@
 /**
  * The AG-UI channel endpoints of the Ayni AG-UI Profile v3 (CHAN-ADP-004, PROF-*):
- * descriptor, sessions, binding refresh, session stream, runs and cancellation, history, attachments.
+ * descriptor, sessions, binding refresh, session stream, runs and cancellation, history, attachments; spaces, the
+ * person's memories, handover (§3.7, §3.8); the member picker and the admin view of the user directory (§3.9).
  */
 
 import { readFileSync } from 'node:fs'
@@ -23,15 +24,16 @@ import { conversationOf } from '../../core/conversationOf.js'
 import { conversationKey, type TurnEvent, type TurnSink } from '../../core/orchestrator.js'
 import { normalizeClient, SessionError } from '../../core/sessions.js'
 import { type SpaceAccess, SpaceError, spaceIdOf } from '../../core/spaces.js'
-import type {
-  ClientDescription,
-  Conversation,
-  MessageEntry,
-  Principal,
-  Session,
-  Space,
-  SpaceActivity,
-  SpaceMember,
+import {
+  type ClientDescription,
+  type Conversation,
+  DIRECTORY_ACTOR,
+  type MessageEntry,
+  type Principal,
+  type Session,
+  type Space,
+  type SpaceActivity,
+  type SpaceMember,
 } from '../../core/types.js'
 import { TooManyWaiting } from '../../core/waiting.js'
 import { canonicalMime, mimeAllowed } from '../../media/service.js'
@@ -83,6 +85,21 @@ const SHARED_SOURCE_TYPES = ['text', 'voice', 'media']
 interface SpaceViewContext {
   conversations: Conversation[]
   principals: Principal[]
+}
+
+/** The status of each code of a `SessionError` (profile §9); `ERROR_STATUS` of the profile package lists the same. */
+export const SESSION_ERROR_STATUS: Record<SessionError['code'], number> = {
+  unauthorized: 401,
+  'not-bound': 403,
+  'not-found': 404,
+  conflict: 409,
+  'pairing-expired': 409,
+  'pairing-invalid': 409,
+  'grant-used': 409,
+  'grant-expired': 409,
+  final: 409,
+  closed: 410,
+  forbidden: 403,
 }
 
 /** The attachments of a message as its sender gets them back: a voice note with its transcription (PROF-MAP-006). */
@@ -206,19 +223,7 @@ export class AgUiRoutes {
       return
     }
     if (error instanceof SessionError) {
-      const code = {
-        unauthorized: 401,
-        'not-bound': 403,
-        'not-found': 404,
-        conflict: 409,
-        'pairing-expired': 409,
-        'pairing-invalid': 409,
-        'grant-used': 409,
-        'grant-expired': 409,
-        final: 409,
-        closed: 410,
-        forbidden: 403,
-      }[error.code]
+      const code = SESSION_ERROR_STATUS[error.code]
       reply.code(code).send({
         error: error.code === 'not-found' ? 'not-found' : error.code,
         ...(error.reason ? { reason: error.reason } : {}),
@@ -675,7 +680,33 @@ export class AgUiRoutes {
 
   private nameOf(principals: Principal[], id: string): string {
     const p = principals.find((each) => each.id === id)
-    return p ? displayName(p) : id
+    return p ? this.personName(p) : id
+  }
+
+  /** A person of the home organization by the name the user directory gives them, else as the agent names them. */
+  private personName(principal: Principal): string {
+    return this.directoryName(principal.directoryEntryId) ?? displayName(principal)
+  }
+
+  /** The name the user directory gives a person, when the agent has one and holds the entry (decision 61). */
+  private directoryName(directoryId: string | undefined): string | undefined {
+    return directoryId ? this.agent.people?.directory?.view(directoryId)?.name : undefined
+  }
+
+  /**
+   * A member of a list space as its members see it (PROF-SPACE-003): a person who holds a Principal by their name; one
+   * of the directory still invited by the name the directory gives them; one of another organization by the address
+   * they were invited at, until the invitation binds.
+   */
+  private memberInfo(m: SpaceMember, principals: Principal[]) {
+    const p = m.principalId ? principals.find((each) => each.id === m.principalId) : undefined
+    return {
+      memberId: m.id,
+      name: p ? this.personName(p) : (this.directoryName(m.directoryId) ?? m.email ?? m.directoryId ?? m.id),
+      organization: p?.backingIdentity?.name ?? p?.backingIdentity?.id ?? m.organizationKey ?? null,
+      state: m.state,
+      role: m.role,
+    }
   }
 
   /**
@@ -714,23 +745,10 @@ export class AgUiRoutes {
   private async spaceDetail(access: SpaceAccess, ctx: SpaceViewContext) {
     const { space } = access
     const rows = space.kind === 'personal' ? [] : await this.agent.spaces.memberRows(space.id)
-    const byId = new Map(ctx.principals.map((p) => [p.id, p]))
     return {
       ...(await this.spaceInfo(access, ctx, rows)),
       ...(space.membership.mode === 'list' && space.kind !== 'personal' && !access.left
-        ? {
-            members: rows.map((m) => {
-              const p = m.principalId ? byId.get(m.principalId) : undefined
-              return {
-                memberId: m.id,
-                // an invited person is named by the address they were invited at, until the invitation binds
-                name: p ? displayName(p) : (m.email ?? m.directoryId ?? m.id),
-                organization: p?.backingIdentity?.name ?? p?.backingIdentity?.id ?? m.organizationKey ?? null,
-                state: m.state,
-                role: m.role,
-              }
-            }),
-          }
+        ? { members: rows.map((m) => this.memberInfo(m, ctx.principals)) }
         : {}),
       createdAt: space.createdAt,
       updatedAt: space.updatedAt,
@@ -756,15 +774,22 @@ export class AgUiRoutes {
     }
   }
 
-  /** One line of a space's activity (PROF-SPACE-006): who did what, and to whom; never the value of a field. */
+  /**
+   * One line of a space's activity (PROF-SPACE-006): who did what, and to whom; never the value of a field. What a reload
+   * of the user directory did names no one as `by`.
+   */
   private async activityItem(a: SpaceActivity, principals: Principal[]) {
     const member = a.memberId ? await this.agent.store.spaceMembers.get(a.memberId) : undefined
+    const principalId = member?.principalId ?? a.principalId
+    const name = principalId
+      ? this.nameOf(principals, principalId)
+      : this.directoryName(member?.directoryId ?? a.directoryId)
     return {
       id: a.id,
       at: a.at,
       kind: a.action,
-      by: { name: this.nameOf(principals, a.actorId) },
-      ...(member?.principalId ? { member: { name: this.nameOf(principals, member.principalId) } } : {}),
+      ...(a.actorId === DIRECTORY_ACTOR ? {} : { by: { name: this.nameOf(principals, a.actorId) } }),
+      ...(name ? { member: { name } } : {}),
       ...(a.fields ? { fields: a.fields } : {}),
       ...(a.conversationId ? { conversationId: a.conversationId } : {}),
     }
@@ -869,13 +894,18 @@ export class AgUiRoutes {
       })
     )
 
-    // PROF-SPACE-005. Phase 1: a person of the employee list or of another organization comes with the list and the
-    // invitations (501)
+    // PROF-SPACE-005: a person of the user directory by `directoryId`, `invited` until a Principal holds that entry
+    // (SPACE-MEMB-002). A person of another organization comes with the invitations (agent phase 2b: 501 meanwhile)
     app.post(
       `${base}/spaces/:spaceId/members`,
-      handle(async ({ principal }, request) => {
+      handle(async ({ principal }, request, reply) => {
         const { spaceId } = request.params as { spaceId: string }
-        return this.agent.spaces.addMember(principal, spaceId, (request.body ?? {}) as Record<string, unknown>)
+        const row = await this.agent.spaces.addMember(
+          principal,
+          spaceId,
+          (request.body ?? {}) as Record<string, unknown>
+        )
+        return reply.code(201).send(this.memberInfo(row, await this.agent.store.principals.list()))
       })
     )
 
@@ -888,19 +918,16 @@ export class AgUiRoutes {
       })
     )
 
-    // PROF-SPACE-006: a member of a list space by `memberId`; a person of a rule space by `directoryId` comes with the
-    // employee list (501 in phase 1)
+    // PROF-SPACE-006, SPACE-MEMB-007: a member of a list space by `memberId`; a person the rule of a rule space matches,
+    // who holds a Principal, by `directoryId`
     app.post(
       `${base}/spaces/:spaceId/owner`,
       handle(async ({ principal }, request) => {
         const { spaceId } = request.params as { spaceId: string }
         const { memberId, directoryId } = (request.body ?? {}) as { memberId?: unknown; directoryId?: unknown }
-        if (typeof memberId !== 'string' && typeof directoryId === 'string') {
-          await this.agent.spaces.owned(principal, spaceId)
-          throw new SpaceError('a person of the employee list comes with the list', 'not-implemented')
-        }
-        if (typeof memberId !== 'string') throw new SpaceError('memberId is required', 'bad-request')
-        await this.agent.spaces.transferOwner(principal, spaceId, memberId)
+        if (memberId === undefined && directoryId === undefined)
+          throw new SpaceError('memberId or directoryId is required', 'bad-request')
+        await this.agent.spaces.transferOwner(principal, spaceId, { memberId, directoryId })
         return this.spaceDetail(await visible(principal, spaceId), await this.spaceViewContext(principal))
       })
     )
@@ -1067,6 +1094,39 @@ export class AgUiRoutes {
     app.get(
       `${base}/about-me`,
       handle(async ({ session, principal }) => this.agent.aboutMe(principal, session))
+    )
+
+    // PROF-DIR-001, SPACE-MEMB-005: the member picker, to a person who owns a list space or may create one; names and
+    // departments only, never an email, a birthdate or a nationality (IDENT-DIR-007)
+    app.get(
+      `${base}/directory`,
+      handle(async ({ principal }, request) => {
+        const { q } = request.query as { q?: string }
+        const people = this.agent.people
+        if (!people)
+          throw new SpaceError('only the owner of a list space, or who may create one, picks people', 'not-creator')
+        return people.search(principal, typeof q === 'string' ? q : '')
+      })
+    )
+
+    // PROF-DIR-003, IDENT-DIR-008/009: who holds which role and why, and what each reload changed; to an admin only
+    app.get(
+      `${base}/admin/roles`,
+      handle(async ({ principal }) => {
+        if (!this.agent.people) throw new SpaceError('only an admin of the agent reads the admin view', 'not-admin')
+        return this.agent.people.adminRoles(principal)
+      })
+    )
+    app.get(
+      `${base}/admin/changes`,
+      handle(async ({ principal }, request) => {
+        if (!this.agent.people) throw new SpaceError('only an admin of the agent reads the admin view', 'not-admin')
+        const { before, limit } = request.query as { before?: string; limit?: string }
+        return this.agent.people.adminChanges(principal, {
+          before: before || undefined,
+          limit: Number(limit) || undefined,
+        })
+      })
     )
   }
 

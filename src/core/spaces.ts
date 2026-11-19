@@ -19,6 +19,7 @@ import { type EntryCrypto, openJson, sealJson } from '../memory/crypto.js'
 import type { SpaceMemberRepo, SpaceRepo, Store } from '../store/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
+import type { DirectoryView } from './directory.js'
 import type {
   Conversation,
   LawfulBasis,
@@ -58,9 +59,12 @@ export type SpaceErrorCode =
   | 'handover-not-allowed'
   | 'final'
   | 'space-left'
+  | 'already-member'
+  | 'not-admin'
   | 'not-implemented'
 
-const STATUS: Record<SpaceErrorCode, number> = {
+/** The status of each refusal (profile 3.3 §9); `ERROR_STATUS` of the profile package lists the same. */
+export const SPACE_ERROR_STATUS: Record<SpaceErrorCode, number> = {
   'not-found': 404,
   'bad-request': 400,
   'not-creator': 403,
@@ -74,6 +78,8 @@ const STATUS: Record<SpaceErrorCode, number> = {
   'handover-not-allowed': 409,
   final: 409,
   'space-left': 409,
+  'already-member': 409,
+  'not-admin': 403,
   'not-implemented': 501,
 }
 
@@ -87,7 +93,7 @@ export class SpaceError extends Error {
   ) {
     super(message)
     this.name = 'SpaceError'
-    this.status = STATUS[code]
+    this.status = SPACE_ERROR_STATUS[code]
   }
 }
 
@@ -112,6 +118,11 @@ export interface MembershipFacts {
 
 /** The department and groups of a Principal's directory entry (ayni-spec D79, IDENT-ROLE-012); none without one. */
 export type DirectoryFacts = (principal: Principal) => { department?: string; groups?: string[] } | undefined
+
+/** The people of the user directory as the spaces see them: a name, a department, groups (SPACE-MEMB-002/005). */
+export interface DirectoryPeople {
+  view(directoryId: string): DirectoryView | undefined
+}
 
 export function membershipFacts(principal: Principal, directory?: DirectoryFacts): MembershipFacts {
   const entry = directory?.(principal)
@@ -186,6 +197,9 @@ export function sealedMembers(repo: SpaceMemberRepo, crypto: EntryCrypto): Space
     listBySpace: async (spaceId) => (await repo.listBySpace(spaceId)).map((m) => open(m) as SpaceMember),
     listByPrincipal: async (principalId) =>
       (await repo.listByPrincipal(principalId)).map((m) => open(m) as SpaceMember),
+    listByDirectoryId: async (directoryId) =>
+      (await repo.listByDirectoryId(directoryId)).map((m) => open(m) as SpaceMember),
+    delete: (id) => repo.delete(id),
   }
 }
 
@@ -218,11 +232,13 @@ export class SpaceService {
   private readonly spaces: SpaceRepo
   private readonly members: SpaceMemberRepo
   /**
-   * The directory entry of a Principal, for the rules over a department or a group (SPACE-MEMB-001). Phase 1 has no user
-   * directory (ayni-spec D79 is not implemented here yet): such a rule matches its owner only, and `organization: true`
-   * matches every Principal of `relation: home`.
+   * The directory entry of a Principal, for the rules over a department or a group (SPACE-MEMB-001): the agent wires it
+   * to the user directory as loaded (decision 61). Without a directory such a rule matches its owner only, and
+   * `organization: true` every Principal of `relation: home`.
    */
   public directory?: DirectoryFacts
+  /** the people of the user directory, for adding them to a list and naming them (SPACE-MEMB-002); none without one */
+  public people?: DirectoryPeople
 
   public constructor(
     private readonly store: Store,
@@ -332,7 +348,7 @@ export class SpaceService {
     rows: SpaceMember[],
     hasConversations: boolean
   ): SpaceAccess | undefined {
-    const row = rows.find((m) => m.spaceId === space.id && m.principalId === principal.id)
+    const row = rows.find((m) => m.spaceId === space.id && this.isRowOf(principal, m))
     if (row?.state === 'active') return { space, role: row.role, left: false, member: row }
     if (space.ownerIds.includes(principal.id))
       return { space, role: 'owner', left: false, ...(row ? { member: row } : {}) }
@@ -347,6 +363,13 @@ export class SpaceService {
     return undefined
   }
 
+  /** A row of a space is a Principal's when it names the Principal, or the directory entry the Principal holds. */
+  private isRowOf(principal: Principal, m: SpaceMember): boolean {
+    return (
+      m.principalId === principal.id || (!!principal.directoryEntryId && m.directoryId === principal.directoryEntryId)
+    )
+  }
+
   /** What a Principal is to a space; undefined when they cannot see it (someone else's Personal space included). */
   public async access(principal: Principal, spaceId: string): Promise<SpaceAccess | undefined> {
     if (isPersonalSpace(spaceId))
@@ -355,7 +378,7 @@ export class SpaceService {
         : undefined
     const space = await this.find(spaceId)
     if (!space) return undefined
-    const rows = (await this.members.listBySpace(space.id)).filter((m) => m.principalId === principal.id)
+    const rows = (await this.members.listBySpace(space.id)).filter((m) => this.isRowOf(principal, m))
     // a member is one without reading their conversations: those are read only to tell a former member
     const member = this.accessOf(principal, space, rows, false)
     if (member) return member
@@ -371,6 +394,9 @@ export class SpaceService {
   /** The spaces a Principal sees: Personal first, then the others by creation; left ones they still have conversations in. */
   public async listFor(principal: Principal): Promise<SpaceAccess[]> {
     const rows = await this.members.listByPrincipal(principal.id)
+    if (principal.directoryEntryId)
+      for (const row of await this.members.listByDirectoryId(principal.directoryEntryId))
+        if (!rows.some((r) => r.id === row.id)) rows.push(row)
     const own = new Set((await this.store.conversations.listByPrincipal(principal.id)).map(spaceIdOf))
     const out: SpaceAccess[] = [{ space: this.personal(principal), role: 'owner', left: false }]
     for (const space of await this.all()) {
@@ -581,24 +607,91 @@ export class SpaceService {
     return this.members.listBySpace(spaceId)
   }
 
+  /** The Principals that hold a directory entry: those whose identity credential this agent issued from it (IDENT-DIR-006). */
+  public async holdersOf(directoryId: string): Promise<Principal[]> {
+    return (await this.store.principals.list())
+      .filter((p) => p.directoryEntryId === directoryId)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+  }
+
   /**
-   * Adds a person to a space's list (SPACE-MEMB-002, PROF-SPACE-005): a person of the employee list by its entry, a person of another
-   * organization by its organization key and email. Phase 1 has neither the employee list (ayni-spec D79) nor the
-   * invitations: both answer 501 for an owner.
+   * Adds a person to a space's list (SPACE-MEMB-002, PROF-SPACE-005): a person of the user directory by its entry,
+   * `invited` until a Principal holds that entry, then `active`. A person of another organization, by its organization
+   * key and email, comes with the invitations (agent phase 2b: 501 meanwhile).
    */
-  public async addMember(principal: Principal, spaceId: string, body: Record<string, unknown>): Promise<never> {
+  public async addMember(principal: Principal, spaceId: string, body: Record<string, unknown>): Promise<SpaceMember> {
     const { space } = await this.owned(principal, spaceId)
     if (space.membership.mode === 'rule')
       throw new SpaceError('the members of this space are given by its rule', 'rule-membership')
-    const kind =
-      typeof body.directoryId === 'string' ? 'a person of the employee list' : 'a person of another organization'
-    throw new SpaceError(`adding ${kind} comes with the employee list and the invitations`, 'not-implemented')
+    if (typeof body.directoryId === 'string' && body.directoryId)
+      return this.addFromDirectory(principal, space, body.directoryId)
+    if (body.organizationKey !== undefined || body.email !== undefined)
+      throw new SpaceError('inviting a person of another organization comes with the invitations', 'not-implemented')
+    throw new SpaceError('directoryId, or organizationKey and email, is required', 'bad-request')
+  }
+
+  private async addFromDirectory(principal: Principal, space: Space, directoryId: string): Promise<SpaceMember> {
+    if (!this.people?.view(directoryId)) throw new SpaceError('person not found', 'not-found')
+    const holders = await this.holdersOf(directoryId)
+    if (holders.some((h) => space.ownerIds.includes(h.id)))
+      throw new SpaceError('this person owns the space', 'already-member')
+    const rows = await this.members.listBySpace(space.id)
+    const existing = rows.find(
+      (m) => m.directoryId === directoryId || (!!m.principalId && holders.some((h) => h.id === m.principalId))
+    )
+    if (existing && existing.state !== 'left') throw new SpaceError('this person is a member already', 'already-member')
+    const holder = holders[0]
+    const now = nowIso()
+    const row: SpaceMember = {
+      ...(existing ?? { id: prefixedId('mem'), spaceId: space.id, createdAt: now }),
+      principalId: holder?.id ?? null,
+      directoryId,
+      state: holder ? 'active' : 'invited',
+      role: 'member',
+      updatedAt: now,
+    }
+    await this.members.save(row)
+    await this.record(space.id, principal.id, holder ? 'joined' : 'invited', { memberId: row.id, directoryId })
+    this.logger.info(
+      { spaceId: space.id, memberId: row.id, directoryId, state: row.state },
+      'a person of the directory added to a space'
+    )
+    return row
+  }
+
+  /**
+   * A Principal comes to hold a directory entry (its badge from the directory is presented): the lists it was added to
+   * by that entry while `invited` make it `active` (SPACE-MEMB-002).
+   */
+  public async bindDirectoryMember(principal: Principal): Promise<number> {
+    if (!principal.directoryEntryId) return 0
+    let bound = 0
+    for (const row of await this.members.listByDirectoryId(principal.directoryEntryId)) {
+      if (row.state !== 'invited' || !(await this.find(row.spaceId))) continue
+      await this.members.save({ ...row, principalId: principal.id, state: 'active', updatedAt: nowIso() })
+      await this.record(row.spaceId, principal.id, 'joined', { memberId: row.id, directoryId: row.directoryId })
+      bound++
+    }
+    if (bound) this.logger.info({ principalId: principal.id, spaces: bound }, 'invitations of the directory bound')
+    return bound
+  }
+
+  /**
+   * Who may search the user directory (SPACE-MEMB-005, PROF-DIR-001): a Principal who owns a list space or holds a
+   * `creators` role of a list template.
+   */
+  public async mayPickPeople(principal: Principal): Promise<boolean> {
+    if (
+      this.templates().some((t) => t.membership.mode === 'list' && t.creators.some((r) => principal.roles.includes(r)))
+    )
+      return true
+    return (await this.all()).some((s) => s.membership.mode === 'list' && s.ownerIds.includes(principal.id))
   }
 
   /**
    * The owner removes a member of a list space (profile PROF-SPACE-005); the owner is not removed (they give the space
-   * first), and a rule space's members follow its rule. The row stays, as `left`: its person keeps reading their own
-   * conversations of the space.
+   * first), and a rule space's members follow its rule. The row of a member stays, as `left`: its person keeps reading
+   * their own conversations of the space. A person removed while `invited` is removed (SPACE-MEMB-004).
    */
   public async removeMember(principal: Principal, spaceId: string, memberId: string): Promise<SpaceMember> {
     const { space } = await this.owned(principal, spaceId)
@@ -608,15 +701,83 @@ export class SpaceService {
     if (!row || row.spaceId !== spaceId || row.state === 'left') throw new SpaceError('member not found', 'not-found')
     if (row.role === 'owner' || (row.principalId && space.ownerIds.includes(row.principalId)))
       throw new SpaceError('the owner stays: give the space to a member first', 'owner')
+    const detail = {
+      memberId,
+      ...(row.directoryId ? { directoryId: row.directoryId } : {}),
+      ...(row.principalId ? { principalId: row.principalId } : {}),
+    }
+    if (row.state === 'invited') {
+      await this.members.delete(row.id)
+      await this.record(spaceId, principal.id, 'removed', detail)
+      return row
+    }
     const left: SpaceMember = { ...row, state: 'left', updatedAt: nowIso() }
     await this.members.save(left)
-    await this.record(spaceId, principal.id, 'removed', { memberId })
+    await this.record(spaceId, principal.id, 'removed', detail)
     return left
   }
 
-  /** An owner gives the space to an active member, and becomes a member. */
-  public async transferOwner(principal: Principal, spaceId: string, memberId: string): Promise<Space> {
-    const { space, member: mine } = await this.owned(principal, spaceId)
+  /**
+   * An owner gives the space to another person (SPACE-MEMB-007, PROF-SPACE-006): in a list space an active member who is
+   * not a guest, by `memberId`; in a rule space a person the rule matches who holds a Principal, by `directoryId`. The
+   * former owner stays a member; any other target is not eligible.
+   */
+  public async transferOwner(
+    principal: Principal,
+    spaceId: string,
+    target: { memberId?: unknown; directoryId?: unknown }
+  ): Promise<Space> {
+    const { space } = await this.owned(principal, spaceId)
+    if (space.membership.mode === 'rule') {
+      if (typeof target.directoryId !== 'string' || !target.directoryId)
+        throw new SpaceError('a rule space is given to a person of the directory the rule matches', 'not-eligible')
+      return this.transferToEntry(principal, space, target.directoryId)
+    }
+    if (typeof target.memberId !== 'string' || !target.memberId)
+      throw new SpaceError('a list space is given to one of its active members', 'not-eligible')
+    return this.transferToMember(principal, space, target.memberId)
+  }
+
+  private async transferToEntry(principal: Principal, space: Space, directoryId: string): Promise<Space> {
+    const rule = (space.membership as Extract<SpaceMembership, { mode: 'rule' }>).rule
+    const target = (await this.holdersOf(directoryId)).find((p) =>
+      ruleMatches(rule, membershipFacts(p, this.directory))
+    )
+    if (!target)
+      throw new SpaceError(
+        'the space can be given to a person the rule matches who holds a badge from the directory',
+        'not-eligible'
+      )
+    if (space.ownerIds.includes(target.id)) return space
+    const rows = await this.members.listBySpace(space.id)
+    const mine = rows.find((m) => m.principalId === principal.id && m.state === 'active')
+    const theirs = rows.find((m) => m.principalId === target.id)
+    const now = nowIso()
+    const row: SpaceMember = {
+      ...(theirs ?? { id: prefixedId('mem'), spaceId: space.id, createdAt: now }),
+      principalId: target.id,
+      directoryId,
+      state: 'active',
+      role: 'owner',
+      updatedAt: now,
+    }
+    await this.members.save(row)
+    if (mine) await this.members.save({ ...mine, role: 'member', updatedAt: now })
+    const next: Space = {
+      ...space,
+      ownerIds: [...space.ownerIds.filter((id) => id !== principal.id && id !== target.id), target.id],
+      updatedAt: now,
+    }
+    await this.spaces.save(next)
+    await this.record(space.id, principal.id, 'owner-changed', { memberId: row.id, directoryId })
+    return next
+  }
+
+  private async transferToMember(principal: Principal, space: Space, memberId: string): Promise<Space> {
+    const spaceId = space.id
+    const mine = (await this.members.listBySpace(spaceId)).find(
+      (m) => m.principalId === principal.id && m.state === 'active'
+    )
     const target = await this.members.get(memberId)
     if (
       !target ||
@@ -659,7 +820,7 @@ export class SpaceService {
     spaceId: string,
     actorId: string,
     action: SpaceActivity['action'],
-    detail: Pick<SpaceActivity, 'fields' | 'memberId' | 'conversationId'>
+    detail: Pick<SpaceActivity, 'fields' | 'memberId' | 'conversationId' | 'principalId' | 'directoryId'>
   ): Promise<void> {
     await this.store.spaceActivity.insert({ id: prefixedId('act'), spaceId, at: nowIso(), actorId, action, ...detail })
   }

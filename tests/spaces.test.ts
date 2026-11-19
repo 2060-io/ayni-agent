@@ -288,11 +288,13 @@ describe('spaces and their templates (SPACE-DEF-001..006, PROF-SPACE-001..004)',
     expect(second.body.activity.map((a: { kind: string }) => a.kind)).toEqual(['created'])
   })
 
-  it('answers 501 for members in phase 1, keeps its owner, and is given to an active member (SPACE-MEMB-007)', async () => {
+  it('knows no person outside the directory, keeps its owner, and is given to an active member (SPACE-MEMB-007)', async () => {
     const ana = await device('did:peer:ana-owner')
     const bob = await device('did:peer:bob-owner')
     const space = (await call(ana, 'POST', '/spaces', { templateId: 'project', title: 'Handoff', purpose: 'p' })).body
-    expect((await call(ana, 'POST', `/spaces/${space.id}/members`, { directoryId: 'emp-1' })).status).toBe(501)
+    // the dev pack names no user directory: nobody is found in it (decision 61); a person of another organization comes
+    // with the invitations (phase 2b)
+    expect((await call(ana, 'POST', `/spaces/${space.id}/members`, { directoryId: 'emp-1' })).status).toBe(404)
     const outsider = await call(ana, 'POST', `/spaces/${space.id}/members`, {
       organizationKey: 'org:EE:1',
       email: 'x@example.org',
@@ -300,11 +302,16 @@ describe('spaces and their templates (SPACE-DEF-001..006, PROF-SPACE-001..004)',
     expect(outsider).toMatchObject({ status: 501, body: { error: 'not-implemented' } })
     const ownerRow = space.members[0].memberId as string
     expect((await call(ana, 'DELETE', `/spaces/${space.id}/members/${ownerRow}`)).body.error).toBe('owner')
-    // a person of the employee list for a rule space comes with the list; a member who is none is not eligible
-    expect((await call(ana, 'POST', `/spaces/${space.id}/owner`, { directoryId: 'emp-1' })).status).toBe(501)
+    // a list space is given to one of its members, by `memberId`, never to a person of the directory by `directoryId`
+    const byEntry = await call(ana, 'POST', `/spaces/${space.id}/owner`, { directoryId: 'emp-1' })
+    expect(byEntry).toMatchObject({ status: 422, body: { error: 'not-eligible' } })
+    // the member picker of an agent without a directory finds nobody (SPACE-MEMB-005)
+    expect(await call(ana, 'GET', '/directory?q=ana')).toEqual({ status: 200, body: { people: [] } })
+    // and its admin view is nobody's: no role of the dev pack is an admin (IDENT-DIR-008)
+    expect((await call(ana, 'GET', '/admin/roles')).body.error).toBe('not-admin')
     const nobody = await call(ana, 'POST', `/spaces/${space.id}/owner`, { memberId: 'mem_nobody' })
     expect(nobody).toMatchObject({ status: 422, body: { error: 'not-eligible' } })
-    // a listed member, as the employee list will add one (phase 2)
+    // a listed member, as the owner adds one
     const now = new Date().toISOString()
     await running.agent.store.spaceMembers.save({
       id: 'mem_bob',
@@ -332,6 +339,19 @@ describe('spaces and their templates (SPACE-DEF-001..006, PROF-SPACE-001..004)',
     const activity = (await call(bob, 'GET', `/spaces/${space.id}/activity`)).body.activity
     expect(activity.slice(0, 2).map((a: { kind: string }) => a.kind)).toEqual(['removed', 'owner-changed'])
     expect(activity[0]).toMatchObject({ by: { name: 'bob-owner' }, member: { name: 'ana-owner' } })
+  })
+})
+
+describe('without a user directory (decision 61)', () => {
+  it('gives no role from an entry once the agent-pack names no directory (IDENT-ROLE-012)', async () => {
+    const ana = await device('did:peer:ana-no-directory', { roles: ['employee', 'dispatcher'] })
+    await running.agent.principals.save({ ...ana.principal, directoryEntryId: 'p-0042', factRoles: ['employee'] })
+    expect(await running.agent.people?.reconcile()).toMatchObject({ rolesChanged: 1, released: 0, revoked: 0 })
+    const after = await running.agent.principals.get(ana.principal.id)
+    expect(after?.directoryEntryId).toBeUndefined()
+    expect(after?.roles).toEqual(['employee'])
+    // nothing else changes: her session is open
+    expect((await running.agent.sessions.get(ana.sessionId))?.state).toBe('bound')
   })
 })
 
@@ -515,6 +535,7 @@ describe('membership by rule, and leaving a space (SPACE-MEMB-001/003/004, PROF-
     const home = { backingRelation: 'home' as const }
     // the department of each person comes from their directory entry, never from a claim (SPACE-MEMB-001)
     const departments = new Map<string, string>()
+    const wired = running.agent.spaces.directory
     running.agent.spaces.directory = (p) => (departments.has(p.id) ? { department: departments.get(p.id) } : undefined)
     const lead = await device('did:peer:lead-rule', { ...home, roles: ['employee', 'manager'] })
     const mia = await device('did:peer:mia-rule', {
@@ -561,7 +582,7 @@ describe('membership by rule, and leaving a space (SPACE-MEMB-001/003/004, PROF-
     // back in Sales: active again (SPACE-MEMB-004)
     departments.set(mia.principal.id, 'Sales')
     expect((await run(conversation, 'back again')).status).toBe(200)
-    running.agent.spaces.directory = undefined
+    running.agent.spaces.directory = wired
   })
 
   it('makes every person of the organization a member of its space, and nobody else (SPACE-MEMB-001)', async () => {

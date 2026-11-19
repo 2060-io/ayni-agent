@@ -175,6 +175,16 @@ export interface EvidenceRepo {
   save(record: StoredEvidence): Promise<void>
   /** active records whose retention ended at or before the given time */
   listExpired(nowIso: string): Promise<StoredEvidence[]>
+  /**
+   * the issuance records whose claims came from the user directory, of one entry or of every entry, oldest first: what a
+   * removal from the directory revokes (IDENT-DIR-006, IDENT-ROLE-013)
+   */
+  listIssuedFromDirectory(directoryEntryId?: string): Promise<StoredEvidence[]>
+  /**
+   * the issuance records of the identity credential that identifies an actor, by the keyed index of the actor, newest
+   * first: how a presented credential finds the entry it was issued from (IDENT-ROLE-012)
+   */
+  listIssuedTo(holderIndex: string): Promise<StoredEvidence[]>
 }
 
 export interface ApprovalRepo {
@@ -238,7 +248,11 @@ export interface KvRepo {
 export interface AdminAuditRecord {
   id: string
   ts: string
-  action: 'erasure' | 'legal-hold' | 'legal-hold-release' | 'audit-read'
+  /**
+   * a call to the admin interface; what a reload of the user directory changed, entry by entry (IDENT-DIR-009); a
+   * credential revoked because its entry left the directory (IDENT-ROLE-013)
+   */
+  action: 'erasure' | 'legal-hold' | 'legal-hold-release' | 'audit-read' | 'directory-change' | 'credential-revocation'
   actor: string
   reason: string
   /** what it named and what came of it: entry ids, a conversation, a Principal, an evidence record, counts */
@@ -247,7 +261,8 @@ export interface AdminAuditRecord {
 
 export interface AdminAuditRepo {
   insert(record: AdminAuditRecord): Promise<void>
-  list(limit: number): Promise<AdminAuditRecord[]>
+  /** newest first; of one action when named, and after (older than) the record `before` names */
+  list(limit: number, filter?: { action?: AdminAuditRecord['action']; before?: string }): Promise<AdminAuditRecord[]>
 }
 
 /** The spaces of the agent (SPACE-DEF-001): title, purpose and brief sealed by the space service. */
@@ -263,6 +278,10 @@ export interface SpaceMemberRepo {
   save(member: SpaceMember): Promise<void>
   listBySpace(spaceId: string): Promise<SpaceMember[]>
   listByPrincipal(principalId: string): Promise<SpaceMember[]>
+  /** the rows of a person of the user directory, in every space (SPACE-MEMB-002) */
+  listByDirectoryId(directoryId: string): Promise<SpaceMember[]>
+  /** a person removed while invited is removed, not `left` (SPACE-MEMB-004) */
+  delete(id: string): Promise<void>
 }
 
 export interface SpaceActivityRepo {

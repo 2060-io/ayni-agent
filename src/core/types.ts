@@ -64,6 +64,17 @@ export interface Principal {
     lastUsedAt?: string
     secretHash?: string
   }[]
+  /**
+   * The entry of the user directory this Principal holds: the one its identity credential was issued from, by this
+   * agent (IDENT-ROLE-012, IDENT-DIR-006). Set when the credential is presented, while the directory holds the entry;
+   * cleared when the entry leaves it (IDENT-ROLE-013)
+   */
+  directoryEntryId?: string
+  /**
+   * the roles its verified facts give (organization pattern, role rules, overrides); `roles` adds those its directory
+   * entry gives, so that a reload of the directory recomputes them without the facts (IDENT-ROLE-002)
+   */
+  factRoles?: string[]
   createdAt: string
   updatedAt: string
 }
@@ -396,13 +407,20 @@ export interface SpaceActivity {
   id: string
   spaceId: string
   at: string
-  /** the Principal who did it */
+  /** the Principal who did it, or `directory` for what a reload of the user directory did (SPACE-MEMB-008) */
   actorId: string
   action: SpaceActivityAction
   fields?: string[]
   memberId?: string
+  /** the member concerned when no row of the space names them: a person a rule takes in or out (SPACE-MEMB-008) */
+  principalId?: string
+  /** the directory entry of the member concerned: a person of the directory added, invited or removed */
+  directoryId?: string
   conversationId?: string
 }
+
+/** The actor of what a reload of the user directory does in a space (SPACE-MEMB-008). */
+export const DIRECTORY_ACTOR = 'directory'
 
 export interface PrincipalPreference {
   principalId: string
@@ -444,6 +462,18 @@ export interface EvidenceRecord {
   connectionRef?: string
   /** an issuance: the evidence records its claims were resolved from */
   evidenceRefs?: string[]
+  /**
+   * an issuance whose claims came from the user directory: the entry they came from (IDENT-DIR-006). The Principal that
+   * presents the credential holds that entry, and the credential is revoked when the entry leaves the directory
+   */
+  directoryEntryId?: string
+  /**
+   * an issuance of the identity credential: a keyed index of the actor it identifies (the home organization, the
+   * schema and the subject key, D59), by which the presented credential finds its record (IDENT-ROLE-012)
+   */
+  holderIndex?: string
+  /** an issuance under a revocable credential definition: where its status is kept, and its revocation (D91) */
+  revocation?: IssuedRevocation
   verifiedAt: string
   state: 'active' | 'archived' | 'legal-hold' | 'crypto-erased'
   /** the end of the retention of the values, and what happens then */
@@ -453,6 +483,26 @@ export interface EvidenceRecord {
   contentDigest: string
   /** wrapped per-record key; null once the values are erased */
   encKeyRef: string | null
+}
+
+/**
+ * The revocation of an issued AnonCreds credential (D91, IDENT-ROLE-013): the registry and the index the agent gave it
+ * at the offer (the DIDComm agent takes both from the caller), and what became of its revocation. Audit fields, in the
+ * clear: no value of a claim.
+ */
+export interface IssuedRevocation {
+  registryDefinitionId: string
+  index: number
+  /** when the DIDComm agent published the revocation */
+  revokedAt?: string
+  /** why it is revoked: `directory-removal` (the entry left the directory) */
+  reason?: string
+  /** when the holder was sent the `revocation_notification` (INTX-FLOW-007) */
+  notifiedAt?: string
+  /** how many times the notification was tried: it is tried again a few times, then given up */
+  notifyAttempts?: number
+  /** the last failure of a revocation that is to be done again */
+  lastError?: string
 }
 
 export type ApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED' | 'EXPIRED'
