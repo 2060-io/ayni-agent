@@ -8,7 +8,9 @@
  * `/preferences`, `/about-me`; §3.8, PROF-MEM-*), the memories a reply used (`metadata.usedMemories`,
  * `usedPreferences`, PROF-HIST-011), a memory update as `ayni.memory.updated` and the `ayni.memory-update` history
  * item (PROF-STREAM-010, PROF-HIST-012); a person deletes their own message within a window (`features.erasure:
- * { windowSeconds }`, PROF-HIST-010); a run in a space the person left answers `409 space-left` (PROF-RUN-014).
+ * { windowSeconds }`, PROF-HIST-010); a run in a space the person left answers `409 space-left` (PROF-RUN-014); the
+ * member picker of the user directory, the organizations of the trust graph and the admin view of roles and changes
+ * (§3.9, PROF-DIR-001..003); the error codes of §9 with their statuses (`ERROR_STATUS`).
  * `POST {sessions}/conversations/{id}/erasure` is withdrawn (PROF-CONV-009).
  *
  * 3.1 over 3.0: the session grant (`CreateSessionRequest.grant`, `features.sessionGrant`, §4.1), `features.flows`,
@@ -708,7 +710,7 @@ export interface ConversationsResponse {
 export interface ConversationPatch {
   title?: string
   state?: ConversationState
-  /** another space, only before the conversation's first message: 409 `conversation-started` after it (3.3) */
+  /** another space, only before the conversation's first message: 409 `has-messages` after it (3.3, PROF-CONV-011) */
   spaceId?: string
 }
 
@@ -744,51 +746,80 @@ export interface UploadResponse {
 // ---------------------------------------------------------------------------------------------
 // Errors (section 9)
 
-export type ErrorCode =
-  | 'unauthorized'
-  | 'not-bound'
-  | 'not-found'
-  | 'conflict'
-  | 'closed'
-  | 'too-large'
-  | 'rate-limited'
-  | 'bad-request'
+/**
+ * Every error code of §9 with its status, as the reference agent answers them. `ErrorCode` is derived from it, so that
+ * a client and the agent read one list. The last three are the reference agent's beyond §9: `forbidden` (an agent-pack
+ * that turns sibling sessions off, PROF-SESS-007), `turn-in-progress` (a deletion whose turn did not stop within its
+ * wait) and `not-implemented` (an operation a later phase of the agent brings).
+ */
+export const ERROR_STATUS = {
+  'bad-request': 400,
+  unauthorized: 401,
+  /** a bound-only endpoint called with a provisional session */
+  'not-bound': 403,
+  /** 3.3: only the owner of the space does this (§3.7) */
+  'not-owner': 403,
+  /** 3.3: the person holds no creator role of the template; the member picker for a person who may add nobody (§3.7, §3.9) */
+  'not-creator': 403,
+  /** 3.3: only a holder of an admin role reads the admin view (PROF-DIR-003) */
+  'not-admin': 403,
+  'not-found': 404,
+  /** binding material still valid on `POST /binding` (with `binding`); a run that already ended */
+  conflict: 409,
   /** `POST {sessions}` with a grant already used (§3.2, PROF-SESS-013) */
-  | 'grant-used'
+  'grant-used': 409,
   /** `POST {sessions}` with a grant past its sixty seconds */
-  | 'grant-expired'
-  /** 3.3: a message older than the deletion window (`features.erasure.windowSeconds`) */
-  | 'window-passed'
-  /** 3.3: a message whose reply is being written */
-  | 'turn-in-progress'
+  'grant-expired': 409,
+  /** `silent: true` with a pairing that expired, or with no valid proof (PROF-SESS-015) */
+  'pairing-expired': 409,
+  'pairing-invalid': 409,
+  /** 3.3: a message older than the deletion window (`features.erasure.windowSeconds`, PROF-HIST-010) */
+  'window-passed': 409,
+  /** 3.3: a message on legal hold is not deleted (PROF-HIST-010) */
+  'legal-hold': 409,
+  /** 3.3: a conversation that has a message of the person keeps its space (PROF-CONV-011) */
+  'has-messages': 409,
+  /** 3.3: the space takes no handover, Personal included (PROF-CONV-012) */
+  'handover-not-allowed': 409,
+  /** a conversation closed for good: not reopened, not shared (PROF-CONV-012) */
+  final: 409,
+  /** 3.3: the Personal space has no settings, members or owner (§3.7) */
+  'personal-space': 409,
+  /** 3.3: the members of a rule space follow its rule (§3.7) */
+  'rule-membership': 409,
+  /** 3.3: the owner is not removed: they give the space first (§3.7) */
+  owner: 409,
+  /** 3.3: the person is a member of the space already (§3.7) */
+  'already-member': 409,
+  /** 3.3: the authentication entry does not accept credentials of that organization (§3.7) */
+  'organization-not-accepted': 409,
   /** 3.3: a run on a conversation of a space the person is no longer a member of: readable, no run (PROF-RUN-014) */
-  | 'space-left'
-  /** 3.3: only an admin of the agent reads the admin view (PROF-DIR-003) */
-  | 'not-admin'
-  /** 3.3: the person is a member already */
-  | 'already-member'
-  /** 3.3: a conversation that has a message of the person keeps its space */
-  | 'has-messages'
-  /** 3.3: the person holds no creator role of the template */
-  | 'not-creator'
-  /** 3.3: only the owner of the space does this */
-  | 'not-owner'
-  /** 3.3: the Personal space has no settings, members or owner */
-  | 'personal-space'
-  /** 3.3: a value outside the bounds of the space's template, with `field` */
-  | 'out-of-bounds'
-  /** 3.3: the members of a rule space follow its rule */
-  | 'rule-membership'
-  /** 3.3: the owner is not removed: they give the space first */
-  | 'owner'
-  /** 3.3: the space is given to an active member of the organization only */
-  | 'not-eligible'
-  /** 3.3: the space takes no handover (Personal included) */
-  | 'handover-not-allowed'
-  /** 3.3: a conversation closed for good is not shared */
-  | 'final'
-  /** 3.3: the operation comes in a later version of the agent */
-  | 'not-implemented'
+  'space-left': 409,
+  closed: 410,
+  'too-large': 413,
+  /** 3.3: a value outside the bounds of the space's template, with `field` (PROF-SPACE-004) */
+  'out-of-bounds': 422,
+  /** 3.3: the organization is not found trusted in the trust graph (§3.7) */
+  'not-on-verana': 422,
+  /** 3.3: the agent's own organization is picked from the directory, not invited (§3.7) */
+  'home-organization': 422,
+  /** 3.3: the space is given to an active member of the organization only (PROF-SPACE-006) */
+  'not-eligible': 422,
+  'rate-limited': 429,
+  /** 3.3: the agent cannot send email: no SMTP server is configured (§3.7) */
+  'email-unavailable': 503,
+  /** the agent-pack turns sibling sessions off (the reference agent, beyond §9) */
+  forbidden: 403,
+  /** 3.3: a message whose reply is being written, whose turn did not stop in time (the reference agent, beyond §9) */
+  'turn-in-progress': 409,
+  /** an operation a later phase of the reference agent brings (beyond §9) */
+  'not-implemented': 501,
+} as const
+
+export type ErrorCode = keyof typeof ERROR_STATUS
+
+/** The error codes of §9 and of the reference agent. */
+export const ERROR_CODES = Object.keys(ERROR_STATUS) as ErrorCode[]
 
 export interface ErrorBody {
   error: ErrorCode | string
@@ -985,7 +1016,7 @@ export interface SpaceDetail extends SpaceInfo {
   updatedAt: string
 }
 
-/** `PATCH {sessions}/spaces/{id}` (an owner): within the template's bounds, 400 `out-of-bounds` outside. */
+/** `PATCH {sessions}/spaces/{id}` (an owner): within the template's bounds, 422 `out-of-bounds` with `field` outside. */
 export interface SpacePatch {
   title?: string
   purpose?: string
@@ -1043,6 +1074,67 @@ export interface SharedConversationInfo {
   author: { name: string }
   sharedAt: string
   lastActivityAt: string
+}
+
+// ---------------------------------------------------------------------------------------------
+// People, organizations and the admin view (3.3, §3.9): `{sessions}/directory`, `/organizations`, `/admin/*`
+
+/** One person of `GET {sessions}/directory?q=` (PROF-DIR-001): the member picker sees a name and a department only. */
+export interface DirectoryPerson {
+  directoryId: string
+  /** first and last name */
+  name: string
+  department: string | null
+}
+
+/** `GET {sessions}/directory?q=`: at most 20, to a person who owns a list space or may create one (else 403). */
+export interface DirectoryResponse {
+  people: DirectoryPerson[]
+}
+
+/** One organization of `GET {sessions}/organizations?q=` (PROF-DIR-002), found in the trust graph. */
+export interface OrganizationInfo {
+  organizationKey: string
+  name: string
+  country: string
+}
+
+export interface OrganizationsResponse {
+  organizations: OrganizationInfo[]
+}
+
+/** One entry of `GET {sessions}/admin/roles` (PROF-DIR-003): who holds which role, and the entry that gives it. */
+export interface AdminRoleEntry {
+  directoryId: string
+  name: string
+  department: string | null
+  groups: string[]
+  roles: string[]
+  /** a Principal of the agent holds the entry */
+  onAgent: boolean
+}
+
+export interface AdminRolesResponse {
+  entries: AdminRoleEntry[]
+}
+
+/** One change a reload of the directory made (PROF-DIR-003): field names, never a value. */
+export interface DirectoryChangeItem {
+  at: string
+  kind: 'added' | 'removed' | 'changed'
+  directoryId: string
+  name: string
+  /** the names of the fields that changed */
+  fields: string[]
+  /** when the roles changed */
+  rolesBefore?: string[]
+  rolesAfter?: string[]
+}
+
+/** `GET {sessions}/admin/changes?before=&limit=`: newest first. */
+export interface AdminChangesResponse {
+  changes: DirectoryChangeItem[]
+  nextBefore: string | null
 }
 
 // ---------------------------------------------------------------------------------------------

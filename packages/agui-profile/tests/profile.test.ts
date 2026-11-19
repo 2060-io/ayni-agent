@@ -11,6 +11,8 @@ import {
   buildAppLink,
   CLIENT_PLATFORMS,
   CUSTOM_EVENT,
+  ERROR_CODES,
+  ERROR_STATUS,
   INVITATION_GOAL_CODE,
   isAppLink,
   isClientPlatform,
@@ -37,6 +39,22 @@ describe('profile 3.3 constants', () => {
     expect(CLIENT_PLATFORMS).toEqual(['web', 'ios', 'android'])
     expect(isClientPlatform('ios')).toBe(true)
     expect(isClientPlatform('Firefox on Linux')).toBe(false)
+  })
+})
+
+describe('errors (§9, PROF-ERR-001)', () => {
+  it('gives each code its status, as profile.md does', () => {
+    expect(ERROR_STATUS['has-messages']).toBe(409)
+    expect(ERROR_STATUS['out-of-bounds']).toBe(422)
+    expect(ERROR_STATUS['space-left']).toBe(409)
+    expect(ERROR_STATUS['not-admin']).toBe(403)
+    expect(ERROR_STATUS['not-creator']).toBe(403)
+    expect(ERROR_STATUS['already-member']).toBe(409)
+    expect(ERROR_STATUS['legal-hold']).toBe(409)
+    expect(ERROR_STATUS['not-on-verana']).toBe(422)
+    expect(ERROR_STATUS['email-unavailable']).toBe(503)
+    expect(ERROR_CODES).not.toContain('conversation-started')
+    expect(ERROR_CODES).not.toContain('left-space')
   })
 })
 
