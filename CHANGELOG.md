@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.1](https://github.com/2060-io/ayni-agent/compare/v0.23.0...v0.23.1) (2026-11-19)
+
+
+### Bug Fixes
+
+* **memory:** working-memory notes and preferences sealed (D77, PRIV-ERASE-009) ([#92](https://github.com/2060-io/ayni-agent/issues/92)) ([8caea23](https://github.com/2060-io/ayni-agent/commit/8caea2336a5019f600032fd8029901bfc51ed9b6))
+
 ## [0.23.0](https://github.com/2060-io/ayni-agent/compare/v0.22.0...v0.23.0) (2026-11-18)
 
 
