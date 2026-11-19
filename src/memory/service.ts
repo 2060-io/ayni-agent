@@ -23,6 +23,13 @@ import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import { type EntryCrypto, openJson, sealJson } from './crypto.js'
 import { buildScope, EMPTY_SCOPE, type ScopeContext, type ScopePredicate } from './scope.js'
+import {
+  preferenceIndex,
+  type SealedNotes,
+  type SealedPreferences,
+  sealedNotes,
+  sealedPreferences,
+} from './sealedMemory.js'
 
 export interface NewEntry {
   sessionId: string
@@ -88,6 +95,9 @@ const SYSTEM_SCOPE: ScopePredicate = { state: 'active', terms: VISIBILITIES.map(
 
 export class MemoryService {
   public hooks: ErasureHooks = {}
+  /** notes and preferences go through these: the store keeps them sealed (D77, PRIV-ERASE-009) */
+  private readonly notesRepo: SealedNotes
+  private readonly prefsRepo: SealedPreferences
 
   public constructor(
     private readonly store: Store,
@@ -95,7 +105,10 @@ export class MemoryService {
     private readonly embeddings: EmbeddingModel,
     private readonly pack: AgentPack,
     private readonly logger: Logger
-  ) {}
+  ) {
+    this.notesRepo = sealedNotes(store.notes, crypto)
+    this.prefsRepo = sealedPreferences(store.preferences, crypto)
+  }
 
   // ---- scope ---------------------------------------------------------------------------------
 
@@ -330,12 +343,23 @@ export class MemoryService {
   public async preferences(principal: Principal, session: Session): Promise<PrincipalPreference[]> {
     const scope = this.scopeFor(principal, session)
     if (scope.terms.length === 0) return []
-    const prefs = await this.store.preferences.query(scope)
+    const prefs = await this.prefsRepo.query(scope)
     if (prefs.length) {
-      const ids = prefs.map((p) => ({ id: `pref:${p.principalId}:${p.key}` }))
+      // the log names a preference by its index: its name stays sealed (D77)
+      const ids = prefs.map((p) => ({ id: `pref:${preferenceIndex(this.crypto, p.principalId, p.key)}` }))
       await this.log(principal, scope, 'preferences', ids, true)
     }
     return prefs
+  }
+
+  /** Stores a preference of the Principal, sealed (D77). */
+  public async setPreference(principal: Principal, key: string, value: string): Promise<void> {
+    await this.prefsRepo.set({ principalId: principal.id, key, value, updatedAt: nowIso() })
+  }
+
+  /** Seals the notes and preferences an earlier version kept in the clear (D77); at start. */
+  public async sealPlainNotesAndPreferences(): Promise<{ notes: number; preferences: number }> {
+    return { notes: await this.notesRepo.sealPlain(), preferences: await this.prefsRepo.sealPlain() }
   }
 
   // ---- working memory (D10, MEM-TIER-003) ---------------------------------------------------------
@@ -344,13 +368,13 @@ export class MemoryService {
   public async notes(principal: Principal, session: Session): Promise<WorkingMemoryNote[]> {
     const scope = this.scopeFor(principal, session)
     if (scope.terms.length === 0) return []
-    const notes = await this.store.notes.query(scope)
+    const notes = await this.notesRepo.query(scope)
     if (notes.length) await this.log(principal, scope, 'working_memory', notes, true)
     return notes
   }
 
   private async activeNotes(principal: Principal): Promise<WorkingMemoryNote[]> {
-    return (await this.store.notes.list(principal.id)).filter((n) => n.state === 'active')
+    return (await this.notesRepo.list(principal.id)).filter((n) => n.state === 'active')
   }
 
   public async addNote(principal: Principal, content: string, lineageRefs: string[]): Promise<WorkingMemoryNote> {
@@ -370,24 +394,24 @@ export class MemoryService {
       createdAt: nowIso(),
       updatedAt: nowIso(),
     }
-    await this.store.notes.save(note)
+    await this.notesRepo.save(note)
     return note
   }
 
   public async updateNote(principal: Principal, id: string, content: string): Promise<boolean> {
-    const note = (await this.store.notes.list(principal.id)).find((n) => n.id === id)
+    const note = (await this.notesRepo.list(principal.id)).find((n) => n.id === id)
     if (!note) return false
     note.content = content.slice(0, this.pack.memory?.workingMemory?.maxNoteChars ?? 500)
     note.needsRevision = false
     note.updatedAt = nowIso()
-    await this.store.notes.save(note)
+    await this.notesRepo.save(note)
     return true
   }
 
   public async removeNote(principal: Principal, id: string): Promise<boolean> {
-    const note = (await this.store.notes.list(principal.id)).find((n) => n.id === id)
+    const note = (await this.notesRepo.list(principal.id)).find((n) => n.id === id)
     if (!note) return false
-    await this.store.notes.delete(id)
+    await this.notesRepo.delete(id)
     return true
   }
 

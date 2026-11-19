@@ -126,6 +126,8 @@ export interface WorkingMemoryRepo {
   save(note: WorkingMemoryNote): Promise<void>
   delete(id: string): Promise<void>
   flagByLineage(entryId: string): Promise<number>
+  /** every note, for sealing what an earlier version kept in the clear (D77) */
+  listAll(): Promise<WorkingMemoryNote[]>
 }
 
 export interface PreferenceRepo {
@@ -133,6 +135,10 @@ export interface PreferenceRepo {
   query(scope: ScopePredicate): Promise<PrincipalPreference[]>
   list(principalId: string): Promise<PrincipalPreference[]>
   set(pref: PrincipalPreference): Promise<void>
+  /** removes one preference by the key it is stored under */
+  delete(principalId: string, key: string): Promise<void>
+  /** every preference, for sealing what an earlier version kept in the clear (D77) */
+  listAll(): Promise<PrincipalPreference[]>
 }
 
 /** An evidence record with the ciphertext of its stored values (null when none were stored, or once erased). */

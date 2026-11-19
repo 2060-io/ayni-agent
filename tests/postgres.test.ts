@@ -125,6 +125,82 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
     })
   })
 
+  describe('working-memory notes and preferences, sealed (D77, PRIV-ERASE-009)', () => {
+    let store: PostgresStore
+    let url: string
+    beforeAll(async () => {
+      url = await freshDatabase()
+      store = new PostgresStore(url)
+      await store.init()
+    })
+    afterAll(async () => {
+      await store.close()
+    })
+
+    it('keeps no plaintext of a note or a preference, and seals what an earlier version kept in the clear', async () => {
+      const { pack } = loadPack('agent-packs/dev', { ...process.env })
+      const memory = new MemoryService(
+        store,
+        crypto,
+        createEmbeddings({ provider: 'stub', model: 'hash' }),
+        pack,
+        logger
+      )
+      const ana = principal('p9')
+      await memory.addNote(ana, 'CANARY-NOTE-4412', ['msg_1'])
+      await memory.setPreference(ana, 'CANARY-PREF-NAME-3021', 'CANARY-PREF-VALUE-8830')
+      // rows as the previous version wrote them, in the clear
+      await store.notes.save({
+        id: 'note_legacy',
+        principalId: 'p9',
+        content: 'CANARY-LEGACY-NOTE-5517',
+        visibility: 'principal-private',
+        state: 'active',
+        backingIdentity: null,
+        lineageRefs: [],
+        needsRevision: false,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      })
+      await store.preferences.set({
+        principalId: 'p9',
+        key: 'CANARY-LEGACY-PREF-NAME-6604',
+        value: 'CANARY-LEGACY-PREF-VALUE-7190',
+        updatedAt: new Date().toISOString(),
+      })
+      expect(await memory.sealPlainNotesAndPreferences()).toEqual({ notes: 1, preferences: 1 })
+
+      const client = new pg.Client({ connectionString: url })
+      await client.connect()
+      const rows = [
+        ...(await client.query('SELECT n::text AS row FROM working_memory n')).rows,
+        ...(await client.query('SELECT p::text AS row FROM preferences p')).rows,
+        ...(await client.query('SELECT l::text AS row FROM memory_access_log l')).rows,
+      ]
+      expect(rows.length).toBeGreaterThanOrEqual(4)
+      for (const { row } of rows) expect(row).not.toMatch(/CANARY/)
+      expect((await client.query('SELECT count(*)::int AS n FROM preferences')).rows[0].n).toBe(2)
+      await client.end()
+
+      const scopeSession = session('s9', 'p9', 'conv_9')
+      expect((await memory.notes(ana, scopeSession)).map((n) => n.content).sort()).toEqual([
+        'CANARY-LEGACY-NOTE-5517',
+        'CANARY-NOTE-4412',
+      ])
+      expect((await memory.preferences(ana, scopeSession)).map((p) => `${p.key}=${p.value}`).sort()).toEqual([
+        'CANARY-LEGACY-PREF-NAME-6604=CANARY-LEGACY-PREF-VALUE-7190',
+        'CANARY-PREF-NAME-3021=CANARY-PREF-VALUE-8830',
+      ])
+      // the access log of those reads names neither
+      const log = new pg.Client({ connectionString: url })
+      await log.connect()
+      for (const { row } of (await log.query('SELECT l::text AS row FROM memory_access_log l')).rows)
+        expect(row).not.toMatch(/CANARY/)
+      await log.end()
+      expect(await memory.sealPlainNotesAndPreferences()).toEqual({ notes: 0, preferences: 0 })
+    })
+  })
+
   describe('reads, through the predicate compiled for each store', () => {
     let store: PostgresStore
     let url: string

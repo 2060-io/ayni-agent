@@ -417,6 +417,7 @@ export class PostgresStore implements Store {
       )
       return result.rowCount ?? 0
     },
+    listAll: () => this.many<WorkingMemoryNote>('SELECT data FROM working_memory'),
   }
 
   private preferenceOf = (r: Row): PrincipalPreference => ({
@@ -424,6 +425,9 @@ export class PostgresStore implements Store {
     key: String(r.key),
     value: String(r.value),
     updatedAt: new Date(r.updated_at as string).toISOString(),
+    ...(r.enc_key_ref && r.cipher
+      ? { sealed: { keyRef: String(r.enc_key_ref), cipher: (r.cipher as Buffer).toString('base64') } }
+      : {}),
   })
 
   public preferences = {
@@ -435,10 +439,22 @@ export class PostgresStore implements Store {
       (await this.rows('SELECT * FROM preferences WHERE principal_id = $1', [principalId])).map(this.preferenceOf),
     set: async (p: PrincipalPreference) => {
       await this.pool.query(
-        'INSERT INTO preferences (principal_id, key, value, updated_at) VALUES ($1,$2,$3,$4) ON CONFLICT (principal_id, key) DO UPDATE SET value = $3, updated_at = $4',
-        [p.principalId, p.key, p.value, p.updatedAt]
+        `INSERT INTO preferences (principal_id, key, value, updated_at, enc_key_ref, cipher) VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (principal_id, key) DO UPDATE SET value = $3, updated_at = $4, enc_key_ref = $5, cipher = $6`,
+        [
+          p.principalId,
+          p.key,
+          p.value,
+          p.updatedAt,
+          p.sealed?.keyRef ?? null,
+          p.sealed ? Buffer.from(p.sealed.cipher, 'base64') : null,
+        ]
       )
     },
+    delete: async (principalId: string, key: string) => {
+      await this.pool.query('DELETE FROM preferences WHERE principal_id = $1 AND key = $2', [principalId, key])
+    },
+    listAll: async () => (await this.rows('SELECT * FROM preferences')).map(this.preferenceOf),
   }
 
   private evidenceOf = (r: Record<string, unknown>): StoredEvidence => ({

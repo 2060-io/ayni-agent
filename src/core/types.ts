@@ -286,6 +286,11 @@ export interface WorkingMemoryNote {
   needsRevision: boolean
   createdAt: string
   updatedAt: string
+  /**
+   * In the store only (D77): the content under a key of the note, the `content` field then empty. The memory service
+   * reads and writes notes in the clear through the sealed repository (src/memory/sealedMemory.ts).
+   */
+  sealed?: { keyRef: string; cipher: string }
 }
 
 export interface PrincipalPreference {
@@ -293,6 +298,11 @@ export interface PrincipalPreference {
   key: string
   value: string
   updatedAt: string
+  /**
+   * In the store only (D77): the name and the value under a key of the preference; `key` then holds the keyed index
+   * of the name (EntryCrypto.blindIndex) and `value` is empty.
+   */
+  sealed?: { keyRef: string; cipher: string }
 }
 
 /**
