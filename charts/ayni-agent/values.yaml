@@ -46,6 +46,19 @@ existingSecret: ""
 agentPackConfigMap: ""
 agentPack: ""
 
+# More volumes for the pod, and where the agent's container mounts them: the user directory, for one, from a Secret
+# (identity.directory.file of the pack). Mount it without subPath: a Secret is updated by swapping the `..data` symlink
+# of its directory, which a subPath mount never sees, and the agent reloads the file on change (decision 61).
+#   extraVolumes:
+#     - name: user-directory
+#       secret: { secretName: my-agent-directory }
+#   extraVolumeMounts:
+#     - name: user-directory
+#       mountPath: /run/secrets/ayni
+#       readOnly: true
+extraVolumes: []
+extraVolumeMounts: []
+
 service:
   enabled: true
   type: ClusterIP
