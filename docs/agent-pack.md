@@ -30,7 +30,7 @@ directory.
 |---------|----------|---------------|------|
 | `schemaVersion` | yes | `"3.x"`; the loader refuses another major | CORE-PACK-004 |
 | `metadata` | yes | id, display name, description, tags | |
-| `identity` | yes | the agent's DID, user-agent gate, the authentication schema, organization patterns, roles, role rules, per-actor overrides | D30, D34, D37, D38 |
+| `identity` | yes | the agent's DID, user-agent gate, the authentication schema, organization patterns, roles, role rules, per-actor overrides, the file of the user directory | D30, D34, D37, D38, D79 |
 | `language` | yes | the one agent language | D21 |
 | `persona` | yes | system prompt, greeting, contextual menu | D46, CORE-PROMPT |
 | `llm` | yes | model provider and model | LLM-PROV |
@@ -134,7 +134,8 @@ identity:
   stored to serve as the reference of a face-match challenge. The `principal_credentials` tool lists the
   records with the visible attributes.
 
-- **Role assignment is rules over verified facts, never rosters** (D34). A rule's `when` matches on the
+- **Role assignment is rules over verified facts and, with a user directory, the roles its entries give by hand**
+  (D34, D87; below). The directory is the only list of people. A rule's `when` matches on the
   Principal's `relation` to this agent (`home`, `partner`, `unrecognized`), its `connectionType`,
   whether the ECS-UserAgent credential was presented (`userAgentVerified`), and verified `claims`
   (ECS-Badge facts such as `department` or `title`; ECS-Service attributes for services). A list value
@@ -203,6 +204,66 @@ identity:
   verifiable-service peer). Each entry is a `jsonSchemaCredentialId` or a `credentialDefinitionId`
   the DIDComm agent can resolve, with optional `attributes`. The credential that authenticates a person
   is `authentication`, above; `credentials.badge` no longer exists.
+
+### The user directory (`identity.directory`)
+
+When no identity provider is configured, the people of the home organization and their roles are a **user directory**
+(ayni-spec D79, D87, D91, D92; agent decision 61): a file the pack names, mounted from a secret of the deployment.
+The people are **never written in the pack**, which is versioned with the deployment and would keep every former
+employee in its history: a pack that lists them (`identity.directory.people`, `identity.people`, or a list under
+`identity.directory`) is refused at start, in words.
+
+```yaml
+identity:
+  directory:
+    file: /run/secrets/ayni/directory.yaml    # a relative path resolves from the pack directory
+  roles:
+    dispatcher: { description: Dispatches the trucks. }
+    people-admin: { description: Reads who holds which role., admin: true }
+```
+
+```yaml
+# the file, YAML or JSON
+people:
+  - id: p-0042                    # stable, unique
+    firstName: Ana
+    lastName: Ríos
+    email: ana.rios@northwind.example        # unique, compared in lower case
+    birthDate: 19910521           # YYYYMMDD; only when badges are obtained with a passport
+    nationality: ESP              # the code of ICAO Doc 9303; idem
+    department: Depot Rotterdam   # optional: rule spaces only
+    groups: [fleet-safety, night-shift]      # optional, several: rule spaces only
+    roles: [dispatcher]           # typed by hand, roles of identity.roles
+```
+
+- **Validation.** Every scalar is read as text (an id `0042` keeps its zeros). Ids and emails are unique, roles are
+  declared, no other field is allowed, and a birthdate and a nationality are required on every entry when an issuance
+  profile obtains badges from the directory with a passport. At start a file that does not validate stops the agent,
+  naming each entry and field at fault; the message never carries a birthdate or a nationality.
+- **Reload.** The agent watches the directory of the file (a Kubernetes Secret is updated by swapping the `..data`
+  symlink in it, whatever the mount) and reads the file again every `DIRECTORY_POLL_SECONDS` (10; 0 watches only),
+  comparing its content by hash. A new version that does not validate is not loaded: the one in force stays and the
+  reason goes to the log.
+- **Roles by hand (D87).** A Principal holds the entry its identity credential was issued from, by this agent: the
+  issuance record names the entry, and the credential, once presented, finds its record. The entry's roles join those
+  of the Principal's verified facts, from its next request after a reload. No role rule reads an entry: a rule that
+  names `claims` does not match a Principal whose badge this agent issued from an entry (those claims are the entry's
+  fields); the relation keeps its rules, and the claims of badges issued by others keep theirs (IDENT-ROLE-014). A
+  Principal whose badge was not issued from an entry receives no role from the directory.
+- **`department` and `groups`** make people members of the rule spaces that name them (`spaces.templates[].membership`),
+  and nothing else.
+- **What each load changed** is written to the admin audit, one record per entry added, removed or changed: its id,
+  its name, the names of the fields that changed, the roles before and after; never a value of a birthdate or a
+  nationality. The last load is kept sealed in the store, so that what changed while the agent was down is recorded,
+  and acted on, at start.
+- **Removal (D91).** A person whose entry leaves the directory loses it and the roles it gave, and every session of
+  theirs is closed at once with `credential-invalid`, their devices unpaired; then every credential issued from the
+  entry is revoked and its holder told (`revocation_notification`). A revocation the DIDComm agent cannot make is made
+  again later. An invitation to a list space of a person no longer listed is removed.
+- **Who reads it.** The member picker of list spaces (`GET {sessions}/directory?q=`) gives names and departments, to a
+  person who owns a list space or may create one. The admin view (`GET {sessions}/admin/roles` and `/admin/changes`)
+  gives every entry with its roles and whether a Principal holds it, and the changes, to the holders of a role marked
+  `admin`. The model reads nothing of the directory.
 
 ## persona
 
@@ -405,6 +466,14 @@ issuance:
 - **The record.** Each issuance leaves a record built as evidence is: the audit fields always (the profile,
   the credential definition, the exchange, the evidence its claims came from), the issued claims sealed
   and kept only with `storeClaims`, for the `retention` given.
+- **Revocation (decision 61).** A credential that must be revocable, one whose claims come from the user directory, is
+  issued under a definition created with revocation, and nothing of it is issued otherwise. Under a revocable
+  definition every credential takes a revocation registry and an index, which the agent allocates (the DIDComm agent
+  takes both from the caller) and keeps in the record, with the entry it came from and a keyed index of the actor it
+  identifies. The DIDComm agent keeps one definition per schema: when the one it holds for the badge schema was created
+  without revocation, the agent issues no badge from the directory under it and says so in the log; delete that
+  definition in the DIDComm agent (`DELETE /v2/anoncreds/credential-definitions/{id}`) and the agent creates a
+  revocable one.
 
 ## tools, mcp and access tiers
 

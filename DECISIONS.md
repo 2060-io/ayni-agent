@@ -765,3 +765,98 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       `tests/pack.test.ts`, the space of the predicate in `tests/policy.test.ts`, and on PostgreSQL the migration to
       3.6.0, the space stores, no plaintext of a space or an invited email, and the agent served from PostgreSQL with
       no plaintext of a space in any table.
+61. **The user directory, roles by hand, and removal that revokes: phase 2a** (2026-11-19, Fabrice's decisions of the
+    design review, review decisions 13, 14 (answer a), 17 and 18; ayni-spec D79, D81, D87, D91, D92, PR #94). Phase 2b
+    follows: the badge from the directory (the passport match, the email code, SMTP), the invitations of other
+    organizations and the search of organizations.
+    - **The file (IDENT-ROLE-012, IDENT-DIR-001, CORE-PACK-001):** `identity.directory.file` names it, a relative path
+      from the pack directory. It holds `people`, each with `id`, `firstName`, `lastName`, `email`, optional
+      `birthDate` (`YYYYMMDD`) and `nationality` (ICAO 9303), required on every entry when an issuance profile takes
+      claims from the directory and reads a document (`directoryReadsDocuments`), optional `department`, `groups` and
+      `roles`. Every scalar is read as text (YAML's failsafe schema: `0042` keeps its zeros, `NO` stays Norway). Ids and
+      emails (lower case) are unique, roles declared, no other field allowed. A file that does not validate stops the
+      start, naming each entry and field; the message never holds a birthdate or a nationality. A pack that writes the
+      people inline (`identity.directory.people`, a list under `identity.directory`, `identity.people`) is refused in
+      words, before the schema (`inlineDirectoryErrors`).
+    - **Reload (IDENT-ROLE-013):** the directory of the file is watched, since a Kubernetes Secret is updated by a rename
+      of the `..data` symlink in it, and the content is read every `DIRECTORY_POLL_SECONDS` (10; 0: watch only) and
+      compared by its SHA-256, whatever the mount (no subPath assumption). A new version that does not validate is not
+      loaded: the one in force stays, the log names the faults, and that content is not read again until it changes.
+    - **What changed (IDENT-DIR-009):** each load is diffed against the last one into the admin audit, one record per
+      entry added, removed or changed (`action: directory-change`, `actor: directory`, `reason: start | reload`):
+      the id, the name, the names of the fields that changed, the roles before and after. The last load is kept in the
+      key-value table, sealed, with keyed digests of the email, the birthdate and the nationality, never their values:
+      what changed while the agent was down is recorded, and acted on, at start. Schema 3.7.0 gives the audit the order
+      it was written in (`seq`), so that `GET {sessions}/admin/changes` pages newest first.
+    - **Who holds an entry (IDENT-DIR-006):** the issuance record of a credential whose claims came from the directory
+      names the entry (`directoryEntryId`) and a keyed index of the actor it identifies once presented (`holderIndex`:
+      the home organization, the authentication schema, the subject key, D59); both are columns of `evidence` in 3.7.0.
+      A presented identity credential of the home organization finds the newest such record that is not revoked, under
+      the credential definition the presentation names (`PeopleService.entryOf`), and its Principal holds the entry
+      (`Principal.directoryEntryId`). A Principal already identified as that actor holds it from the issuance. Its
+      invitations to list spaces become `active` then (`SpaceService.bindDirectoryMember`).
+    - **Roles by hand (IDENT-ROLE-002, IDENT-ROLE-014, D87):** a Principal's roles are those of its facts (`factRoles`:
+      pattern, rules, overrides) with those of its entry. A rule that names `claims` does not match a Principal whose
+      credential this agent issued from an entry; the relation keeps its rules, and the claims of badges issued by
+      others keep theirs. A reload recomputes the roles of every holder; they hold from the next request, which reads
+      the Principal again. `department` and `groups` give rule spaces their members (`SpaceService.directory`) and
+      nothing else. A pack that no longer names a directory drops the roles its entries gave, and nothing else.
+    - **Removal (D91, IDENT-LIVE-004/005):** the agent brings itself in line with the directory as loaded
+      (`PeopleService.reconcile`, at start and after every reload). A Principal whose entry left loses it and the roles
+      it gave, its identity credential's verdict turns invalid, and `onCredentialInvalid` closes every one of its
+      sessions with `credential-invalid`, tells its wallet and unpairs its devices; all of this before any network
+      call. Then every credential issued from the entry is revoked by its registry and index, an `admin_audit` record
+      (`credential-revocation`) is written, and the holder is sent `revocation_notification` (INTX-FLOW-007) on the
+      connection it was issued on and on its connection now, tried three times. A revocation the DIDComm agent refuses
+      is kept with its error and made again every minute, and at the next start. An invitation of a person no longer
+      listed is removed.
+    - **Revocation, new:** the VS Agent takes the registry and the index from the caller at the offer under a revocable
+      definition (VSA-ADM-DC-CE-OFFER) and does not report them; it revokes with `POST /v2/anoncreds/revoke-credential`
+      and sends nothing to the holder, which the flow plugin does (`POST /v2/didcomm/revocation-notification`,
+      `<registry>::<index>`). So `CredentialRevocations` allocates: one registry per definition at a time (capacity
+      1000, the VS Agent's default), created with `POST /v2/anoncreds/revocation-registries` when there is none or the
+      last is full, indexes from 0, the next index kept in the key-value table before the offer leaves, one allocation at
+      a time. The definition of a schema is created with `supportRevocation` when a profile on it must be revocable
+      (`mustBeRevocable`: its claims come from the directory, the only case the spec names); under any definition that
+      supports revocation every offer carries a slot, which the record keeps (`revocation`). A credential from the
+      directory is not issued without a slot (`not-ready`), nor when its holder cannot be told (the home organization
+      not established).
+    - **Spaces (SPACE-MEMB-001/002/004/005/007/008):** `POST {sessions}/spaces/{id}/members {directoryId}` adds a person
+      of the directory, `active` when a Principal holds the entry, else `invited` (201 with the member; 404 for an
+      unknown entry, 409 `already-member`); outsiders stay 501. A person removed while invited is removed, no longer
+      `left`. `POST {sessions}/spaces/{id}/owner {directoryId}` gives a rule space to a person the rule matches who holds
+      a Principal (422 `not-eligible` otherwise, and for `memberId` in a rule space or `directoryId` in a list space).
+      A reload records `joined` and `left` in the rule spaces of a department or a group, with no `by`, for the
+      Principals whose entry it moved; the owner and a former owner who keeps a member row are left out.
+    - **Endpoints (PROF-DIR-001/003):** `GET {sessions}/directory?q=` (names and departments, at most 20, two
+      characters at least, case and marks folded; `403 not-creator` to a person who owns no list space and may create
+      none; an empty list without a directory). `GET {sessions}/admin/roles` and `GET {sessions}/admin/changes?before=
+      &limit=` (`403 not-admin` without a role marked `admin`). People of the directory are named by its name in member
+      lists, owners, activity and handovers.
+    - **Profile package, aligned with §9 of spec #94** (the coordinator found drift): `ERROR_STATUS` lists every code
+      with its status and `ErrorCode` is derived from it; `legal-hold`, `organization-not-accepted`, `not-on-verana`,
+      `home-organization`, `email-unavailable`, `pairing-expired` and `pairing-invalid` were missing; the comments said
+      409 `conversation-started` (the code is `has-messages`) and 400 for `out-of-bounds` (422). `forbidden`,
+      `turn-in-progress` and `not-implemented` are kept, marked as the reference agent's beyond §9. The package carries
+      the types of §3.9. `tests/profileErrors.test.ts` checks the codes and statuses of the routes, the space and session
+      errors against the package and §9. No `features.spaces` or `features.memories` exists in the package.
+    - **Choices of mine, to flag:** the 403 of the picker is `not-creator` (§9 gives no other for it); the admin change
+      items carry their audit `id`, the cursor of `before`; the first load ever records every entry as `added`; the poll
+      default is 10 seconds; a credential issued under a definition without revocation cannot be revoked and is logged
+      once (no such badge from the directory is issued by this version); the existing definition of the badge schema on
+      devnet was created without revocation and must be deleted in the VS Agent before badges are issued from the
+      directory.
+    - **Not done here (phase 2b):** the `record: directory` claim source and its loader rules (IDENT-DIR-002,
+      INTX-ISSUE-021), the passport match (IDENT-DIR-003), the email code and `emailId` (IDENT-DIR-004, INTX-AUTH-011
+      to 015, INTX-ISSUE-020), `as: dateint` (IDENT-DIR-005), SMTP (PLAT-MAIL), invitations (SPACE-INV) and
+      `GET {sessions}/organizations` (PROF-DIR-002). The hook is `IssuanceDeps.record`, which resolves a claim of a
+      system of record and names the entry. An offer left unanswered whose credential the wallet accepts later is not
+      recorded (as before): such a badge would not be revocable by its entry.
+    - **Tests:** `tests/directory.test.ts` (the file, the refusal of people inline, the diff, the sealed last load, a
+      symlink swap seen by the watch and by the poll, an invalid reload, the picker), `tests/revocation.test.ts` (the
+      allocation, a revocable definition, the offer, the issuance record of a badge from the directory),
+      `tests/people.test.ts` (over the agent, with a mocked DIDComm agent and trust resolver: roles from the entry and
+      IDENT-ROLE-014, the admin view, members by directory id, rule spaces by department and group, owner by directory id,
+      a reload that changes roles, moves a person out of a rule space and removes two, revocation, its retry),
+      `tests/profileErrors.test.ts`, and on PostgreSQL the migration to 3.7.0, the new queries, and the agent with a
+      directory keeping nothing of a person in the clear but the id and the name the admin audit holds.

@@ -59,6 +59,14 @@ identity:
     auditor:
       description: Read-only access to the persistent store.
       auditor: true
+    people-admin:
+      description: Reads who holds which role of the user directory, and what each reload changed (D92).
+      admin: true
+  # With no identity provider, the people of Northwind and their roles, typed by hand, are a file mounted from a
+  # secret of the deployment, never written here (D79, D87). The rules below never read a badge this agent issues
+  # from it; its department and groups make people members of rule spaces only.
+  # directory:
+  #   file: /run/secrets/ayni/directory.yaml
   roleRules:                                               # first match wins (D34)
     - when: { relation: home, claims: { department: [Finance, Treasury] } }
       roles: [employee, finance]
