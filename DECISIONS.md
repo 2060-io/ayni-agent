@@ -860,3 +860,107 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       a reload that changes roles, moves a person out of a rule space and removes two, revocation, its retry),
       `tests/profileErrors.test.ts`, and on PostgreSQL the migration to 3.7.0, the new queries, and the agent with a
       directory keeping nothing of a person in the clear but the id and the name the admin audit holds.
+62. **A badge from the user directory, the email code, email, and invitations of other organizations: phase 2b**
+    (2026-11-19, Fabrice's decisions of the design review, E5, E6, E7, review decisions 12 and 16; ayni-spec D88, D89,
+    D90, PR #94). With it the build of spaces, memories, people and erasure is complete; one pull request carries
+    decisions 60 to 62.
+    - **The claims of the directory (INTX-ISSUE-002/021, IDENT-DIR-002/005):** a claim may read `{ from: record, record:
+      directory, field }` (`name`, `firstName`, `lastName`, `email` or `department`, empty when the entry has none). The
+      entry is found from the person's evidence, never before it exists: the claim is `pending` until then, its action the
+      profile's own challenge (`issue_credential` with the profile and the `challenge`, `document` or `email`), and the
+      credential `ready`; `missing` when no single entry is found, the reason in the log without a value
+      (`DirectoryClaims`). The record of the issuance keeps the entry. `as: dateint` writes a date as `YYYYMMDD`;
+      `emailId` numbers a badge by the verified address as `documentId` does by the document. The challenges of a profile
+      are a list, run in order (`challengesOf`); a single object is still taken, as the spec's own §11.9 writes one for a
+      document read. The loader refuses, in words, a profile of the directory with another list than `[document]`,
+      `[email]` or `[document, email]`, a directory claim with no `identity.directory`, a passport whose match reads what
+      `evidence.document` does not store, an email challenge without `evidence.email` storing `address`, with
+      `modelVisible`, on a profile that takes nothing from the directory or on an automatic one, and an action that
+      declares it (before the schema).
+    - **The passport (IDENT-DIR-003):** the names of an entry are written as the machine-readable zone writes them, by the
+      table of ICAO Doc 9303, Part 3, section 6 (`src/core/icao.ts`): every form the table gives for a letter, its base
+      letter among them (`Müller` is `MUELLER`, `MUXXLLER` or `MULLER`; `Peña` is `PENA` or `PENXXA`; `ß` is `SS`), an
+      apostrophe dropped, any other sign a separator. The last name equals the document's word for word; the words of the
+      first name are words of the given names, in order (not necessarily side by side: `Ana Carmen` matches `ANA MARIA
+      CARMEN`); the date of birth and the nationality (the zone's code, `D` for Germany) are equal. The document read does
+      not keep its format, so the zone is taken to have filled its name field when the field it rebuilds is 30, 31 or 39
+      characters long (TD1, TD2, TD3); then the last word it holds may begin the entry's, and a surname that filled it
+      left no given name to compare. A letter with no Latin form never matches. The birthdate and the nationality never
+      leave `UserDirectory.matchDocument`. The nationality comes from the chip's DG1, which the agent already reads
+      (D73): nothing changes in the VS Agent.
+    - **The email code (D89, INTX-AUTH-011..015, PROF-RUN-015, `src/core/emailCheck.ts`):** the issuing tool answers the
+      model that the system asks the person and ends the turn (`ToolResult.endTurn`): the orchestrator calls the model no
+      more, writes no empty reply, and streams the code's question as an `auth-challenge` entry. While the check waits in
+      a conversation, `AyniAgent.turn` gives the person's messages there, from any device, to the code before anything
+      else (one at a time per person): the address, then the tries. They and the code's answers are `auth-challenge`
+      entries that start no turn and never enter the model's window, summary or recall (`entryToMessages` gives them
+      nothing; they are not embedded); history shows them as messages. The answer to the address is one text; a code
+      goes, in the background, only to an address an entry holds, so that neither the words nor the time of the answer
+      tell which. Six digits (`randomInt`), kept as a keyed hash of the check and the code, ten minutes from its sending,
+      five tries, used once; the address waits sealed in the challenge record and is dropped at its end. A right code
+      records evidence `email` (`address`), and the issuance goes on by itself (`AyniAgent.continueIssuance`), the person
+      told its outcome by the code; the model reads `Identity check (email) for issue_credential: passed | failed |
+      expired` as a record of the system. A timer ends a check whose time is over, and the code says so; checks a restart
+      left waiting resume. The platform rules (add-on 3.3.0) tell the model, when a profile has an email check, never to
+      ask for an address or a code.
+    - **Issuing identifies nobody (IDENT-RES-017):** a guest who receives the badge of the authentication schema is asked
+      at once to present it (`IdentityRequests.request`, as the person's own request). When a guest identifies, what the
+      agent verified about them and what it issued them follow them to the identified Principal
+      (`EvidenceService.reassign`; PostgreSQL now updates `principal_id` of a record saved again): about-me shows the
+      address, and the badge is `held`.
+    - **Email (PLAT-MAIL-001/002, `src/platform/mail.ts`):** nodemailer 10.3.1, pinned, through `SMTP_URL` (`smtp://`,
+      STARTTLS when offered, or `smtps://`) from `SMTP_FROM`; without both, the email code is unavailable (its claims
+      `unavailable`, INTX-AUTH-011) and invitations answer `503 email-unavailable`, which the agent says at start, naming
+      the profiles and the templates. An email carries what its purpose needs and nothing else. `pnpm test:mail` sends
+      through a throwaway Mailpit (`axllent/mailpit:v1.32.0`) and reads it back from its API.
+    - **Invitations of other organizations (D90, SPACE-INV-001..005, PROF-DIR-002, `src/core/invitations.ts`):**
+      `GET {sessions}/organizations?q=` searches the Verana Graph (`VERANA_GRAPH_URL`, `POST /v4/graph/search`, the `Did`
+      surface, operators of kind `Organization`; key `org:<countryCode>:<registryId>`), one item per organization,
+      trusted only, its name containing `q` (two characters at least, case and marks aside), the agent's own excluded, at
+      most 20, to the people of the member picker. `POST {sessions}/spaces/{id}/members { organizationKey, email }`
+      refuses, in this order, a key or an address that is not one (`400` with the field), no SMTP (`503`), the agent's
+      own organization (`422 home-organization`), one the authentication does not accept (`409
+      organization-not-accepted`), one the graph does not hold trusted (`422 not-on-verana`); then records an `invited`
+      guest (the email sealed, its keyed index, the organization's name for the member list) and sends one email: who
+      invites, the space, the agent and its organization, the badge needed, and the app link `<APP_LINK_BASE>service/<did>`.
+      A Principal of that organization whose stored email matches is bound at once, asked nothing; one whose evidence
+      holds none is asked once per invitation for its badge again, now when its wallet is connected, else at its next
+      connection (`askedPrincipalIds`). A presented identity credential binds the invitations of its issuer's
+      organization key (from the proof) and its `email`, in lower case, to its Principal, as `guest`. The agent warns at
+      start when a list template exists and the authentication does not both ask for and store `email`, or when no
+      `VERANA_GRAPH_URL` is set.
+    - **Folded in from the integration check of the UI and the app (2026-11-19):** `GET {sessions}/spaces/{id}/shared` of
+      a space that takes no handover answers `200 { conversations: [] }`, its messages 404 (it answered `409
+      handover-not-allowed`, which §3.7 does not give). `turn-in-progress` is in §9 now (spec 84ec336); the profile
+      package drops `not-implemented`, which no route answers any more. About-me names `email` as the source of a verified
+      address and the issuing state as that of a document.
+    - **Choices of mine, to flag:** `cancel` (or stop, annuler, cancelar, parar, abbrechen) stops an email check; a text
+      that is not an address is asked again within the ten minutes and is not a try; every message while the check waits
+      is taken, a voice note or a file included; the check is never served on a DIDComm chat (that is the capability
+      channel): a badge asked from the wallet's own menu answers that the check runs in the app or the web; the outcome is
+      told to the person by the code as a message of the agent; a guest who receives the badge is asked to present it; an
+      invitation whose email cannot be sent is not recorded (`503`), and one whose organization the graph cannot be asked
+      about is refused as not on Verana; without `APP_LINK_BASE` the link is on `app.ayni.org`; the first-name words of a
+      passport match in order but not necessarily side by side; the zone's "filled" field is read from the length of the
+      names, the format of the document not being kept.
+    - **Found, not changed here:** the Principal keeps the stored claims of its identity credential in `identityAttributes`,
+      in the clear in the `principals` table (decision 43): with `email` stored for invitations, the address is there. The
+      messages of an email check are not ones a person can delete within the window (`TRANSCRIPT_MESSAGE_TYPES`). The
+      reference profile names the indexer (`VERANA_API_URL`) for the search of organizations; the graph is its own
+      service, `VERANA_GRAPH_URL` (a patch for spec #94 is handed over).
+    - **Tests:** `tests/icao.test.ts` (the table, separators, other scripts, truncation, the match), `tests/directoryBadge.test.ts`
+      (passport, email, both, `dateint`, `emailId`, the loader), `tests/emailCode.test.ts` (over the agent: pending claims,
+      the turn that ends, one check at a time, the same answer, five tries, the right code and the offer, the badge
+      presented and held, history and the model's requests, nothing in the clear, expiry by time and by timer, cancel,
+      no SMTP), `tests/invitations.test.ts` (the graph search, every refusal, the email, binding, guests, the known
+      Principal asked once), `tests/mail.test.ts` (the mailer, and Mailpit with `pnpm test:mail`), the shared list in
+      `tests/spaces.test.ts`, `tests/profileErrors.test.ts`, and on PostgreSQL the invitations by keyed index and no
+      address, code or invited email in any table. `pnpm e2e` (`scripts/e2e/spaces-people.e2e.ts`) runs the built agent
+      on PostgreSQL with Mailpit and a stand-in that plays the DIDComm agent, the trust resolver, the graph and the phone:
+      its report is in `scripts/e2e/report/`. A real VS Agent and a wallet are not part of any of them.
+    - **Devnet (the deploy pull request):** the Dev Agent's credential definition of schema 23 was created without
+      revocation: delete it in its VS Agent (`DELETE /v2/anoncreds/credential-definitions/{id}`) before a badge is issued
+      from the directory. The flow plugin's `POST /v2/didcomm/revocation-notification` is in the plugin since its first
+      release (`V2DidcommRevocationNotificationController`, registered by `AyniFlowPlugin`), so in the devnet image
+      `io2060/vs-agent-ayni:v2.0.0-ayni.5-ayni.0.1.7`. New environment: `SMTP_URL` (a Secret), `SMTP_FROM`,
+      `VERANA_GRAPH_URL`.

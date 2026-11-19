@@ -20,10 +20,11 @@ identity:
     - credential: { jsonSchemaCredentialId: "${IDENTITY_SCHEMA_ID:-https://ecs.example/vt/schemas-badge-jsc.json}" }
       subjectKey: [badgeNumber]
       request: on-connect        # before any conversation: identified or refused; on-demand lets people in first
-      attributes: [badgeNumber, name, title, department, photo]
-      # what is kept of the badge, sealed, and for how long; by default nothing but the audit record (D67)
+      attributes: [badgeNumber, name, email, title, department, photo]
+      # what is kept of the badge, sealed, and for how long; by default nothing but the audit record (D67). The email
+      # binds an invitation of another organization to a person the agent knows already, asking nothing (SPACE-INV-004)
       store:
-        attributes: [name, title, department, photo]
+        attributes: [name, email, title, department, photo]
         retention: { days: 365, onExpiry: erase }
       # what the model may read of it; by default nothing. department is used by the role rules and kept for
       # audit, the photo is the reference of the face-match challenge: neither is shown to the model
@@ -178,6 +179,26 @@ issuance:
       issuedOn:   { from: computed, fn: today }
       validUntil: { from: computed, fn: addDays, days: 90 }
     record: { storeClaims: false }     # the audit record is always kept; the claims only when asked
+  # A badge from the user directory (D88, D89): with identity.directory above, the badges of Northwind are issued from
+  # it, and their claims come from the person's entry. The person shows which entry is theirs with an email code (the
+  # agent's code asks for the address in the conversation and sends a six-digit code to it: SMTP_URL and SMTP_FROM are
+  # needed), with a passport ([{ type: document }], numbered by documentId), or with both, in this order.
+  # badge:
+  #   credential: { jsonSchemaCredentialId: "${IDENTITY_SCHEMA_ID:-https://ecs.example/vt/schemas-badge-jsc.json}" }
+  #   label: Northwind badge
+  #   trigger: model
+  #   authChallenge: [{ type: email }]
+  #   claims:
+  #     badgeNumber: { from: computed, fn: emailId }
+  #     name:        { from: record, record: directory, field: name }
+  #     email:       { from: record, record: directory, field: email }
+  #     department:  { from: record, record: directory, field: department }
+  #     birthDate:   { from: computed, fn: constant, value: "" }
+  #     photo:       { from: computed, fn: constant, value: "" }
+  #     phoneNumber: { from: computed, fn: constant, value: "" }
+# ... with the address the email code verified, kept sealed and never shown to the model (INTX-AUTH-015):
+# evidence:
+#   email: { store: { attributes: [address], retention: { days: 30, onExpiry: erase } } }
 
 tools:
   http:

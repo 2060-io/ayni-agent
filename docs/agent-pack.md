@@ -264,6 +264,8 @@ people:
   person who owns a list space or may create one. The admin view (`GET {sessions}/admin/roles` and `/admin/changes`)
   gives every entry with its roles and whether a Principal holds it, and the changes, to the holders of a role marked
   `admin`. The model reads nothing of the directory.
+- **Badges from it.** An issuance profile may take its claims from the entry of the person, found with a passport or an
+  email code: see `issuance`, "A badge from the user directory".
 
 ## persona
 
@@ -393,10 +395,13 @@ issuance:
   so, and the agent looks again at the next issuance.
 - **Sources.** `evidence` reads an attribute of a verified presentation: the `authentication`, or an entry
   of `presentations`. The attribute must be among those the entry **stores**, or the pack is refused: what
-  is not kept cannot be issued from. `computed` is `today`, `now`, `addDays` (with `days`), `constant`
-  (with `value`) or `subjectId`; the list is closed, and another name is refused. A system of record, a
-  human attestation and a value declared by the peer are named by the specification and not available in
-  this version. `evidence` also reads a **document**: see below.
+  is not kept cannot be issued from; `as: dateint` writes a calendar date as the integer `YYYYMMDD`.
+  `computed` is `today`, `now`, `addDays` (with `days`), `constant` (with `value`), `subjectId`,
+  `documentId` or `emailId`; the list is closed, and another name is refused. `record` reads a field of the
+  person's entry of the **user directory** (`record: directory`), the one system of record of this version:
+  see "A badge from the user directory" below. A human attestation and a value declared by the peer are
+  named by the specification and not available in this version. `evidence` also reads a **document** and a
+  **verified email address**: see below.
 - **An identifier of the subject.** `subjectId` gives a claim that numbers the holders of an issuer, such
   as `badgeNumber`: 16 characters derived from the Principal and the name of the profile with a key of the
   deployment (from `ENTRY_ENCRYPTION_KEY`). The same person gets the same number under the same profile at
@@ -448,11 +453,66 @@ issuance:
     attribute that is not of the list; a presentation entry named `document`.
   - **What it proves:** that the document was in hand. The chip is not checked against a copy, and nobody
     compares the holder with the portrait.
+- **A badge from the user directory (D88, D89; decision 62).** With a user directory the agent issues the badges of
+  its own organization from it. The person shows which entry is theirs as the profile's challenges say: a passport
+  (`[{ type: document }]`), an email code (`[{ type: email }]`), or both, in this order:
+
+  ```yaml
+  evidence:
+    email: { store: { attributes: [address], retention: { days: 30 } } }   # needed with an email code
+    document:                                    # needed with a passport: what the match reads
+      store: { attributes: [documentNumber, issuingState, nationality, lastName, firstName, dateOfBirth, portrait] }
+  issuance:
+    badge:
+      credential: { jsonSchemaCredentialId: <the ECS Badge schema of the ecosystem> }
+      label: Northwind badge
+      trigger: model
+      authChallenge: [{ type: email }]           # [{ type: document }], or [{ type: document }, { type: email }]
+      claims:
+        badgeNumber: { from: computed, fn: emailId }                    # documentId with a passport
+        name:        { from: record, record: directory, field: name }   # first and last name
+        email:       { from: record, record: directory, field: email }
+        department:  { from: record, record: directory, field: department }
+        birthDate:   { from: computed, fn: constant, value: "" }        # with a passport:
+                                                                        # { from: evidence, entry: document, attribute: dateOfBirth, as: dateint }
+        photo:       { from: computed, fn: constant, value: "" }        # with a passport: { from: evidence, entry: document, attribute: portrait }
+        phoneNumber: { from: computed, fn: constant, value: "" }
+  ```
+
+  - **The entry.** A passport finds the one entry whose date of birth and nationality equal the document's, whose last
+    name equals the document's and whose first names are among its given names, in their order, after the names of the
+    entry are written as the machine-readable zone writes them (ICAO Doc 9303, Part 3: capitals A to Z; `Ríos` is
+    `RIOS`, `Müller` is `MUELLER`, `MUXXLLER` or `MULLER`; an apostrophe dropped; a space or a hyphen a separator). A
+    name the zone cut for want of room matches what it holds. An email code finds the entry that holds the verified
+    address. With both, the two must find the same entry. None, two, or two different ones: the claims of the
+    directory are `missing`, and the log says why, with no value.
+  - **`record: directory`** takes `name` (first and last name), `firstName`, `lastName`, `email` or `department` (empty
+    when the entry has none). Before the evidence that finds the entry exists, the claim is `pending`, and its action is
+    the profile's own challenge: the credential is `ready`. The issuance record keeps the entry, which the person who
+    presents the badge then holds, with its roles; the badge is revoked when the entry leaves the directory.
+  - **The email code.** The issuing call ends the turn of the model with a question the agent's code writes in the
+    conversation: which address the organization knows the person by. The person's next messages there, from any
+    device, are the address and then the code: the code takes them, they start no turn and never reach the model. The
+    answer to the address is the same whether or not an entry holds it; a six-digit code is sent, by email, only to an
+    address an entry holds. It is valid ten minutes, with five tries; `cancel` stops the check. A right code records
+    the address as evidence (`evidence.email`, never shown to the model) and the issuance goes on by itself, offering
+    the badge with no new turn of the model. The model is told `passed`, `failed` or `expired`, and nothing else. A
+    guest who receives the badge is asked at once to present it, which identifies them (issuing identifies nobody).
+  - **`emailId`** numbers a badge by the verified address, as `documentId` does by the document: the same address gives
+    the same number to whoever proves it, an address that changes in the directory gives another one.
+  - **Email** goes through the SMTP server of the deployment (`SMTP_URL`, `SMTP_FROM`). Without both, the email code
+    is unavailable: the claims it serves are `unavailable`, and the agent says so at start, naming the profiles.
+  - **Refused by the loader:** a profile that takes a claim from the directory with no challenge, another challenge or
+    another order; a directory claim with no `identity.directory`; a passport without `nationality`, `lastName`,
+    `firstName` and `dateOfBirth` stored; an email challenge without `evidence.email` storing `address`, with
+    `evidence.email.modelVisible`, on a profile that takes nothing from the directory, on an `automatic` profile, or in
+    `actions` (in words, before the schema); `emailId` without an email challenge.
 - **Two tools.** `credential_requirements` is read-only and passes no gate. For each credential the person
   may receive it answers `held`, `ready` or `incomplete`, and for each claim a status without any value:
-  `available`, `missing`, `expired`, `not-revealed` or `unavailable`. A claim that is not available names
-  what obtains it: `request_presentation` with an entry, `issue_credential` when the issuance itself reads
-  the document it needs (the credential is then `ready`), or nothing to do. `issue_credential` takes the
+  `available`, `missing`, `expired`, `not-revealed`, `unavailable` or `pending` (a claim of the directory whose
+  evidence does not exist yet). A claim that is not available names what obtains it: `request_presentation`
+  with an entry, `issue_credential` with the profile and the `challenge` (`document` or `email`) when the
+  issuance itself obtains it (the credential is then `ready`), or nothing to do. `issue_credential` takes the
   name of the credential and nothing else: the agent resolves the claims itself, for the person of the
   session, offers the credential to their wallet, and issues nothing when a claim cannot be resolved,
   answering with the same list.
@@ -460,7 +520,8 @@ issuance:
   "Get <label>"; the credential is absent from the model's list. `automatic`: the agent issues as soon as
   every claim resolves, when evidence arrives. `credential_requirements` is there in the three cases.
 - **Gates.** `roles` limits who may receive the credential. `authChallenge` runs before the offer, as for
-  any action. A credential is issued once to a Principal.
+  any action: one challenge, or a list of them, run in their order (a list is for a badge from the directory
+  only). A credential is issued once to a Principal.
 - **Persons only** in this version: a credential is offered on the connection of the person, as an `issue`
   flow on a flow-capable wallet.
 - **The record.** Each issuance leaves a record built as evidence is: the audit fields always (the profile,
@@ -607,6 +668,18 @@ spaces:
 - Personal's rules are `spaces.personal`; without it, 365 days (the deployment's `RETENTION_HISTORY_DAYS`), the
   lawful basis of `conversation-memory` and the agent's provider.
 - The title, the purpose and the brief of a space are stored sealed, like a conversation's title (D77).
+- **People of other organizations (D90; decision 62).** The owner of a list space finds an organization in the trust
+  graph (`GET {sessions}/organizations?q=`, the Verana Graph of `VERANA_GRAPH_URL`, the agent's own excluded) and
+  invites a person of it by email (`POST {sessions}/spaces/{id}/members { organizationKey, email }`). The agent refuses
+  an organization the graph does not hold trusted (`422 not-on-verana`), its own (`422 home-organization`), one whose
+  badges `identity.authentication.issuers.organizations` does not accept (`409 organization-not-accepted`), and every
+  invitation without an SMTP server (`503 email-unavailable`). The email names who invites, the space, the agent and
+  its organization, says that a badge of that organization carrying the address is needed, and carries the app link to
+  the agent (`<APP_LINK_BASE>service/<did>`): no token, nothing that opens the space. The invitation binds to the first
+  person who presents a badge whose issuer is that organization and whose `email` is that address; they are then a
+  `guest` of the space. A person the agent knows already is compared on the email their stored evidence holds, and
+  asked nothing; one whose evidence holds none is asked once for their badge again. For this the authentication should
+  ask for and store `email`, which the agent says at start when a list template exists and it does not.
 
 ## privacy
 
@@ -650,8 +723,11 @@ enables crypto-erasure with its lineage cascade.
 12. A space template is declared once; its `creators` are declared in `identity.roles` (rule 2); the default of
     each of its rules lies within its bounds; a template of kind `organization` has the rule `organization: true`
     (SPACE-DEF-003).
+13. A badge from the user directory: see `issuance`, "Refused by the loader" (IDENT-DIR-002/003, INTX-AUTH-011/012/015,
+    INTX-ISSUE-020). A profile that takes nothing from the directory declares at most one challenge, never `email`.
 
-Before the schema, a role that declares `crossSession` is refused in words (RBAC-XSESS-005).
+Before the schema, a role that declares `crossSession` is refused in words (RBAC-XSESS-005), and so is an action that
+declares the email code (INTX-AUTH-011).
 
 ## Differences from the previous generation of packs
 

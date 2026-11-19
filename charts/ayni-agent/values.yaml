@@ -36,7 +36,8 @@ env:
     value: ayni-agent
 
 # Secret holding SESSION_TOKEN_SECRET, DATABASE_URL, REDIS_URL, OBJECT_STORE_ACCESS_KEY,
-# OBJECT_STORE_SECRET_KEY, ENTRY_ENCRYPTION_KEY, LLM_API_KEY, EMBEDDINGS_API_KEY, ANCHOR_SIGNER_MNEMONIC...
+# OBJECT_STORE_SECRET_KEY, ENTRY_ENCRYPTION_KEY, LLM_API_KEY, EMBEDDINGS_API_KEY, ANCHOR_SIGNER_MNEMONIC,
+# SMTP_URL (with its credentials; SMTP_FROM and VERANA_GRAPH_URL may be plain values in env)...
 existingSecret: ""
 
 # The agent pack, one of: a pack shipped in the image (set AGENT_PACK_PATH to its directory, e.g.
