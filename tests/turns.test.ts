@@ -1,7 +1,9 @@
 /**
  * Usage, the context figure, caching and erasure over the real agent (in-memory store, stub model), driven through
  * the AG-UI profile and the admin interface: LLM-USAGE-001..003, LLM-CACHE-001/002, MEM-CTX-001, PLAT-STATS-004,
- * PROF-DESC-008, PROF-STREAM-007/008, PROF-HIST-010, PROF-CONV-009, PRIV-ERASE-005/007/008, RBAC-XSESS-006.
+ * PROF-DESC-008, PROF-STREAM-007/008, PROF-HIST-010, PRIV-ERASE-005/007/008, RBAC-XSESS-006; decision 60 (a person
+ * deletes their message within its window, with the reply to it and the memories taken from it; no conversation
+ * erasure).
  */
 import { DESCRIPTOR_PATH } from '@ayni.org/ayni-agui-profile'
 import pino from 'pino'
@@ -254,44 +256,56 @@ describe('a request that keeps its start (MEM-CTX-001, LLM-CACHE-001/002)', () =
   })
 })
 
-describe('the descriptor (PROF-DESC-008)', () => {
-  it('declares context and erasure', async () => {
+describe('the descriptor (PROF-DESC-008, decision 60)', () => {
+  it('declares context and the deletion window', async () => {
     const descriptor = await running.app.inject({ method: 'GET', url: DESCRIPTOR_PATH })
     expect(descriptor.statusCode).toBe(200)
-    expect(descriptor.json().features).toMatchObject({ context: true, erasure: true })
+    expect(descriptor.json().features).toMatchObject({ context: true, erasure: { windowSeconds: 600 } })
   })
 })
 
-describe('a person erases what they wrote (PRIV-ERASE-007, PROF-HIST-010, PROF-CONV-009, PROF-STREAM-008)', () => {
-  it('erases one message by the client id, tells every device, and refuses a message of the agent', async () => {
+describe('a person deletes a message of theirs within its window (PRIV-ERASE-007/010..012, PROF-HIST-010, PROF-STREAM-008)', () => {
+  const erase = (s: { sessionId: string; sessionToken: string }, id: string) =>
+    running.app.inject({
+      method: 'DELETE',
+      url: `/agui/v3/sessions/${s.sessionId}/messages/${encodeURIComponent(id)}`,
+      headers: { authorization: `Bearer ${s.sessionToken}` },
+    })
+  const erasedEvents = (sessionId: string, from: number) =>
+    received(sessionId)
+      .slice(from)
+      .filter((e) => e.type === 'CUSTOM' && e.name === 'ayni.messages.erased')
+
+  it('deletes it by the client id with the reply to it, tells every device, and refuses a message of the agent', async () => {
     const laptop = await device('did:peer:erase')
     const phone = await device('did:peer:erase')
     const conversationId = await conversationOfSession(laptop.sessionId)
     await run(laptop, 'My door code is 4412.', 'u-door')
-    const own = (await entries(conversationId)).find((e) => e.text === 'My door code is 4412.') as MessageEntry
-    const agentReply = (await entries(conversationId)).find((e) => e.role === 'agent') as MessageEntry
+    const all = await entries(conversationId)
+    const own = all.find((e) => e.text === 'My door code is 4412.') as MessageEntry
+    // the reply names the message it answers
+    const reply = all.find((e) => e.role === 'agent' && e.payload?.inboundId === own.id) as MessageEntry
+    expect(reply.text).toContain('4412')
     const seen = received(phone.sessionId).length
-    const erase = (id: string, s = laptop) =>
-      running.app.inject({
-        method: 'DELETE',
-        url: `/agui/v3/sessions/${s.sessionId}/messages/${encodeURIComponent(id)}`,
-        headers: { authorization: `Bearer ${s.sessionToken}` },
-      })
-    expect((await erase(agentReply.id)).statusCode).toBe(404)
-    expect((await erase('msg_unknown')).statusCode).toBe(404)
-    expect((await erase('u-door')).statusCode).toBe(204)
-    const stored = await running.agent.store.entries.get(own.id)
-    expect(stored?.state).toBe('crypto-erased')
-    expect(running.agent.memory.open(stored as never).text).toBe('[erased]')
-    expect((await history(phone)).some((m) => m.id === own.id)).toBe(false)
-    const told = received(phone.sessionId)
-      .slice(seen)
-      .filter((e) => e.type === 'CUSTOM' && e.name === 'ayni.messages.erased')
+    expect((await erase(laptop, reply.id)).statusCode).toBe(404)
+    expect((await erase(laptop, 'msg_unknown')).statusCode).toBe(404)
+    expect((await erase(laptop, 'u-door')).statusCode).toBe(204)
+    for (const id of [own.id, reply.id]) {
+      const stored = await running.agent.store.entries.get(id)
+      expect(stored?.state).toBe('crypto-erased')
+      expect(running.agent.memory.open(stored as never).text).toBe('[erased]')
+    }
+    const left = await history(phone)
+    expect(left.some((m) => m.id === own.id || m.id === reply.id)).toBe(false)
+    const told = erasedEvents(phone.sessionId, seen)
     expect(told).toHaveLength(1)
-    expect(told[0]?.value).toEqual({ conversationId, messageIds: [own.id], clientIds: ['u-door'] })
+    expect(told[0]?.value).toEqual({ conversationId, messageIds: [own.id, reply.id], clientIds: ['u-door'] })
+    // a second deletion, from another device, finds it deleted already and tells nobody again
+    expect((await erase(phone, own.id)).statusCode).toBe(204)
+    expect(erasedEvents(phone.sessionId, seen)).toHaveLength(1)
   })
 
-  it('erases with the message the tool calls of its turn, and flags the note that cites it (PRIV-ERASE-005)', async () => {
+  it("deletes with it the turn's tool calls, its memory line and the memory taken from it (not flagged)", async () => {
     const d = await device('did:peer:cascade')
     const conversationId = await conversationOfSession(d.sessionId)
     await run(d, 'remember /call working_memory {"action":"add","content":"lives in Lyon"}', 'u-note')
@@ -299,37 +313,115 @@ describe('a person erases what they wrote (PRIV-ERASE-007, PROF-HIST-010, PROF-C
     const message = all.find((e) => e.role === 'principal' && e.text.includes('remember')) as MessageEntry
     const call = all.find((e) => e.sourceType === 'tool-call') as MessageEntry
     expect((call.payload as { inboundId?: string }).inboundId).toBe(message.id)
+    const line = all.find((e) => e.sourceType === 'state-update' && e.payload?.kind === 'memory') as MessageEntry
+    expect(line.payload).toMatchObject({ action: 'added', inboundId: message.id })
     // the store holds the note sealed (D77): found by its lineage, its content only in the ciphertext
     const note = (await running.agent.store.notes.list(d.principal.id)).find((n) => n.lineageRefs.includes(message.id))
     expect(note?.lineageRefs).toEqual([message.id])
     expect(note?.content).toBe('')
     expect(JSON.stringify(note)).not.toContain('Lyon')
-    const response = await running.app.inject({
-      method: 'DELETE',
-      url: `/agui/v3/sessions/${d.sessionId}/messages/${message.id}`,
-      headers: { authorization: `Bearer ${d.sessionToken}` },
-    })
-    expect(response.statusCode).toBe(204)
-    expect((await running.agent.store.entries.get(call.id))?.state).toBe('crypto-erased')
-    const flagged = (await running.agent.store.notes.list(d.principal.id)).find((n) => n.id === note?.id)
-    expect(flagged?.needsRevision).toBe(true)
+    const seen = received(d.sessionId).length
+    expect((await erase(d, message.id)).statusCode).toBe(204)
+    for (const id of [message.id, call.id, line.id])
+      expect((await running.agent.store.entries.get(id))?.state).toBe('crypto-erased')
+    const replies = all.filter(
+      (e) => e.role === 'agent' && e.sourceType === 'text' && e.payload?.inboundId === message.id
+    )
+    expect(replies.length).toBeGreaterThan(0)
+    for (const r of replies) expect((await running.agent.store.entries.get(r.id))?.state).toBe('crypto-erased')
+    // the memory is gone, not flagged (decision 60; the operator's erasure flags, PRIV-ERASE-005)
+    expect((await running.agent.store.notes.list(d.principal.id)).some((n) => n.id === note?.id)).toBe(false)
+    const told = erasedEvents(d.sessionId, seen)
+    // the memory goes without a line of its own (PRIV-ERASE-012); the announcement names the messages (PROF-STREAM-008)
+    expect(Object.keys(told[0]?.value as object).sort()).toEqual(['clientIds', 'conversationId', 'messageIds'])
+    expect((told[0]?.value as { messageIds?: string[] } | undefined)?.messageIds).toEqual(
+      expect.arrayContaining([message.id, call.id, line.id])
+    )
   })
 
-  it("erases every message the person wrote in a conversation, and keeps the agent's", async () => {
+  it('refuses a message older than the window (409 window-passed) and leaves it as it is', async () => {
+    const d = await device('did:peer:window')
+    const conversationId = await conversationOfSession(d.sessionId)
+    await run(d, 'an old message', 'u-old')
+    const own = (await entries(conversationId)).find((e) => e.text === 'an old message') as MessageEntry
+    await running.agent.store.entries.update(own.id, { createdAt: new Date(Date.now() - 601_000).toISOString() })
+    const response = await erase(d, 'u-old')
+    expect(response.statusCode).toBe(409)
+    expect(response.json()).toEqual({ error: 'window-passed' })
+    expect((await running.agent.store.entries.get(own.id))?.state).toBe('active')
+  })
+
+  it('cancels the turn that is writing its reply, then deletes the message and what the turn recorded', async () => {
+    const d = await device('did:peer:busy')
+    const conversationId = await conversationOfSession(d.sessionId)
+    const long = Array.from({ length: 80 }, (_, i) => `word${i}`).join(' ')
+    const pending = run(d, long, 'u-busy')
+    let own: MessageEntry | undefined
+    for (let i = 0; i < 100 && !own; i++) {
+      await new Promise((r) => setTimeout(r, 10))
+      own = (await entries(conversationId)).find((e) => e.role === 'principal' && e.text === long)
+    }
+    expect(own).toBeDefined()
+    const seen = received(d.sessionId).length
+    const response = await erase(d, 'u-busy')
+    expect(response.statusCode).toBe(204)
+    const events = await pending
+    expect(events.some((e) => e.type === 'RUN_ERROR' && e.code === 'cancelled')).toBe(true)
+    // the interrupted reply is erased with the message, and both are named in the announcement (PROF-STREAM-008)
+    expect((await running.agent.store.entries.get(own?.id as string))?.state).toBe('crypto-erased')
+    const told = erasedEvents(d.sessionId, seen)
+    const ids = (told[0]?.value as { messageIds?: string[] } | undefined)?.messageIds ?? []
+    expect(ids).toHaveLength(2)
+    expect(ids[0]).toBe(own?.id)
+    const reply = await running.agent.store.entries.get(ids[1] as string)
+    expect(reply).toMatchObject({ role: 'agent', completion: 'interrupted', state: 'crypto-erased' })
+  })
+
+  it('takes a message that waits for its turn off the list: nothing answers it', async () => {
+    const d = await device('did:peer:waits')
+    const conversationId = await conversationOfSession(d.sessionId)
+    const long = Array.from({ length: 40 }, (_, i) => `w${i}`).join(' ')
+    const first = run(d, long, 'u-first')
+    for (let i = 0; i < 100; i++) {
+      await new Promise((r) => setTimeout(r, 10))
+      if ((await entries(conversationId)).some((e) => e.role === 'principal' && e.text === long)) break
+    }
+    await run(d, 'never mind this one', 'u-waits')
+    const waiting = (await entries(conversationId)).find((e) => e.text === 'never mind this one') as MessageEntry
+    expect(waiting).toBeDefined()
+    expect((await erase(d, 'u-waits')).statusCode).toBe(204)
+    await first
+    await new Promise((r) => setTimeout(r, 100))
+    const after = await entries(conversationId)
+    expect(after.some((e) => e.role === 'agent' && e.payload?.inboundId === waiting.id)).toBe(false)
+    const session = await running.agent.sessions.get(d.sessionId)
+    expect(await running.agent.waitingOf(session as never)).toEqual([])
+  })
+
+  it('with a window of 0, declares no erasure (PRIV-ERASE-010, PROF-DESC-008)', async () => {
+    process.env.MESSAGE_DELETION_WINDOW_SECONDS = '0'
+    const none = await buildAgent(testEnv(), pino({ level: 'silent' }), { drainMs: 100 })
+    delete process.env.MESSAGE_DELETION_WINDOW_SECONDS
+    try {
+      const descriptor = await none.app.inject({ method: 'GET', url: DESCRIPTOR_PATH })
+      expect(descriptor.json().features.erasure).toBeUndefined()
+      expect(none.agent.pack.conversations?.messageDeletionWindowSeconds).toBe(0)
+    } finally {
+      await none.stop()
+    }
+  })
+
+  it('cannot erase a whole conversation any more: an operator does, through the admin interface', async () => {
     const d = await device('did:peer:whole')
     const conversationId = await conversationOfSession(d.sessionId)
     await run(d, 'one')
-    await run(d, 'two')
     const response = await running.app.inject({
       method: 'POST',
       url: `/agui/v3/sessions/conversations/${conversationId}/erasure`,
       headers: { authorization: `Bearer ${d.sessionToken}` },
     })
-    expect(response.statusCode).toBe(200)
-    expect(response.json()).toEqual({ erased: 2, held: 0 })
-    const remaining = await history(d)
-    expect(remaining.length).toBeGreaterThan(0)
-    expect(remaining.every((m) => m.role !== 'user')).toBe(true)
+    expect(response.statusCode).toBe(404)
+    expect((await history(d)).some((m) => m.role === 'user')).toBe(true)
   })
 })
 
@@ -396,6 +488,25 @@ describe('the admin interface (PRIV-ERASE-008, RBAC-XSESS-006)', () => {
     const records = log.json().records as { action: string; actor: string; reason: string }[]
     for (const action of ['legal-hold', 'legal-hold-release', 'erasure', 'audit-read'])
       expect(records.some((r) => r.action === action && r.actor && r.reason)).toBe(true)
+  })
+
+  it('erases with the tool calls of its turn and flags the note that cites it, deletes no note (PRIV-ERASE-005)', async () => {
+    const d = await device('did:peer:operator-flags')
+    const conversationId = await conversationOfSession(d.sessionId)
+    await run(d, 'remember /call working_memory {"action":"add","content":"lives in Lyon"}', 'u-op-note')
+    const all = await entries(conversationId)
+    const message = all.find((e) => e.role === 'principal' && e.text.includes('remember')) as MessageEntry
+    const call = all.find((e) => e.sourceType === 'tool-call') as MessageEntry
+    // older than the window: the person may not delete it any more, an operator may
+    await running.agent.store.entries.update(message.id, { createdAt: new Date(Date.now() - 3_600_000).toISOString() })
+    const response = await admin().inject({
+      method: 'POST',
+      url: '/admin/erasure',
+      payload: { operator: 'ops@example.org', reason: 'request 12', entryIds: [message.id] },
+    })
+    expect(response.json().erased).toEqual(expect.arrayContaining([message.id, call.id]))
+    const note = (await running.agent.store.notes.list(d.principal.id)).find((n) => n.lineageRefs.includes(message.id))
+    expect(note?.needsRevision).toBe(true)
   })
 
   it('recomputes the last text of a conversation when its newest messages are erased (PRIV-ERASE-005, D77)', async () => {

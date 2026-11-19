@@ -12,6 +12,7 @@ import type { Store } from '../store/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import { type SealedConversations, sealedConversations } from './conversationSeal.js'
+import { personalSpaceId, spaceIdOf } from './spaces.js'
 import type { ChannelType, ClientDescription, ClosureReason, Conversation, Principal, Session } from './types.js'
 
 export interface InvitationMinter {
@@ -79,6 +80,12 @@ export interface SessionGrant {
   used: boolean
 }
 
+/**
+ * The space of a new conversation (PROF-CONV-011): the one a session asked for when its Principal may use it, else their
+ * Personal space. Set by the composition root; without it every conversation is Personal.
+ */
+export type SpaceChooser = (principal: Principal, requested: string | undefined) => Promise<string>
+
 /** how many sessions of its conversation a session reads besides its own, newest first */
 const LINEAGE_LIMIT = 30
 /** how many message ids one `viewed` receipt is read for, and how many are kept while a reply is being stored */
@@ -98,6 +105,8 @@ export class SessionService {
   private readonly siblingsAllowed: boolean
   /** the store's conversations, their title and last text sealed (D77) */
   private readonly conversations: SealedConversations
+  /** where a new conversation goes (SPACE-CONV-001) */
+  public chooseSpace: SpaceChooser = async (principal) => personalSpaceId(principal.id)
 
   public constructor(
     private readonly store: Store,
@@ -164,7 +173,8 @@ export class SessionService {
     grant: SessionGrant,
     conversationId?: string,
     newConversation = false,
-    resumeSessionId?: string
+    resumeSessionId?: string,
+    spaceId?: string
   ): Promise<{ session: Session; token: string }> {
     const { token, hash } = this.newToken()
     const id = prefixedId('ses')
@@ -178,6 +188,7 @@ export class SessionService {
       locale,
       conversationId: conversationId ?? grant.conversationId,
       newConversation: newConversation || grant.newConversation,
+      ...(spaceId ? { spaceId } : {}),
       resumedFromSessionId: resumeSessionId,
       tokenHash: hash,
       boundAt: nowIso(),
@@ -325,7 +336,8 @@ export class SessionService {
     deviceHandle?: string,
     resumeSessionId?: string,
     conversationId?: string,
-    newConversation = false
+    newConversation = false,
+    spaceId?: string
   ): Promise<{ session: Session; token: string }> {
     const { token, hash } = this.newToken()
     const id = prefixedId('ses')
@@ -340,6 +352,7 @@ export class SessionService {
       deviceHandle,
       conversationId,
       newConversation,
+      ...(spaceId ? { spaceId } : {}),
       resumedFromSessionId: resumeSessionId,
       tokenHash: hash,
       lastActivityAt: nowIso(),
@@ -428,7 +441,8 @@ export class SessionService {
     locale?: string,
     resumeSessionId?: string,
     conversationId?: string,
-    newConversation = false
+    newConversation = false,
+    spaceId?: string
   ): Promise<{ session: Session; token: string }> {
     this.requireBound(parent)
     if (!this.siblingsAllowed) throw new SessionError('sibling sessions are disabled', 'forbidden')
@@ -448,6 +462,7 @@ export class SessionService {
       deviceHandle: parent.deviceHandle,
       conversationId,
       newConversation,
+      ...(spaceId ? { spaceId } : {}),
       resumedFromSessionId: resumeSessionId,
       tokenHash: hash,
       boundAt: nowIso(),
@@ -486,6 +501,9 @@ export class SessionService {
       const latest = (await this.conversations.listByPrincipal(principal.id, ['active']))[0]
       if (latest) conversation = latest
     }
+    // a new conversation is in the space the request named when its Principal is an active member of it, else in
+    // Personal (PROF-CONV-011, SPACE-CONV-001)
+    const space = conversation ? spaceIdOf(conversation) : await this.chooseSpace(principal, session.spaceId)
     const now = nowIso()
     if (!conversation) {
       conversation = {
@@ -497,6 +515,7 @@ export class SessionService {
         createdAt: now,
         lastActivityAt: now,
         sessionIds: [],
+        spaceId: space,
       }
     }
     // one open session per device per conversation (IDENT-SESS-014): the newer one supersedes the older
@@ -537,11 +556,71 @@ export class SessionService {
     )
   }
 
-  /** The Principal's conversations, active and archived, newest activity first (PROF-CONV-001). */
-  public async listConversations(principalId: string): Promise<(Conversation & { open: boolean })[]> {
+  /**
+   * The Principal's conversations, active and archived, newest activity first (PROF-CONV-001); of one space when one is
+   * named (PROF-CONV-010).
+   */
+  public async listConversations(
+    principalId: string,
+    spaceId?: string
+  ): Promise<(Conversation & { open: boolean; spaceId: string })[]> {
     const open = new Set((await this.store.sessions.listByPrincipal(principalId, ['bound'])).map((s) => s.id))
     const list = await this.conversations.listByPrincipal(principalId, ['active', 'archived'])
-    return list.map((c) => ({ ...c, open: c.sessionIds.some((id) => open.has(id)) }))
+    return list
+      .map((c) => ({ ...c, spaceId: spaceIdOf(c), open: c.sessionIds.some((id) => open.has(id)) }))
+      .filter((c) => spaceId === undefined || c.spaceId === spaceId)
+  }
+
+  /** Every conversation of the Principal, in every state, for what the agent keeps about them (MEM-SPACE-007). */
+  public async allConversations(principalId: string): Promise<Conversation[]> {
+    return this.conversations.listByPrincipal(principalId, ['active', 'archived', 'final'])
+  }
+
+  /** A conversation by its id, opened, whoever it belongs to: for the space service, which checks who reads it. */
+  public async conversationById(id: string): Promise<Conversation | undefined> {
+    return this.conversations.get(id)
+  }
+
+  /** The conversations of a space, opened: those their authors share with it when `shared` (SPACE-SHARE-002). */
+  public async conversationsOfSpace(spaceId: string, shared = false): Promise<Conversation[]> {
+    return this.conversations.listBySpace(spaceId, { shared })
+  }
+
+  /** The conversation has a message of the person: from then on its space is fixed (SPACE-CONV-002). */
+  public async hasStarted(conversation: Conversation): Promise<boolean> {
+    const [row] = await this.store.entries.query(this.scopeOf(conversation), {
+      conversationId: conversation.id,
+      roles: ['principal'],
+      sourceTypes: TRANSCRIPT_MESSAGE_TYPES,
+      limit: 1,
+    })
+    return !!row
+  }
+
+  /** Moves a conversation that has no message yet to another space (SPACE-CONV-002); the caller checked the space. */
+  public async setConversationSpace(conversation: Conversation, spaceId: string): Promise<Conversation> {
+    if (conversation.state === 'final') throw new SessionError('conversation is final', 'final')
+    conversation.spaceId = spaceId
+    conversation.sharedAt = null
+    await this.conversations.save(conversation)
+    // what it holds already (a greeting) goes with it (SPACE-CONV-001)
+    await this.store.entries.setSpace(conversation.id, spaceId)
+    await this.conversationChanged(conversation)
+    return conversation
+  }
+
+  /** Its author shares a conversation with its own space, or stops sharing it (SPACE-SHARE-001, PROF-CONV-012). */
+  public async setConversationShared(conversation: Conversation, sharedAt: string | null): Promise<Conversation> {
+    conversation.sharedAt = sharedAt
+    await this.conversations.save(conversation)
+    await this.conversationChanged(conversation)
+    return conversation
+  }
+
+  /** The bound AG-UI sessions that show a conversation, on every device of its Principal. */
+  public async sessionsOfConversation(conversation: Conversation): Promise<Session[]> {
+    const open = await this.store.sessions.listByPrincipal(conversation.principalId, ['bound'])
+    return open.filter((s) => s.channelType === 'ag-ui' && s.conversationId === conversation.id)
   }
 
   public async conversationOf(principal: Principal, id: string): Promise<Conversation> {
@@ -685,13 +764,12 @@ export class SessionService {
   }
 
   /** What the conversation holds, and nothing else (PRIV-SCOPE-001, D76). */
-  private scopeOf(conversation: Conversation) {
+  public scopeOf(conversation: Pick<Conversation, 'id' | 'principalId'>) {
     return buildScope({
       principalId: conversation.principalId,
       conversationId: conversation.id,
       backingIdentity: null,
       relation: 'unrecognized',
-      crossSession: 'own-sessions',
     })
   }
 

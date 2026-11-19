@@ -6,6 +6,7 @@ import sharp from 'sharp'
 import type { AgentPack } from '../config/packTypes.js'
 import type { CapabilityRouter } from '../core/channel.js'
 import type { MessageAttachment, MessageEntry, Principal, Session } from '../core/types.js'
+import type { ScopePredicate } from '../memory/scope.js'
 import type { MemoryService } from '../memory/service.js'
 import type { Store } from '../store/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
@@ -166,6 +167,35 @@ export class MediaService {
       }
     }
     if (!attachment) return undefined
+    return this.bytesOf(attachment, wantThumb)
+  }
+
+  /**
+   * An attachment of a conversation its author shares with a space, for an active member of the space (SPACE-SHARE-002,
+   * PROF-SPACE-007): found among the messages of that conversation alone, through its own predicate, and logged
+   * under the reader.
+   */
+  public async openShared(
+    reader: Principal,
+    conversation: { id: string; principalId: string },
+    scope: ScopePredicate,
+    attachmentId: string
+  ): Promise<{ bytes: Buffer; mimeType: string; filename?: string } | undefined> {
+    const wantThumb = attachmentId.endsWith('.thumb')
+    const baseId = wantThumb ? attachmentId.slice(0, -6) : attachmentId
+    const entries = await this.memory.sharedHistory(reader, conversation, scope, {
+      limit: 500,
+      sourceTypes: ['text', 'voice', 'media'],
+      roles: ['principal', 'agent'],
+    })
+    const attachment = entries.flatMap((e) => e.attachments).find((a) => a.id === baseId)
+    return attachment ? this.bytesOf(attachment, wantThumb) : undefined
+  }
+
+  private async bytesOf(
+    attachment: MessageAttachment,
+    wantThumb: boolean
+  ): Promise<{ bytes: Buffer; mimeType: string; filename?: string } | undefined> {
     if (wantThumb) {
       const keyRef = (attachment as MessageAttachment & { thumbnailKeyRef?: string }).thumbnailKeyRef
       if (!attachment.thumbnailBucketKey || !keyRef) return undefined

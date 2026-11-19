@@ -74,11 +74,22 @@ function caption(a: MessageAttachment): string {
   return `${a.textRepr.slice(0, 200).trim()}…`
 }
 
+/** The ids or names in a payload field, when it is a list of texts. */
+function texts(value: unknown): string[] | undefined {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : undefined
+}
+
 /** One entry becomes one or more AG-UI messages (text and activities), transcript order preserved. */
 export function entryToMessages(entry: MessageEntry): Record<string, unknown>[] {
   const out: Record<string, unknown>[] = []
   const reactionMap = (entry.payload?.reactions ?? {}) as Record<string, { emoji: string; by: string }>
   const reactions = Object.values(reactionMap).map((r) => ({ emoji: r.emoji, by: r.by }))
+  // what of the person's memory a reply was given: its Info lists it, empty lists for a message of the agent outside a
+  // turn (decision 60, PROF-HIST-011)
+  const spaceRefusal = entry.sourceType === 'refusal' && entry.payload?.kind === 'space-rules'
+  const reply = entry.role === 'agent' && (['text', 'voice', 'media'].includes(entry.sourceType) || spaceRefusal)
+  const usedMemories = reply ? (texts(entry.payload?.usedMemories) ?? []) : undefined
+  const usedPreferences = reply ? (texts(entry.payload?.usedPreferences) ?? []) : undefined
   const meta = {
     createdAt: entry.createdAt,
     initiatedAt: entry.initiatedAt,
@@ -87,6 +98,8 @@ export function entryToMessages(entry: MessageEntry): Record<string, unknown>[] 
     reactions: reactions.length ? reactions : undefined,
     replyTo: wireReply(entry.payload?.replyTo),
     externalId: entry.externalId,
+    ...(usedMemories ? { usedMemories } : {}),
+    ...(usedPreferences ? { usedPreferences } : {}),
   }
   switch (entry.sourceType) {
     case 'text':
@@ -133,6 +146,8 @@ export function entryToMessages(entry: MessageEntry): Record<string, unknown>[] 
     }
     case 'approval':
     case 'refusal':
+      // the code's answer in a space whose rules do not allow the agent's model: a message (PROF-RUN-014)
+      if (spaceRefusal) return [{ id: entry.id, role: 'assistant', content: entry.text, metadata: meta }]
       return [
         {
           id: entry.id,
@@ -178,7 +193,43 @@ export function entryToMessages(entry: MessageEntry): Record<string, unknown>[] 
       ]
     case 'tool-call':
       return [] // progress is signalled with steps; tool names, arguments and results never reach the wire (PROF-MAP-005)
+    case 'state-update': {
+      // a memory the agent changed is a line of the transcript, never its content (PROF-HIST-012); other bookkeeping is not
+      const p = entry.payload as { kind?: string; memoryId?: string; spaceId?: string; action?: string } | undefined
+      if (p?.kind !== 'memory' || !p.memoryId) return []
+      return [
+        {
+          id: entry.id,
+          role: 'activity',
+          activityType: ACTIVITY.memoryUpdate,
+          content: { memoryId: p.memoryId, spaceId: p.spaceId, action: p.action },
+          metadata: {
+            entryId: entry.id,
+            createdAt: entry.createdAt,
+            initiatedAt: entry.initiatedAt,
+            sourceType: entry.sourceType,
+          },
+        },
+      ]
+    }
     default:
       return []
   }
+}
+
+/** What a member of a space reads of a conversation its author shares with it: the messages of the transcript. */
+const SHARED_TYPES = ['text', 'voice', 'media']
+
+/**
+ * An entry of a shared conversation, as a member of its space reads it (SPACE-SHARE-003, PROF-HIST-011): the person's and the
+ * agent's messages only, without what is the author's own (the memories and preferences a reply used, the memory lines,
+ * the cards of their requests and approvals).
+ */
+export function sharedEntryToMessages(entry: MessageEntry): Record<string, unknown>[] {
+  if (!SHARED_TYPES.includes(entry.sourceType) || (entry.role !== 'principal' && entry.role !== 'agent')) return []
+  if (entry.payload?.menuId !== undefined && entry.payload?.items) return []
+  return entryToMessages(entry).map((message) => {
+    const { usedMemories: _m, usedPreferences: _p, ...metadata } = (message.metadata ?? {}) as Record<string, unknown>
+    return { ...message, metadata }
+  })
 }

@@ -9,11 +9,11 @@ import { type IdentityRequests, identityOutcomeForPerson } from '../channels/did
 import type { PeerStatusNotifier } from '../channels/didcomm/peerStatus.js'
 import type { Env } from '../config/env.js'
 import type { AgentPack, Features } from '../config/packTypes.js'
-import { featuresOf } from '../config/packTypes.js'
+import { featuresOf, messageDeletionWindowSeconds } from '../config/packTypes.js'
 import type { ChatModel } from '../llm/types.js'
 import type { MediaService } from '../media/service.js'
 import type { RagService } from '../memory/rag.js'
-import type { MemoryService, NewEntry } from '../memory/service.js'
+import { MemoryService, type NewEntry } from '../memory/service.js'
 import type { StatsSink } from '../platform/stats.js'
 import { ApprovalError, type ApprovalService, displayName } from '../policy/approvals.js'
 import type { Store } from '../store/types.js'
@@ -38,6 +38,7 @@ import {
 } from './orchestrator.js'
 import type { PrincipalService, VerifiedFacts } from './principals.js'
 import { SessionError, type SessionService, TRANSCRIPT_MESSAGE_TYPES } from './sessions.js'
+import { isPersonalSpace, personalSpaceId, type SpaceError, type SpaceService, spaceIdOf } from './spaces.js'
 import { TurnLock } from './turnLock.js'
 import type { ApprovalRecord, ClientDescription, ClosureReason, MessageEntry, Principal, Session } from './types.js'
 import { ProcessEnding, TooManyWaiting, type WaitingItem, WaitingList } from './waiting.js'
@@ -60,6 +61,8 @@ export interface AgentParts {
   orchestrator: Orchestrator
   /** the context of a turn and the figure of a conversation (D74, D75) */
   context: ContextAssembler
+  /** spaces, their members and handovers (SPACE-DEF, SPACE-MEMB, SPACE-SHARE) */
+  spaces: SpaceService
   llm: ChatModel
   stats: StatsSink
   logger: Logger
@@ -105,6 +108,7 @@ export class AyniAgent {
   public readonly store: Store
   public readonly memory: MemoryService
   public readonly context: ContextAssembler
+  public readonly spaces: SpaceService
   public readonly media: MediaService
   public readonly rag?: RagService
   public readonly principals: PrincipalService
@@ -137,6 +141,7 @@ export class AyniAgent {
     this.store = parts.store
     this.memory = parts.memory
     this.context = parts.context
+    this.spaces = parts.spaces
     this.media = parts.media
     this.rag = parts.rag
     this.principals = parts.principals
@@ -214,8 +219,11 @@ export class AyniAgent {
     const pending = principal && this.features.approvals ? (await this.approvals.pendingFor(principal)).length : 0
     // the context figure of the conversation's latest turn, the same on every device (D74, PROF-STREAM-007)
     const context = session.state === 'bound' ? await this.context.figure(conversationOf(session)) : undefined
+    // the space of the conversation, as its header names it (SPACE-CONV-003, PROF-STREAM-009)
+    const space = session.state === 'bound' && principal ? await this.spaceRef(session, principal) : undefined
     return {
       ...(context ? { context } : {}),
+      ...(space ? { space } : {}),
       contextualMenu: { items: contextualMenuFor(this.pack, principal, session, pending) },
       pendingApprovals: pending,
       generating: this.media
@@ -230,60 +238,135 @@ export class AyniAgent {
     }
   }
 
-  // ---- erasure (D78, PRIV-ERASE-007) -------------------------------------------------------------
+  // ---- spaces (decision 60) ------------------------------------------------------------------------
+
+  /** The space of a session's conversation: the one its conversation names, else Personal (a DIDComm session). */
+  public async spaceOfSession(session: Session, principal: Principal): Promise<string> {
+    if (!session.conversationId) return personalSpaceId(principal.id)
+    const conversation = await this.sessions.conversationById(session.conversationId)
+    return conversation ? spaceIdOf(conversation) : personalSpaceId(principal.id)
+  }
+
+  /** `state.ayni.space`: the space of the session's conversation, as its header names it. */
+  public async spaceRef(session: Session, principal: Principal) {
+    const spaceId = await this.spaceOfSession(session, principal)
+    const access = await this.spaces.access(principal, spaceId)
+    const space = access?.space ?? (isPersonalSpace(spaceId) ? this.spaces.personal(principal) : undefined)
+    return space ? { id: space.id, title: space.title, kind: space.kind } : undefined
+  }
 
   /**
-   * A message the Principal wrote in the session's conversation, erased for good (PROF-HIST-010): named by the
-   * agent's id or by the client's id. Any other message is not found; a message on legal hold is held.
+   * A run of the session on a conversation of a space its Principal left is refused, a receipt excepted: reading is not
+   * writing (SPACE-MEMB-004, PROF-RUN-014). The model providers a space allows are checked by the turn itself
+   * (SPACE-CONV-004).
+   */
+  public async runRefusal(session: Session, kind: AyniAction['kind']): Promise<SpaceError | undefined> {
+    if (kind === 'receipt' || !session.conversationId) return undefined
+    const principal = await this.principalOf(session)
+    const conversation = await this.sessions.conversationById(session.conversationId)
+    if (!principal || !conversation) return undefined
+    return this.spaces.leftRefusal(principal, conversation)
+  }
+
+  /** What the agent keeps about a person (MEM-SPACE-007, PROF-MEM-003): preferences, memories and conversations by space, evidence. */
+  public async aboutMe(principal: Principal, session: Session) {
+    const preferences = await this.memory.ownPreferences(principal, session)
+    const notes = await this.memory.ownNotes(principal, session)
+    const spaces = new Map((await this.spaces.listFor(principal)).map((a) => [a.space.id, a.space]))
+    const titleOf = (spaceId: string) => spaces.get(spaceId)?.title ?? ''
+    const count = (ids: string[]) => {
+      const counts = new Map<string, number>()
+      for (const id of ids) counts.set(id, (counts.get(id) ?? 0) + 1)
+      return [...counts]
+    }
+    // the conversations the person reads, active and archived, by space (PROF-MEM-003)
+    const conversations = (await this.sessions.allConversations(principal.id)).filter((c) => c.state !== 'final')
+    // what the agent verified about the person and still keeps: no attribute value
+    const verified = (await this.evidence.list(principal.id)).filter(
+      (r) => r.outcome === 'verified' && r.kind !== 'issuance' && r.state === 'active' && !!r.encKeyRef
+    )
+    return {
+      preferences: preferences.map((p) => ({ key: p.key, value: p.value, updatedAt: p.updatedAt })),
+      memoriesBySpace: count(notes.map((n) => MemoryService.spaceOfNote(n))).map(([spaceId, n]) => ({
+        spaceId,
+        title: titleOf(spaceId),
+        count: n,
+      })),
+      conversations: count(conversations.map(spaceIdOf)).map(([spaceId, n]) => ({
+        spaceId,
+        title: titleOf(spaceId),
+        count: n,
+        retentionDays: spaces.get(spaceId)?.rules.retentionDays ?? null,
+      })),
+      verified: verified.map((r) => ({
+        // the catalog entry, or the kind of evidence
+        label: r.entry,
+        source: r.issuerOrganization?.name ?? r.issuerOrganization?.key ?? null,
+        verifiedAt: r.verifiedAt,
+        expiresAt: r.expiresAt ?? null,
+      })),
+    }
+  }
+
+  // ---- erasure (D78, PRIV-ERASE-007, PRIV-ERASE-010..012) ----------------------------------------------------------------
+
+  /**
+   * A person deletes a message they wrote in the session's conversation (decision 60, PROF-HIST-010), named by the
+   * agent's id or by the client's id, while it is younger than the pack's window: with it go the agent's reply to it
+   * (its messages, the tool calls and the memory lines of the turn) and the memories taken from it. Any other message
+   * is not found; one past its window, one whose reply is being written and one on legal hold are refused. A message
+   * that waits for its turn leaves the list: nothing answered it.
    */
   public async eraseOwnMessage(
     session: Session,
     principal: Principal,
     messageId: string
   ): Promise<{
-    outcome: 'erased' | 'not-found' | 'legal-hold'
+    outcome: 'erased' | 'not-found' | 'legal-hold' | 'window-passed' | 'turn-in-progress'
     conversationId: string
     messageIds: string[]
     /** the ids the client gave the erased messages, when it gave one (PROF-STREAM-008) */
     clientIds: string[]
+    /** the person's memories deleted with them */
+    memoryIds: string[]
   }> {
     const conversationId = conversationOf(session)
+    const none = { conversationId, messageIds: [], clientIds: [], memoryIds: [] }
     const own = (
       await this.store.entries.listAll({ conversationId, principalId: principal.id, limit: 100_000 })
     ).filter((e) => e.role === 'principal' && TRANSCRIPT_MESSAGE_TYPES.includes(e.sourceType))
     const target = own.find((e) => e.id === messageId) ?? own.find((e) => e.externalId === messageId)
-    if (!target) return { outcome: 'not-found', conversationId, messageIds: [], clientIds: [] }
-    const result = await this.memory.erase(target.id)
-    if (result.reason === 'legal-hold') return { outcome: 'legal-hold', conversationId, messageIds: [], clientIds: [] }
+    if (!target) return { outcome: 'not-found', ...none }
+    // deleted already, from another device: nothing more to do
+    if (target.state === 'crypto-erased') return { outcome: 'erased', ...none }
+    if (target.state === 'legal-hold') return { outcome: 'legal-hold', ...none }
+    // counted from when the agent recorded it; a window of 0 lets nobody delete (PRIV-ERASE-010)
+    const window = messageDeletionWindowSeconds(this.pack)
+    if (window <= 0 || Date.now() - Date.parse(target.createdAt) > window * 1000)
+      return { outcome: 'window-passed', ...none }
+    const key = conversationKey(session)
+    // its reply is being written: the turn is cancelled, and what it recorded is erased once it has stopped
+    // (PRIV-ERASE-011)
+    if (this.orchestrator.answeringIn(conversationId).has(target.id)) {
+      if (!this.cancelTurns?.(key)) return { outcome: 'turn-in-progress', ...none }
+      const until = Date.now() + this.cancelWaitMs
+      while (this.orchestrator.answeringIn(conversationId).has(target.id) && Date.now() < until)
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      if (this.orchestrator.answeringIn(conversationId).has(target.id)) return { outcome: 'turn-in-progress', ...none }
+    }
+    if ((await this.waitingMessages.list(key)).some((item) => item.entryId === target.id)) {
+      await this.waitingMessages.remove(key, [target.id])
+      this.waitingChanged?.(session)
+    }
+    const result = await this.memory.eraseTurn(target.id)
+    if (result.outcome !== 'erased') return { ...none, outcome: result.outcome }
     return {
       outcome: 'erased',
       conversationId,
-      messageIds: [target.id],
-      clientIds: target.externalId ? [target.externalId] : [],
+      messageIds: result.erased.map((e) => e.id),
+      clientIds: result.erased.flatMap((e) => (e.externalId ? [e.externalId] : [])),
+      memoryIds: result.memoryIds,
     }
-  }
-
-  /** Every message the Principal wrote in a conversation, erased for good (PROF-CONV-009); the agent's stay. */
-  public async eraseOwnConversation(
-    principal: Principal,
-    conversationId: string
-  ): Promise<{ erased: string[]; held: string[]; clientIds: string[] }> {
-    const own = (
-      await this.store.entries.listAll({ conversationId, principalId: principal.id, limit: 100_000 })
-    ).filter(
-      (e) => e.role === 'principal' && TRANSCRIPT_MESSAGE_TYPES.includes(e.sourceType) && e.state !== 'crypto-erased'
-    )
-    const erased: string[] = []
-    const held: string[] = []
-    const clientIds: string[] = []
-    for (const entry of own) {
-      const result = await this.memory.erase(entry.id)
-      if (result.erased) {
-        erased.push(entry.id)
-        if (entry.externalId) clientIds.push(entry.externalId)
-      } else if (result.reason === 'legal-hold') held.push(entry.id)
-    }
-    return { erased, held, clientIds }
   }
 
   // ---- sessions ----------------------------------------------------------------------------------
@@ -301,7 +384,8 @@ export class AyniAgent {
     grant: string,
     conversationId?: string,
     newConversation = false,
-    resumeSessionId?: string
+    resumeSessionId?: string,
+    spaceId?: string
   ): Promise<{ session: Session; token: string }> {
     const record = await this.sessions.redeemGrant(grant)
     const principal = await this.store.principals.get(record.principalId)
@@ -311,6 +395,8 @@ export class AyniAgent {
     const live = await this.principals.ensureLive(principal)
     if (!live.ok) throw new SessionError('identity credential no longer valid', 'grant-expired')
     const conversation = await this.sessions.requireOpenable(conversationId ?? record.conversationId, resumeSessionId)
+    // the space of a new conversation is one the person may use (decision 60)
+    if (spaceId && !conversation) await this.spaces.usable(principal, spaceId)
     const merged: ClientDescription = {
       ...record.client,
       ...client,
@@ -323,7 +409,8 @@ export class AyniAgent {
       record,
       conversation,
       newConversation,
-      resumeSessionId
+      resumeSessionId,
+      spaceId
     )
   }
 
@@ -335,7 +422,8 @@ export class AyniAgent {
     deviceProof?: string,
     conversationId?: string,
     newConversation = false,
-    silent = false
+    silent = false,
+    spaceId?: string
   ) {
     const conversation = await this.sessions.requireOpenable(conversationId, resumeSessionId)
     const created = await this.sessions.createProvisional(
@@ -345,7 +433,8 @@ export class AyniAgent {
       deviceHandle,
       resumeSessionId,
       conversation,
-      newConversation
+      newConversation,
+      spaceId
     )
     let rebind: 'asked' | 'unavailable' | undefined
     let pairing: 'expired' | 'invalid' | undefined
@@ -357,6 +446,15 @@ export class AyniAgent {
         const live = await this.principals.ensureLive(principal)
         if (!live.ok) pairing = 'expired'
         else {
+          // bound at once: a space the person may not use is refused here, not left to the binding (PROF-CONV-011)
+          if (spaceId && !conversation) {
+            try {
+              await this.spaces.usable(principal, spaceId)
+            } catch (error) {
+              await this.sessions.close(created.session, 'user')
+              throw error
+            }
+          }
           try {
             await this.sessions.bindWithProof(created.session, principal, deviceProof)
             return { ...created, pairing: undefined, rebind: undefined }
@@ -395,6 +493,14 @@ export class AyniAgent {
     return (await this.store.principals.list()).find((p) => p.devices?.some((d) => d.handle === handle))
   }
 
+  /**
+   * Stops the turns in progress on a conversation, by its key, as the person stopping them would; set by the channel
+   * that runs them. Returns how many it stopped.
+   */
+  public cancelTurns?: (key: string) => number
+  /** how long a deletion waits for the turn it cancelled to stop */
+  public cancelWaitMs = 15_000
+
   /** The Principal's paired devices (IDENT-DEV-005, PROF-SESS-011). */
   public listDevices(principal: Principal, currentHandle?: string) {
     return (principal.devices ?? []).map((d) => ({
@@ -420,10 +526,14 @@ export class AyniAgent {
     locale?: string,
     resumeSessionId?: string,
     conversationId?: string,
-    newConversation = false
+    newConversation = false,
+    spaceId?: string
   ) {
     const conversation = await this.sessions.requireOpenable(conversationId, resumeSessionId)
-    return this.sessions.createSibling(parent, client, locale, resumeSessionId, conversation, newConversation)
+    // the space of a new conversation is one the person may use (decision 60)
+    const principal = parent.principalId ? await this.principals.get(parent.principalId) : undefined
+    if (spaceId && !conversation && principal) await this.spaces.usable(principal, spaceId)
+    return this.sessions.createSibling(parent, client, locale, resumeSessionId, conversation, newConversation, spaceId)
   }
 
   public async closeSession(session: Session, reason: ClosureReason): Promise<void> {
@@ -1166,8 +1276,19 @@ export class AyniAgent {
     const sessions = await this.store.sessions.listByPrincipal(current.id)
     for (const session of sessions) await this.store.sessions.save({ ...session, principalId: target.id })
     const conversations = await this.store.conversations.listByPrincipal(current.id, ['active', 'archived', 'final'])
+    // a conversation of the guest's Personal space is one of the identified person's Personal space, and so are its
+    // memories (decision 60, SPACE-DEF-002)
     for (const conversation of conversations)
-      await this.store.conversations.save({ ...conversation, principalId: target.id })
+      await this.store.conversations.save({
+        ...conversation,
+        principalId: target.id,
+        spaceId:
+          spaceIdOf(conversation) === personalSpaceId(current.id) ? personalSpaceId(target.id) : conversation.spaceId,
+      })
+    for (const note of await this.store.notes.list(current.id)) {
+      if (MemoryService.spaceOfNote(note) !== personalSpaceId(current.id)) continue
+      await this.store.notes.save({ ...note, principalId: target.id, spaceId: personalSpaceId(target.id) })
+    }
     const entries = await this.store.entries.reassign(
       sessions.map((s) => s.id),
       target.id

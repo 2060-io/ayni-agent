@@ -289,6 +289,7 @@ describe('binding after connect (D66, IDENT-RES-013/014/017)', () => {
     running = await startTestAgent()
     const { agent } = running
     const before = await visit(agent, 'conn-up')
+    const guestNote = await agent.memory.addNote(before.principal, 'prefers the night shift', [])
     const result = await agent.onIdentityPresented('conn-up', identified())
     expect(result.outcome).toBe('identified')
     const alice = result.principal as Principal
@@ -297,6 +298,14 @@ describe('binding after connect (D66, IDENT-RES-013/014/017)', () => {
     expect(alice.capabilityChannelId).toBe('conn-up')
     // the conversation held before is hers, with its session and its entries
     expect((await agent.store.conversations.listByPrincipal(alice.id)).map((c) => c.id)).toEqual(['conv_conn-up'])
+    // the guest's Personal conversation, its entries and its memory are of her Personal space (SPACE-DEF-002)
+    expect((await agent.store.conversations.listByPrincipal(alice.id))[0]?.spaceId).toBe(`personal:${alice.id}`)
+    expect((await agent.store.notes.list(alice.id)).map((n) => [n.id, n.spaceId])).toEqual([
+      [guestNote.id, `personal:${alice.id}`],
+    ])
+    const moved = await agent.store.entries.listAll({ principalId: alice.id, limit: 100 })
+    expect(moved.length).toBeGreaterThan(0)
+    expect(moved.every((e) => e.spaceId === `personal:${alice.id}`)).toBe(true)
     expect(await agent.store.conversations.listByPrincipal(before.principal.id)).toEqual([])
     expect((await agent.store.sessions.get(before.session.id))?.principalId).toBe(alice.id)
     const bound = await agent.didcommSession('conn-up')

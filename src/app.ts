@@ -35,6 +35,7 @@ import { HomeOrganization } from './core/organization.js'
 import { PrincipalService } from './core/principals.js'
 import { PROMPT_ADDON_VERSION } from './core/promptAddon.js'
 import { SessionService } from './core/sessions.js'
+import { SpaceService } from './core/spaces.js'
 import { AnchoringService, VeranaLedgerWriter } from './integrity/anchoring.js'
 import { createChatModel, createEmbeddings } from './llm/index.js'
 import { createImageGenerators } from './media/imageGen.js'
@@ -67,6 +68,8 @@ export interface RunningAgent {
   /** the admin interface (D78), when ADMIN_PORT is not 0; never exposed */
   admin?: FastifyInstance
   agent: AyniAgent
+  /** the retention job (PRIV-RETN, decision 60), for the tests that run it */
+  retention: RetentionService
   /** the session streams of the AG-UI channel, for the tests that read what a session received */
   streams: SessionStreams
   stop(): Promise<void>
@@ -214,6 +217,10 @@ export async function buildAgent(
     }
   )
 
+  // spaces (SPACE-CONV-001, PROF-CONV-011): a new conversation goes to the space asked when its Principal may use it, else Personal
+  const spaces = new SpaceService(store, pack, crypto, logger, env.retentionHistoryDays)
+  sessions.chooseSpace = (principal, requested) => spaces.spaceForNewConversation(principal, requested)
+
   // a message the agent adds outside a turn counts as unread until a device reports it viewed (IDENT-SESS-017)
   router.onAgentMessage = (session) => sessions.agentMessageAdded(session)
   // a conversation that loses an entry loses its summary and recomputes its last text (PRIV-ERASE-005)
@@ -307,6 +314,7 @@ export async function buildAgent(
     store,
     memory,
     context,
+    spaces,
     media,
     rag,
     principals,
@@ -323,6 +331,10 @@ export async function buildAgent(
     logger,
   })
   agentRef = agent
+  // the notes the model reads and writes are those of the space of the conversation (MEM-SPACE-001), and a space may
+  // not allow the model this agent uses (SPACE-CONV-004)
+  orchestrator.spaceOf = (session, principal) => agent.spaceOfSession(session, principal)
+  orchestrator.providerRefusal = (_session, principal, spaceId) => spaces.providerRefusal(principal, spaceId)
   didcomm.attach(agent)
   agui.attach(agent)
 
@@ -379,6 +391,8 @@ export async function buildAgent(
       for (const each of [session, ...(await sessions.conversationPeers(session))]) await agui.pushState(each)
     })().catch((err) => logger.debug({ err, sessionId: session.id }, 'waiting messages not announced'))
   }
+  // a message deleted while its reply is written stops that reply first (PRIV-ERASE-011)
+  agent.cancelTurns = (key) => aguiRoutes?.cancelConversation(key) ?? 0
   agent.queuedRun = (session) => {
     if (session.channelType !== 'ag-ui' || !aguiRoutes) throw new Error('no channel shows this conversation')
     return aguiRoutes.queuedRun(session)
@@ -506,7 +520,7 @@ export async function buildAgent(
     store,
     memory,
     env.objectStore ? objects : undefined,
-    env.retentionHistoryDays,
+    spaces,
     env.retentionMediaGraceDays,
     logger,
     evidence
@@ -538,6 +552,7 @@ export async function buildAgent(
     app,
     admin,
     agent,
+    retention,
     streams,
     stop: async () => {
       // no turn starts any more; those in progress end, or are cut when their time is over (PLAT-DEPLOY-004)

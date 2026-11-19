@@ -144,6 +144,47 @@ const createWithGrant = (
 ) => running.app.inject({ method: 'POST', url: '/agui/v3/sessions', payload: { client, locale: 'en', grant } })
 
 describe('session grant (D56, CHAN-BIND-014, PROF-SESS-013)', () => {
+  it('opens the new conversation in the space named, and refuses a space the person may not use (decision 60)', async () => {
+    const connectionId = 'conn-grant-space'
+    await connectFlowCapable(connectionId)
+    const phone = await running.agent.didcommSession(connectionId)
+    if (!phone) throw new Error('phone not bound')
+    const now = new Date().toISOString()
+    await running.agent.store.spaces.save({
+      id: 'spc_grant',
+      agentId: running.agent.pack.metadata.id,
+      kind: 'team',
+      templateId: 'project',
+      title: 'Grant space',
+      purpose: 'p',
+      brief: '',
+      language: null,
+      rules: { retentionDays: 365, lawfulBasis: 'contract', allowedProviders: ['stub'], handover: false },
+      membership: { mode: 'list' },
+      ownerIds: [phone.principal.id],
+      createdAt: now,
+      updatedAt: now,
+    })
+    const client = { name: 'ayni-app', version: '1.0.0', platform: 'ios' }
+    await requestGrant(connectionId, 'sg-req-space-1')
+    const ok = await running.app.inject({
+      method: 'POST',
+      url: '/agui/v3/sessions',
+      payload: { client, grant: lastGrant().grant, newConversation: true, spaceId: 'spc_grant' },
+    })
+    expect(ok.statusCode).toBe(201)
+    const conversation = await running.agent.sessions.conversationById(String(ok.json().conversationId))
+    expect(conversation?.spaceId).toBe('spc_grant')
+    await requestGrant(connectionId, 'sg-req-space-2')
+    const refused = await running.app.inject({
+      method: 'POST',
+      url: '/agui/v3/sessions',
+      payload: { client, grant: lastGrant().grant, newConversation: true, spaceId: 'spc_someone_else' },
+    })
+    expect(refused.statusCode).toBe(404)
+    expect(refused.json().error).toBe('not-found')
+  })
+
   it('answers the request with a single-use grant and the sessions URL, and binds the session in one request', async () => {
     const connectionId = 'conn-grant'
     await connectFlowCapable(connectionId)
@@ -272,7 +313,7 @@ describe('session grant (D56, CHAN-BIND-014, PROF-SESS-013)', () => {
   it('declares features.sessionGrant in the descriptor (PROF-DESC-004)', async () => {
     const response = await running.app.inject({ method: 'GET', url: '/.well-known/ayni-agent.json' })
     expect(response.json().features).toMatchObject({ sessionGrant: true, flows: true })
-    expect(response.json().profileVersion).toBe('3.1')
+    expect(response.json().profileVersion).toBe('3.3')
   })
 })
 
