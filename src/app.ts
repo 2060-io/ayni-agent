@@ -305,6 +305,7 @@ export async function buildAgent(
   let orchestratorRef: Orchestrator | undefined
   let identityRequestsRef: IdentityRequests | undefined
   let issuanceRef: IssuanceService | undefined
+  let emailChecksRef: EmailChecks | undefined
   registry.add(
     new BundledToolSource({
       pack,
@@ -319,6 +320,7 @@ export async function buildAgent(
       rag,
       stats,
       setReactionPolicy: (sid, policy) => orchestratorRef?.setReactionPolicy(sid, policy),
+      emailChecks: () => emailChecksRef,
     })
   )
   for (const source of createMcpSources(pack.mcp?.servers ?? [], logger)) registry.add(source, false)
@@ -510,6 +512,7 @@ export async function buildAgent(
     logger,
   })
   agent.emailChecks = emailChecks
+  emailChecksRef = emailChecks
   await emailChecks.resume()
   // the claims of a badge from the directory: the entry the person's evidence finds (D88, INTX-ISSUE-021)
   const directoryClaims = directory ? new DirectoryClaims(directory, evidence, logger, emailChecks) : undefined

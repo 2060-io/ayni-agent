@@ -407,10 +407,11 @@ describe('the email code of a badge from the directory (D89)', () => {
     checks.minutes = 10
   })
 
-  it('stops when the person types cancel, and asks again for a text that is not an address', async () => {
+  it('stops when the person types cancel; a text with no address reaches the model, and the check waits (decision 63)', async () => {
     const quick = await guest(running, 'quick-wallet')
     await runText(running, quick, ISSUE)
-    expect(textOf(await runText(running, quick, 'my mail is ana'))).toMatch(/^That is not an email address\./)
+    expect(textOf(await runText(running, quick, 'my mail is ana'))).toMatch(/^You said: my mail is ana/)
+    expect(await pending()).toHaveLength(1)
     expect(textOf(await runText(running, quick, 'Cancel'))).toBe('The email check is stopped. Nothing was issued.')
     expect(textOf(await runText(running, quick, 'hello'))).toMatch(/^You said:/)
   })

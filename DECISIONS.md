@@ -966,3 +966,55 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       release (`V2DidcommRevocationNotificationController`, registered by `AyniFlowPlugin`), so in the devnet image
       `io2060/vs-agent-ayni:v2.0.0-ayni.5-ayni.0.1.7`. New environment: `MAIL_*` (`MAIL_USERNAME` and `MAIL_PASSWORD` in a Secret),
       `VERANA_GRAPH_URL`.
+
+63. **During an email check, only an address or a code is the code's; the model has a tool on the check** (2026-11-19,
+    found by Fabrice on devnet with 0.24.0; ayni-spec D89 amended, INTX-AUTH-013/014 amended, INTX-AUTH-016..019,
+    PROF-RUN-015 amended). The email never arrived (the SMTP server was misconfigured then); he typed "Resend the email"
+    and the code answered "That code is not right. 4 tries are left." Every message was the code's while the check
+    waited, and only the hidden word `cancel` got out. His words: "here it should detect it is not a code and pass it to
+    the LLM, else I'm stuck".
+    - **What the code takes (`carriedBy`, `src/core/emailCheck.ts`):** at the address step, a message that holds an email
+      address, taken from the words around it ("my email is **Ana.Rios@Northwind.example**." gives
+      `ana.rios@northwind.example`: the signs a sentence, a quote or markdown put around it are dropped, and the address
+      is checked as before); at the code step, a message that holds six digits, side by side or split by single spaces or
+      dashes (`482 913`, `482-913`, `4 8 2 9 1 3`), in a run of digits that is not longer, not part of a decimal number,
+      and not a date or a phone number; at either step a message that is only a stop word (`cancel.` too). A message
+      with two addresses, or two codes (`482913 or 123456`, or two groups of six in one run), is taken and answered with
+      a request for one, and counts no try. A taken message is recorded and answered as before. **Any other message is
+      the model's**: `take` returns before recording anything, `AyniAgent.turn` goes on as when no check waits, and the
+      check keeps waiting; it counts no try. An address at the code step, or a code at the address step, is the model's.
+    - **The tool `email_check` (`src/tools/bundled.ts`, INTX-AUTH-016..018):** in the model's list when an issuance
+      profile declares an `email` challenge, whatever `tools.bundled` says (it has no switch of its own), for every
+      Principal. `{ action: status | resend | cancel }`. `status` answers JSON: `waiting`, `conversation` (`this` or
+      `another`), `credential` (the label), `step`, `secondsLeft`, `triesLeft`, `resendsLeft`, `resendInSeconds` at the
+      code step. `resend` sends a new code to the sealed address (`EmailChecks.resend`): the hash of the previous code is
+      replaced, `codeSentAt` and `expiresAt` start again, `resends` counts; refused before an address (`no-address`),
+      after three (`limit`), within thirty seconds of the previous sending (`too-soon`, with the seconds). Its words and
+      its limits do not depend on whether an entry holds the address; the code goes, in the background, to a listed
+      address only, as at the address step. `cancel` ends the check as `failed`, as the stop word does: the address and
+      the hash go, the model reads `Identity check (email) for issue_credential: failed` as a record of the system. The
+      three run in the Principal's queue of the check, as `take` does. No answer and no `data` of the tool holds the
+      address or the code.
+    - **The words:** the platform rules (add-on 3.4.0) add "While one waits, email_check tells its step, sends a new code
+      or cancels it."; the answer to the address adds "If it does not arrive, say so: a new one can be sent."; the
+      issuing tool's `challenge-waiting` names `email_check`. The add-on with every feature, app links and an email check
+      is about 820 tokens by our estimate (about 800 before): over the 500 target of CORE-PROMPT-004 already, as the
+      orchestrator's warning says.
+    - **Kept:** five tries in all for the check, whichever code they are for (a resend does not give five more); ten
+      minutes from the last sending; the same answer to a listed and an unlisted address; the check on the store and its
+      resumption after a restart (`resends` is one more field of the challenge's `details`, so nothing changes in the
+      store); `cancel` and the other stop words.
+    - **Choices of mine, to flag:** the tool also acts on a check that waits in another conversation of the person, and
+      says so (`conversation: another`; a resend's answer says where to type the code); the tool exists for every pack
+      with an email challenge, with no `tools.bundled` switch; the model's `cancel` writes no message of the code in the
+      conversation (the model tells the person); an address typed at the code step goes to the model, which can `cancel`
+      and call `issue_credential` again to use another address; a message whose only text comes from an attachment (a
+      voice note's transcript, a PDF's text) is read as any message is, since that text is the message's.
+    - **Tests:** `tests/emailCheckMessages.test.ts` (what a message carries; the tool in the list and the rule only with
+      an email profile; over the agent: a message with no address and "Resend the email" reach the model and count no
+      try, the address from a sentence, `status` here and from another conversation, a resend too soon, then sent, the
+      first code a wrong try, the new one split by a space, nothing typed for the check in any model request, an unlisted
+      address resent with the same words and nothing sent, the fourth resend refused, the resends kept by a check that a
+      restart left waiting, two codes in one message, the model's `cancel` and the record it leaves);
+      `tests/emailCode.test.ts` now expects a text with no address to reach the model. The store is not touched, so the
+      PostgreSQL tests did not change.

@@ -8,8 +8,15 @@ import {
 } from '../channels/didcomm/identityRequests.js'
 import { AUTHENTICATION_ENTRY } from '../config/pack.js'
 import type { AgentPack, ToolAccess } from '../config/packTypes.js'
-import { connectionTypeOf, featuresOf } from '../config/packTypes.js'
-import { EMAIL_CHECK_KIND } from '../core/emailCheck.js'
+import { challengeTypesOf, connectionTypeOf, featuresOf } from '../config/packTypes.js'
+import { conversationOf } from '../core/conversationOf.js'
+import {
+  EMAIL_CHECK_KIND,
+  type EmailChecks,
+  emailCancelForModel,
+  emailResendForModel,
+  emailStatusForModel,
+} from '../core/emailCheck.js'
 import type { EvidenceService } from '../core/evidence.js'
 import { type IssuanceService, issuanceOutcomeForModel, offeredProfiles } from '../core/issuance.js'
 import type { Principal } from '../core/types.js'
@@ -37,6 +44,8 @@ export interface BundledDeps {
   stats: StatsSink
   /** the model sets a per-message reaction policy (INTX-REACT-001) */
   setReactionPolicy: (sessionId: string, policy: 'notify' | 'historize' | { notifyOn: string[] }) => void
+  /** the email checks the code runs, which the model follows, renews or cancels (INTX-AUTH-016..018) */
+  emailChecks?: () => Pick<EmailChecks, 'status' | 'resend' | 'cancel'> | undefined
 }
 
 /** Tools every bound Principal may use regardless of role (their effect is scoped to the Principal). */
@@ -181,6 +190,43 @@ export class BundledToolSource implements ToolSource {
           },
         })
       }
+    }
+
+    // the email check, which the code runs: the model follows it, has a new code sent, or ends it, and never sees the
+    // address or the code (decision 63, INTX-AUTH-016..018). Present only when a profile declares one.
+    if (profiles.some(([, p]) => challengeTypesOf(p).includes('email'))) {
+      specs.push({
+        key: 'bundled:email_check',
+        name: 'email_check',
+        description:
+          'The email check the system runs when a credential needs one (issue_credential): the system itself asks the person, in the conversation, for the address their organization knows them by, then for the code it emails there, and takes the message that carries either. You never see them and never ask for them; any other message of the person reaches you as usual. status: whether a check is waiting for the person, in this conversation or another, at which step (address or code), and the seconds, tries and resends left. resend: when the person says the code did not arrive, sends a new one to the same address; the previous code stops working and the ten minutes start again; at most three times per check, thirty seconds apart. cancel: ends the check, and nothing is issued. To use another address, cancel, then call issue_credential again.',
+        parameters: {
+          type: 'object',
+          required: ['action'],
+          additionalProperties: false,
+          properties: { action: { type: 'string', enum: ['status', 'resend', 'cancel'] } },
+        },
+        access: ALWAYS_ALLOWED,
+        stepLabel: 'Looking at your email check',
+        invoke: async (args, ctx) => {
+          const checks = this.deps.emailChecks?.()
+          const action = String(args.action ?? '')
+          const conversationId = conversationOf(ctx.session)
+          if (action === 'status') {
+            const status = checks ? await checks.status(ctx.principal.id, conversationId) : { waiting: false as const }
+            return { content: emailStatusForModel(status), data: { action, waiting: status.waiting } }
+          }
+          if (action === 'resend') {
+            const result = checks ? await checks.resend(ctx.principal.id, conversationId) : { outcome: 'none' as const }
+            return { content: emailResendForModel(result), data: { action, outcome: result.outcome } }
+          }
+          if (action === 'cancel') {
+            const cancelled = checks ? await checks.cancel(ctx.principal.id) : false
+            return { content: emailCancelForModel(cancelled), data: { action, cancelled } }
+          }
+          return { content: 'Unknown action: use status, resend or cancel.', isError: true }
+        },
+      })
     }
 
     if (features.preferences && bundled.principalPreferences?.enabled !== false) {

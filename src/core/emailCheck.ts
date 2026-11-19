@@ -5,9 +5,11 @@
  *
  * 1. The issuing tool of a badge from the directory starts the check in the conversation it was called from, and the
  *    turn ends with the code's question (`start`): which email address the organization knows the person by.
- * 2. While the check waits, the person's next messages in that conversation, from any of their sessions, are taken by
- *    the code (`take`): the first as the address, the next ones as tries of the code. Each is recorded as an
- *    `auth-challenge` entry, starts no turn and never reaches the model, and so are the code's answers.
+ * 2. While the check waits, a message of the person in that conversation, from any of their sessions, is taken by the
+ *    code (`take`) when it carries what the step waits for (decision 63, INTX-AUTH-013): an email address, taken from
+ *    the words around it, then a code of six digits, which may be split by spaces or dashes. Each taken message is
+ *    recorded as an `auth-challenge` entry, starts no turn and never reaches the model, and so are the code's answers.
+ *    Any other message is the model's, as when no check waits: it counts no try, and the check keeps waiting.
  * 3. The answer to the address is the same whether or not an entry holds it; a code is sent only to an address an entry
  *    holds, by email, in the background, so that neither the words nor the time of the answer tell which. The code has
  *    six digits from a secure generator, is kept as a keyed hash only, is valid ten minutes from its sending, is used
@@ -16,6 +18,11 @@
  *    issuance that started the check goes on by itself (`passed`). An address not given in ten minutes, a code not
  *    given right in its validity, or a fifth wrong try end the check; the code says so, and the model is told the
  *    outcome only, as a record of the system: `passed`, `failed` or `expired`.
+ *
+ * 5. The model follows the check with its tool `email_check` (INTX-AUTH-016..018): where it stands (`status`), a new code
+ *    to the same address (`resend`: the previous code stops working, the ten minutes start again, three times at most,
+ *    thirty seconds apart, the same answer whether or not an entry holds the address), or its end (`cancel`). No answer
+ *    of the tool holds the address or the code.
  *
  * At most one check waits per Principal. The address typed while the check waits is kept sealed in the challenge
  * record, and dropped when the check ends; nothing of the check is in the clear but its state and its times.
@@ -37,8 +44,11 @@ import type { AuthChallengeRecord, MessageEntry, Principal, Session } from './ty
 
 /** How long the address may wait after the question, and the code after its sending (INTX-AUTH-014). */
 export const EMAIL_CHECK_MINUTES = 10
-/** How many tries of the code, in all (INTX-AUTH-014). */
+/** How many tries of the code, in all, whichever code they are for (INTX-AUTH-014). */
 export const EMAIL_CODE_TRIES = 5
+/** How many new codes a check may send, and how long after the previous sending (INTX-AUTH-017). */
+export const EMAIL_CODE_RESENDS = 3
+export const EMAIL_RESEND_AFTER_SECONDS = 30
 /** The words that stop the check: the person's way out before the ten minutes. */
 const STOP_WORDS = new Set(['cancel', 'stop', 'annuler', 'cancelar', 'parar', 'abbrechen'])
 
@@ -62,7 +72,39 @@ interface EmailCheckDetails {
   sealed?: { keyRef: string; cipher: string }
   /** the session the last message of the check came from: where the code answers an expiry */
   lastSessionId?: string
+  /** how many new codes the model had sent (INTX-AUTH-017) */
+  resends?: number
 }
+
+/** Where a check stands, as the model's tool tells it: never the address, never the code (INTX-AUTH-016). */
+export type EmailCheckStatus =
+  | { waiting: false }
+  | {
+      waiting: true
+      /** whether the check waits in the conversation the tool was called from, or in another of the person's */
+      conversation: 'this' | 'another'
+      credential: string
+      step: 'address' | 'code'
+      secondsLeft: number
+      triesLeft: number
+      resendsLeft: number
+      /** at the code step: how long before a new code may be sent */
+      resendInSeconds?: number
+    }
+
+/** What became of the model's `resend` (INTX-AUTH-017); `sent` whether or not an entry holds the address. */
+export type EmailResendOutcome =
+  | { outcome: 'sent'; conversation: 'this' | 'another'; resendsLeft: number; minutes: number }
+  | { outcome: 'none' | 'no-address' | 'limit' }
+  | { outcome: 'too-soon'; seconds: number }
+
+/** What a message carries for the step of a check (INTX-AUTH-013); undefined: nothing, the message is the model's. */
+export type CarriedByMessage =
+  | { kind: 'stop' }
+  | { kind: 'address'; address: string }
+  | { kind: 'code'; code: string }
+  /** more than one address, or more than one code: the code asks for one, and counts no try */
+  | { kind: 'several' }
 
 export interface EmailCheckDeps {
   store: Store
@@ -185,9 +227,10 @@ export class EmailChecks {
   }
 
   /**
-   * A message of the Principal in a conversation where its check waits (INTX-AUTH-013): taken by the code, recorded with
-   * the code's answer as `auth-challenge` entries, answered in the run that carried it, with no turn of the model.
-   * Undefined when no check waits there: the message is the model's.
+   * A message of the Principal in a conversation where its check waits (INTX-AUTH-013): when it carries what the step
+   * waits for, taken by the code, recorded with the code's answer as `auth-challenge` entries, answered in the run that
+   * carried it, with no turn of the model. Undefined when no check waits there, or when the message carries nothing
+   * for it: the message is the model's, counts no try, and the check keeps waiting.
    */
   public async take(
     session: Session,
@@ -201,6 +244,9 @@ export class EmailChecks {
       if (!record) return undefined
       const details = detailsOf(record)
       const step = details.step
+      // only what the step waits for is the code's: "Resend the email" is the model's (decision 63)
+      const carried = carriedBy(input.entry.text ?? '', step)
+      if (!carried) return undefined
       const inbound = await this.deps.memory.append({
         ...input.entry,
         sourceType: 'auth-challenge',
@@ -208,20 +254,20 @@ export class EmailChecks {
       })
       await sink.emit({ type: 'inbound', entry: inbound })
       details.lastSessionId = session.id
-      const typed = inbound.text.trim()
       let answer: string
       let ended: AuthChallengeRecord['outcome'] | undefined
-      if (STOP_WORDS.has(typed.toLowerCase())) {
+      if (carried.kind === 'stop') {
         answer = 'The email check is stopped. Nothing was issued.'
         ended = 'failed'
-      } else if (step === 'address') {
-        if (!isEmailAddress(typed)) {
-          answer = `That is not an email address. Type the address ${(await this.deps.organizationName()) ?? 'your organization'} gave you, for example name@company.example, or cancel.`
-        } else {
-          answer = await this.takeAddress(record, details, typed.toLowerCase())
-        }
+      } else if (carried.kind === 'several') {
+        answer =
+          step === 'address'
+            ? `That message holds more than one email address. Type the one address ${(await this.deps.organizationName()) ?? 'your organization'} knows you by, or cancel.`
+            : 'That message holds more than one code. Type the code of the last email only, or cancel.'
+      } else if (carried.kind === 'address') {
+        answer = await this.takeAddress(record, details, carried.address)
       } else {
-        const outcome = this.takeCode(record, details, typed)
+        const outcome = this.takeCode(record, details, carried.code)
         if (outcome === 'right') {
           await this.deps.evidence.record(principal, {
             kind: 'email',
@@ -257,6 +303,82 @@ export class EmailChecks {
     })
   }
 
+  /** Where the check of the Principal stands, for the model's tool: never the address, never the code (INTX-AUTH-016). */
+  public async status(principalId: string, conversationId: string): Promise<EmailCheckStatus> {
+    return this.serial(principalId, async () => {
+      const record = await this.current(principalId)
+      if (!record) return { waiting: false }
+      const details = detailsOf(record)
+      return {
+        waiting: true,
+        conversation: details.conversationId === conversationId ? 'this' : 'another',
+        credential: details.label,
+        step: details.step,
+        secondsLeft: secondsUntil(record.expiresAt),
+        triesLeft: EMAIL_CODE_TRIES - details.tries,
+        resendsLeft: EMAIL_CODE_RESENDS - (details.resends ?? 0),
+        ...(details.step === 'code' ? { resendInSeconds: this.resendIn(details) } : {}),
+      }
+    })
+  }
+
+  /**
+   * A new code to the address the check took, at the model's call (INTX-AUTH-017): the previous code is no longer right,
+   * the ten minutes start again, the tries used still count. Refused before an address, after three resends, and within
+   * thirty seconds of the previous sending; the answer and the limits are the same whether or not an entry holds the
+   * address, to which alone a code goes.
+   */
+  public async resend(principalId: string, conversationId: string): Promise<EmailResendOutcome> {
+    return this.serial(principalId, async () => {
+      const record = await this.current(principalId)
+      if (!record) return { outcome: 'none' } as const
+      const details = detailsOf(record)
+      const address = this.address(details)
+      if (details.step !== 'code' || !address) return { outcome: 'no-address' } as const
+      const resends = details.resends ?? 0
+      if (resends >= EMAIL_CODE_RESENDS) return { outcome: 'limit' } as const
+      const wait = this.resendIn(details)
+      if (wait > 0) return { outcome: 'too-soon', seconds: wait } as const
+      const now = nowIso()
+      details.resends = resends + 1
+      details.codeSentAt = now
+      record.expiresAt = this.deadline(now)
+      this.sendCode(record, details, address)
+      record.details = details as unknown as Record<string, unknown>
+      await this.deps.store.challenges.save(record)
+      this.schedule(record)
+      this.deps.logger.info(
+        { challengeId: record.id, principalId, resends: details.resends },
+        'email code sent again (INTX-AUTH-017)'
+      )
+      return {
+        outcome: 'sent',
+        conversation: details.conversationId === conversationId ? 'this' : 'another',
+        resendsLeft: EMAIL_CODE_RESENDS - details.resends,
+        minutes: this.minutes,
+      } as const
+    })
+  }
+
+  /**
+   * Ends the check of the Principal at the model's call, as the person's `cancel` does (INTX-AUTH-018): failed, nothing
+   * issued, the model told the outcome as a record of the system. False when none waits.
+   */
+  public async cancel(principalId: string): Promise<boolean> {
+    return this.serial(principalId, async () => {
+      const record = await this.current(principalId)
+      if (!record) return false
+      await this.end(record, 'failed')
+      return true
+    })
+  }
+
+  /** The seconds before a new code may be sent (INTX-AUTH-017). */
+  private resendIn(details: EmailCheckDetails): number {
+    if (!details.codeSentAt) return 0
+    return secondsUntil(new Date(Date.parse(details.codeSentAt) + EMAIL_RESEND_AFTER_SECONDS * 1000).toISOString())
+  }
+
   /** The address: the same answer whether or not an entry holds it; a code only to one that an entry holds. */
   private async takeAddress(record: AuthChallengeRecord, details: EmailCheckDetails, address: string): Promise<string> {
     const now = nowIso()
@@ -265,27 +387,32 @@ export class EmailChecks {
     details.step = 'code'
     details.tries = 0
     details.codeSentAt = now
-    details.codeHash = undefined
     record.expiresAt = this.deadline(now)
-    if (this.deps.directory?.byEmail(address)) {
-      const code = String(randomInt(0, 1_000_000)).padStart(6, '0')
-      details.codeHash = this.hash(record.id, code)
-      // in the background: a slow or failing server changes neither the answer nor its time (INTX-AUTH-014)
-      void this.send(record.id, address, code)
-    }
+    this.sendCode(record, details, address)
     this.schedule(record)
     const organization = (await this.deps.organizationName()) ?? 'your organization'
-    return `If this address is on the list of ${organization}, a six-digit code was just sent to it. Type the code here: it is valid for ${this.minutes} minutes.`
+    return `If this address is on the list of ${organization}, a six-digit code was just sent to it. Type the code here: it is valid for ${this.minutes} minutes. If it does not arrive, say so: a new one can be sent.`
   }
 
-  /** A try of the code: right, wrong, the last wrong one, or past its validity. */
+  /**
+   * A new code, to an address an entry holds only, and in the background: a slow or failing server changes neither the
+   * answer nor its time (INTX-AUTH-014). The hash of the previous code goes: it is no longer right (INTX-AUTH-017).
+   */
+  private sendCode(record: AuthChallengeRecord, details: EmailCheckDetails, address: string): void {
+    details.codeHash = undefined
+    if (!this.deps.directory?.byEmail(address)) return
+    const code = String(randomInt(0, 1_000_000)).padStart(6, '0')
+    details.codeHash = this.hash(record.id, code)
+    void this.send(record.id, address, code)
+  }
+
+  /** A try of the code, six digits: right, wrong, the last wrong one, or past its validity. */
   private takeCode(
     record: AuthChallengeRecord,
     details: EmailCheckDetails,
-    typed: string
+    digits: string
   ): 'right' | 'wrong' | 'last' | 'expired' {
     if (Date.parse(record.expiresAt) <= Date.now()) return 'expired'
-    const digits = typed.replace(/\s+/g, '')
     if (details.codeHash && /^\d{6}$/.test(digits)) {
       const a = Buffer.from(details.codeHash, 'hex')
       const b = Buffer.from(this.hash(record.id, digits), 'hex')
@@ -475,6 +602,94 @@ export class EmailChecks {
 
 function detailsOf(record: AuthChallengeRecord): EmailCheckDetails {
   return { ...(record.details as unknown as EmailCheckDetails) }
+}
+
+function secondsUntil(iso: string): number {
+  return Math.max(0, Math.ceil((Date.parse(iso) - Date.now()) / 1000))
+}
+
+/** The digits of a text, as runs of groups split by single spaces or dashes; not a part of a decimal number. */
+const DIGIT_RUN = /(?<![\d.,])\d+(?:[\s\-\u2010-\u2015]\d+)*(?![.,]?\d)/g
+/** What may be an address in a text: anything around an `@` up to a space or a sign no address holds. */
+const ADDRESS_CANDIDATE = /[^\s@<>()[\]\\,;:"]+@[^\s@<>()[\]\\,;:"]+/g
+
+/** The email addresses a text holds, in lower case, each once: "my address is Ana@X.example." gives `ana@x.example`. */
+export function addressesIn(text: string): string[] {
+  const found = new Set<string>()
+  for (const [candidate] of text.matchAll(ADDRESS_CANDIDATE)) {
+    // the signs a sentence, a quote or markdown put around it are not the address's
+    const address = candidate.replace(/^[^\p{L}\p{N}]+/u, '').replace(/[^\p{L}\p{N}]+$/u, '')
+    if (isEmailAddress(address)) found.add(address.toLowerCase())
+  }
+  return [...found]
+}
+
+/**
+ * The codes a text holds, as six digits, each once (INTX-AUTH-013): a run of six digits, which may be split by spaces or
+ * dashes ("it is 482 913" gives `482913`), or a run of groups of six ("482913 123456" gives both). A longer number, a
+ * phone number or a date gives none.
+ */
+export function codesIn(text: string): string[] {
+  const found = new Set<string>()
+  for (const [run] of text.matchAll(DIGIT_RUN)) {
+    const groups = run.split(/[\s\-\u2010-\u2015]/)
+    if (groups.join('').length === 6) found.add(groups.join(''))
+    else if (groups.every((group) => group.length === 6)) for (const group of groups) found.add(group)
+  }
+  return [...found]
+}
+
+/**
+ * What a message carries for the step of a check (INTX-AUTH-013): only a word that stops it, an address at the address
+ * step, a code at the code step, or more than one of them. Undefined when it carries none: the message is the model's.
+ */
+export function carriedBy(text: string, step: 'address' | 'code'): CarriedByMessage | undefined {
+  const word = text
+    .trim()
+    .toLowerCase()
+    .replace(/[.!]+$/, '')
+  if (STOP_WORDS.has(word)) return { kind: 'stop' }
+  if (step === 'address') {
+    const addresses = addressesIn(text)
+    if (addresses.length > 1) return { kind: 'several' }
+    return addresses[0] ? { kind: 'address', address: addresses[0] } : undefined
+  }
+  const codes = codesIn(text)
+  if (codes.length > 1) return { kind: 'several' }
+  return codes[0] ? { kind: 'code', code: codes[0] } : undefined
+}
+
+/** What the model's tool answers of where a check stands (INTX-AUTH-016): no address, no code. */
+export function emailStatusForModel(status: EmailCheckStatus): string {
+  if (!status.waiting) return 'No email check is waiting for this person.'
+  return JSON.stringify(status)
+}
+
+/** What the model's tool answers of a `resend` (INTX-AUTH-017): the same words whether or not an entry holds the address. */
+export function emailResendForModel(result: EmailResendOutcome): string {
+  switch (result.outcome) {
+    case 'sent': {
+      const where =
+        result.conversation === 'this' ? 'in this conversation' : 'in the conversation where the check was asked'
+      const left = `${result.resendsLeft} more ${result.resendsLeft === 1 ? 'resend is' : 'resends are'} possible.`
+      return `A new code was sent to the address the person gave, if it is on the list of the organization; the previous code no longer works. The person types the new one ${where}; it is valid for ${result.minutes} minutes. ${left}`
+    }
+    case 'none':
+      return 'Nothing was sent: no email check is waiting for this person. issue_credential starts one when a credential needs it.'
+    case 'no-address':
+      return 'Nothing was sent: the person has not given an address yet. The system waits for it in the conversation of the check and sends a code once they type it there.'
+    case 'limit':
+      return `Refused: ${EMAIL_CODE_RESENDS} new codes were already sent in this check. The person can cancel it and ask again later.`
+    case 'too-soon':
+      return `Refused: the last code was sent less than ${EMAIL_RESEND_AFTER_SECONDS} seconds ago. A new one can be sent in ${result.seconds} seconds.`
+  }
+}
+
+/** What the model's tool answers of a `cancel` (INTX-AUTH-018). */
+export function emailCancelForModel(cancelled: boolean): string {
+  return cancelled
+    ? 'The email check is cancelled: nothing was issued. To check another address, call issue_credential again.'
+    : 'No email check is waiting for this person: there is nothing to cancel.'
 }
 
 /** Whether an entry is a message of an email check: what the person typed or what the code answered (MEM-RET-006). */

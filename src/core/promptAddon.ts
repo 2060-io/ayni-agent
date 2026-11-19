@@ -5,7 +5,7 @@
 import type { Features } from '../config/packTypes.js'
 import { estimateTokens } from '../util/tokens.js'
 
-export const PROMPT_ADDON_VERSION = '3.3.0'
+export const PROMPT_ADDON_VERSION = '3.4.0'
 export const PROMPT_ADDON_TOKEN_BUDGET = 500
 
 export interface AddonContext {
@@ -18,7 +18,10 @@ export interface AddonContext {
   issuance?: boolean
   /** when set, the model may send the person to places in the app with links on this base (PROF-LINK-001) */
   appLinkBase?: string
-  /** a credential is obtained with an email code, which the system runs in the conversation (D89, INTX-AUTH-012) */
+  /**
+   * a credential is obtained with an email code, which the system runs in the conversation and the model follows with
+   * email_check (D89, INTX-AUTH-012, INTX-AUTH-019)
+   */
   emailChecks?: boolean
 }
 
@@ -85,7 +88,7 @@ export function renderPromptAddon(ctx: AddonContext): string {
     )
   if (ctx.emailChecks)
     lines.push(
-      'An email check is run by the system in the conversation: never ask the person for an email address or a code yourself, and never repeat one; you are told only whether the check passed.'
+      'An email check is run by the system in the conversation: never ask the person for an email address or a code yourself, and never repeat one; you are told only whether the check passed. While one waits, email_check tells its step, sends a new code or cancels it.'
     )
   if (ctx.features.reactions)
     lines.push(
