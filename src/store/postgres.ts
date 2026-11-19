@@ -22,7 +22,15 @@ import { type ScopePredicate, STORE_SHAPES, scopeToSql } from '../memory/scope.j
 import { MemoryStore } from './memory.js'
 import { MIGRATIONS } from './migrations.js'
 import { holdProcessLock, type ProcessLockOptions } from './processLock.js'
-import type { AdminAuditRecord, EntryQuery, Store, StoredEntry, StoredEvidence, VectorHit } from './types.js'
+import type {
+  AdminAuditRecord,
+  EntryQuery,
+  Store,
+  StoredEntry,
+  StoredEvidence,
+  TranslationRecord,
+  VectorHit,
+} from './types.js'
 
 const vec = (v: number[]): string => `[${v.join(',')}]`
 
@@ -722,6 +730,24 @@ export class PostgresStore implements Store {
     delete: async (key: string) => {
       await this.pool.query('DELETE FROM kv WHERE key = $1', [key])
     },
+  }
+
+  public translations = {
+    get: async (digest: string, language: string) => {
+      const [row] = await this.rows('SELECT data FROM translations WHERE digest = $1 AND language = $2', [
+        digest,
+        language,
+      ])
+      return row ? (row.data as TranslationRecord) : undefined
+    },
+    // the first translation kept for a sentence and a language stays (INTX-AUTH-021)
+    set: async (r: TranslationRecord) => {
+      await this.pool.query(
+        'INSERT INTO translations (digest, language, created_at, data) VALUES ($1,$2,$3,$4) ON CONFLICT (digest, language) DO NOTHING',
+        [r.digest, r.language, r.createdAt, r]
+      )
+    },
+    list: () => this.many<TranslationRecord>('SELECT data FROM translations ORDER BY created_at, digest', []),
   }
 
   public adminAudit = {

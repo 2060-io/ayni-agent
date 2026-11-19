@@ -19,6 +19,7 @@ import type { Mailer, MailMessage } from '../src/platform/mail.js'
 import { BundledToolSource } from '../src/tools/bundled.js'
 import { createLogger } from '../src/util/logger.js'
 import {
+  bindWeb,
   directoryPack,
   guest,
   historyOf,
@@ -30,7 +31,7 @@ import {
   textOf,
   until,
 } from './directoryFixtures.js'
-import { testEnv } from './helpers.js'
+import { parseSse, testEnv } from './helpers.js'
 
 describe('what a message carries for an email check (INTX-AUTH-013)', () => {
   it('takes the address from the words around it, in lower case, and none from a text without one', () => {
@@ -193,14 +194,37 @@ describe('messages while an email check waits, and the model on the check (decis
     expect(status).toContain('"waiting":true')
     expect(status).toContain('"conversation":"this"')
     expect(status).toContain('"step":"address"')
-    const answer = textOf(await runText(running, ana, 'Sure, my email is **Ana.Rios@Northwind.example**.'))
+    // a second device of the person, on the same conversation
+    const phone = await bindWeb(running, ana.principal, ana.connectionId)
+    const sessionOf = async (id: string) => (await running.agent.sessions.get(id))?.conversationId
+    expect(await sessionOf(phone.sessionId)).toBe(await sessionOf(ana.sessionId))
+    const run = await runText(running, ana, 'Sure, my email is **Ana.Rios@Northwind.example**.', 'u-address')
+    const answer = textOf(run)
     expect(answer).toMatch(/^If this address is on the list of Northwind Logistics, a six-digit code was just sent/)
+    // named at once as a message the model never receives, in the run and on the other device (PROF-STREAM-011)
+    const address = (await historyOf(running, ana)).find((m) => m.metadata.externalId === 'u-address')
+    const withheld = {
+      type: 'CUSTOM',
+      timestamp: expect.any(Number),
+      name: 'ayni.messages.withheld',
+      value: { conversationId: await sessionOf(ana.sessionId), messageIds: [address?.id], clientIds: ['u-address'] },
+    }
+    expect(run.filter((e) => e.name === 'ayni.messages.withheld')).toEqual([withheld])
+    const onThePhone: string[] = []
+    running.streams.attach(phone.sessionId, { write: (c) => onThePhone.push(c), end: () => undefined }, 0)()
+    const phoneEvents = parseSse(onThePhone.join('')).map((e) => e.event)
+    expect(phoneEvents.filter((e) => e.name === 'ayni.messages.withheld')).toEqual([withheld])
+    expect(address?.metadata.modelVisible).toBe(false)
     expect(answer).toContain('If it does not arrive, say so: a new one can be sent.')
     await until(() => sent.length === 1)
     expect(sent[0]?.to).toBe('ana.rios@northwind.example')
     // the person's message the model answered is an ordinary one; the address is the check's
     const history = await historyOf(running, ana)
-    expect(history.find((m) => m.content === 'Hi, what is this about?')?.metadata.sourceType).toBe('text')
+    const hello = history.find((m) => m.content === 'Hi, what is this about?')
+    expect(hello?.metadata.sourceType).toBe('text')
+    expect(hello?.metadata.modelVisible).toBeUndefined()
+    // an ordinary message is named by no such event
+    expect(phoneEvents.filter((e) => e.name === 'ayni.messages.withheld')).toHaveLength(1)
     expect(history.find((m) => String(m.content).startsWith('Sure, my email is'))?.metadata.sourceType).toBe(
       'auth-challenge'
     )
@@ -249,13 +273,19 @@ describe('messages while an email check waits, and the model on the check (decis
     expect(textOf(await runText(running, ana, STATUS))).toContain('No email check is waiting for this person.')
   })
 
-  it('never gives the model the address or a code typed for the check, nor in a tool answer (INTX-AUTH-013, INTX-AUTH-016)', async () => {
+  it("never gives the model the address or a code typed for the check, nor in a tool answer, and gives it the code's messages (INTX-AUTH-013, INTX-AUTH-016, D95)", async () => {
     await runText(running, ana, 'thanks!')
     const requests = JSON.stringify(model().requests)
     expect(requests).toContain('Identity check (email) for issue_credential: passed')
     const [first, second] = [codeOf(sent[0]), codeOf(sent[1])]
     for (const secret of [first, second, `${second.slice(0, 3)} ${second.slice(3)}`, 'ana.rios', 'Ana.Rios'])
       expect(requests).not.toContain(secret)
+    // the code's messages are the agent's in the model's conversation; what the code took is a record there
+    const last = model().requests.at(-1)?.messages ?? []
+    const assistant = last.filter((m) => m.role === 'assistant').map((m) => String(m.content))
+    expect(assistant).toContain('That code is not right. 4 tries are left.')
+    expect(assistant.some((t) => t.startsWith('If this address is on the list of Northwind Logistics'))).toBe(true)
+    expect(JSON.stringify(last)).toContain('the person typed their email address here; the code of the service took it')
   })
 
   it('answers a resend for an unlisted address as for a listed one, sends nothing, and refuses a fourth (INTX-AUTH-017)', async () => {

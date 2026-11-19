@@ -8,8 +8,10 @@
  * 2. While the check waits, a message of the person in that conversation, from any of their sessions, is taken by the
  *    code (`take`) when it carries what the step waits for (decision 63, INTX-AUTH-013): an email address, taken from
  *    the words around it, then a code of six digits, which may be split by spaces or dashes. Each taken message is
- *    recorded as an `auth-challenge` entry, starts no turn and never reaches the model, and so are the code's answers.
- *    Any other message is the model's, as when no check waits: it counts no try, and the check keeps waiting.
+ *    recorded as an `auth-challenge` entry and starts no turn; its content never reaches the model, which reads a record
+ *    in its place, and the clients are told so (`ayni.messages.withheld`, `modelVisible: false`; decision 65). The
+ *    code's answers are `auth-challenge` entries too, in the person's language (decision 64), which the model reads as
+ *    the agent's. Any other message is the model's, as when no check waits: it counts no try, and the check waits.
  * 3. The answer to the address is the same whether or not an entry holds it; a code is sent only to an address an entry
  *    holds, by email, in the background, so that neither the words nor the time of the answer tell which. The code has
  *    six digits from a secure generator, is kept as a keyed hash only, is valid ten minutes from its sending, is used
@@ -28,6 +30,7 @@
  * record, and dropped when the check ends; nothing of the check is in the clear but its state and its times.
  */
 import { randomInt, timingSafeEqual } from 'node:crypto'
+import { CUSTOM_EVENT } from '@ayni.org/ayni-agui-profile'
 import { EMAIL_ENTRY } from '../config/pack.js'
 import type { AgentPack } from '../config/packTypes.js'
 import { type EntryCrypto, openJson, sealJson } from '../memory/crypto.js'
@@ -40,6 +43,7 @@ import { conversationOf } from './conversationOf.js'
 import type { EvidenceService } from './evidence.js'
 import type { IssuanceTrigger } from './issuance.js'
 import type { TurnInput, TurnResult, TurnSink } from './orchestrator.js'
+import type { ServiceLanguage, ServiceSentence } from './serviceLanguage.js'
 import type { AuthChallengeRecord, MessageEntry, Principal, Session } from './types.js'
 
 /** How long the address may wait after the question, and the code after its sending (INTX-AUTH-014). */
@@ -54,6 +58,8 @@ const STOP_WORDS = new Set(['cancel', 'stop', 'annuler', 'cancelar', 'parar', 'a
 
 /** The payload of the entries of a check: what the person typed and what the code answered (MEM-RET-006). */
 export const EMAIL_CHECK_KIND = 'email-check'
+/** The CUSTOM event that names a message of the person the model never receives (PROF-STREAM-011). */
+export const MESSAGES_WITHHELD = CUSTOM_EVENT.messagesWithheld
 
 /** What the store keeps of a check beyond the challenge record: its state and times in the clear, the address sealed. */
 interface EmailCheckDetails {
@@ -118,6 +124,11 @@ export interface EmailCheckDeps {
   mailer?: Mailer
   /** the name of the agent's own organization, as the question names it */
   organizationName(): Promise<string | undefined>
+  /**
+   * the messages of the check in the language the person reads, translated with no context and kept (decision 64,
+   * INTX-AUTH-020..022); without it they are in English
+   */
+  language?: Pick<ServiceLanguage, 'render'>
   /** a message of the code written outside a run (an expiry), shown in the conversation of the session */
   deliver(sessionId: string, entry: MessageEntry): Promise<void>
   /** the check passed: the action that started it goes on, without a turn of the model (INTX-AUTH-015) */
@@ -207,12 +218,12 @@ export class EmailChecks {
       { challengeId: record.id, principalId: principal.id, profile: input.profile },
       'email check started (INTX-AUTH-012)'
     )
-    const organization = (await this.deps.organizationName()) ?? 'your organization'
-    return {
-      started: true,
-      challengeId: record.id,
-      question: `To issue your ${input.label}, the agent checks your email address. Which email address does ${organization} know you by? Type it in your next message: the agent's own code reads it, not the AI. Type cancel to stop.`,
-    }
+    const organization = await this.deps.organizationName()
+    const question = await this.text(principal, session, {
+      text: `To issue your ${input.label}, the agent checks your email address. Which email address does ${organization ?? 'your organization'} know you by? Type it in your next message: the agent's own code reads it, not the AI. Type cancel to stop.`,
+      keep: [input.label, organization ?? ''],
+    })
+    return { started: true, challengeId: record.id, question }
   }
 
   /** Whether a check of the Principal waits, in any of its conversations: what every message is first compared with. */
@@ -247,23 +258,40 @@ export class EmailChecks {
       // only what the step waits for is the code's: "Resend the email" is the model's (decision 63)
       const carried = carriedBy(input.entry.text ?? '', step)
       if (!carried) return undefined
+      // `carried` names what the person typed, never its content: the record the model reads in its place (decision 65)
       const inbound = await this.deps.memory.append({
         ...input.entry,
         sourceType: 'auth-challenge',
-        payload: { kind: EMAIL_CHECK_KIND, challengeId: record.id, step },
+        payload: { kind: EMAIL_CHECK_KIND, challengeId: record.id, step, carried: carried.kind },
       })
       await sink.emit({ type: 'inbound', entry: inbound })
+      // the model never receives it: every bound session of the conversation draws it apart, at once (decision 65,
+      // INTX-AUTH-023, PROF-STREAM-011)
+      await sink.emit({
+        type: 'custom',
+        name: MESSAGES_WITHHELD,
+        value: {
+          conversationId: conversationOf(session),
+          messageIds: [inbound.id],
+          ...(inbound.externalId ? { clientIds: [inbound.externalId] } : {}),
+        },
+      })
       details.lastSessionId = session.id
-      let answer: string
+      // the code's answers are finished English sentences, shown in the person's language (decision 64)
+      let answer: ServiceSentence
       let ended: AuthChallengeRecord['outcome'] | undefined
       if (carried.kind === 'stop') {
-        answer = 'The email check is stopped. Nothing was issued.'
+        answer = { text: 'The email check is stopped. Nothing was issued.' }
         ended = 'failed'
       } else if (carried.kind === 'several') {
+        const organization = await this.deps.organizationName()
         answer =
           step === 'address'
-            ? `That message holds more than one email address. Type the one address ${(await this.deps.organizationName()) ?? 'your organization'} knows you by, or cancel.`
-            : 'That message holds more than one code. Type the code of the last email only, or cancel.'
+            ? {
+                text: `That message holds more than one email address. Type the one address ${organization ?? 'your organization'} knows you by, or cancel.`,
+                keep: [organization ?? ''],
+              }
+            : { text: 'That message holds more than one code. Type the code of the last email only, or cancel.' }
       } else if (carried.kind === 'address') {
         answer = await this.takeAddress(record, details, carried.address)
       } else {
@@ -276,22 +304,34 @@ export class EmailChecks {
             requestRef: record.id,
             connectionRef: session.id,
           })
-          answer = `Your email address is verified. Your ${details.label} is now offered to your wallet: accept it there.`
+          answer = {
+            text: `Your email address is verified. Your ${details.label} is now offered to your wallet: accept it there.`,
+            keep: [details.label],
+          }
           ended = 'completed'
         } else if (outcome === 'expired') {
-          answer = 'This code has expired. Nothing was issued; ask again when you are ready.'
+          answer = { text: 'This code has expired. Nothing was issued; ask again when you are ready.' }
           ended = 'expired'
         } else if (outcome === 'last') {
-          answer = 'That code is not right, and that was the last try: the email check has ended. Nothing was issued.'
+          answer = {
+            text: 'That code is not right, and that was the last try: the email check has ended. Nothing was issued.',
+          }
           ended = 'failed'
         } else {
           const left = EMAIL_CODE_TRIES - details.tries
-          answer = `That code is not right. ${left} ${left === 1 ? 'try is' : 'tries are'} left.`
+          answer = { text: `That code is not right. ${left} ${left === 1 ? 'try is' : 'tries are'} left.` }
         }
       }
       record.details = details as unknown as Record<string, unknown>
       if (!ended) await this.deps.store.challenges.save(record)
-      const reply = await this.say(session, principal, record, answer, sink, inbound.id)
+      const reply = await this.say(
+        session,
+        principal,
+        record,
+        await this.text(principal, session, answer),
+        sink,
+        inbound.id
+      )
       if (ended) await this.end(record, ended, session)
       if (ended === 'completed')
         void this.deps
@@ -380,7 +420,11 @@ export class EmailChecks {
   }
 
   /** The address: the same answer whether or not an entry holds it; a code only to one that an entry holds. */
-  private async takeAddress(record: AuthChallengeRecord, details: EmailCheckDetails, address: string): Promise<string> {
+  private async takeAddress(
+    record: AuthChallengeRecord,
+    details: EmailCheckDetails,
+    address: string
+  ): Promise<ServiceSentence> {
     const now = nowIso()
     const keyRef = this.deps.crypto.newWrappedKey()
     details.sealed = { keyRef, cipher: sealJson(this.deps.crypto, keyRef, { address }).cipher.toString('base64') }
@@ -390,8 +434,11 @@ export class EmailChecks {
     record.expiresAt = this.deadline(now)
     this.sendCode(record, details, address)
     this.schedule(record)
-    const organization = (await this.deps.organizationName()) ?? 'your organization'
-    return `If this address is on the list of ${organization}, a six-digit code was just sent to it. Type the code here: it is valid for ${this.minutes} minutes. If it does not arrive, say so: a new one can be sent.`
+    const organization = await this.deps.organizationName()
+    return {
+      text: `If this address is on the list of ${organization ?? 'your organization'}, a six-digit code was just sent to it. Type the code here: it is valid for ${this.minutes} minutes. If it does not arrive, say so: a new one can be sent.`,
+      keep: [organization ?? ''],
+    }
   }
 
   /**
@@ -436,6 +483,18 @@ export class EmailChecks {
       // the person was answered as anyone is; the failure is the operator's to see (INTX-AUTH-014)
       this.deps.logger.error({ err: error, challengeId }, 'the email code could not be sent')
     }
+  }
+
+  /**
+   * A finished sentence of the code in the language the person reads (decision 64): translated with no context and kept,
+   * never with anything the person typed in it.
+   */
+  private async text(principal: Principal | undefined, session: Session | undefined, sentence: ServiceSentence) {
+    if (!this.deps.language) return sentence.text
+    return this.deps.language.render(sentence, principal, session).catch((err) => {
+      this.deps.logger.warn({ err }, 'a message of the email check is shown in English')
+      return sentence.text
+    })
   }
 
   /** A message of the code in the conversation: an `auth-challenge` entry, streamed in the run that carried the message. */
@@ -519,11 +578,13 @@ export class EmailChecks {
     const details = detailsOf(record)
     await this.end(record, 'expired')
     const principal = await this.deps.store.principals.get(record.principalId)
-    const text =
-      details.step === 'address'
-        ? 'No address was given in time: the email check has ended. Nothing was issued; ask again when you are ready.'
-        : 'The code was not given in time: the email check has ended. Nothing was issued; ask again when you are ready.'
     const sessionId = details.lastSessionId ?? record.originSessionId
+    const text = await this.text(principal, await this.deps.store.sessions.get(sessionId), {
+      text:
+        details.step === 'address'
+          ? 'No address was given in time: the email check has ended. Nothing was issued; ask again when you are ready.'
+          : 'The code was not given in time: the email check has ended. Nothing was issued; ask again when you are ready.',
+    })
     const entry = await this.deps.memory.append({
       sessionId,
       conversationId: details.conversationId,
@@ -695,4 +756,32 @@ export function emailCancelForModel(cancelled: boolean): string {
 /** Whether an entry is a message of an email check: what the person typed or what the code answered (MEM-RET-006). */
 export function isEmailCheckMessage(entry: Pick<MessageEntry, 'sourceType' | 'payload'>): boolean {
   return entry.sourceType === 'auth-challenge' && entry.payload?.kind === EMAIL_CHECK_KIND
+}
+
+/**
+ * Whether an entry is a message of the person the model never receives (decision 65, INTX-AUTH-023): what the code of
+ * an email check took. The code's own messages are the agent's, which the model reads.
+ */
+export function isWithheldMessage(entry: Pick<MessageEntry, 'sourceType' | 'payload' | 'role'>): boolean {
+  return isEmailCheckMessage(entry) && entry.role !== 'agent'
+}
+
+/** What the person typed, as the model is told it in the place of a message it never receives (decision 65). */
+const WITHHELD_WORDS: Record<string, string> = {
+  address: 'their email address',
+  code: 'a code',
+  'several-address': 'more than one email address',
+  'several-code': 'more than one code',
+  stop: 'a word that stops the email check',
+}
+
+/**
+ * The record the model reads in the place of a message of the person the code took (decision 65, INTX-AUTH-013): what
+ * was typed there and that the code took it, never its content.
+ */
+export function withheldRecordText(entry: Pick<MessageEntry, 'payload'>): string {
+  const carried = String(entry.payload?.carried ?? entry.payload?.step ?? '')
+  const step = String(entry.payload?.step ?? '')
+  const what = WITHHELD_WORDS[carried === 'several' ? `several-${step}` : carried] ?? 'a message for the email check'
+  return `the person typed ${what} here; the code of the service took it for the email check, and it is not shown to you`
 }

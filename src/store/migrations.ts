@@ -1,5 +1,5 @@
 /** Memory schema versions (CORE-VER-001/002). Each migration is applied once, in order. */
-export const MEMORY_SCHEMA_VERSION = '3.7.0'
+export const MEMORY_SCHEMA_VERSION = '3.8.0'
 
 export const MIGRATIONS: { version: string; sql: string }[] = [
   {
@@ -331,6 +331,21 @@ CREATE INDEX IF NOT EXISTS space_members_directory ON space_members (directory_i
 
 ALTER TABLE admin_audit ADD COLUMN IF NOT EXISTS seq BIGSERIAL;
 CREATE INDEX IF NOT EXISTS admin_audit_action ON admin_audit (action, ts DESC, seq DESC);
+`,
+  },
+  {
+    // decision 64 (INTX-AUTH-021): the sentences of the service translated by the model, kept by the digest of the
+    // English sentence and the language, so that a sentence costs one call per language. A sentence of the service holds
+    // no personal data (no address, no code, nothing a person typed): it is kept in the clear, with no retention
+    version: '3.8.0',
+    sql: `
+CREATE TABLE IF NOT EXISTS translations (
+  digest TEXT NOT NULL,
+  language TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  data JSONB NOT NULL,
+  PRIMARY KEY (digest, language)
+);
 `,
   },
 ]

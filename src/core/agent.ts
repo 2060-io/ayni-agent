@@ -40,6 +40,7 @@ import {
 } from './orchestrator.js'
 import type { PeopleService } from './people.js'
 import type { PrincipalService, VerifiedFacts } from './principals.js'
+import type { ServiceLanguage } from './serviceLanguage.js'
 import { SessionError, type SessionService, TRANSCRIPT_MESSAGE_TYPES } from './sessions.js'
 import { isPersonalSpace, personalSpaceId, type SpaceError, type SpaceService, spaceIdOf } from './spaces.js'
 import { TurnLock } from './turnLock.js'
@@ -142,6 +143,8 @@ export class AyniAgent {
   public people?: PeopleService
   /** the email code of a badge from the directory, served by the code in the conversation (decision 62, D89) */
   public emailChecks?: EmailChecks
+  /** the service's own sentences in the person's language (decision 64) */
+  public serviceLanguage?: ServiceLanguage
   /** the invitations of people of other organizations, bound when their badge is presented (decision 62, D90) */
   public invitations?: InvitationService
   /** the agent's own DID, read from the DIDComm agent at start (IDENT-SELF-001) */

@@ -9,7 +9,8 @@
  * decision 61 (the user directory: the migration to 3.7.0, the issuances of an entry and of a holder, the members of an
  * entry, the changes newest first, nothing of a person of the directory in the clear but its id and audited name),
  * decision 62 (a badge by email code and an invitation of another organization: the invitations of a person found by
- * their keyed index, and neither the address, the code nor the invited email in the clear in any table).
+ * their keyed index, and neither the address, the code nor the invited email in the clear in any table), decision 64
+ * (the service's sentences translated and kept: the migration to 3.8.0, reused by a new process, no address or code).
  */
 import { rmSync } from 'node:fs'
 import pg from 'pg'
@@ -17,9 +18,11 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { buildAgent } from '../src/app.js'
 import { loadPack } from '../src/config/pack.js'
 import { sealedConversations } from '../src/core/conversationSeal.js'
+import { TRANSLATION_INSTRUCTION_HEAD } from '../src/core/serviceLanguage.js'
 import { personalSpaceId, SpaceService, sealedMembers } from '../src/core/spaces.js'
 import type { Principal, RagChunk, Session } from '../src/core/types.js'
 import { createEmbeddings } from '../src/llm/embeddings.js'
+import type { StubChatModel } from '../src/llm/stub.js'
 import { createEntryCrypto, sealJson } from '../src/memory/crypto.js'
 import { buildScope } from '../src/memory/scope.js'
 import { MemoryService } from '../src/memory/service.js'
@@ -1063,6 +1066,82 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
           }
         }
         expect(rows).toBeGreaterThan(20)
+        await raw.end()
+      } finally {
+        await running.stop()
+        await services.app.close()
+        rmSync(fixture.root, { recursive: true, force: true })
+      }
+    }, 30_000)
+  })
+
+  describe('the sentences of the service, translated and kept in PostgreSQL (decision 64, schema 3.8.0)', () => {
+    it('keeps a translation for the next process, in an agent whose default language is Spanish, with no address or code', async () => {
+      const services = await mockServices()
+      const canary = { id: 'p-canary', firstName: 'Ana', lastName: 'Ríos', email: 'canary.lang.4417@northwind.example' }
+      const fixture = directoryPack([canary], { badge: 'email', language: 'es' })
+      const url = await freshDatabase()
+      const sent: MailMessage[] = []
+      const start = () =>
+        buildAgent(
+          testEnv({
+            store: 'postgres',
+            databaseUrl: url,
+            agentPackPath: fixture.pack,
+            vsAgentAdminUrl: services.url,
+            veranaApiUrl: services.url,
+            directoryPollSeconds: 0,
+          }),
+          logger,
+          {
+            drainMs: 200,
+            mailer: {
+              from: 'Fleet <fleet@northwind.example>',
+              send: async (message) => {
+                sent.push(message)
+                return 'id'
+              },
+            },
+          }
+        )
+      const translations = (running: Awaited<ReturnType<typeof start>>) =>
+        (running.agent.llm as unknown as StubChatModel).requests.filter((r) =>
+          String(r.messages[0]?.content).startsWith(TRANSLATION_INSTRUCTION_HEAD)
+        )
+      let running = await start()
+      try {
+        mintLocally(running)
+        // no locale: the agent's default language
+        const ana = await guest(running, 'lang-wallet', '')
+        expect(textOf(await runText(running, ana, '/call issue_credential {"credential":"badge"}'))).toMatch(
+          /^\[es\] To issue your Northwind badge/
+        )
+        await runText(running, ana, canary.email)
+        await until(() => sent.length === 1)
+        const code = /\b(\d{6})\b/.exec(sent[0]?.text ?? '')?.[1] as string
+        const wrong = code === '000000' ? '111111' : '000000'
+        expect(textOf(await runText(running, ana, wrong))).toBe('[es] That code is not right. 4 tries are left.')
+        expect(translations(running)).toHaveLength(3)
+        await running.stop()
+
+        // a new process: the question it asks again is kept, and costs no call
+        running = await start()
+        mintLocally(running)
+        const jonas = await guest(running, 'lang-wallet-2', '')
+        expect(textOf(await runText(running, jonas, '/call issue_credential {"credential":"badge"}'))).toMatch(
+          /^\[es\] To issue your Northwind badge/
+        )
+        expect(translations(running)).toHaveLength(0)
+
+        const raw = new pg.Client({ connectionString: url })
+        await raw.connect()
+        const rows = (await raw.query('SELECT t::text AS row FROM translations t')).rows.map((r) => String(r.row))
+        expect(rows).toHaveLength(3)
+        for (const row of rows) {
+          expect(row).not.toMatch(/canary\.lang|4417@/)
+          expect(row).not.toContain(code)
+          expect(row).not.toContain(wrong)
+        }
         await raw.end()
       } finally {
         await running.stop()

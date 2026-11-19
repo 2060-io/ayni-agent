@@ -54,7 +54,7 @@ export function renderPromptAddon(ctx: AddonContext): string {
   }
   if (ctx.features.preferences) {
     lines.push(
-      'Preferences (language, formatting, style) are stored with principal_preferences and loaded every turn; set them when the person states one.'
+      'Preferences (language, formatting, style) are stored with principal_preferences and loaded every turn; set them when the person states one, the language under the key language as a BCP 47 tag (es, pt-BR).'
     )
   }
   if (ctx.features.credentialTool)

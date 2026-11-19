@@ -1,5 +1,6 @@
 /** Canonical entries to AG-UI messages (profile sections 6 to 8, PROF-MAP-002/006, PROF-HIST-001). */
 import { ACTIVITY, type AttachmentActivity } from '@ayni.org/ayni-agui-profile'
+import { isWithheldMessage } from '../../core/emailCheck.js'
 import type { ApprovalRecord, MessageAttachment, MessageEntry } from '../../core/types.js'
 
 export function attachmentActivity(a: MessageAttachment, role?: 'user' | 'assistant'): AttachmentActivity {
@@ -175,7 +176,8 @@ export function entryToMessages(entry: MessageEntry): Record<string, unknown>[] 
         },
       ]
     case 'auth-challenge':
-      // the messages of an email check, the person's and the code's, are shown as any message is (PROF-RUN-015)
+      // the messages of an email check, the person's and the code's, are shown as any message is (PROF-RUN-015); the
+      // person's, which the code took, are ones the model never received (decision 65, PROF-HIST-013)
       if (entry.payload?.kind === 'email-check')
         return [
           {
@@ -187,6 +189,7 @@ export function entryToMessages(entry: MessageEntry): Record<string, unknown>[] 
               initiatedAt: entry.initiatedAt,
               sourceType: entry.sourceType,
               externalId: entry.externalId,
+              ...(isWithheldMessage(entry) ? { modelVisible: false } : {}),
             },
           },
         ]

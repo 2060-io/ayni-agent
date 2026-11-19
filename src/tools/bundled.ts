@@ -19,6 +19,7 @@ import {
 } from '../core/emailCheck.js'
 import type { EvidenceService } from '../core/evidence.js'
 import { type IssuanceService, issuanceOutcomeForModel, offeredProfiles } from '../core/issuance.js'
+import { LANGUAGE_PREFERENCE, languageTag } from '../core/serviceLanguage.js'
 import type { Principal } from '../core/types.js'
 import type { MediaService } from '../media/service.js'
 import type { RagService } from '../memory/rag.js'
@@ -234,7 +235,7 @@ export class BundledToolSource implements ToolSource {
         key: 'bundled:principal_preferences',
         name: 'principal_preferences',
         description:
-          'Reads or stores a durable preference of the person (language, formatting, style). Preferences load automatically each turn.',
+          'Reads or stores a durable preference of the person (language, formatting, style). Preferences load automatically each turn. The language the person reads goes under the key language, as a BCP 47 tag (es, pt-BR): the messages the system writes itself follow it.',
         parameters: {
           type: 'object',
           properties: {
@@ -250,9 +251,21 @@ export class BundledToolSource implements ToolSource {
           if (args.action === 'set') {
             if (typeof args.key !== 'string' || typeof args.value !== 'string')
               return { content: 'key and value are required', isError: true }
+            // the language is a tag the code reads (INTX-PREF-003): anything else is refused, in words
+            let { key, value } = args
+            if (key.trim().toLowerCase() === LANGUAGE_PREFERENCE) {
+              key = LANGUAGE_PREFERENCE
+              const tag = languageTag(value)
+              if (!tag)
+                return {
+                  content: `${LANGUAGE_PREFERENCE} must be a BCP 47 language tag, such as es, fr or pt-BR: nothing was stored`,
+                  isError: true,
+                }
+              value = tag
+            }
             // through the memory service, which seals it (D77)
-            await this.deps.memory.setPreference(ctx.principal, args.key, args.value)
-            return { content: `preference ${args.key} stored` }
+            await this.deps.memory.setPreference(ctx.principal, key, value)
+            return { content: `preference ${key} stored` }
           }
           // a retrieval: through the scope predicate, logged (PRIV-SCOPE-003/006)
           const prefs = await this.deps.memory.preferences(ctx.principal, ctx.session)
