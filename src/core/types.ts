@@ -95,6 +95,13 @@ export interface Conversation {
   readUpTo?: string | null
   /** the agent messages after the marker, kept beside it so that listing costs nothing */
   unread?: number
+  /**
+   * the space it belongs to (SPACE-CONV-001): exactly one, the Principal's Personal space when absent. Set at its
+   * creation; changed only before its first message
+   */
+  spaceId?: string
+  /** its author shares it, read-only, with the members of its own space, from this time (SPACE-SHARE-001) */
+  sharedAt?: string | null
 }
 export type SessionState = 'provisional' | 'bound' | 'closed'
 export type ClosureReason =
@@ -153,6 +160,8 @@ export interface Session {
   conversationId?: string
   /** the request asked for a new conversation rather than continuing the latest (PROF-CONV-006) */
   newConversation?: boolean
+  /** the space the request named for its new conversation (PROF-CONV-011), checked when the session binds */
+  spaceId?: string
   /** a closed session this one resumes: its entries stay readable here (IDENT-SESS-009) */
   resumedFromSessionId?: string
   /** ids of every session in the resume chain, oldest last */
@@ -252,6 +261,11 @@ export interface MessageEntry {
   sessionId: string
   /** the conversation it belongs to (MEM-ENTRY-004, D76): what `conversation-private` keys on */
   conversationId: string
+  /**
+   * the space of its conversation (SPACE-CONV-001): set when it is recorded, changed with its conversation's space
+   * before the first message, and followed by the retention of that space (PRIV-RETN-008)
+   */
+  spaceId?: string
   principalId: string | null
   role: EntryRole
   sourceType: SourceType
@@ -287,10 +301,107 @@ export interface WorkingMemoryNote {
   createdAt: string
   updatedAt: string
   /**
+   * the space it belongs to: the space of the conversation it was taken in (MEM-SPACE-001). The model reads the notes of
+   * the space of its conversation only. In the clear: the query filters on it. Personal when absent
+   */
+  spaceId?: string
+  /**
    * In the store only (D77): the content under a key of the note, the `content` field then empty. The memory service
    * reads and writes notes in the clear through the sealed repository (src/memory/sealedMemory.ts).
    */
   sealed?: { keyRef: string; cipher: string }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Spaces (SPACE-DEF-001, ayni-spec D80..D84): one piece of work in one agent; every conversation belongs to exactly one.
+
+export type SpaceKind = 'personal' | 'team' | 'organization'
+export type LawfulBasis = 'consent' | 'contract' | 'legitimate-interest'
+
+export interface SpaceRules {
+  /** days the entries of its conversations stay active; then they are archived, legal hold excepted (PRIV-RETN-008) */
+  retentionDays: number
+  lawfulBasis: LawfulBasis
+  /** the model providers (an agent-pack `llm.provider`) that may process its conversations; never empty */
+  allowedProviders: string[]
+  /** its members may read the conversations their authors share with it */
+  handover: boolean
+}
+
+/** Membership by rule over verified facts, or by a list the owners keep. */
+export type SpaceMembership =
+  | { mode: 'rule'; rule: { department?: string; group?: string; organization?: true } }
+  | { mode: 'list' }
+
+export interface Space {
+  id: string
+  /** the agent it belongs to: `metadata.id` of the agent-pack */
+  agentId: string
+  kind: SpaceKind
+  templateId: string
+  /** sealed in the store with the purpose and the brief (D77): empty there */
+  title: string
+  purpose: string
+  brief: string
+  /** what the agent writes for the space is in this language; the agent's default when null */
+  language: string | null
+  rules: SpaceRules
+  membership: SpaceMembership
+  /** the Principals who own it */
+  ownerIds: string[]
+  createdAt: string
+  updatedAt: string
+  /** in the store only: title, purpose and brief under a key of the space */
+  sealed?: { keyRef: string; cipher: string }
+}
+
+export type SpaceRole = 'owner' | 'member' | 'guest'
+export type SpaceMemberState = 'invited' | 'active' | 'left'
+
+/** A row of a space's members: an owner, a listed member, an invited person of another organization. */
+export interface SpaceMember {
+  id: string
+  spaceId: string
+  /** the Principal, once bound */
+  principalId: string | null
+  /** the entry of the employee list (ayni-spec D79), for a person of the organization */
+  directoryId?: string
+  /** a person of another organization, by its organization key and email (phase 2); the email is sealed */
+  organizationKey?: string
+  email?: string
+  /** in the store only: the keyed index of the email, to bind a badge to the invitation */
+  emailIndex?: string
+  state: SpaceMemberState
+  role: SpaceRole
+  createdAt: string
+  updatedAt: string
+  /** in the store only: the email under a key of the row */
+  sealed?: { keyRef: string; cipher: string }
+}
+
+/** What happened in a space (profile 3.3 §3.7): `rules-changed` names the fields an owner changed, never their values. */
+export type SpaceActivityAction =
+  | 'created'
+  | 'rules-changed'
+  | 'joined'
+  | 'left'
+  | 'invited'
+  | 'removed'
+  | 'owner-changed'
+  | 'shared'
+  | 'unshared'
+
+/** What was done in a space, by whom; never the content of a field (only its name). */
+export interface SpaceActivity {
+  id: string
+  spaceId: string
+  at: string
+  /** the Principal who did it */
+  actorId: string
+  action: SpaceActivityAction
+  fields?: string[]
+  memberId?: string
+  conversationId?: string
 }
 
 export interface PrincipalPreference {

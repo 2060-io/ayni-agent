@@ -4,12 +4,15 @@
  * database of its own, created and dropped here.
  *
  * MEM-RAG-005 (document search compiles for its store), PRIV-SCOPE-003 (every store through the predicate),
- * PRIV-ERASE-001 and D77 (no plaintext beside the ciphertext), MEM-ENTRY-004 and D76 (the migration to conversations).
+ * PRIV-ERASE-001 and D77 (no plaintext beside the ciphertext), MEM-ENTRY-004 and D76 (the migration to conversations),
+ * decision 60 (spaces: the migration to 3.6.0, the stores, no plaintext of a space, the agent served from PostgreSQL).
  */
 import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { buildAgent } from '../src/app.js'
 import { loadPack } from '../src/config/pack.js'
 import { sealedConversations } from '../src/core/conversationSeal.js'
+import { personalSpaceId, SpaceService, sealedMembers } from '../src/core/spaces.js'
 import type { Principal, RagChunk, Session } from '../src/core/types.js'
 import { createEmbeddings } from '../src/llm/embeddings.js'
 import { createEntryCrypto, sealJson } from '../src/memory/crypto.js'
@@ -18,6 +21,7 @@ import { MemoryService } from '../src/memory/service.js'
 import { MIGRATIONS } from '../src/store/migrations.js'
 import { PostgresStore } from '../src/store/postgres.js'
 import { createLogger } from '../src/util/logger.js'
+import { parseSse, testEnv } from './helpers.js'
 
 const serverUrl = process.env.PG_TEST_URL
 const logger = createLogger('silent')
@@ -231,7 +235,7 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
       await store.rag.replaceSource('ptn', [chunk('ptn', 'partner-shared', 'org:EE:14000000')])
       const search = async (ctx: Parameters<typeof buildScope>[0]) =>
         (await store.rag.vectorSearch(buildScope(ctx), [0.1, 0.2, 0.3], 10)).map((h) => h.item.id).sort()
-      const base = { principalId: 'p1', conversationId: 'c1', crossSession: 'own-sessions' as const }
+      const base = { principalId: 'p1', conversationId: 'c1' }
       expect(await search({ ...base, backingIdentity: { kind: 'org', id: 'org:CO:1' }, relation: 'home' })).toEqual([
         'org',
         'pub',
@@ -281,7 +285,6 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
         conversationId: 'c1',
         backingIdentity: null,
         relation: 'unrecognized',
-        crossSession: 'own-sessions',
       })
       expect((await store.notes.query(scope)).map((n) => n.id)).toEqual(['n1'])
       expect((await store.preferences.query(scope)).map((p) => p.key)).toEqual(['tone'])
@@ -449,5 +452,297 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
       } as never)
       expect((await store.approvals.list({ inboundId: 'msg_9' })).map((a) => a.id)).toEqual(['apr_9'])
     })
+  })
+
+  describe('the migration to spaces (decision 60, schema 3.6.0)', () => {
+    let url: string
+    beforeAll(async () => {
+      url = await freshDatabase()
+      const client = new pg.Client({ connectionString: url })
+      await client.connect()
+      await client.query(
+        'CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())'
+      )
+      for (const m of MIGRATIONS.filter((m) => m.version < '3.6.0')) {
+        await client.query(m.sql)
+        await client.query('INSERT INTO schema_migrations (version) VALUES ($1)', [m.version])
+      }
+      // a conversation, an entry of it, an entry of no conversation and a note of the previous version: no space
+      await client.query(
+        `INSERT INTO conversations (id, principal_id, state, last_activity_at, data)
+         VALUES ('conv_v35', 'p7', 'active', now(), '{"id":"conv_v35","principalId":"p7","sessionIds":[]}')`
+      )
+      for (const [id, conversation, visibility] of [
+        ['msg_v35', 'conv_v35', 'conversation-private'],
+        ['msg_didcomm', 'ses_didcomm', 'principal-private'],
+      ])
+        await client.query(
+          `INSERT INTO entries (id, session_id, conversation_id, principal_id, role, source_type, visibility, state, language,
+             content_digest, enc_key_ref, initiated_at, created_at, data)
+           VALUES ($1, 's', $2, 'p7', 'principal', 'text', $3, 'active', 'en', 'd', 'k', now(), now(),
+             jsonb_build_object('id', $1::text))`,
+          [id, conversation, visibility]
+        )
+      await client.query(
+        `INSERT INTO working_memory (id, principal_id, visibility, state, data)
+         VALUES ('note_v35', 'p7', 'principal-private', 'active', '{"id":"note_v35","principalId":"p7","state":"active","visibility":"principal-private","lineageRefs":[]}')`
+      )
+      await client.end()
+    })
+
+    it('puts every conversation and every note of an earlier version in the Personal space of its Principal', async () => {
+      const store = new PostgresStore(url)
+      await store.init()
+      const client = new pg.Client({ connectionString: url })
+      await client.connect()
+      const conversation = (
+        await client.query("SELECT space_id, shared_at, data FROM conversations WHERE id = 'conv_v35'")
+      ).rows[0]
+      expect(conversation.space_id).toBe('personal:p7')
+      expect(conversation.shared_at).toBeNull()
+      expect(conversation.data.spaceId).toBe('personal:p7')
+      const note = (await client.query("SELECT space_id, data FROM working_memory WHERE id = 'note_v35'")).rows[0]
+      expect(note.space_id).toBe('personal:p7')
+      expect(note.data.spaceId).toBe('personal:p7')
+      for (const table of ['spaces', 'space_members', 'space_activity'])
+        expect((await client.query(`SELECT count(*)::int AS n FROM ${table}`)).rows[0].n).toBe(0)
+      // every entry carries the space of its conversation, Personal when it has none (SPACE-CONV-001)
+      const spaces = (await client.query('SELECT id, space_id FROM entries ORDER BY id')).rows
+      expect(spaces).toEqual([
+        { id: 'msg_didcomm', space_id: 'personal:p7' },
+        { id: 'msg_v35', space_id: 'personal:p7' },
+      ])
+      await client.end()
+      expect((await store.conversations.listBySpace('personal:p7')).map((c) => c.id)).toEqual(['conv_v35'])
+      const scope = buildScope({
+        principalId: 'p7',
+        conversationId: 'c',
+        backingIdentity: null,
+        relation: 'unrecognized',
+      })
+      // the predicate names the space of the notes it reads (MEM-SPACE-001), compiled on the store's space column
+      expect((await store.notes.query({ ...scope, spaceId: 'personal:p7' })).map((n) => n.id)).toEqual(['note_v35'])
+      expect(await store.notes.query({ ...scope, spaceId: 'spc_other' })).toEqual([])
+      expect((await store.notes.query(scope)).map((n) => n.id)).toEqual(['note_v35'])
+      // a principal-private entry is read in the conversations of its space only
+      const read = async (spaceId: string) =>
+        (await store.entries.query({ ...scope, spaceId }, { limit: 10 })).map((e) => [e.id, e.spaceId])
+      expect(await read('personal:p7')).toEqual([['msg_didcomm', 'personal:p7']])
+      expect(await read('spc_other')).toEqual([])
+      await store.close()
+    })
+  })
+
+  describe('spaces in the store (decision 60)', () => {
+    let store: PostgresStore
+    let url: string
+    beforeAll(async () => {
+      url = await freshDatabase()
+      store = new PostgresStore(url)
+      await store.init()
+    })
+    afterAll(async () => {
+      await store.close()
+    })
+
+    it('keeps no plaintext of a space or of an invited email, and reads them back in the clear', async () => {
+      const { pack } = loadPack('agent-packs/dev', { ...process.env })
+      const spaces = new SpaceService(store, pack, crypto, logger)
+      const ana = principal('p_ana', { roles: ['employee'] })
+      const space = await spaces.create(ana, {
+        templateId: 'project',
+        title: 'CANARY-SPACE-TITLE-9140',
+        purpose: 'CANARY-SPACE-PURPOSE-2275',
+        brief: 'CANARY-SPACE-BRIEF-6618',
+      })
+      await spaces.update(ana, space.id, { title: 'CANARY-SPACE-TITLE-NEW-3309', rules: { retentionDays: 30 } })
+      const members = sealedMembers(store.spaceMembers, crypto)
+      const now = new Date().toISOString()
+      await members.save({
+        id: 'mbr_guest',
+        spaceId: space.id,
+        principalId: null,
+        organizationKey: 'org:EE:14000000',
+        email: 'CANARY-EMAIL-4410@example.org',
+        state: 'invited',
+        role: 'guest',
+        createdAt: now,
+        updatedAt: now,
+      })
+      const client = new pg.Client({ connectionString: url })
+      await client.connect()
+      const rows = [
+        ...(await client.query('SELECT s::text AS row FROM spaces s')).rows,
+        ...(await client.query('SELECT m::text AS row FROM space_members m')).rows,
+        ...(await client.query('SELECT a::text AS row FROM space_activity a')).rows,
+      ]
+      expect(rows.length).toBe(5)
+      for (const { row } of rows) expect(row).not.toMatch(/CANARY/)
+      // what the lists and the membership need stays in the clear
+      const kept = (await client.query('SELECT kind, template_id, membership_mode, data FROM spaces')).rows[0]
+      expect(kept).toMatchObject({ kind: 'team', template_id: 'project', membership_mode: 'list' })
+      expect(kept.data.rules.retentionDays).toBe(30)
+      const invited = (
+        await client.query("SELECT email_index, organization_key FROM space_members WHERE id = 'mbr_guest'")
+      ).rows[0]
+      expect(invited.organization_key).toBe('org:EE:14000000')
+      expect(invited.email_index).toMatch(/^[0-9a-f]{64}$/)
+      await client.end()
+
+      expect(await spaces.find(space.id)).toMatchObject({
+        title: 'CANARY-SPACE-TITLE-NEW-3309',
+        purpose: 'CANARY-SPACE-PURPOSE-2275',
+        brief: 'CANARY-SPACE-BRIEF-6618',
+      })
+      expect((await members.get('mbr_guest'))?.email).toBe('CANARY-EMAIL-4410@example.org')
+      expect((await spaces.listFor(ana)).map((a) => a.space.id)).toEqual([personalSpaceId('p_ana'), space.id])
+      const activity = await store.spaceActivity.list(space.id, 10)
+      expect(activity.map((a) => a.action)).toEqual(['rules-changed', 'created'])
+      expect(activity[0]?.fields).toEqual(['title', 'rules.retentionDays'])
+    })
+
+    it('lists the conversations of a space, and those shared with it', async () => {
+      const conversations = sealedConversations(store.conversations, crypto)
+      const base = {
+        principalId: 'p_ana',
+        channelType: 'ag-ui' as const,
+        title: 't',
+        state: 'active' as const,
+        createdAt: new Date().toISOString(),
+        sessionIds: [],
+      }
+      await conversations.save({ ...base, id: 'c_a', spaceId: 'spc_x', lastActivityAt: '2026-11-18T10:00:00.000Z' })
+      await conversations.save({
+        ...base,
+        id: 'c_b',
+        spaceId: 'spc_x',
+        sharedAt: '2026-11-18T11:00:00.000Z',
+        lastActivityAt: '2026-11-18T11:00:00.000Z',
+      })
+      await conversations.save({ ...base, id: 'c_c', lastActivityAt: '2026-11-18T12:00:00.000Z' })
+      expect((await store.conversations.listBySpace('spc_x')).map((c) => c.id)).toEqual(['c_b', 'c_a'])
+      expect((await store.conversations.listBySpace('spc_x', { shared: true })).map((c) => c.id)).toEqual(['c_b'])
+      expect((await store.conversations.listBySpace(personalSpaceId('p_ana'))).map((c) => c.id)).toEqual(['c_c'])
+    })
+  })
+
+  describe('the agent served from PostgreSQL (decision 60)', () => {
+    it('serves spaces, memories per space and the deletion of a message, with no plaintext of a space', async () => {
+      const url = await freshDatabase()
+      const running = await buildAgent(testEnv({ store: 'postgres', databaseUrl: url }), logger, { drainMs: 200 })
+      try {
+        const minter = running.agent.sessions as unknown as { minter: { mint: (id: string) => Promise<unknown> } }
+        minter.minter = {
+          mint: async (id: string) => ({
+            invitationId: `inv-${id}`,
+            outOfBandId: `oob-${id}`,
+            url: `http://agent.test?oob=${Buffer.from(`{"@id":"inv-${id}"}`).toString('base64url')}`,
+          }),
+        }
+        const client = { name: 'ayni-ui', version: '3.3.0', platform: 'web' }
+        const created = (
+          await running.app.inject({ method: 'POST', url: '/agui/v3/sessions', payload: { client } })
+        ).json() as { sessionId: string; sessionToken: string }
+        const provisional = await running.agent.sessions.get(created.sessionId)
+        const { principal } = await running.agent.onPeerConnected(
+          {
+            connectionType: 'verifiable-user-agent',
+            actorIdentity: 'did:peer:pg-ana',
+            backingIdentity: null,
+            claims: { userName: 'Ana' },
+            userAgentVerified: false,
+            identityCredentialRef: null,
+          },
+          'conn-pg',
+          { name: 'Wallet', version: '1', platform: 'ios' }
+        )
+        await running.agent.sessions.markConfirmationSent(provisional as Session, 'conn-pg', 'thread-pg')
+        const confirm = (await running.agent.sessions.findByConfirmation('conn-pg', 'thread-pg')) as Session
+        await running.agent.sessions.bind(confirm, principal, confirm.binding?.nonce as string)
+        const auth = { authorization: `Bearer ${created.sessionToken}` }
+        const space = (
+          await running.app.inject({
+            method: 'POST',
+            url: '/agui/v3/sessions/spaces',
+            headers: auth,
+            payload: {
+              templateId: 'project',
+              title: 'CANARY-PG-TITLE-5150',
+              purpose: 'CANARY-PG-PURPOSE-7311',
+              brief: 'CANARY-PG-BRIEF-2208',
+            },
+          })
+        ).json() as { id: string }
+        const sibling = (
+          await running.app.inject({
+            method: 'POST',
+            url: '/agui/v3/sessions',
+            headers: auth,
+            payload: { client, newConversation: true, spaceId: space.id },
+          })
+        ).json() as { sessionId: string; sessionToken: string; conversationId: string }
+        const run = async (text: string, id: string) =>
+          parseSse(
+            (
+              await running.app.inject({
+                method: 'POST',
+                url: `/agui/v3/sessions/${sibling.sessionId}/runs`,
+                headers: { authorization: `Bearer ${sibling.sessionToken}` },
+                payload: {
+                  threadId: sibling.sessionId,
+                  runId: `run-${id}`,
+                  messages: [{ id, role: 'user', content: text }],
+                },
+              })
+            ).body
+          ).map((e) => e.event)
+        await run('keep /call working_memory {"action":"add","content":"CANARY-PG-NOTE-8121"}', 'u-pg-1')
+        const memories = (
+          await running.app.inject({
+            method: 'GET',
+            url: `/agui/v3/sessions/memories?spaceId=${space.id}`,
+            headers: auth,
+          })
+        ).json() as { memories: { content: string; spaceId: string }[] }
+        expect(memories.memories).toEqual([
+          expect.objectContaining({ content: 'CANARY-PG-NOTE-8121', spaceId: space.id }),
+        ])
+        const listed = (
+          await running.app.inject({
+            method: 'GET',
+            url: `/agui/v3/sessions/conversations?spaceId=${space.id}`,
+            headers: auth,
+          })
+        ).json() as { conversations: { id: string; spaceId: string }[] }
+        expect(listed.conversations.map((c) => c.id)).toEqual([sibling.conversationId])
+
+        const deleted = await running.app.inject({
+          method: 'DELETE',
+          url: `/agui/v3/sessions/${sibling.sessionId}/messages/u-pg-1`,
+          headers: { authorization: `Bearer ${sibling.sessionToken}` },
+        })
+        expect(deleted.statusCode).toBe(204)
+        const after = (
+          await running.app.inject({ method: 'GET', url: '/agui/v3/sessions/memories', headers: auth })
+        ).json() as { memories: unknown[] }
+        expect(after.memories).toEqual([])
+
+        const raw = new pg.Client({ connectionString: url })
+        await raw.connect()
+        const tables = (
+          await raw.query(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
+          )
+        ).rows.map((r) => String(r.table_name))
+        expect(tables).toEqual(expect.arrayContaining(['spaces', 'space_members', 'space_activity']))
+        for (const table of tables) {
+          for (const { row } of (await raw.query(`SELECT t::text AS row FROM ${table} t`)).rows)
+            expect(row, table).not.toMatch(/CANARY-PG/)
+        }
+        await raw.end()
+      } finally {
+        await running.stop()
+      }
+    }, 30_000)
   })
 })
