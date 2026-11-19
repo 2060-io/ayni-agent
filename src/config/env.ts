@@ -71,6 +71,12 @@ export interface Env {
   statsEnabled: boolean
   statsSink: 'redis-stream' | 'http'
   statsHttpUrl?: string
+
+  /**
+   * how often the file of the user directory is read again and compared by its hash, beside the watch of its directory
+   * (IDENT-ROLE-013); 0 watches only. 10 by default
+   */
+  directoryPollSeconds?: number
 }
 
 function num(value: string | undefined, fallback?: number): number | undefined {
@@ -166,6 +172,8 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
     statsEnabled: bool(source.STATS_ENABLED, false),
     statsSink: (source.STATS_SINK as Env['statsSink']) ?? 'redis-stream',
     statsHttpUrl: source.STATS_HTTP_URL || undefined,
+
+    directoryPollSeconds: num(source.DIRECTORY_POLL_SECONDS, 10),
   }
 
   if (store === 'postgres' && !env.databaseUrl) missing.push('DATABASE_URL')

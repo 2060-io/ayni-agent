@@ -229,6 +229,29 @@ export function removedCrossSessionErrors(doc: unknown): string[] {
     )
 }
 
+/**
+ * The people of the user directory are never written in the agent-pack (IDENT-ROLE-012, D79): the pack is versioned
+ * with the deployment and its history would keep every former employee. A pack that lists people, under
+ * `identity.directory` or beside it, is refused in words, before the schema, which would only name the key.
+ */
+export function inlineDirectoryErrors(doc: unknown): string[] {
+  const identity = (doc as { identity?: Record<string, unknown> })?.identity
+  if (!identity || typeof identity !== 'object') return []
+  const fix =
+    'the people of the user directory are never written in the agent-pack (IDENT-ROLE-012, D79): mount the list from a secret of the deployment and name its file with identity.directory.file'
+  const errors: string[] = []
+  const directory = identity.directory
+  if (Array.isArray(directory)) errors.push(`identity.directory is a list of people: ${fix}`)
+  else if (directory && typeof directory === 'object') {
+    for (const [key, value] of Object.entries(directory as Record<string, unknown>))
+      if (key !== 'file' && (Array.isArray(value) || key === 'people' || key === 'entries'))
+        errors.push(`identity.directory.${key}: ${fix}`)
+  }
+  for (const key of ['people', 'users', 'employees'])
+    if (identity[key] !== undefined) errors.push(`identity.${key}: ${fix}`)
+  return errors
+}
+
 /** What a space template may not say (SPACE-DEF-003): its defaults lie within its bounds. */
 export function spaceTemplateErrors(pack: AgentPack): string[] {
   const errors: string[] = []
@@ -500,6 +523,9 @@ export function validatePackDocument(doc: unknown, env: Record<string, string | 
   // RBAC-XSESS-005: a role that declares crossSession is refused in words, before the schema names the key
   const removed = removedCrossSessionErrors(coerced)
   if (removed.length) throw new PackError('agent-pack names a cross-session scope that was removed', removed)
+  // IDENT-ROLE-012: the people of the user directory are refused in words, before the schema names the key
+  const inline = inlineDirectoryErrors(coerced)
+  if (inline.length) throw new PackError('agent-pack writes the people of the user directory inline', inline)
   const ajv = new Ajv2020({ allErrors: true, strict: false, useDefaults: true })
   addFormats.default(ajv)
   const validate = ajv.compile(schema)

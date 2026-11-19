@@ -19,8 +19,16 @@ export interface RoleDefinition {
   description?: string
   canApprove?: boolean
   auditor?: boolean
-  /** the role reads the admin view of roles and changes (IDENT-DIR-008, phase 2) */
+  /** the role reads the admin view of roles and of the changes of the user directory (IDENT-DIR-008, decision 61) */
   admin?: boolean
+}
+
+/**
+ * The user directory (ayni-spec D79, IDENT-ROLE-012): the people of the home organization, in a file mounted from a
+ * secret of the deployment and never written in the agent-pack. A relative path resolves from the pack directory.
+ */
+export interface UserDirectoryRef {
+  file: string
 }
 
 export interface RoleRule {
@@ -172,6 +180,44 @@ export interface IssuanceProfile {
   record?: { storeClaims?: boolean; retention?: { days?: number; onExpiry?: 'archive' | 'erase' } }
 }
 
+/**
+ * Whether a profile takes a claim from the user directory (`{ from: record, record: directory, field }`,
+ * INTX-ISSUE-021). The source comes with the badge from the directory (agent phase 2b); it is read loosely here, so
+ * that the directory and revocation see such a profile as soon as the loader accepts one.
+ */
+export function takesClaimsFromDirectory(profile: Pick<IssuanceProfile, 'claims'>): boolean {
+  return Object.values(profile.claims).some((source) => {
+    const s = source as { from?: string; record?: string }
+    return s.from === 'record' && s.record === 'directory'
+  })
+}
+
+/** The challenges a profile declares: one object today, a list of them for the badge from the directory (IDENT-DIR-002). */
+export function challengeTypesOf(profile: Pick<IssuanceProfile, 'authChallenge'>): string[] {
+  return ([] as unknown[])
+    .concat(profile.authChallenge ?? [])
+    .map((c) => (c as { type?: string }).type)
+    .filter((t): t is string => typeof t === 'string')
+}
+
+/**
+ * Badges are obtained from the directory with a passport: then every entry carries a birthdate and a nationality,
+ * which only the matching of a document read reads (IDENT-ROLE-012, IDENT-DIR-002, IDENT-DIR-007).
+ */
+export function directoryReadsDocuments(pack: Pick<AgentPack, 'issuance'>): boolean {
+  return Object.values(pack.issuance ?? {}).some(
+    (profile) => takesClaimsFromDirectory(profile) && challengeTypesOf(profile).includes('document')
+  )
+}
+
+/**
+ * A credential that must be revocable: one whose claims come from the directory, revoked when its entry leaves it
+ * (D91, IDENT-ROLE-013, IDENT-DIR-006). The definition of its schema is created with revocation (decision 61).
+ */
+export function mustBeRevocable(profile: Pick<IssuanceProfile, 'claims'>): boolean {
+  return takesClaimsFromDirectory(profile)
+}
+
 /** The connection type a schema of the given subject kind is asked of (INTX-PRES-007). */
 export function connectionTypeOf(subjectKind: PresentationEntry['subjectKind']): ConnectionType {
   return subjectKind === 'service' ? 'verifiable-service' : 'verifiable-user-agent'
@@ -196,6 +242,8 @@ export interface PackIdentity {
   roles?: Record<string, RoleDefinition>
   roleRules: RoleRule[]
   perActorOverrides?: { actor: string; roles: string[]; comment?: string }[]
+  /** the people of the home organization and their roles, typed by hand (D79, D87, IDENT-ROLE-012) */
+  directory?: UserDirectoryRef
   /** Credentials requested on DIDComm connect (addition over schema 3.0, see docs/agent-pack.md). */
   credentials?: {
     userAgent?: CredentialRef

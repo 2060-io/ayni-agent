@@ -261,6 +261,19 @@
             }
           }
         },
+        "directory": {
+          "description": "The user directory (D79, D87, IDENT-ROLE-012): the people of the home organization, their department, groups and roles typed by hand, in a file mounted from a secret of the deployment. The people are never written in the agent-pack: a pack that lists them is refused. A relative path resolves from the pack directory. The agent reloads the file when it changes (IDENT-ROLE-013).",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["file"],
+          "properties": {
+            "file": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Path of the directory file: YAML or JSON holding a list `people`."
+            }
+          }
+        },
         "roles": {
           "description": "Declared roles with the approval rights they carry (RBAC-TOOL, INTX-APPR). Any role named in roleRules, toolAccess or approvers must be declared here.",
           "type": "object",
@@ -285,7 +298,7 @@
               "admin": {
                 "type": "boolean",
                 "default": false,
-                "description": "The role reads the admin view of roles and changes (IDENT-DIR-008). A role carries no scope of conversation reads: crossSession is withdrawn and refused (RBAC-XSESS-005)."
+                "description": "The role reads the admin view of the user directory: who holds which role and why, and what each reload changed (IDENT-DIR-008/009, PROF-DIR-003). A role carries no scope of conversation reads: crossSession is withdrawn and refused (RBAC-XSESS-005)."
               }
             }
           }
