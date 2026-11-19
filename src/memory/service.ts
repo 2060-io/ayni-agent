@@ -20,7 +20,7 @@ import type {
 import { SOURCE_TYPES, VISIBILITIES } from '../core/types.js'
 import type { EmbeddingModel } from '../llm/types.js'
 import type { EntryKey, EntryQuery, Store, StoredEntry } from '../store/types.js'
-import { nowIso, prefixedId } from '../util/ids.js'
+import { monotonicIso, nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import { type EntryCrypto, openJson, sealJson } from './crypto.js'
 import { buildScope, EMPTY_SCOPE, type ScopeContext, type ScopePredicate } from './scope.js'
@@ -205,7 +205,8 @@ export class MemoryService {
     }
     const conversationId = input.conversationId ?? (await this.conversationOfSession(input.sessionId))
     const spaceId = input.spaceId ?? (await this.spaceOfConversation(conversationId, input.principalId))
-    const now = nowIso()
+    // strictly after the entry recorded before it: what is recorded in order is read in order (CORE-MSG-010)
+    const now = monotonicIso()
     const entry: MessageEntry = {
       id: input.id ?? prefixedId('msg'),
       sessionId: input.sessionId,
