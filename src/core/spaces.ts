@@ -61,7 +61,10 @@ export type SpaceErrorCode =
   | 'space-left'
   | 'already-member'
   | 'not-admin'
-  | 'not-implemented'
+  | 'not-on-verana'
+  | 'home-organization'
+  | 'organization-not-accepted'
+  | 'email-unavailable'
 
 /** The status of each refusal (profile 3.3 §9); `ERROR_STATUS` of the profile package lists the same. */
 export const SPACE_ERROR_STATUS: Record<SpaceErrorCode, number> = {
@@ -80,7 +83,10 @@ export const SPACE_ERROR_STATUS: Record<SpaceErrorCode, number> = {
   'space-left': 409,
   'already-member': 409,
   'not-admin': 403,
-  'not-implemented': 501,
+  'not-on-verana': 422,
+  'home-organization': 422,
+  'organization-not-accepted': 409,
+  'email-unavailable': 503,
 }
 
 export class SpaceError extends Error {
@@ -199,8 +205,15 @@ export function sealedMembers(repo: SpaceMemberRepo, crypto: EntryCrypto): Space
       (await repo.listByPrincipal(principalId)).map((m) => open(m) as SpaceMember),
     listByDirectoryId: async (directoryId) =>
       (await repo.listByDirectoryId(directoryId)).map((m) => open(m) as SpaceMember),
+    listByInvitee: async (organizationKey, emailIndex) =>
+      (await repo.listByInvitee(organizationKey, emailIndex)).map((m) => open(m) as SpaceMember),
     delete: (id) => repo.delete(id),
   }
+}
+
+/** How a person of another organization is invited to a list space (SPACE-INV-001..004, PROF-SPACE-005). */
+export interface OutsiderInvitations {
+  invite(principal: Principal, space: Space, input: { organizationKey: unknown; email: unknown }): Promise<SpaceMember>
 }
 
 /** What a template gives a new space and lets an owner change, its bounds resolved against the pack (SPACE-DEF-003). */
@@ -239,11 +252,13 @@ export class SpaceService {
   public directory?: DirectoryFacts
   /** the people of the user directory, for adding them to a list and naming them (SPACE-MEMB-002); none without one */
   public people?: DirectoryPeople
+  /** the invitations of people of other organizations (SPACE-INV); none without an SMTP server */
+  public outsiders?: OutsiderInvitations
 
   public constructor(
     private readonly store: Store,
     private readonly pack: AgentPack,
-    crypto: EntryCrypto,
+    private readonly crypto: EntryCrypto,
     private readonly logger: Logger,
     /** the retention of Personal when `spaces.personal` gives none: the deployment's history days */
     private readonly personalRetentionDays = PERSONAL_RETENTION_DAYS
@@ -616,8 +631,8 @@ export class SpaceService {
 
   /**
    * Adds a person to a space's list (SPACE-MEMB-002, PROF-SPACE-005): a person of the user directory by its entry,
-   * `invited` until a Principal holds that entry, then `active`. A person of another organization, by its organization
-   * key and email, comes with the invitations (agent phase 2b: 501 meanwhile).
+   * `invited` until a Principal holds that entry, then `active`; a person of another organization by its organization
+   * key and email, invited by email and bound when their badge is presented (SPACE-INV-001..004, `outsiders`).
    */
   public async addMember(principal: Principal, spaceId: string, body: Record<string, unknown>): Promise<SpaceMember> {
     const { space } = await this.owned(principal, spaceId)
@@ -625,9 +640,21 @@ export class SpaceService {
       throw new SpaceError('the members of this space are given by its rule', 'rule-membership')
     if (typeof body.directoryId === 'string' && body.directoryId)
       return this.addFromDirectory(principal, space, body.directoryId)
-    if (body.organizationKey !== undefined || body.email !== undefined)
-      throw new SpaceError('inviting a person of another organization comes with the invitations', 'not-implemented')
+    if (body.organizationKey !== undefined || body.email !== undefined) {
+      if (!this.outsiders) throw new SpaceError('this agent sends no email: it invites nobody', 'email-unavailable')
+      return this.outsiders.invite(principal, space, { organizationKey: body.organizationKey, email: body.email })
+    }
     throw new SpaceError('directoryId, or organizationKey and email, is required', 'bad-request')
+  }
+
+  /** Writes a member row: its email sealed, with its keyed index (the invitations of another organization). */
+  public async saveMember(row: SpaceMember): Promise<void> {
+    await this.members.save(row)
+  }
+
+  /** The rows of an invited person of another organization, in every space, by organization key and email (SPACE-INV-003). */
+  public async invitationsOf(organizationKey: string, email: string): Promise<SpaceMember[]> {
+    return this.members.listByInvitee(organizationKey, inviteeIndex(this.crypto, organizationKey, email))
   }
 
   private async addFromDirectory(principal: Principal, space: Space, directoryId: string): Promise<SpaceMember> {

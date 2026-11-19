@@ -790,11 +790,24 @@
       }
     },
     "evidence": {
-      "description": "The evidence that is not a credential (D73, PRIV-EVID-003): what is kept of a document read, the document challenge of an action, and what the model may read of it. Its attributes are a closed list: documentType, documentNumber, issuingState, nationality, lastName, firstName, fullName, dateOfBirth, dateOfExpiry, sex, portrait.",
+      "description": "The evidence that is not a credential (D73, D89, PRIV-EVID-003): what is kept of a document read (the document challenge) and of an address verified by an email code (the email challenge of a badge from the directory), and what the model may read of it. The attributes of a document read are a closed list: documentType, documentNumber, issuingState, nationality, lastName, firstName, fullName, dateOfBirth, dateOfExpiry, sex, portrait. An email check has one: address, which the model never reads.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "document": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "store": {
+              "$ref": "#/$defs/evidenceStore"
+            },
+            "modelVisible": {
+              "$ref": "#/$defs/evidenceModelVisible"
+            }
+          }
+        },
+        "email": {
+          "description": "What is kept of an address verified by an email code (D89, INTX-AUTH-015): its one attribute is address. A profile with an email challenge needs it stored, since the badge number and the directory entry are found from it; the model never reads it, so modelVisible is refused.",
           "type": "object",
           "additionalProperties": false,
           "properties": {
@@ -857,29 +870,16 @@
             "$ref": "#/$defs/roleList"
           },
           "authChallenge": {
-            "description": "The challenge enforced before the issuance (INTX-ISSUE-010).",
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["type"],
-            "properties": {
-              "type": {
-                "type": "string",
-                "enum": ["device", "face-match", "document"]
-              },
-              "onChannelUnavailable": {
-                "type": "string",
-                "enum": ["fail", "degrade"],
-                "default": "fail"
-              },
-              "referenceImage": {
-                "type": "string",
-                "enum": ["badge-photo"]
-              },
-              "timeoutSeconds": {
-                "type": "integer",
-                "minimum": 30
+            "description": "The challenges enforced before the issuance, in order (INTX-ISSUE-010): one, or a list. A profile that takes claims from the user directory declares [document], [email] or [document, email] (IDENT-DIR-002); email belongs to such a profile and to no other action (INTX-AUTH-011).",
+            "oneOf": [
+              { "$ref": "#/$defs/issuanceChallenge" },
+              {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 2,
+                "items": { "$ref": "#/$defs/issuanceChallenge" }
               }
-            }
+            ]
           },
           "evidenceMaxAgeMinutes": {
             "description": "Evidence older than this is expired for the profile (INTX-ISSUE-013).",
@@ -887,7 +887,7 @@
             "minimum": 1
           },
           "claims": {
-            "description": "Every claim of the credential with its one source (INTX-ISSUE-002). evidence: a stored attribute of the authentication or of a presentations entry; computed: today, now, addDays (days) or constant (value).",
+            "description": "Every claim of the credential with its one source (INTX-ISSUE-002). evidence: a stored attribute of the authentication, of a presentations entry, of a document read or of a verified email, `as: dateint` writing a calendar date as the integer YYYYMMDD (IDENT-DIR-005); record: a field of the person's entry of the user directory, found from their evidence (INTX-ISSUE-021); computed: today, now, addDays (days), constant (value), subjectId, documentId or emailId.",
             "type": "object",
             "minProperties": 1,
             "additionalProperties": {
@@ -899,7 +899,8 @@
                   "properties": {
                     "from": { "const": "evidence" },
                     "entry": { "type": "string", "minLength": 1 },
-                    "attribute": { "type": "string", "minLength": 1 }
+                    "attribute": { "type": "string", "minLength": 1 },
+                    "as": { "type": "string", "enum": ["dateint"] }
                   }
                 },
                 {
@@ -910,10 +911,20 @@
                     "from": { "const": "computed" },
                     "fn": {
                       "type": "string",
-                      "enum": ["today", "now", "addDays", "constant", "subjectId", "documentId"]
+                      "enum": ["today", "now", "addDays", "constant", "subjectId", "documentId", "emailId"]
                     },
                     "days": { "type": "integer" },
                     "value": { "type": "string" }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["from", "record", "field"],
+                  "properties": {
+                    "from": { "const": "record" },
+                    "record": { "const": "directory" },
+                    "field": { "type": "string", "enum": ["name", "firstName", "lastName", "email", "department"] }
                   }
                 }
               ]
@@ -1845,6 +1856,31 @@
     }
   },
   "$defs": {
+    "issuanceChallenge": {
+      "description": "One challenge of an issuance profile (INTX-ISSUE-010): device, face-match or document as for any action; email, the email code of a badge from the user directory (D89, INTX-AUTH-011).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["device", "face-match", "document", "email"]
+        },
+        "onChannelUnavailable": {
+          "type": "string",
+          "enum": ["fail", "degrade"],
+          "default": "fail"
+        },
+        "referenceImage": {
+          "type": "string",
+          "enum": ["badge-photo"]
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 30
+        }
+      }
+    },
     "evidenceStore": {
       "description": "The attributes of a piece of evidence whose values the agent keeps, sealed, and for how long (D67, PRIV-EVID-003). Omitted: no value is kept, only the audit fields.",
       "type": "object",

@@ -292,14 +292,14 @@ describe('spaces and their templates (SPACE-DEF-001..006, PROF-SPACE-001..004)',
     const ana = await device('did:peer:ana-owner')
     const bob = await device('did:peer:bob-owner')
     const space = (await call(ana, 'POST', '/spaces', { templateId: 'project', title: 'Handoff', purpose: 'p' })).body
-    // the dev pack names no user directory: nobody is found in it (decision 61); a person of another organization comes
-    // with the invitations (phase 2b)
+    // the dev pack names no user directory: nobody is found in it (decision 61); a person of another organization is
+    // invited by email, and this agent has no SMTP server (PLAT-MAIL-001, SPACE-INV-001)
     expect((await call(ana, 'POST', `/spaces/${space.id}/members`, { directoryId: 'emp-1' })).status).toBe(404)
     const outsider = await call(ana, 'POST', `/spaces/${space.id}/members`, {
       organizationKey: 'org:EE:1',
       email: 'x@example.org',
     })
-    expect(outsider).toMatchObject({ status: 501, body: { error: 'not-implemented' } })
+    expect(outsider).toMatchObject({ status: 503, body: { error: 'email-unavailable' } })
     const ownerRow = space.members[0].memberId as string
     expect((await call(ana, 'DELETE', `/spaces/${space.id}/members/${ownerRow}`)).body.error).toBe('owner')
     // a list space is given to one of its members, by `memberId`, never to a person of the directory by `directoryId`

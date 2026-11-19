@@ -280,6 +280,8 @@ export interface SpaceMemberRepo {
   listByPrincipal(principalId: string): Promise<SpaceMember[]>
   /** the rows of a person of the user directory, in every space (SPACE-MEMB-002) */
   listByDirectoryId(directoryId: string): Promise<SpaceMember[]>
+  /** the invitations of a person of another organization, by its organization key and the keyed index of its email (SPACE-INV-003) */
+  listByInvitee(organizationKey: string, emailIndex: string): Promise<SpaceMember[]>
   /** a person removed while invited is removed, not `left` (SPACE-MEMB-004) */
   delete(id: string): Promise<void>
 }

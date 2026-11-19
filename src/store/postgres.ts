@@ -518,8 +518,8 @@ export class PostgresStore implements Store {
       await this.pool.query(
         `INSERT INTO evidence (id, principal_id, state, verified_at, expires_at, data, cipher, directory_entry_id, holder_index)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-         ON CONFLICT (id) DO UPDATE SET state = $3, expires_at = $5, data = $6, cipher = $7, directory_entry_id = $8,
-           holder_index = $9`,
+         ON CONFLICT (id) DO UPDATE SET principal_id = $2, state = $3, expires_at = $5, data = $6, cipher = $7,
+           directory_entry_id = $8, holder_index = $9`,
         [
           e.id,
           e.principalId,
@@ -808,6 +808,12 @@ export class PostgresStore implements Store {
       this.many<SpaceMember>('SELECT data FROM space_members WHERE directory_id = $1 ORDER BY created_at, id', [
         directoryId,
       ]),
+    // the index space_members_invitee (schema 3.6.0) serves it
+    listByInvitee: (organizationKey: string, emailIndex: string) =>
+      this.many<SpaceMember>(
+        'SELECT data FROM space_members WHERE organization_key = $1 AND email_index = $2 ORDER BY created_at, id',
+        [organizationKey, emailIndex]
+      ),
     delete: async (id: string) => {
       await this.pool.query('DELETE FROM space_members WHERE id = $1', [id])
     },

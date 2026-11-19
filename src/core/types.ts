@@ -377,9 +377,16 @@ export interface SpaceMember {
   principalId: string | null
   /** the entry of the employee list (ayni-spec D79), for a person of the organization */
   directoryId?: string
-  /** a person of another organization, by its organization key and email (phase 2); the email is sealed */
+  /** a person of another organization, by its organization key and email (SPACE-INV-001); the email is sealed */
   organizationKey?: string
+  /** the name the trust graph gives that organization, when it was invited (PROF-SPACE-003) */
+  organizationName?: string
   email?: string
+  /**
+   * the Principals of the invited organization the agent asked, once, for a presentation that reveals their email,
+   * their stored evidence holding none (SPACE-INV-004)
+   */
+  askedPrincipalIds?: string[]
   /** in the store only: the keyed index of the email, to bind a badge to the invitation */
   emailIndex?: string
   state: SpaceMemberState
@@ -442,8 +449,11 @@ export interface PrincipalPreference {
 export interface EvidenceRecord {
   id: string
   principalId: string
-  /** a verification (a presentation, a document read) or an issuance, recorded the same way (INTX-ISSUE-014) */
-  kind: 'presentation' | 'document' | 'issuance'
+  /**
+   * a verification (a presentation, a document read, an address verified by an email code) or an issuance, recorded
+   * the same way (INTX-ISSUE-014, INTX-AUTH-015)
+   */
+  kind: 'presentation' | 'document' | 'email' | 'issuance'
   /** the entry of the agent-pack it answers: `authentication`, a catalog entry, or the evidence kind */
   entry: string
   schema?: string
@@ -563,7 +573,7 @@ export interface ElevationGrant {
   expiresAt: string
 }
 
-export type ChallengeType = 'device' | 'face-match' | 'document'
+export type ChallengeType = 'device' | 'face-match' | 'document' | 'email'
 export type ChallengeOutcome = 'pending' | 'completed' | 'failed' | 'expired' | 'unavailable' | 'degraded'
 
 export interface AuthChallengeRecord {

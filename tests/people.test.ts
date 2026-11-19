@@ -226,12 +226,12 @@ describe('the member picker and the members of a list (SPACE-MEMB-002/005, PROF-
       status: 400,
       body: { error: 'bad-request' },
     })
-    // a person of another organization comes with the invitations (phase 2b)
+    // a person of another organization is invited by email: this agent has no SMTP server (PLAT-MAIL-001, SPACE-INV-001)
     const outsider = await call(jonas, 'POST', `/spaces/${project.id}/members`, {
       organizationKey: 'org:FR:1',
       email: 'x@acme.example',
     })
-    expect(outsider.status).toBe(501)
+    expect(outsider).toMatchObject({ status: 503, body: { error: 'email-unavailable' } })
     // Ana reads the space as a member; Piet, invited, holds no Principal yet
     expect((await call(ana, 'GET', `/spaces/${project.id}`)).body).toMatchObject({ role: 'member', state: 'active' })
     const members = (await call(jonas, 'GET', `/spaces/${project.id}`)).body.members

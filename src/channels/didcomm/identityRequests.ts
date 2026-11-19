@@ -103,6 +103,34 @@ export class IdentityRequests {
     }
   }
   /**
+   * An identified person is asked again for the authentication credential, to reveal an attribute its stored evidence
+   * lacks: the email an invitation of its organization is compared with (SPACE-INV-004). What it presents is recorded and
+   * binds as at a connection (`onIdentityPresented`); another identity is refused there.
+   */
+  public async reveal(principal: Principal): Promise<IdentityRequestOutcome> {
+    if (!this.pack.identity.authentication?.length) return 'not-offered'
+    const connectionId = principal.capabilityChannelId
+    if (!connectionId) return 'unavailable'
+    if (this.pending.has(connectionId)) return 'pending'
+    this.pending.add(connectionId)
+    try {
+      const flowMode = await this.deps.isFlowCapable(connectionId)
+      const attempt = await this.deps.authenticate(
+        connectionId,
+        principal.actorIdentity,
+        flowMode,
+        principal.userAgentVerified
+      )
+      if (attempt.outcome !== 'accepted') return 'not-presented'
+      const { outcome } = await this.deps.onIdentityPresented(connectionId, attempt.facts)
+      this.logger.info({ principalId: principal.id, outcome }, 'authentication asked again to reveal the email')
+      return outcome === 'identified' || outcome === 'refreshed' ? 'identified' : (outcome as IdentityRequestOutcome)
+    } finally {
+      this.pending.delete(connectionId)
+    }
+  }
+
+  /**
    * A catalog entry asked on demand (D69, INTX-PRES-003..007): of a peer of the subject kind of its schema,
    * on the connection of the Principal. What comes back is evidence of that Principal; it binds nobody.
    */

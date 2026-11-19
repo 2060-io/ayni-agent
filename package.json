@@ -13,6 +13,8 @@
     "check-types": "pnpm --filter @ayni.org/ayni-agui-profile build && tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:postgres": "node scripts/test-postgres.mjs",
+    "test:mail": "node scripts/test-mail.mjs",
+    "e2e": "tsx scripts/e2e/spaces-people.e2e.ts",
     "validate": "pnpm check-types && pnpm check-format",
     "pack:validate": "tsx src/cli/validate-pack.ts"
   },
@@ -34,6 +36,7 @@
     "ioredis": "^6.0.0",
     "jpeg-js": "0.4.4",
     "mrz": "4.2.1",
+    "nodemailer": "10.3.1",
     "openai": "^7.32.0",
     "pdfjs-dist": "^4",
     "pg": "^8.23.1",

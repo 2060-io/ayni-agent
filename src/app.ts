@@ -23,18 +23,28 @@ import { CredentialRevocations } from './channels/didcomm/revocations.js'
 import { VsAgentClient } from './channels/didcomm/vsAgentClient.js'
 import { type Env, loadEnv } from './config/env.js'
 import { evidenceWarnings, loadPack } from './config/pack.js'
-import { admitsUnidentified, directoryReadsDocuments, featuresOf } from './config/packTypes.js'
+import {
+  type AgentPack,
+  admitsUnidentified,
+  challengeTypesOf,
+  directoryReadsDocuments,
+  featuresOf,
+} from './config/packTypes.js'
 import { AyniAgent } from './core/agent.js'
 import { ChallengeService } from './core/challenges.js'
 import { CapabilityRouter } from './core/channel.js'
 import { ContextAssembler } from './core/context.js'
 import { UserDirectory } from './core/directory.js'
+import { DirectoryClaims } from './core/directoryClaims.js'
 import { documentOutcomeForModel } from './core/document.js'
+import { EmailChecks } from './core/emailCheck.js'
 import { EvidenceService } from './core/evidence.js'
 import { FlowService } from './core/flows.js'
+import { InvitationService } from './core/invitations.js'
 import { IssuanceService, subjectIdKey } from './core/issuance.js'
 import { Orchestrator } from './core/orchestrator.js'
 import { HomeOrganization } from './core/organization.js'
+import { TrustGraph } from './core/organizations.js'
 import { PeopleService } from './core/people.js'
 import { PrincipalService } from './core/principals.js'
 import { PROMPT_ADDON_VERSION } from './core/promptAddon.js'
@@ -52,6 +62,7 @@ import { RagService } from './memory/rag.js'
 import { storeShapeFaults } from './memory/scope.js'
 import { MemoryService } from './memory/service.js'
 import { buildAdmin } from './platform/admin.js'
+import { createMailer, type Mailer } from './platform/mail.js'
 import { RetentionService } from './platform/retention.js'
 import { HttpStats, NoopStats, RedisStreamStats, type StatsSink, StoreStats } from './platform/stats.js'
 import { ApprovalService } from './policy/approvals.js'
@@ -87,6 +98,10 @@ export async function buildAgent(
     storeLost?: (error?: Error) => void
     /** how long the turns in progress are given to end when the process stops */
     drainMs?: number
+    /** the email of the agent, in place of the SMTP server of `SMTP_URL` (the tests read what it sends) */
+    mailer?: Mailer
+    /** how the trust graph is asked, in place of the network (the tests answer it) */
+    graphFetch?: typeof fetch
   } = {}
 ): Promise<RunningAgent> {
   const { pack, dir: packDir } = loadPack(env.agentPackPath)
@@ -152,6 +167,9 @@ export async function buildAgent(
   const memory = new MemoryService(store, crypto, embeddings, pack, logger)
   const evidence = new EvidenceService(store, pack, crypto, logger)
   for (const warning of evidenceWarnings(pack)) logger.warn(`agent-pack: ${warning} (PRIV-EVID-006)`)
+  // email: the email code and the invitations of other organizations, only through the deployment's SMTP server
+  const mailer = hooks.mailer ?? createMailer(env.smtpUrl, env.smtpFrom, logger)
+  for (const warning of mailWarnings(pack, !!mailer, !!env.veranaGraphUrl)) logger.warn(warning)
   const s3 = env.objectStore ? new S3ObjectStore(env.objectStore, crypto) : undefined
   const objects: ObjectStore = s3 ?? new MemoryObjectStore(crypto)
   if (!s3) logger.warn('OBJECT_STORE_ENDPOINT not set: media objects are kept in memory (development only)')
@@ -474,6 +492,48 @@ export async function buildAgent(
     logger,
   })
   agent.people = people
+  // the email code of a badge from the directory, served by the code in the conversation (D89, INTX-AUTH-011..015)
+  const emailChecks = new EmailChecks({
+    store,
+    memory,
+    evidence,
+    crypto,
+    pack,
+    directory,
+    mailer,
+    organizationName: async () => (await home.name()) ?? undefined,
+    deliver: async (sessionId, entry) => {
+      const session = await sessions.get(sessionId)
+      if (session) await agent.deliverToConversation(session, entry)
+    },
+    passed: (record) => agent.continueIssuance(record),
+    logger,
+  })
+  agent.emailChecks = emailChecks
+  await emailChecks.resume()
+  // the claims of a badge from the directory: the entry the person's evidence finds (D88, INTX-ISSUE-021)
+  const directoryClaims = directory ? new DirectoryClaims(directory, evidence, logger, emailChecks) : undefined
+  // people of other organizations, invited by email and bound by their badge (D90, SPACE-INV)
+  const graph = new TrustGraph(env.veranaGraphUrl, logger, hooks.graphFetch)
+  const invitations = new InvitationService({
+    pack,
+    store,
+    spaces,
+    evidence,
+    graph,
+    mailer,
+    home: async () => ({ key: await home.key(), name: await home.name() }),
+    agentDid: () => agent.did,
+    appLinkBase: pack.channels?.agui?.appLinkBase,
+    nameOf: (principal) =>
+      (principal.directoryEntryId ? directory?.view(principal.directoryEntryId)?.name : undefined) ??
+      agent.principalDisplay(principal).displayName,
+    isLive: async (principal) => !!(await router.capabilitySession(principal)),
+    reveal: (principal) => identityRequestsRef?.reveal(principal) ?? Promise.resolve(),
+    logger,
+  })
+  agent.invitations = invitations
+  spaces.outsiders = invitations
   if (directory) principals.directory = people
   // a rule space reads the department and the groups of the entry a Principal holds, and nothing else (SPACE-MEMB-001)
   spaces.directory = (principal) => people.factsOf(principal)
@@ -496,7 +556,30 @@ export async function buildAgent(
         const key = await home.key()
         return key ? actorIdentityOf(key, schema, subject as string[]) : undefined
       },
-      issued: (principal, record, holder) => people.onIssued(principal, record, holder),
+      issued: async (principal, record, holder) => {
+        await people.onIssued(principal, record, holder)
+        // issuing identifies nobody (IDENT-RES-017): a guest who just received the badge that authenticates is asked to
+        // present it, and holds its entry once it has (IDENT-DIR-006)
+        const authentication = pack.identity.authentication?.[0]?.credential.jsonSchemaCredentialId
+        const profile = pack.issuance?.[record.entry.replace(/^issuance:/, '')]
+        if (
+          !principal.identityCredentialRef &&
+          record.directoryEntryId &&
+          authentication &&
+          profile?.credential.jsonSchemaCredentialId === authentication
+        )
+          void identityRequestsRef
+            ?.request(principal, 'person')
+            .then((outcome) =>
+              logger.info({ principalId: principal.id, outcome }, 'asked to present the badge just issued')
+            )
+            .catch((err) => logger.warn({ err, principalId: principal.id }, 'the badge just issued was not asked for'))
+      },
+      // a field of the person's entry of the user directory, found from their evidence (INTX-ISSUE-021)
+      ...(directoryClaims
+        ? { record: (principal, name, profile, source) => directoryClaims.resolve(principal, name, profile, source) }
+        : {}),
+      emailCheck: emailChecks,
       challenge: async (principal, session, policy, purpose) => {
         const { outcome, record } = await challenges.run({
           principal,
@@ -623,6 +706,8 @@ export async function buildAgent(
     stop: async () => {
       // no turn starts any more; those in progress end, or are cut when their time is over (PLAT-DEPLOY-004)
       await agent.shutdown(hooks.drainMs)
+      emailChecks.stop()
+      mailer?.close?.()
       // the turns are over: their runs are given a moment to tell their clients so, before anything is closed
       await aguiRoutes?.quiet(RUNS_END_WITHIN_MS)
       for (const stop of stops) stop()
@@ -637,6 +722,37 @@ export async function buildAgent(
       await store.close()
     },
   }
+}
+
+/**
+ * What the email and the invitations of other organizations need, said at start (PLAT-MAIL-001, SPACE-INV-004): the
+ * issuance profiles and the templates an absent SMTP server disables, an authentication that does not keep the email
+ * invitations bind with, a trust graph to find organizations in.
+ */
+export function mailWarnings(pack: AgentPack, smtp: boolean, graph: boolean): string[] {
+  const warnings: string[] = []
+  const profiles = Object.entries(pack.issuance ?? {})
+    .filter(([, p]) => challengeTypesOf(p).includes('email'))
+    .map(([name]) => name)
+  const lists = (pack.spaces?.templates ?? []).filter((t) => t.membership.mode === 'list').map((t) => t.id)
+  if (!smtp && (profiles.length || lists.length))
+    warnings.push(
+      `email: SMTP_URL and SMTP_FROM are not both set: the email code is disabled for the issuance profiles [${profiles.join(', ')}] and the invitations of other organizations for the templates [${lists.join(', ')}] (PLAT-MAIL-001)`
+    )
+  if (lists.length) {
+    const authentication = pack.identity.authentication?.[0]
+    const asks = !!authentication && (!authentication.attributes || authentication.attributes.includes('email'))
+    const stores = !!authentication?.store?.attributes.includes('email')
+    if (!asks || !stores)
+      warnings.push(
+        `invitations: the templates [${lists.join(', ')}] keep lists, and identity.authentication does not both ask for and store email: a person already authenticated is asked again for their badge before an invitation binds (SPACE-INV-004)`
+      )
+    if (!graph)
+      warnings.push(
+        `invitations: VERANA_GRAPH_URL is not set: no organization is found in the trust graph, so nobody of another organization can be invited to the templates [${lists.join(', ')}] (SPACE-INV-001)`
+      )
+  }
+  return warnings
 }
 
 export async function start(): Promise<RunningAgent> {

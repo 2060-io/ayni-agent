@@ -513,6 +513,12 @@ export class MemoryStore implements Store {
           .filter((m) => m.directoryId === directoryId)
           .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
       ),
+    listByInvitee: async (organizationKey: string, emailIndex: string) =>
+      clone(
+        [...this.memberRows.values()]
+          .filter((m) => m.organizationKey === organizationKey && m.emailIndex === emailIndex)
+          .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      ),
     delete: async (id: string) => {
       this.memberRows.delete(id)
     },

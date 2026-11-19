@@ -25,6 +25,7 @@ import { type EntryCrypto, openJson, sealJson } from '../memory/crypto.js'
 import type { AdminAuditRepo, KvRepo } from '../store/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
+import { type DocumentIdentity, entryMatchesDocument, type MismatchReason } from './icao.js'
 
 /** A person of the directory (IDENT-ROLE-012). */
 export interface DirectoryEntry {
@@ -544,6 +545,26 @@ export class UserDirectory {
   /** Every entry as the agent shows it, in the order of the file. */
   public views(): DirectoryView[] {
     return [...this.current.keys()].map((id) => this.view(id) as DirectoryView)
+  }
+
+  /**
+   * The entries a document read is of (IDENT-DIR-003): the same date of birth and nationality, the same last name and the
+   * entry's first names among the given names of the document, after the transliteration of ICAO Doc 9303, Part 3. The
+   * birthdate and the nationality are compared here and leave the module in no form (IDENT-DIR-007); what the caller
+   * learns of an entry that does not match is the first test it failed, counted.
+   */
+  public matchDocument(document: DocumentIdentity): {
+    ids: string[]
+    nearest: Partial<Record<MismatchReason, number>>
+  } {
+    const ids: string[] = []
+    const nearest: Partial<Record<MismatchReason, number>> = {}
+    for (const entry of this.current.values()) {
+      const reason = entryMatchesDocument(entry, document)
+      if (!reason) ids.push(entry.id)
+      else nearest[reason] = (nearest[reason] ?? 0) + 1
+    }
+    return { ids, nearest }
   }
 
   /** The entry that holds an address, compared in lower case (IDENT-DIR-004). */

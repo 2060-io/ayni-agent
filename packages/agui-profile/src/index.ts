@@ -748,9 +748,8 @@ export interface UploadResponse {
 
 /**
  * Every error code of §9 with its status, as the reference agent answers them. `ErrorCode` is derived from it, so that
- * a client and the agent read one list. The last three are the reference agent's beyond §9: `forbidden` (an agent-pack
- * that turns sibling sessions off, PROF-SESS-007), `turn-in-progress` (a deletion whose turn did not stop within its
- * wait) and `not-implemented` (an operation a later phase of the agent brings).
+ * a client and the agent read one list. `forbidden` is the reference agent's beyond §9 (an agent-pack that turns
+ * sibling sessions off, PROF-SESS-007).
  */
 export const ERROR_STATUS = {
   'bad-request': 400,
@@ -810,10 +809,8 @@ export const ERROR_STATUS = {
   'email-unavailable': 503,
   /** the agent-pack turns sibling sessions off (the reference agent, beyond §9) */
   forbidden: 403,
-  /** 3.3: a message whose reply is being written, whose turn did not stop in time (the reference agent, beyond §9) */
+  /** 3.3: a message whose reply is being written, whose turn did not stop in time: nothing changed, ask again (PROF-HIST-010) */
   'turn-in-progress': 409,
-  /** an operation a later phase of the reference agent brings (beyond §9) */
-  'not-implemented': 501,
 } as const
 
 export type ErrorCode = keyof typeof ERROR_STATUS

@@ -36,6 +36,8 @@ const SECTION_9: Record<string, number> = {
   'home-organization': 422,
   'not-eligible': 422,
   'email-unavailable': 503,
+  // a deletion whose turn could not be stopped in time (PROF-HIST-010, added to §9 by spec #94)
+  'turn-in-progress': 409,
   // PROF-SESS-015
   'pairing-expired': 409,
   'pairing-invalid': 409,

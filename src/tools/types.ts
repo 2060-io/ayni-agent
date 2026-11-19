@@ -18,6 +18,17 @@ export interface ToolContext {
   spaceId?: string
   /** a memory of the person changed: the turn tells the conversation, never its content (MEM-SPACE-005) */
   memoryChanged?: (change: MemoryChange) => Promise<void>
+  /** the tool ends the turn with a message of the code (INTX-AUTH-012): the model is called no more in it */
+  turnEnded?: (message: EndTurnMessage) => void
+}
+
+/**
+ * A message the code writes to end a turn (INTX-AUTH-012): the question of an email check. It is recorded as an
+ * `auth-challenge` entry, streamed as the turn's last message, and the model is called no more in the turn.
+ */
+export interface EndTurnMessage {
+  text: string
+  payload?: Record<string, unknown>
 }
 
 /** What became of a memory of the person in a turn (MEM-SPACE-005). */
@@ -33,6 +44,8 @@ export interface ToolResult {
   /** optional structured data persisted with the tool-call entry */
   data?: unknown
   isError?: boolean
+  /** the turn ends after this call, with this message of the code (INTX-AUTH-012) */
+  endTurn?: EndTurnMessage
 }
 
 export interface ToolSpec {

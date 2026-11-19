@@ -5,7 +5,7 @@
  * the retention the pack gives, then archived or erased. The model reads the attributes the pack makes
  * visible, and nothing else.
  */
-import { AUTHENTICATION_ENTRY, DOCUMENT_ENTRY } from '../config/pack.js'
+import { AUTHENTICATION_ENTRY, DOCUMENT_ENTRY, EMAIL_ENTRY } from '../config/pack.js'
 import type { AgentPack, EvidencePolicy } from '../config/packTypes.js'
 import { type EntryCrypto, openJson, sealJson } from '../memory/crypto.js'
 import type { Store, StoredEvidence } from '../store/types.js'
@@ -25,6 +25,7 @@ export function evidencePolicyOf(pack: AgentPack, entry: string): EvidencePolicy
     return { store: authentication?.store, modelVisible: authentication?.modelVisible }
   }
   if (entry === DOCUMENT_ENTRY) return pack.evidence?.document ?? {}
+  if (entry === EMAIL_ENTRY) return pack.evidence?.email ?? {}
   const catalog = pack.presentations?.[entry]
   return catalog ? { store: catalog.store, modelVisible: catalog.modelVisible } : {}
 }
@@ -210,6 +211,30 @@ export class EvidenceService {
     const next: StoredEvidence = { ...stored, revocation: { ...revocation } }
     await this.store.evidence.save(next)
     return auditOf(next)
+  }
+
+  /**
+   * A guest who identifies is the identified person (D66, decision 62): what the agent verified about the guest (an
+   * address checked by an email code, a document read) and what it issued them become the identified Principal's. The
+   * newest record of an entry keeps its values, the earlier ones stay as audit (PRIV-EVID-010).
+   */
+  public async reassign(fromPrincipalId: string, toPrincipalId: string): Promise<number> {
+    const moved = await this.store.evidence.list(fromPrincipalId)
+    for (const record of moved) await this.store.evidence.save({ ...record, principalId: toPrincipalId })
+    if (!moved.length) return 0
+    const newest = new Map<string, StoredEvidence>()
+    const all = await this.store.evidence.list(toPrincipalId)
+    for (const record of all)
+      if (record.state === 'active' && record.encKeyRef && record.kind !== 'issuance') newest.set(record.entry, record)
+    for (const record of all) {
+      if (record.state !== 'active' || !record.encKeyRef || record.kind === 'issuance') continue
+      if (newest.get(record.entry)?.id !== record.id) await this.drop(record)
+    }
+    this.logger.info(
+      { from: fromPrincipalId, principalId: toPrincipalId, records: moved.length },
+      'evidence of a guest taken by the identified person'
+    )
+    return moved.length
   }
 
   /** The audit fields of the records of a Principal, oldest first. */

@@ -7,7 +7,9 @@
  * PRIV-ERASE-001 and D77 (no plaintext beside the ciphertext), MEM-ENTRY-004 and D76 (the migration to conversations),
  * decision 60 (spaces: the migration to 3.6.0, the stores, no plaintext of a space, the agent served from PostgreSQL),
  * decision 61 (the user directory: the migration to 3.7.0, the issuances of an entry and of a holder, the members of an
- * entry, the changes newest first, nothing of a person of the directory in the clear but its id and audited name).
+ * entry, the changes newest first, nothing of a person of the directory in the clear but its id and audited name),
+ * decision 62 (a badge by email code and an invitation of another organization: the invitations of a person found by
+ * their keyed index, and neither the address, the code nor the invited email in the clear in any table).
  */
 import { rmSync } from 'node:fs'
 import pg from 'pg'
@@ -21,10 +23,20 @@ import { createEmbeddings } from '../src/llm/embeddings.js'
 import { createEntryCrypto, sealJson } from '../src/memory/crypto.js'
 import { buildScope } from '../src/memory/scope.js'
 import { MemoryService } from '../src/memory/service.js'
+import type { MailMessage } from '../src/platform/mail.js'
 import { MIGRATIONS } from '../src/store/migrations.js'
 import { PostgresStore } from '../src/store/postgres.js'
 import { createLogger } from '../src/util/logger.js'
-import { directoryPack, mintLocally, mockServices, present } from './directoryFixtures.js'
+import {
+  directoryPack,
+  guest,
+  mintLocally,
+  mockServices,
+  present,
+  runText,
+  textOf,
+  until,
+} from './directoryFixtures.js'
 import { parseSse, testEnv } from './helpers.js'
 
 const serverUrl = process.env.PG_TEST_URL
@@ -954,6 +966,103 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
         }
         // the name is in the records of the admin audit (IDENT-DIR-009), and nowhere else
         expect([...new Set(named)]).toEqual(['admin_audit'])
+        await raw.end()
+      } finally {
+        await running.stop()
+        await services.app.close()
+        rmSync(fixture.root, { recursive: true, force: true })
+      }
+    }, 30_000)
+  })
+
+  describe('a badge by email code and an invitation, served from PostgreSQL (decision 62)', () => {
+    it('finds the invitations of a person by their keyed index, and keeps no address, code or invited email in the clear', async () => {
+      const services = await mockServices()
+      services.organizations.push({ name: 'Acme Freight', countryCode: 'FR', registryId: '111' })
+      const canary = {
+        id: 'p-canary',
+        firstName: 'Ana',
+        lastName: 'Ríos',
+        email: 'canary.code.6631@northwind.example',
+        department: 'Depot',
+        roles: ['manager'],
+      }
+      const fixture = directoryPack([canary], { badge: 'email', authenticationStores: ['name', 'email'] })
+      const url = await freshDatabase()
+      const sent: MailMessage[] = []
+      const running = await buildAgent(
+        testEnv({
+          store: 'postgres',
+          databaseUrl: url,
+          agentPackPath: fixture.pack,
+          vsAgentAdminUrl: services.url,
+          veranaApiUrl: services.url,
+          veranaGraphUrl: services.url,
+          directoryPollSeconds: 0,
+        }),
+        logger,
+        {
+          drainMs: 200,
+          mailer: {
+            from: 'Fleet <fleet@northwind.example>',
+            send: async (message) => {
+              sent.push(message)
+              return 'id'
+            },
+          },
+        }
+      )
+      try {
+        mintLocally(running)
+        // a guest proves the address of the directory with the code sent to it
+        const ana = await guest(running, 'canary-wallet')
+        await runText(running, ana, '/call issue_credential {"credential":"badge"}')
+        await runText(running, ana, canary.email)
+        await until(() => sent.length === 1)
+        const code = /\b(\d{6})\b/.exec(sent[0]?.text ?? '')?.[1] as string
+        expect(textOf(await runText(running, ana, code))).toMatch(/^Your email address is verified\./)
+        await until(() => services.calls.some((c) => c.url === '/v2/didcomm/credential-offer'))
+        // a manager of the directory invites a person of another organization
+        const jonas = await present(running, 'BN-CANARY', 'Ana Ríos', { entry: 'p-canary' })
+        const space = (
+          await running.app.inject({
+            method: 'POST',
+            url: '/agui/v3/sessions/spaces',
+            headers: { authorization: `Bearer ${jonas.sessionToken}` },
+            payload: { templateId: 'project', title: 'Handoff', purpose: 'p' },
+          })
+        ).json() as { id: string }
+        const invited = await running.app.inject({
+          method: 'POST',
+          url: `/agui/v3/sessions/spaces/${space.id}/members`,
+          headers: { authorization: `Bearer ${jonas.sessionToken}` },
+          payload: { organizationKey: 'org:FR:111', email: 'canary.invite.7720@acme.example' },
+        })
+        expect(invited.statusCode).toBe(201)
+        expect(
+          (await running.agent.spaces.invitationsOf('org:FR:111', 'CANARY.invite.7720@acme.example')).map(
+            (m) => m.state
+          )
+        ).toEqual(['invited'])
+        expect(await running.agent.spaces.invitationsOf('org:FR:111', 'someone.else@acme.example')).toEqual([])
+
+        const raw = new pg.Client({ connectionString: url })
+        await raw.connect()
+        const tables = (
+          await raw.query(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
+          )
+        ).rows.map((r) => String(r.table_name))
+        let rows = 0
+        for (const table of tables) {
+          for (const { row } of (await raw.query(`SELECT t::text AS row FROM ${table} t`)).rows) {
+            rows++
+            // the address, the code and the invited email, in no table, in no form but sealed or keyed (INTX-AUTH-014)
+            expect(row, table).not.toMatch(/canary\.code|6631@|canary\.invite|7720@/)
+            expect(row, table).not.toContain(code)
+          }
+        }
+        expect(rows).toBeGreaterThan(20)
         await raw.end()
       } finally {
         await running.stop()

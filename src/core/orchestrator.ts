@@ -4,20 +4,21 @@
  * challenges around tool calls; cancellation that persists the partial reply as interrupted (D47).
  */
 import type { AgentPack } from '../config/packTypes.js'
-import { featuresOf } from '../config/packTypes.js'
+import { challengeTypesOf, featuresOf } from '../config/packTypes.js'
 import type { ChatDelta, ChatMessage, ChatModel, ContentPart, ToolCallRequest } from '../llm/types.js'
 import type { ObjectStore } from '../media/objectStore.js'
 import type { MemoryService, NewEntry, Recalled } from '../memory/service.js'
 import type { StatsSink } from '../platform/stats.js'
 import type { ApprovalService } from '../policy/approvals.js'
 import type { ToolRegistry, VisibleTool } from '../tools/registry.js'
-import type { MemoryChange, ToolContext } from '../tools/types.js'
+import type { EndTurnMessage, MemoryChange, ToolContext } from '../tools/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import { estimateRequestTokens } from '../util/tokens.js'
 import type { ChallengeService } from './challenges.js'
 import type { ContextAssembler } from './context.js'
 import { conversationOf } from './conversationOf.js'
+import { isEmailCheckMessage } from './emailCheck.js'
 import { nameForModel } from './evidence.js'
 import type { PrincipalService } from './principals.js'
 import { addonTokenCount, renderPromptAddon } from './promptAddon.js'
@@ -208,6 +209,7 @@ export class Orchestrator {
       challengesConfigured: Object.values(pack.actions ?? {}).some((a) => a.authChallenge),
       issuance: Object.keys(pack.issuance ?? {}).length > 0,
       appLinkBase: pack.channels?.agui?.appLinkBase,
+      emailChecks: Object.values(pack.issuance ?? {}).some((p) => challengeTypesOf(p).includes('email')),
     })
     const tokens = addonTokenCount(this.addon)
     if (tokens > 500) logger.warn({ tokens }, 'system-prompt add-on exceeds its 500-token target (CORE-PROMPT-004)')
@@ -282,6 +284,9 @@ export class Orchestrator {
     // arrives as its own turn); approvals, challenges and the requests shown on the phone are records of the
     // system, told as such and never in the agent's voice
     if (entry.sourceType === 'state-update' || entry.sourceType === 'reaction') return []
+    // what the person typed in an email check, and what the code answered, never reach the model: only the outcome of
+    // the check does, as a record of the system (INTX-AUTH-013, MEM-RET-006)
+    if (isEmailCheckMessage(entry)) return []
     if (
       entry.sourceType === 'approval' ||
       entry.sourceType === 'refusal' ||
@@ -452,6 +457,8 @@ export class Orchestrator {
 
     /** the memories the turn changed: told as lines of the conversation once its reply is written (MEM-SPACE-005) */
     const changes: MemoryChange[] = []
+    /** a tool ended the turn with a message of the code (INTX-AUTH-012) */
+    let ended: EndTurnMessage | undefined
     const toolCtx: ToolContext = {
       principal,
       session,
@@ -463,6 +470,9 @@ export class Orchestrator {
       spaceId,
       memoryChanged: async (change) => {
         changes.push(change)
+      },
+      turnEnded: (message) => {
+        ended ??= message
       },
     }
 
@@ -577,6 +587,8 @@ export class Orchestrator {
           const result = await this.executeToolCall(call, visible, session, principal, inbound, toolCtx, sink)
           messages.push({ role: 'tool', toolCallId: call.id, name: call.name, content: result })
         }
+        // the code takes the conversation over: no model call after it in this turn (INTX-AUTH-012)
+        if (ended) break
       }
     } catch (error) {
       if (error instanceof TurnCancelled || signal.aborted) cancelled = true
@@ -588,14 +600,18 @@ export class Orchestrator {
     }
     if (started) await sink.emit({ type: 'text-end', messageId })
 
-    // a reply that said nothing after its pause is the messages before it, and no empty one is added
-    const reply =
-      text.trim() || !written.length
+    // a reply that said nothing after its pause is the messages before it, and no empty one is added; a turn a tool ended
+    // ends with the code's message, and with no empty message of the model before it
+    let reply =
+      text.trim() || (!written.length && !ended)
         ? await save(
             cancelled ? 'interrupted' : 'complete',
             text.trim() || (cancelled ? '(stopped before any text)' : '(no reply)')
           )
-        : (written[written.length - 1] as MessageEntry)
+        : (written[written.length - 1] as MessageEntry | undefined)
+    if (ended)
+      reply = await this.codeMessage(session, principal, ended, sink, { after: reply?.initiatedAt, inboundIds })
+    if (!reply) throw new Error('a turn ended with no message')
     // the turn keeps its usage with its reply (LLM-USAGE-002), and the conversation its figure (LLM-USAGE-003)
     if (usage.calls > 0) {
       reply.payload = { ...(reply.payload ?? {}), usage }
@@ -615,6 +631,39 @@ export class Orchestrator {
     this.reactionPolicies.delete(session.id)
     this.stats.emit('message-out', 1, { channel: session.channelType, cancelled: String(cancelled) })
     return { inbound, reply, replies: written, cancelled, inbounds }
+  }
+
+  /**
+   * The message the code ends a turn with (INTX-AUTH-012): an `auth-challenge` entry that names the messages of the turn,
+   * streamed as its last message. The model never reads it (MEM-RET-006).
+   */
+  private async codeMessage(
+    session: Session,
+    principal: Principal,
+    message: EndTurnMessage,
+    sink: TurnSink,
+    place: { after?: string; inboundIds: string[] }
+  ): Promise<MessageEntry> {
+    const id = prefixedId('msg')
+    await sink.emit({ type: 'text-start', messageId: id })
+    await sink.emit({ type: 'text-delta', messageId: id, delta: message.text })
+    await sink.emit({ type: 'text-end', messageId: id })
+    const at = place.after ? Math.max(Date.now(), Date.parse(place.after) + 1) : Date.now()
+    return this.memory.append({
+      id,
+      initiatedAt: new Date(at).toISOString(),
+      sessionId: session.id,
+      principalId: principal.id,
+      role: 'agent',
+      sourceType: 'auth-challenge',
+      text: message.text,
+      backingIdentity: principal.backingIdentity,
+      payload: {
+        ...(message.payload ?? {}),
+        inboundId: place.inboundIds.at(-1),
+        inboundIds: place.inboundIds,
+      },
+    })
   }
 
   /**
@@ -873,6 +922,7 @@ export class Orchestrator {
       const result = await tool.spec.invoke(call.arguments, ctx)
       content = result.content
       isError = result.isError === true
+      if (result.endTurn) ctx.turnEnded?.(result.endTurn)
     } catch (error) {
       content = `tool failed: ${error instanceof Error ? error.message : String(error)}`
       isError = true

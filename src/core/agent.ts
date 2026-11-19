@@ -18,16 +18,18 @@ import type { StatsSink } from '../platform/stats.js'
 import { ApprovalError, type ApprovalService, displayName } from '../policy/approvals.js'
 import type { Store } from '../store/types.js'
 import type { ToolRegistry } from '../tools/registry.js'
-import { nowIso } from '../util/ids.js'
+import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import type { ChallengeService } from './challenges.js'
 import type { CapabilityRouter } from './channel.js'
 import type { ContextAssembler } from './context.js'
 import { conversationOf } from './conversationOf.js'
+import { EMAIL_CHECK_KIND, type EmailChecks } from './emailCheck.js'
 import type { EvidenceService } from './evidence.js'
 import type { FlowService } from './flows.js'
 import { contextualMenuFor, describeDevices, describeSessions, greetingFor, PLATFORM_MENU } from './interaction.js'
-import { type IssuanceService, issuanceOutcomeForPerson } from './issuance.js'
+import type { InvitationService } from './invitations.js'
+import { type IssuanceService, type IssuanceTrigger, issuanceOutcomeForPerson } from './issuance.js'
 import {
   conversationKey,
   type Orchestrator,
@@ -41,7 +43,16 @@ import type { PrincipalService, VerifiedFacts } from './principals.js'
 import { SessionError, type SessionService, TRANSCRIPT_MESSAGE_TYPES } from './sessions.js'
 import { isPersonalSpace, personalSpaceId, type SpaceError, type SpaceService, spaceIdOf } from './spaces.js'
 import { TurnLock } from './turnLock.js'
-import type { ApprovalRecord, ClientDescription, ClosureReason, MessageEntry, Principal, Session } from './types.js'
+import type {
+  ApprovalRecord,
+  AuthChallengeRecord,
+  ClientDescription,
+  ClosureReason,
+  EvidenceRecord,
+  MessageEntry,
+  Principal,
+  Session,
+} from './types.js'
 import { ProcessEnding, TooManyWaiting, type WaitingItem, WaitingList } from './waiting.js'
 
 export interface AgentParts {
@@ -129,6 +140,10 @@ export class AyniAgent {
   public peerStatus?: PeerStatusNotifier
   /** the people of the user directory: who holds an entry, the member picker, the admin view (decision 61) */
   public people?: PeopleService
+  /** the email code of a badge from the directory, served by the code in the conversation (decision 62, D89) */
+  public emailChecks?: EmailChecks
+  /** the invitations of people of other organizations, bound when their badge is presented (decision 62, D90) */
+  public invitations?: InvitationService
   /** the agent's own DID, read from the DIDComm agent at start (IDENT-SELF-001) */
   public did = 'did:unknown'
   public readonly challenges: ChallengeService
@@ -301,14 +316,29 @@ export class AyniAgent {
         count: n,
         retentionDays: spaces.get(spaceId)?.rules.retentionDays ?? null,
       })),
-      verified: verified.map((r) => ({
-        // the catalog entry, or the kind of evidence
-        label: r.entry,
-        source: r.issuerOrganization?.name ?? r.issuerOrganization?.key ?? null,
-        verifiedAt: r.verifiedAt,
-        expiresAt: r.expiresAt ?? null,
-      })),
+      verified: await Promise.all(
+        verified.map(async (r) => ({
+          // the catalog entry, or the kind of evidence
+          label: r.entry,
+          // the issuing organization, the issuing state of a document, or `email` (MEM-SPACE-007)
+          source: await this.evidenceSource(principal, r),
+          verifiedAt: r.verifiedAt,
+          expiresAt: r.expiresAt ?? null,
+        }))
+      ),
     }
+  }
+
+  /** Where a piece of evidence came from, as about-me says it: no attribute value but the issuing state of a document. */
+  private async evidenceSource(principal: Principal, record: EvidenceRecord): Promise<string | null> {
+    if (record.kind === 'email') return 'email'
+    if (record.kind === 'document') {
+      const values = record.stored.includes('issuingState')
+        ? await this.evidence.values(principal.id, record.entry)
+        : undefined
+      return values?.issuingState ?? null
+    }
+    return record.issuerOrganization?.name ?? record.issuerOrganization?.key ?? null
   }
 
   // ---- erasure (D78, PRIV-ERASE-007, PRIV-ERASE-010..012) ----------------------------------------------------------------
@@ -650,6 +680,18 @@ export class AyniAgent {
     await this.sessions.touch(session)
     const key = conversationKey(session)
     const signal = this.untilCut(caller)
+    // while an email check waits in this conversation, the message is the code's: it starts no turn and never reaches
+    // the model (INTX-AUTH-013, PROF-RUN-015)
+    if (this.emailChecks) {
+      await this.orchestrator.live(principal)
+      const taken = await this.emailChecks.take(session, principal, input, sink)
+      if (taken) {
+        await this.sessions
+          .readAfterTurn(session, taken.inbound?.id)
+          .catch((err) => this.logger.warn({ err, sessionId: session.id }, 'read state not updated'))
+        return taken
+      }
+    }
     // while the process ends, as during a turn: the message waits, and the next process answers it
     if (input.mayWait && (this.ending || this.turns.busy(key))) return this.wait(key, session, principal, input)
     return this.exclusive(session, signal, async () => {
@@ -1019,6 +1061,15 @@ export class AyniAgent {
       // the person asks for a credential the pack issues on request (INTX-ISSUE-008)
       const name = itemId.slice(PLATFORM_MENU.issuePrefix.length)
       const result = await this.issuance?.issue(principal, session, name, 'person')
+      // an email check now waits in this conversation: the code asks its question here (INTX-AUTH-012)
+      if (result?.ask) {
+        await this.codeSays(session, principal, result.ask.text, sink, {
+          kind: EMAIL_CHECK_KIND,
+          challengeId: result.ask.challengeId,
+          step: 'question',
+        })
+        return { cancelled: false }
+      }
       return {
         text: issuanceOutcomeForPerson(result?.outcome ?? 'unavailable', result?.requirements, result?.reason),
       }
@@ -1238,11 +1289,17 @@ export class AyniAgent {
     const principal = await this.principals.resolve(facts)
     // the presentation that identified the peer is evidence of the Principal (PRIV-EVID-001)
     if (facts.evidence) await this.evidence.record(principal, { ...facts.evidence, connectionRef: connectionId })
-    // a person of the directory added to a list while invited is a member from now (SPACE-MEMB-002)
+    // a person of the directory added to a list while invited is a member from now (SPACE-MEMB-002), and so is one of
+    // another organization whose badge carries the invited address (SPACE-INV-003)
     await this.spaces.bindDirectoryMember(principal)
+    await this.bindInvitations(principal, facts)
     await this.sessions.supersede(principal, connectionId)
     principal.capabilityChannelId = connectionId
     await this.principals.save(principal)
+    // an invitation of its organization that waits asks it once for the email its stored evidence lacks (SPACE-INV-004)
+    void this.invitations
+      ?.onConnected(principal)
+      .catch((err) => this.logger.warn({ err, principalId: principal.id }, 'waiting invitations not compared'))
     const existing = await this.store.sessions.findByExternalRef('didcomm', connectionId)
     const session = existing ?? (await this.sessions.createBound('didcomm', connectionId, principal, client)).session
     // a flow-capable wallet gets no welcome text and no menu on its connection (D54, CHAN-PROF-006)
@@ -1272,12 +1329,14 @@ export class AyniAgent {
       const principal = await this.principals.resolve(facts)
       if (facts.evidence) await this.evidence.record(principal, { ...facts.evidence, connectionRef: connectionId })
       await this.spaces.bindDirectoryMember(principal)
+      await this.bindInvitations(principal, facts)
       this.issueAutomatically(principal)
       return { outcome: 'refreshed', principal }
     }
     const target = await this.principals.resolve(facts)
     if (facts.evidence) await this.evidence.record(target, { ...facts.evidence, connectionRef: connectionId })
     await this.spaces.bindDirectoryMember(target)
+    await this.bindInvitations(target, facts)
     // the identified Principal may hold another channel: the device policy applies, as at a connection
     await this.sessions.supersede(target, connectionId)
     const sessions = await this.store.sessions.listByPrincipal(current.id)
@@ -1296,6 +1355,9 @@ export class AyniAgent {
       if (MemoryService.spaceOfNote(note) !== personalSpaceId(current.id)) continue
       await this.store.notes.save({ ...note, principalId: target.id, spaceId: personalSpaceId(target.id) })
     }
+    // what the agent verified about the guest (an address its email code checked, a document read) and the badge it
+    // issued them are the identified person's: about-me shows them, and the badge is held (decision 62)
+    await this.evidence.reassign(current.id, target.id)
     const entries = await this.store.entries.reassign(
       sessions.map((s) => s.id),
       target.id
@@ -1320,6 +1382,87 @@ export class AyniAgent {
     )
     this.issueAutomatically(target)
     return { outcome: 'identified', principal: target }
+  }
+
+  /**
+   * The issuance an email check started goes on by itself once the code is right (INTX-AUTH-015): its claims resolve and
+   * the credential is offered with no turn of the model. What became of it is told in the conversation by the code.
+   */
+  public async continueIssuance(record: AuthChallengeRecord): Promise<void> {
+    const details = (record.details ?? {}) as {
+      profile?: string
+      by?: IssuanceTrigger
+      conversationId?: string
+      lastSessionId?: string
+    }
+    const principal = await this.principals.get(record.principalId)
+    if (!principal || !details.profile || !this.issuance) return
+    const session =
+      (details.lastSessionId ? await this.sessions.get(details.lastSessionId) : undefined) ??
+      (await this.sessions.get(record.originSessionId))
+    if (!session) return
+    const result = await this.issuance.issue(principal, session, details.profile, details.by ?? 'model')
+    this.logger.info(
+      { principalId: principal.id, profile: details.profile, outcome: result.outcome },
+      'issuance after the email check'
+    )
+    const text = issuanceOutcomeForPerson(result.outcome, result.requirements, result.reason)
+    const entry = await this.memory.append({
+      sessionId: session.id,
+      ...(details.conversationId ? { conversationId: details.conversationId } : {}),
+      principalId: principal.id,
+      role: 'agent',
+      sourceType: 'text',
+      text,
+      backingIdentity: principal.backingIdentity,
+      payload: { kind: 'issuance-outcome', profile: details.profile, usedMemories: [], usedPreferences: [] },
+    })
+    await this.deliverToConversation(session, entry)
+  }
+
+  /**
+   * A message the agent adds outside a turn, shown in the conversation of a session: on that session when it is open,
+   * else on an open session of the same conversation; history has it in any case.
+   */
+  public async deliverToConversation(session: Session, entry: MessageEntry): Promise<void> {
+    const target =
+      session.state === 'bound'
+        ? session
+        : (await this.sessions.listOpen(session.principalId ?? '')).find(
+            (s) => (s.conversationId ?? s.id) === (session.conversationId ?? session.id)
+          )
+    if (target) await this.router.deliver(target, { kind: 'text', entry })
+  }
+
+  /** A message the code writes in a run (a question of an email check): an `auth-challenge` entry, streamed by the sink. */
+  private async codeSays(
+    session: Session,
+    principal: Principal,
+    text: string,
+    sink: TurnSink,
+    payload: Record<string, unknown>
+  ): Promise<MessageEntry> {
+    const id = prefixedId('msg')
+    await sink.emit({ type: 'text-start', messageId: id })
+    await sink.emit({ type: 'text-delta', messageId: id, delta: text })
+    await sink.emit({ type: 'text-end', messageId: id })
+    return this.memory.append({
+      id,
+      sessionId: session.id,
+      principalId: principal.id,
+      role: 'agent',
+      sourceType: 'auth-challenge',
+      text,
+      backingIdentity: principal.backingIdentity,
+      payload,
+    })
+  }
+
+  /** The invitations of other organizations an identity credential binds to its Principal (SPACE-INV-003). */
+  private async bindInvitations(principal: Principal, facts: VerifiedFacts): Promise<void> {
+    await this.invitations
+      ?.bindPresented(principal, facts)
+      .catch((err) => this.logger.error({ err, principalId: principal.id }, 'invitations not bound'))
   }
 
   /** The credentials the agent issues by itself are issued as soon as their evidence is complete (INTX-ISSUE-008). */

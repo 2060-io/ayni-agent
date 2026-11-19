@@ -175,6 +175,21 @@ export function entryToMessages(entry: MessageEntry): Record<string, unknown>[] 
         },
       ]
     case 'auth-challenge':
+      // the messages of an email check, the person's and the code's, are shown as any message is (PROF-RUN-015)
+      if (entry.payload?.kind === 'email-check')
+        return [
+          {
+            id: entry.id,
+            role: entry.role === 'agent' ? 'assistant' : 'user',
+            content: entry.text,
+            metadata: {
+              createdAt: entry.createdAt,
+              initiatedAt: entry.initiatedAt,
+              sourceType: entry.sourceType,
+              externalId: entry.externalId,
+            },
+          },
+        ]
       // a challenge served as a `confirm` flow is shown by its flow card; the note stays for the model (D55)
       if (entry.payload?.flowId) return []
       return [

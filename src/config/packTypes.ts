@@ -141,20 +141,45 @@ export interface PresentationEntry extends EvidencePolicy {
 
 /**
  * Where a claim of an issued credential comes from (D70, INTX-ISSUE-002): never the model. `evidence` is an
- * attribute of a verified presentation the pack stores; `computed` is a fixed function of the profile.
+ * attribute of a verified presentation, document read or email check the pack stores, `as: dateint` writing a calendar
+ * date as the integer `YYYYMMDD` (IDENT-DIR-005); `record` is a field of the person's entry of the user directory, found
+ * from their evidence (INTX-ISSUE-021); `computed` is a fixed function of the profile.
  */
 export type ClaimSource =
-  | { from: 'evidence'; entry: string; attribute: string }
+  | { from: 'evidence'; entry: string; attribute: string; as?: 'dateint' }
   | { from: 'computed'; fn: ComputedFunction; days?: number; value?: string }
+  | { from: 'record'; record: 'directory'; field: DirectoryField }
+
+/**
+ * The fields a claim may take from an entry of the user directory (INTX-ISSUE-021): `name` is the first and last name
+ * joined by a space. Never the birthdate or the nationality, which only the matching of a document reads (IDENT-DIR-007).
+ */
+export const DIRECTORY_FIELDS = ['name', 'firstName', 'lastName', 'email', 'department'] as const
+export type DirectoryField = (typeof DIRECTORY_FIELDS)[number]
 
 /**
  * The functions of a `computed` source, a closed list (INTX-ISSUE-015). `subjectId` is an identifier of the
  * subject, derived from the Principal and the profile (INTX-ISSUE-016): the number of a badge, for one.
  * `documentId` is an identifier of the document the Principal read, derived from its issuing state and its
- * number (INTX-ISSUE-019): one document gives one value, through whichever connection it is read.
+ * number (INTX-ISSUE-019): one document gives one value, through whichever connection it is read. `emailId` is an
+ * identifier of the address the Principal verified by an email code (INTX-ISSUE-020).
  */
-export const COMPUTED_FUNCTIONS = ['today', 'now', 'addDays', 'constant', 'subjectId', 'documentId'] as const
+export const COMPUTED_FUNCTIONS = ['today', 'now', 'addDays', 'constant', 'subjectId', 'documentId', 'emailId'] as const
 export type ComputedFunction = (typeof COMPUTED_FUNCTIONS)[number]
+
+/**
+ * One challenge of an issuance profile (INTX-ISSUE-010): those of any action, and `email`, the email code of a badge
+ * from the user directory (D89, INTX-AUTH-011), which no other action may declare.
+ */
+export interface IssuanceChallenge {
+  type: 'device' | 'face-match' | 'document' | 'email'
+  onChannelUnavailable?: 'fail' | 'degrade'
+  referenceImage?: 'badge-photo'
+  timeoutSeconds?: number
+}
+
+/** The one attribute of the evidence of an email check: the verified address (INTX-AUTH-015). */
+export const EMAIL_ATTRIBUTES = ['address'] as const
 
 /** A credential the agent may issue, and the source of each of its claims (D70, INTX-ISSUE-001). */
 export interface IssuanceProfile {
@@ -171,8 +196,11 @@ export interface IssuanceProfile {
   trigger?: 'model' | 'request' | 'automatic'
   /** the roles that may receive it; anyone of the subject kind when absent */
   roles?: string[]
-  /** enforced before the issuance, as for any action (INTX-ISSUE-010) */
-  authChallenge?: ActionPolicy['authChallenge']
+  /**
+   * enforced before the issuance, in order (INTX-ISSUE-010): one challenge or a list of them; a badge from the user
+   * directory declares `[document]`, `[email]` or `[document, email]` (IDENT-DIR-002). Read through `challengesOf`
+   */
+  authChallenge?: IssuanceChallenge | IssuanceChallenge[]
   /** evidence older than this is expired for the profile (INTX-ISSUE-013) */
   evidenceMaxAgeMinutes?: number
   claims: Record<string, ClaimSource>
@@ -180,24 +208,19 @@ export interface IssuanceProfile {
   record?: { storeClaims?: boolean; retention?: { days?: number; onExpiry?: 'archive' | 'erase' } }
 }
 
-/**
- * Whether a profile takes a claim from the user directory (`{ from: record, record: directory, field }`,
- * INTX-ISSUE-021). The source comes with the badge from the directory (agent phase 2b); it is read loosely here, so
- * that the directory and revocation see such a profile as soon as the loader accepts one.
- */
+/** Whether a profile takes a claim from the user directory (`{ from: record, record: directory, field }`, INTX-ISSUE-021). */
 export function takesClaimsFromDirectory(profile: Pick<IssuanceProfile, 'claims'>): boolean {
-  return Object.values(profile.claims).some((source) => {
-    const s = source as { from?: string; record?: string }
-    return s.from === 'record' && s.record === 'directory'
-  })
+  return Object.values(profile.claims).some((source) => source.from === 'record' && source.record === 'directory')
 }
 
-/** The challenges a profile declares: one object today, a list of them for the badge from the directory (IDENT-DIR-002). */
-export function challengeTypesOf(profile: Pick<IssuanceProfile, 'authChallenge'>): string[] {
-  return ([] as unknown[])
-    .concat(profile.authChallenge ?? [])
-    .map((c) => (c as { type?: string }).type)
-    .filter((t): t is string => typeof t === 'string')
+/** The challenges a profile declares, in their order: one object or a list of them (IDENT-DIR-002). */
+export function challengesOf(profile: Pick<IssuanceProfile, 'authChallenge'>): IssuanceChallenge[] {
+  return ([] as IssuanceChallenge[]).concat(profile.authChallenge ?? [])
+}
+
+/** The types of the challenges a profile declares, in their order. */
+export function challengeTypesOf(profile: Pick<IssuanceProfile, 'authChallenge'>): IssuanceChallenge['type'][] {
+  return challengesOf(profile).map((c) => c.type)
 }
 
 /**
@@ -455,10 +478,10 @@ export interface AgentPack {
   /** the credentials the agent may ask for, by name; `authentication` is the entry of identity.authentication (D69) */
   presentations?: Record<string, PresentationEntry>
   /**
-   * The evidence that is not a credential: what is kept of a document read, the `document` challenge of an
-   * action, and what the model may read of it (D73, PRIV-EVID-003).
+   * The evidence that is not a credential: what is kept of a document read (the `document` challenge) and of an address
+   * verified by an email code (the `email` challenge, D89), and what the model may read of it (D73, PRIV-EVID-003).
    */
-  evidence?: { document?: EvidencePolicy }
+  evidence?: { document?: EvidencePolicy; email?: EvidencePolicy }
   /** the credentials the agent may issue, by name (D70) */
   issuance?: Record<string, IssuanceProfile>
   tools?: {

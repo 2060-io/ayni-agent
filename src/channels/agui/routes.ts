@@ -703,7 +703,8 @@ export class AgUiRoutes {
     return {
       memberId: m.id,
       name: p ? this.personName(p) : (this.directoryName(m.directoryId) ?? m.email ?? m.directoryId ?? m.id),
-      organization: p?.backingIdentity?.name ?? p?.backingIdentity?.id ?? m.organizationKey ?? null,
+      organization:
+        p?.backingIdentity?.name ?? m.organizationName ?? p?.backingIdentity?.id ?? m.organizationKey ?? null,
       state: m.state,
       role: m.role,
     }
@@ -1107,6 +1108,19 @@ export class AgUiRoutes {
         if (!people)
           throw new SpaceError('only the owner of a list space, or who may create one, picks people', 'not-creator')
         return people.search(principal, typeof q === 'string' ? q : '')
+      })
+    )
+
+    // PROF-DIR-002, SPACE-INV-001: the organizations of the trust graph a person of another organization is invited from,
+    // the agent's own excluded; to the same people as the member picker
+    app.get(
+      `${base}/organizations`,
+      handle(async ({ principal }, request) => {
+        const { q } = request.query as { q?: string }
+        const invitations = this.agent.invitations
+        if (!invitations)
+          throw new SpaceError('only the owner of a list space, or who may create one, invites people', 'not-creator')
+        return invitations.search(principal, typeof q === 'string' ? q : '')
       })
     )
 

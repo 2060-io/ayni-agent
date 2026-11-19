@@ -633,9 +633,11 @@ describe('a credential from a document read (D73, INTX-AUTH-010, INTX-ISSUE-019)
   it('before the read the credential is ready: what is missing is what the issuance itself reads', async () => {
     const { service } = reading()
     const [requirements] = await service.requirements(person())
+    // the action names the issuing tool, the profile and the challenge that obtains it (INTX-ISSUE-006)
     const byIssuing = {
       type: 'issue_credential',
       profile: 'badge',
+      challenge: 'document',
       note: 'the person reads their passport or identity card on their phone when the issuance starts',
     }
     expect(requirements.state).toBe('ready')

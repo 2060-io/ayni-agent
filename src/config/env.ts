@@ -77,6 +77,17 @@ export interface Env {
    * (IDENT-ROLE-013); 0 watches only. 10 by default
    */
   directoryPollSeconds?: number
+
+  /**
+   * the SMTP server the agent sends email through, with its credentials (PLAT-MAIL-001): `smtp://user:password@host:587`
+   * (STARTTLS) or `smtps://user:password@host:465`. Without it, or without `smtpFrom`, the email code and the
+   * invitations of other organizations are disabled
+   */
+  smtpUrl?: string
+  /** the sender of the agent's email, `Fleet support <fleet@northwind.example>` */
+  smtpFrom?: string
+  /** the Verana Graph, whose search finds the organizations a person of another organization is invited from (PROF-DIR-002) */
+  veranaGraphUrl?: string
 }
 
 function num(value: string | undefined, fallback?: number): number | undefined {
@@ -174,6 +185,10 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
     statsHttpUrl: source.STATS_HTTP_URL || undefined,
 
     directoryPollSeconds: num(source.DIRECTORY_POLL_SECONDS, 10),
+
+    smtpUrl: source.SMTP_URL || undefined,
+    smtpFrom: source.SMTP_FROM || undefined,
+    veranaGraphUrl: (source.VERANA_GRAPH_URL || '').replace(/\/+$/, '') || undefined,
   }
 
   if (store === 'postgres' && !env.databaseUrl) missing.push('DATABASE_URL')

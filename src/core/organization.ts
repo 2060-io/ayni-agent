@@ -75,7 +75,7 @@ export interface HomeKeySource {
  * nobody is `home`.
  */
 export class HomeOrganization implements HomeKeySource {
-  private known?: { key: string; at: number }
+  private known?: { key: string; name?: string; at: number }
   private failedAt = 0
 
   public constructor(
@@ -94,7 +94,7 @@ export class HomeOrganization implements HomeKeySource {
       if (organization) {
         if (this.known?.key !== organization.key)
           this.logger.info({ organization: organization.key }, 'own organization established: its people are home')
-        this.known = { key: organization.key, at: now }
+        this.known = { key: organization.key, name: organization.name, at: now }
         return organization.key
       }
       this.logger.warn('the agent has no verified Organization credential yet: no peer is home (IDENT-ROLE-011)')
@@ -105,5 +105,11 @@ export class HomeOrganization implements HomeKeySource {
     if (this.known) return this.known.key
     this.failedAt = now
     return undefined
+  }
+
+  /** The name of the agent's own organization, as its Organization credential gives it; none while it is not established. */
+  public async name(): Promise<string | undefined> {
+    await this.key()
+    return this.known?.name
   }
 }
