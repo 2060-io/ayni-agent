@@ -64,19 +64,29 @@ spec:
             httpGet:
               path: /health/live
               port: http
-          {{- if or .Values.agentPackConfigMap .Values.agentPack }}
+          {{- if or .Values.agentPackConfigMap .Values.agentPack .Values.extraVolumeMounts }}
           volumeMounts:
+            {{- if or .Values.agentPackConfigMap .Values.agentPack }}
             - name: agent-pack
               mountPath: /app/agent-pack
               readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-      {{- if or .Values.agentPackConfigMap .Values.agentPack }}
+      {{- if or .Values.agentPackConfigMap .Values.agentPack .Values.extraVolumes }}
       volumes:
+        {{- if or .Values.agentPackConfigMap .Values.agentPack }}
         - name: agent-pack
           configMap:
             name: {{ .Values.agentPackConfigMap | default (printf "%s-pack" (include "ayni-agent.fullname" .)) }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

@@ -5,13 +5,13 @@
  * the retention the pack gives, then archived or erased. The model reads the attributes the pack makes
  * visible, and nothing else.
  */
-import { AUTHENTICATION_ENTRY, DOCUMENT_ENTRY } from '../config/pack.js'
+import { AUTHENTICATION_ENTRY, DOCUMENT_ENTRY, EMAIL_ENTRY } from '../config/pack.js'
 import type { AgentPack, EvidencePolicy } from '../config/packTypes.js'
 import { type EntryCrypto, openJson, sealJson } from '../memory/crypto.js'
 import type { Store, StoredEvidence } from '../store/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
-import type { EvidenceRecord, Principal } from './types.js'
+import type { EvidenceRecord, IssuedRevocation, Principal } from './types.js'
 
 export { AUTHENTICATION_ENTRY }
 
@@ -25,6 +25,7 @@ export function evidencePolicyOf(pack: AgentPack, entry: string): EvidencePolicy
     return { store: authentication?.store, modelVisible: authentication?.modelVisible }
   }
   if (entry === DOCUMENT_ENTRY) return pack.evidence?.document ?? {}
+  if (entry === EMAIL_ENTRY) return pack.evidence?.email ?? {}
   const catalog = pack.presentations?.[entry]
   return catalog ? { store: catalog.store, modelVisible: catalog.modelVisible } : {}
 }
@@ -76,6 +77,15 @@ export interface EvidenceInput {
   requestRef?: string
   connectionRef?: string
   evidenceRefs?: string[]
+  /** an issuance: the directory entry its claims came from (IDENT-DIR-006) */
+  directoryEntryId?: string
+  /**
+   * an issuance of the identity credential: the actor it identifies once presented (D59). Kept only as a keyed index
+   * (`holderIndex`), by which the presented credential finds its record (IDENT-ROLE-012)
+   */
+  holder?: string
+  /** an issuance under a revocable definition: the registry and the index of the credential (D91) */
+  revocation?: IssuedRevocation
 }
 
 /** What the model is told of a record: its audit fields and the visible attributes, when it is usable. */
@@ -135,6 +145,9 @@ export class EvidenceService {
       requestRef: input.requestRef,
       connectionRef: input.connectionRef,
       evidenceRefs: input.evidenceRefs,
+      ...(input.directoryEntryId ? { directoryEntryId: input.directoryEntryId } : {}),
+      ...(input.holder ? { holderIndex: this.holderIndex(input.holder) } : {}),
+      ...(input.revocation ? { revocation: { ...input.revocation } } : {}),
       verifiedAt,
       state: 'active',
       expiresAt:
@@ -161,6 +174,67 @@ export class EvidenceService {
       'evidence recorded'
     )
     return auditOf(record)
+  }
+
+  /** The keyed index of the actor an identity credential identifies: the actor itself is never kept with the record. */
+  public holderIndex(actorIdentity: string): string {
+    return this.crypto.blindIndex(`holder\n${actorIdentity}`)
+  }
+
+  /**
+   * The entry of the user directory the presented identity credential of an actor was issued from, by this agent
+   * (IDENT-DIR-006, IDENT-ROLE-012): the newest issuance to that actor whose claims came from the directory and which is
+   * not revoked, under the credential definition presented when the presentation names it.
+   */
+  public async issuedFromDirectoryTo(
+    actorIdentity: string,
+    credentialDefinitionId?: string
+  ): Promise<EvidenceRecord | undefined> {
+    const found = (await this.store.evidence.listIssuedTo(this.holderIndex(actorIdentity))).find(
+      (r) =>
+        !!r.directoryEntryId &&
+        !r.revocation?.revokedAt &&
+        (!credentialDefinitionId || !r.credentialDefinitionId || r.credentialDefinitionId === credentialDefinitionId)
+    )
+    return found ? auditOf(found) : undefined
+  }
+
+  /** The issuances whose claims came from the directory: of one entry, or of every entry (IDENT-ROLE-013). */
+  public async issuedFromDirectory(directoryEntryId?: string): Promise<EvidenceRecord[]> {
+    return (await this.store.evidence.listIssuedFromDirectory(directoryEntryId)).map(auditOf)
+  }
+
+  /** Records what became of the revocation of an issued credential: audit fields only (D91). */
+  public async setRevocation(id: string, revocation: IssuedRevocation): Promise<EvidenceRecord | undefined> {
+    const stored = await this.store.evidence.get(id)
+    if (stored?.kind !== 'issuance') return undefined
+    const next: StoredEvidence = { ...stored, revocation: { ...revocation } }
+    await this.store.evidence.save(next)
+    return auditOf(next)
+  }
+
+  /**
+   * A guest who identifies is the identified person (D66, decision 62): what the agent verified about the guest (an
+   * address checked by an email code, a document read) and what it issued them become the identified Principal's. The
+   * newest record of an entry keeps its values, the earlier ones stay as audit (PRIV-EVID-010).
+   */
+  public async reassign(fromPrincipalId: string, toPrincipalId: string): Promise<number> {
+    const moved = await this.store.evidence.list(fromPrincipalId)
+    for (const record of moved) await this.store.evidence.save({ ...record, principalId: toPrincipalId })
+    if (!moved.length) return 0
+    const newest = new Map<string, StoredEvidence>()
+    const all = await this.store.evidence.list(toPrincipalId)
+    for (const record of all)
+      if (record.state === 'active' && record.encKeyRef && record.kind !== 'issuance') newest.set(record.entry, record)
+    for (const record of all) {
+      if (record.state !== 'active' || !record.encKeyRef || record.kind === 'issuance') continue
+      if (newest.get(record.entry)?.id !== record.id) await this.drop(record)
+    }
+    this.logger.info(
+      { from: fromPrincipalId, principalId: toPrincipalId, records: moved.length },
+      'evidence of a guest taken by the identified person'
+    )
+    return moved.length
   }
 
   /** The audit fields of the records of a Principal, oldest first. */

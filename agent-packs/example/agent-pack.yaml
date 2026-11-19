@@ -20,10 +20,11 @@ identity:
     - credential: { jsonSchemaCredentialId: "${IDENTITY_SCHEMA_ID:-https://ecs.example/vt/schemas-badge-jsc.json}" }
       subjectKey: [badgeNumber]
       request: on-connect        # before any conversation: identified or refused; on-demand lets people in first
-      attributes: [badgeNumber, name, title, department, photo]
-      # what is kept of the badge, sealed, and for how long; by default nothing but the audit record (D67)
+      attributes: [badgeNumber, name, email, title, department, photo]
+      # what is kept of the badge, sealed, and for how long; by default nothing but the audit record (D67). The email
+      # binds an invitation of another organization to a person the agent knows already, asking nothing (SPACE-INV-004)
       store:
-        attributes: [name, title, department, photo]
+        attributes: [name, email, title, department, photo]
         retention: { days: 365, onExpiry: erase }
       # what the model may read of it; by default nothing. department is used by the role rules and kept for
       # audit, the photo is the reference of the face-match challenge: neither is shown to the model
@@ -40,19 +41,18 @@ identity:
   roles:
     employee:
       description: Any verified Northwind employee.
+    # no role reads other people's conversations (decision 60): a conversation is read by its author, by the
+    # members of its space when its author shares it, and by an auditor through the admin interface
     finance:
       description: Finance department.
-      crossSession: own-backing-identity
     finance-manager:
       description: Approves refunds.
-      crossSession: own-backing-identity
       canApprove: true
     security-officer:
       description: Approves out-of-role access for investigations.
       canApprove: true
     operator:
       description: Support operators.
-      crossSession: all
     partner:
       description: Baseline for recognized partner organizations.
     visitor:
@@ -60,6 +60,14 @@ identity:
     auditor:
       description: Read-only access to the persistent store.
       auditor: true
+    people-admin:
+      description: Reads who holds which role of the user directory, and what each reload changed (D92).
+      admin: true
+  # With no identity provider, the people of Northwind and their roles, typed by hand, are a file mounted from a
+  # secret of the deployment, never written here (D79, D87). The rules below never read a badge this agent issues
+  # from it; its department and groups make people members of rule spaces only.
+  # directory:
+  #   file: /run/secrets/ayni/directory.yaml
   roleRules:                                               # first match wins (D34)
     - when: { relation: home, claims: { department: [Finance, Treasury] } }
       roles: [employee, finance]
@@ -171,6 +179,26 @@ issuance:
       issuedOn:   { from: computed, fn: today }
       validUntil: { from: computed, fn: addDays, days: 90 }
     record: { storeClaims: false }     # the audit record is always kept; the claims only when asked
+  # A badge from the user directory (D88, D89): with identity.directory above, the badges of Northwind are issued from
+  # it, and their claims come from the person's entry. The person shows which entry is theirs with an email code (the
+  # agent's code asks for the address in the conversation and sends a six-digit code to it: MAIL_HOST and MAIL_FROM_ADDRESS
+  # are needed), with a passport ([{ type: document }], numbered by documentId), or with both, in this order.
+  # badge:
+  #   credential: { jsonSchemaCredentialId: "${IDENTITY_SCHEMA_ID:-https://ecs.example/vt/schemas-badge-jsc.json}" }
+  #   label: Northwind badge
+  #   trigger: model
+  #   authChallenge: [{ type: email }]
+  #   claims:
+  #     badgeNumber: { from: computed, fn: emailId }
+  #     name:        { from: record, record: directory, field: name }
+  #     email:       { from: record, record: directory, field: email }
+  #     department:  { from: record, record: directory, field: department }
+  #     birthDate:   { from: computed, fn: constant, value: "" }
+  #     photo:       { from: computed, fn: constant, value: "" }
+  #     phoneNumber: { from: computed, fn: constant, value: "" }
+# ... with the address the email code verified, kept sealed and never shown to the model (INTX-AUTH-015):
+# evidence:
+#   email: { store: { attributes: [address], retention: { days: 30, onExpiry: erase } } }
 
 tools:
   http:
@@ -256,6 +284,43 @@ channels:
       types: ["image/*", "audio/webm", "audio/ogg", "audio/mp4", "application/pdf"]
   a2a:
     enabled: false
+
+# a person deletes their own message, with the agent's reply and the memories taken from it, for ten minutes
+conversations:
+  messageDeletionWindowSeconds: 600
+
+# spaces (SPACE-DEF-002/003): one piece of work each; every conversation belongs to one, Personal by default
+spaces:
+  personal:
+    retentionDays: 365
+  templates:
+    - id: project                                          # a list kept by its owner
+      title: Project
+      kind: team
+      creators: [employee]
+      membership: { mode: list }
+      rules:
+        retentionDays: { default: 365, min: 30, max: 1825 }
+        lawfulBasis: { default: contract }
+        allowedProviders: { default: [openai] }
+        handover: { default: true, allowed: [true, false] }
+    - id: finance                                          # everyone of the finance department
+      title: Finance
+      kind: team
+      creators: [finance-manager]
+      membership: { mode: rule, rule: { department: Finance } }
+      rules:
+        retentionDays: { default: 730 }
+        lawfulBasis: { default: legitimate-interest }
+        handover: { default: true }
+    - id: northwind                                        # the whole organization
+      title: Northwind Logistics
+      kind: organization
+      creators: [security-officer]
+      membership: { mode: rule, rule: { organization: true } }
+      rules:
+        lawfulBasis: { default: legitimate-interest }
+        handover: { default: false }
 
 privacy:
   processingActivities:

@@ -11,6 +11,9 @@ import type {
   PrincipalPreference,
   RagChunk,
   Session,
+  Space,
+  SpaceActivity,
+  SpaceMember,
   StatEvent,
   WorkingMemoryNote,
 } from '../core/types.js'
@@ -116,6 +119,12 @@ export class MemoryStore implements Store {
       this.conversationRows.set(c.id, clone(c))
     },
     listAll: async () => clone([...this.conversationRows.values()]),
+    listBySpace: async (spaceId: string, opts: { shared?: boolean } = {}) =>
+      clone(
+        [...this.conversationRows.values()]
+          .filter((c) => (c.spaceId ?? `personal:${c.principalId}`) === spaceId && (!opts.shared || !!c.sharedAt))
+          .sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt))
+      ),
     listByPrincipal: async (principalId: string, states?: Conversation['state'][]) =>
       clone(
         [...this.conversationRows.values()]
@@ -134,6 +143,7 @@ export class MemoryStore implements Store {
           conversationId: e.conversationId,
           principalId: e.principalId,
           backingIdentityId: e.backingIdentity?.id ?? null,
+          spaceId: e.spaceId ?? (e.principalId ? `personal:${e.principalId}` : null),
         },
         STORE_SHAPES.entries
       )
@@ -218,13 +228,33 @@ export class MemoryStore implements Store {
         if (row) row.anchorBatchId = batchId
       }
     },
-    listOlderThan: async (cutoff: string, state: LifecycleState, limit: number) =>
-      clone([...this.entryRows.values()].filter((e) => e.state === state && e.createdAt < cutoff).slice(0, limit)),
+    listOlderThan: async (
+      cutoff: string,
+      state: LifecycleState,
+      limit: number,
+      filter: { spaceId?: string; personal?: boolean } = {}
+    ) =>
+      clone(
+        [...this.entryRows.values()]
+          .filter(
+            (e) =>
+              e.state === state &&
+              e.createdAt < cutoff &&
+              (filter.spaceId === undefined || e.spaceId === filter.spaceId) &&
+              (!filter.personal || (e.spaceId ?? 'personal:').startsWith('personal:'))
+          )
+          .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+          .slice(0, limit)
+      ),
+    setSpace: async (conversationId: string, spaceId: string) => {
+      for (const row of this.entryRows.values()) if (row.conversationId === conversationId) row.spaceId = spaceId
+    },
     reassign: async (sessionIds: string[], principalId: string) => {
       let moved = 0
       for (const row of this.entryRows.values()) {
         if (!row.sessionId || !sessionIds.includes(row.sessionId) || row.principalId === principalId) continue
         row.principalId = principalId
+        if (!row.spaceId || row.spaceId.startsWith('personal:')) row.spaceId = `personal:${principalId}`
         moved++
       }
       return moved
@@ -250,7 +280,12 @@ export class MemoryStore implements Store {
         [...this.noteRows.values()].filter((n) =>
           matchesScope(
             scope,
-            { visibility: n.visibility, state: n.state, principalId: n.principalId },
+            {
+              visibility: n.visibility,
+              state: n.state,
+              principalId: n.principalId,
+              spaceId: n.spaceId ?? `personal:${n.principalId}`,
+            },
             STORE_SHAPES.notes
           )
         )
@@ -314,6 +349,21 @@ export class MemoryStore implements Store {
     listExpired: async (nowIso: string) =>
       [...this.evidenceRows.values()]
         .filter((e) => e.state === 'active' && !!e.expiresAt && e.expiresAt <= nowIso)
+        .map(copyEvidence),
+    listIssuedFromDirectory: async (directoryEntryId?: string) =>
+      [...this.evidenceRows.values()]
+        .filter(
+          (e) =>
+            e.kind === 'issuance' &&
+            !!e.directoryEntryId &&
+            (directoryEntryId === undefined || e.directoryEntryId === directoryEntryId)
+        )
+        .sort((a, b) => a.verifiedAt.localeCompare(b.verifiedAt))
+        .map(copyEvidence),
+    listIssuedTo: async (holderIndex: string) =>
+      [...this.evidenceRows.values()]
+        .filter((e) => e.kind === 'issuance' && e.holderIndex === holderIndex)
+        .sort((a, b) => b.verifiedAt.localeCompare(a.verifiedAt))
         .map(copyEvidence),
   }
 
@@ -429,11 +479,81 @@ export class MemoryStore implements Store {
     },
   }
 
+  private readonly spaceRows = new Map<string, Space>()
+  public spaces = {
+    get: async (id: string) => clone(this.spaceRows.get(id)),
+    save: async (space: Space) => {
+      this.spaceRows.set(space.id, clone(space))
+    },
+    list: async (agentId: string) =>
+      clone(
+        [...this.spaceRows.values()]
+          .filter((space) => space.agentId === agentId)
+          .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      ),
+  }
+
+  private readonly memberRows = new Map<string, SpaceMember>()
+  public spaceMembers = {
+    get: async (id: string) => clone(this.memberRows.get(id)),
+    save: async (member: SpaceMember) => {
+      this.memberRows.set(member.id, clone(member))
+    },
+    listBySpace: async (spaceId: string) =>
+      clone(
+        [...this.memberRows.values()]
+          .filter((m) => m.spaceId === spaceId)
+          .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      ),
+    listByPrincipal: async (principalId: string) =>
+      clone([...this.memberRows.values()].filter((m) => m.principalId === principalId)),
+    listByDirectoryId: async (directoryId: string) =>
+      clone(
+        [...this.memberRows.values()]
+          .filter((m) => m.directoryId === directoryId)
+          .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      ),
+    listByInvitee: async (organizationKey: string, emailIndex: string) =>
+      clone(
+        [...this.memberRows.values()]
+          .filter((m) => m.organizationKey === organizationKey && m.emailIndex === emailIndex)
+          .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      ),
+    delete: async (id: string) => {
+      this.memberRows.delete(id)
+    },
+  }
+
+  private readonly activityRows: SpaceActivity[] = []
+  public spaceActivity = {
+    insert: async (activity: SpaceActivity) => {
+      this.activityRows.push(clone(activity))
+    },
+    list: async (spaceId: string, limit: number) =>
+      clone(
+        // newest first; of two at the same time, the one written last first (the sort is stable)
+        this.activityRows
+          .filter((a) => a.spaceId === spaceId)
+          .reverse()
+          .sort((a, b) => b.at.localeCompare(a.at))
+          .slice(0, limit)
+      ),
+  }
+
   private readonly auditRows: AdminAuditRecord[] = []
   public adminAudit = {
     insert: async (r: AdminAuditRecord) => {
       this.auditRows.push(clone(r))
     },
-    list: async (limit: number) => clone([...this.auditRows].sort((a, b) => b.ts.localeCompare(a.ts)).slice(0, limit)),
+    list: async (limit: number, filter: { action?: AdminAuditRecord['action']; before?: string } = {}) => {
+      // newest first; of two at the same time, the one written last first (the sort is stable)
+      const rows = [...this.auditRows]
+        .reverse()
+        .sort((a, b) => b.ts.localeCompare(a.ts))
+        .filter((r) => !filter.action || r.action === filter.action)
+      const from = filter.before ? rows.findIndex((r) => r.id === filter.before) + 1 : 0
+      if (filter.before && from === 0) return []
+      return clone(rows.slice(from, from + limit))
+    },
   }
 }

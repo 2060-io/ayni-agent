@@ -2,6 +2,7 @@
  * Deployment values and secrets (spec reference-implementation-profile, "Container configuration").
  * Everything behavioral lives in the agent-pack (CORE-PACK-001); these are the deployment knobs.
  */
+import type { MailConfig } from '../platform/mail.js'
 
 export interface Env {
   agentPackPath: string
@@ -71,6 +72,21 @@ export interface Env {
   statsEnabled: boolean
   statsSink: 'redis-stream' | 'http'
   statsHttpUrl?: string
+
+  /**
+   * how often the file of the user directory is read again and compared by its hash, beside the watch of its directory
+   * (IDENT-ROLE-013); 0 watches only. 10 by default
+   */
+  directoryPollSeconds?: number
+
+  /**
+   * the SMTP server the agent sends email through (PLAT-MAIL-001), from the variables of the 2060.io website:
+   * MAIL_HOST, MAIL_PORT (587), MAIL_ENCRYPTION (ssl), MAIL_USERNAME, MAIL_PASSWORD, MAIL_FROM_ADDRESS, MAIL_FROM_NAME.
+   * Absent without MAIL_HOST and MAIL_FROM_ADDRESS: the email code and the invitations of other organizations are disabled
+   */
+  mail?: MailConfig
+  /** the Verana Graph, whose search finds the organizations a person of another organization is invited from (PROF-DIR-002) */
+  veranaGraphUrl?: string
 }
 
 function num(value: string | undefined, fallback?: number): number | undefined {
@@ -166,6 +182,22 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
     statsEnabled: bool(source.STATS_ENABLED, false),
     statsSink: (source.STATS_SINK as Env['statsSink']) ?? 'redis-stream',
     statsHttpUrl: source.STATS_HTTP_URL || undefined,
+
+    directoryPollSeconds: num(source.DIRECTORY_POLL_SECONDS, 10),
+
+    mail:
+      source.MAIL_HOST && source.MAIL_FROM_ADDRESS
+        ? {
+            host: source.MAIL_HOST,
+            port: num(source.MAIL_PORT, 587) ?? 587,
+            encryption: source.MAIL_ENCRYPTION || undefined,
+            username: source.MAIL_USERNAME || undefined,
+            password: source.MAIL_PASSWORD || undefined,
+            fromAddress: source.MAIL_FROM_ADDRESS,
+            fromName: source.MAIL_FROM_NAME || undefined,
+          }
+        : undefined,
+    veranaGraphUrl: (source.VERANA_GRAPH_URL || '').replace(/\/+$/, '') || undefined,
   }
 
   if (store === 'postgres' && !env.databaseUrl) missing.push('DATABASE_URL')

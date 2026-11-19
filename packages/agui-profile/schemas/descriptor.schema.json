@@ -99,6 +99,17 @@
         "peerStatus": {
           "type": "boolean",
           "description": "the agent tells a wallet where it stands with peer-status/1.0/status; a wallet asks for a session grant once a status lists ag-ui as open (PROF-DESC-007)"
+        },
+        "erasure": {
+          "type": "object",
+          "required": ["windowSeconds"],
+          "properties": {
+            "windowSeconds": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "description": "a Principal deletes a message they wrote, with the agent's reply, while it is younger than windowSeconds (3.3, PROF-DESC-008)"
         }
       }
     },

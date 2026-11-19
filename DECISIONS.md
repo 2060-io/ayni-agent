@@ -686,3 +686,283 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       `cipher` to `preferences`.
     - **Tests:** `tests/sealedMemory.test.ts`, and a PostgreSQL test that finds no canary of a note, a preference
       name, a preference value or a legacy row in the tables or the access log.
+60. **Spaces, memories per space, and deleting a message within its window: phase 1** (2026-11-19, Fabrice's decisions
+    of the design review of spaces, memories, people and erasure; ayni-spec D80 to D93, PR #94). Phase 1 is everything
+    but the people: the user directory, invitations, the email code and the admin view come in phase 2.
+    - **Deleting a message (PRIV-ERASE-007, PRIV-ERASE-010 to 012, PROF-HIST-010):** a person deletes a message they
+      wrote while it is younger than `conversations.messageDeletionWindowSeconds` (600 by default; 0: nobody, and the
+      descriptor declares no `erasure`), `409 window-passed` after it. With it go, crypto-erased, the agent's messages,
+      the tool calls and the memory lines of the turn that answered it: every entry of a turn now names the messages it
+      answers (`inboundId`, `inboundIds`), the reply and the code's refusal included. The memories whose lineage cites
+      the message or an entry of its reply are deleted, not flagged, with no line of their own; a memory the message
+      changed is deleted, not reverted (its previous content is kept nowhere). A message that waits for its turn leaves
+      the list; one whose reply is being written cancels that turn first (the runs of the conversation are stopped as
+      the person would stop them), and what the turn recorded is erased once it has stopped (15 seconds at most, else
+      `409 turn-in-progress`). The flow, approval and auth-challenge cards of the turn stay, and preferences are not
+      touched. `ayni.messages.erased` names every message erased. A person cannot erase a conversation any more: the
+      endpoint answers 404, `eraseOwnConversation` is gone, and an operator erases through the admin interface, which
+      keeps the flagging of PRIV-ERASE-005.
+    - **No role reads other people's conversations (RBAC-XSESS-001/005/007):** `crossSession` is withdrawn; a pack that
+      declares it, whatever its value, is refused at start with a message that says why. `conversation-private` is the
+      conversation and nothing else. The pack accepts `roles.<name>.admin` (IDENT-DIR-008), unused before phase 2.
+    - **Spaces (SPACE-DEF-001 to 007):** a space (`spc_…`, of the agent) has a kind, a template, a title, a purpose, a
+      brief, a language, its rules (`retentionDays`, `lawfulBasis`, `allowedProviders`, `handover`), a membership (a
+      list, or a rule of exactly one of `department`, `group`, `organization: true`) and an owner. The store seals the
+      title, the purpose and the brief, and an invited person's email (found by a keyed index), as D77 seals a
+      conversation's title; the lists and the membership read what stays in the clear. Templates come from
+      `spaces.templates` (`id`, `title`, `kind`, `creators`, `membership`, `rules` with a default and `min`/`max` or
+      `allowed`); a template of kind `organization` has the rule `organization: true`. Personal, `personal:<principalId>`,
+      is never stored: its rules are `spaces.personal` (365 days, or `RETENTION_HISTORY_DAYS`; the conversation memory's
+      basis; `llm.providerName`), and it takes no handover. Schema 3.6.0 adds `spaces`, `space_members` and
+      `space_activity`, and a `space_id` to conversations, entries and notes, those of an earlier version in Personal.
+    - **Members (SPACE-MEMB-001 to 008):** the owner is always a member. A rule matches the department or the groups of
+      the Principal's directory entry, never a claim; phase 1 has no directory, so a department or group rule gives the
+      owner only, and `organization: true` every Principal whose relation is `home`. A member the rule no longer
+      matches, or the owner removes, is `left`: their own conversations of the space stay readable, a run on them
+      answers `409 space-left` and records nothing, and they open no new conversation there. Adding a member answers
+      501 for an owner (409 `rule-membership` in a rule space); the owner gives the space to an active member, and
+      every action is in the space's activity, by field name, never by value.
+    - **Conversations in a space (SPACE-CONV-001 to 003, PROF-CONV-010/011, PROF-STREAM-009):** `POST {sessions}` with
+      `newConversation` and `spaceId` starts the conversation there for an active member, `404` otherwise (bound later
+      by the phone, it goes to Personal); `PATCH {sessions}/conversations/{id}` changes its space, and its entries',
+      until the person's first message (`409 has-messages`). The list carries `spaceId` and `shared`, filters by space,
+      and every session gets `state.ayni.space`, again when the space or its title changes. A guest who identifies
+      takes their Personal conversations, entries and memories to the identified Principal's Personal space.
+    - **Memories per space, preferences global (MEM-SPACE-001 to 007):** a note carries the space of the conversation it
+      was written in. The scope predicate has a space: a store that declares a space column (entries, notes) reads its
+      `principal-private` items in that space only, a store that does not (preferences) in every space. The
+      working-memory tool lists, changes and removes the notes of the conversation's space only (`maxNotes` per space);
+      a change adds the message to the note's lineage. The platform rules (add-on 3.2.0) tell the model to write notes
+      in the person's language and to change one when the person says it is wrong. `GET {sessions}/memories`,
+      `DELETE {sessions}/memories/{id}`, `DELETE {sessions}/preferences/{key}` and `GET {sessions}/about-me` serve the
+      person alone. Each message of a reply records `usedMemories` and `usedPreferences`, which the person's own
+      history returns in `metadata` (empty lists for a message outside a turn; no live field). A memory the model adds,
+      changes or removes is a `state-update` entry after the reply (`{ kind: 'memory', memoryId, spaceId, action }`,
+      never its content), live as `ayni.memory.updated` and in history as `ayni.memory-update`; the model never reads it.
+    - **Handover (SPACE-SHARE-001 to 004, PROF-CONV-012, PROF-SPACE-007):** the author shares a conversation with its own
+      space while the space takes handovers (`409 handover-not-allowed`, Personal included; `409 final`); its active
+      members list it and read its transcript and attachments as they are now, without the author's memory lines and
+      `used…` lists; one who left, and an unshared conversation, get 404. **My choices, H1 and H2 being unanswered:**
+      only within the conversation's own space; live until the author stops sharing, whatever their membership.
+    - **Allowed providers (SPACE-CONV-004, PROF-RUN-014):** before any model call the turn checks that
+      `llm.providerName` (`llm.provider` when absent) is among the space's `allowedProviders`; when it is not, the
+      person's message is kept and the code answers with a `refusal` entry, a message of the agent in history: no model
+      call, no summary, no memory.
+    - **Retention (PRIV-RETN-008/009):** the job archives the entries of each space older than its retention, Personal's
+      by `spaces.personal`, never an entry on legal hold; it replaces the one threshold of every history.
+    - **Profile package 3.3.0:** the types, endpoints, errors and events above; `features.erasure` is
+      `{ windowSeconds }`; the descriptor says `3.3`.
+    - **Choices of mine, beyond the spec:** Personal is computed, never written (the spec's "created when first
+      needed" is the same on the wire); the list of templates carries their bounds (`rules`) for the owner's form, and
+      the share answers its conversation and space beside `{ shared, sharedAt }`; the deletion waits 15 seconds for a
+      cancelled turn.
+    - **Not done here (phase 2):** the user directory (D79, IDENT-ROLE-012 to 014, IDENT-DIR), the department and
+      group facts it gives the rules (`SpaceService.directory` is the hook), adding members and invitations
+      (SPACE-MEMB-002, SPACE-INV), `GET {sessions}/directory` and `/organizations`, the email code and SMTP, the admin
+      view, `joined` and `left` on a reload, and the issuing state as the `source` of a document in `about-me`.
+    - **Tests:** `tests/spaces.test.ts` (the space endpoints, membership, leaving, a conversation's space, memories,
+      handover, providers, retention), the deletion and its cancellation in `tests/turns.test.ts`, the pack rules in
+      `tests/pack.test.ts`, the space of the predicate in `tests/policy.test.ts`, and on PostgreSQL the migration to
+      3.6.0, the space stores, no plaintext of a space or an invited email, and the agent served from PostgreSQL with
+      no plaintext of a space in any table.
+61. **The user directory, roles by hand, and removal that revokes: phase 2a** (2026-11-19, Fabrice's decisions of the
+    design review, review decisions 13, 14 (answer a), 17 and 18; ayni-spec D79, D81, D87, D91, D92, PR #94). Phase 2b
+    follows: the badge from the directory (the passport match, the email code, SMTP), the invitations of other
+    organizations and the search of organizations.
+    - **The file (IDENT-ROLE-012, IDENT-DIR-001, CORE-PACK-001):** `identity.directory.file` names it, a relative path
+      from the pack directory. It holds `people`, each with `id`, `firstName`, `lastName`, `email`, optional
+      `birthDate` (`YYYYMMDD`) and `nationality` (ICAO 9303), required on every entry when an issuance profile takes
+      claims from the directory and reads a document (`directoryReadsDocuments`), optional `department`, `groups` and
+      `roles`. Every scalar is read as text (YAML's failsafe schema: `0042` keeps its zeros, `NO` stays Norway). Ids and
+      emails (lower case) are unique, roles declared, no other field allowed. A file that does not validate stops the
+      start, naming each entry and field; the message never holds a birthdate or a nationality. A pack that writes the
+      people inline (`identity.directory.people`, a list under `identity.directory`, `identity.people`) is refused in
+      words, before the schema (`inlineDirectoryErrors`).
+    - **Reload (IDENT-ROLE-013):** the directory of the file is watched, since a Kubernetes Secret is updated by a rename
+      of the `..data` symlink in it, and the content is read every `DIRECTORY_POLL_SECONDS` (10; 0: watch only) and
+      compared by its SHA-256, whatever the mount (no subPath assumption). A new version that does not validate is not
+      loaded: the one in force stays, the log names the faults, and that content is not read again until it changes.
+    - **What changed (IDENT-DIR-009):** each load is diffed against the last one into the admin audit, one record per
+      entry added, removed or changed (`action: directory-change`, `actor: directory`, `reason: start | reload`):
+      the id, the name, the names of the fields that changed, the roles before and after. The last load is kept in the
+      key-value table, sealed, with keyed digests of the email, the birthdate and the nationality, never their values:
+      what changed while the agent was down is recorded, and acted on, at start. Schema 3.7.0 gives the audit the order
+      it was written in (`seq`), so that `GET {sessions}/admin/changes` pages newest first.
+    - **Who holds an entry (IDENT-DIR-006):** the issuance record of a credential whose claims came from the directory
+      names the entry (`directoryEntryId`) and a keyed index of the actor it identifies once presented (`holderIndex`:
+      the home organization, the authentication schema, the subject key, D59); both are columns of `evidence` in 3.7.0.
+      A presented identity credential of the home organization finds the newest such record that is not revoked, under
+      the credential definition the presentation names (`PeopleService.entryOf`), and its Principal holds the entry
+      (`Principal.directoryEntryId`). A Principal already identified as that actor holds it from the issuance. Its
+      invitations to list spaces become `active` then (`SpaceService.bindDirectoryMember`).
+    - **Roles by hand (IDENT-ROLE-002, IDENT-ROLE-014, D87):** a Principal's roles are those of its facts (`factRoles`:
+      pattern, rules, overrides) with those of its entry. A rule that names `claims` does not match a Principal whose
+      credential this agent issued from an entry; the relation keeps its rules, and the claims of badges issued by
+      others keep theirs. A reload recomputes the roles of every holder; they hold from the next request, which reads
+      the Principal again. `department` and `groups` give rule spaces their members (`SpaceService.directory`) and
+      nothing else. A pack that no longer names a directory drops the roles its entries gave, and nothing else.
+    - **Removal (D91, IDENT-LIVE-004/005):** the agent brings itself in line with the directory as loaded
+      (`PeopleService.reconcile`, at start and after every reload). A Principal whose entry left loses it and the roles
+      it gave, its identity credential's verdict turns invalid, and `onCredentialInvalid` closes every one of its
+      sessions with `credential-invalid`, tells its wallet and unpairs its devices; all of this before any network
+      call. Then every credential issued from the entry is revoked by its registry and index, an `admin_audit` record
+      (`credential-revocation`) is written, and the holder is sent `revocation_notification` (INTX-FLOW-007) on the
+      connection it was issued on and on its connection now, tried three times. A revocation the DIDComm agent refuses
+      is kept with its error and made again every minute, and at the next start. An invitation of a person no longer
+      listed is removed.
+    - **Revocation, new:** the VS Agent takes the registry and the index from the caller at the offer under a revocable
+      definition (VSA-ADM-DC-CE-OFFER) and does not report them; it revokes with `POST /v2/anoncreds/revoke-credential`
+      and sends nothing to the holder, which the flow plugin does (`POST /v2/didcomm/revocation-notification`,
+      `<registry>::<index>`). So `CredentialRevocations` allocates: one registry per definition at a time (capacity
+      1000, the VS Agent's default), created with `POST /v2/anoncreds/revocation-registries` when there is none or the
+      last is full, indexes from 0, the next index kept in the key-value table before the offer leaves, one allocation at
+      a time. The definition of a schema is created with `supportRevocation` when a profile on it must be revocable
+      (`mustBeRevocable`: its claims come from the directory, the only case the spec names); under any definition that
+      supports revocation every offer carries a slot, which the record keeps (`revocation`). A credential from the
+      directory is not issued without a slot (`not-ready`), nor when its holder cannot be told (the home organization
+      not established).
+    - **Spaces (SPACE-MEMB-001/002/004/005/007/008):** `POST {sessions}/spaces/{id}/members {directoryId}` adds a person
+      of the directory, `active` when a Principal holds the entry, else `invited` (201 with the member; 404 for an
+      unknown entry, 409 `already-member`); outsiders stay 501. A person removed while invited is removed, no longer
+      `left`. `POST {sessions}/spaces/{id}/owner {directoryId}` gives a rule space to a person the rule matches who holds
+      a Principal (422 `not-eligible` otherwise, and for `memberId` in a rule space or `directoryId` in a list space).
+      A reload records `joined` and `left` in the rule spaces of a department or a group, with no `by`, for the
+      Principals whose entry it moved; the owner and a former owner who keeps a member row are left out.
+    - **Endpoints (PROF-DIR-001/003):** `GET {sessions}/directory?q=` (names and departments, at most 20, two
+      characters at least, case and marks folded; `403 not-creator` to a person who owns no list space and may create
+      none; an empty list without a directory). `GET {sessions}/admin/roles` and `GET {sessions}/admin/changes?before=
+      &limit=` (`403 not-admin` without a role marked `admin`). People of the directory are named by its name in member
+      lists, owners, activity and handovers.
+    - **Profile package, aligned with §9 of spec #94** (the coordinator found drift): `ERROR_STATUS` lists every code
+      with its status and `ErrorCode` is derived from it; `legal-hold`, `organization-not-accepted`, `not-on-verana`,
+      `home-organization`, `email-unavailable`, `pairing-expired` and `pairing-invalid` were missing; the comments said
+      409 `conversation-started` (the code is `has-messages`) and 400 for `out-of-bounds` (422). `forbidden`,
+      `turn-in-progress` and `not-implemented` are kept, marked as the reference agent's beyond §9. The package carries
+      the types of §3.9. `tests/profileErrors.test.ts` checks the codes and statuses of the routes, the space and session
+      errors against the package and §9. No `features.spaces` or `features.memories` exists in the package.
+    - **Choices of mine, to flag:** the 403 of the picker is `not-creator` (§9 gives no other for it); the admin change
+      items carry their audit `id`, the cursor of `before`; the first load ever records every entry as `added`; the poll
+      default is 10 seconds; a credential issued under a definition without revocation cannot be revoked and is logged
+      once (no such badge from the directory is issued by this version); every definition an earlier version created
+      has no revocation (it never asked for it), so on devnet the definition of the badge schema, if the agent created
+      one, must be deleted in the VS Agent before badges are issued from the directory (not checked on devnet).
+    - **Not done here (phase 2b):** the `record: directory` claim source and its loader rules (IDENT-DIR-002,
+      INTX-ISSUE-021), the passport match (IDENT-DIR-003), the email code and `emailId` (IDENT-DIR-004, INTX-AUTH-011
+      to 015, INTX-ISSUE-020), `as: dateint` (IDENT-DIR-005), SMTP (PLAT-MAIL), invitations (SPACE-INV) and
+      `GET {sessions}/organizations` (PROF-DIR-002). The hook is `IssuanceDeps.record`, which resolves a claim of a
+      system of record and names the entry. An offer left unanswered whose credential the wallet accepts later is not
+      recorded (as before): such a badge would not be revocable by its entry.
+    - **Tests:** `tests/directory.test.ts` (the file, the refusal of people inline, the diff, the sealed last load, a
+      symlink swap seen by the watch and by the poll, an invalid reload, the picker), `tests/revocation.test.ts` (the
+      allocation, a revocable definition, the offer, the issuance record of a badge from the directory),
+      `tests/people.test.ts` (over the agent, with a mocked DIDComm agent and trust resolver: roles from the entry and
+      IDENT-ROLE-014, the admin view, members by directory id, rule spaces by department and group, owner by directory id,
+      a reload that changes roles, moves a person out of a rule space and removes two, revocation, its retry),
+      `tests/profileErrors.test.ts`, and on PostgreSQL the migration to 3.7.0, the new queries, and the agent with a
+      directory keeping nothing of a person in the clear but the id and the name the admin audit holds.
+62. **A badge from the user directory, the email code, email, and invitations of other organizations: phase 2b**
+    (2026-11-19, Fabrice's decisions of the design review, E5, E6, E7, review decisions 12 and 16; ayni-spec D88, D89,
+    D90, PR #94). With it the build of spaces, memories, people and erasure is complete; one pull request carries
+    decisions 60 to 62.
+    - **The claims of the directory (INTX-ISSUE-002/021, IDENT-DIR-002/005):** a claim may read `{ from: record, record:
+      directory, field }` (`name`, `firstName`, `lastName`, `email` or `department`, empty when the entry has none). The
+      entry is found from the person's evidence, never before it exists: the claim is `pending` until then, its action the
+      profile's own challenge (`issue_credential` with the profile and the `challenge`, `document` or `email`), and the
+      credential `ready`; `missing` when no single entry is found, the reason in the log without a value
+      (`DirectoryClaims`). The record of the issuance keeps the entry. `as: dateint` writes a date as `YYYYMMDD`;
+      `emailId` numbers a badge by the verified address as `documentId` does by the document. The challenges of a profile
+      are a list, run in order (`challengesOf`); a single object is still taken, as the spec's own §11.9 writes one for a
+      document read. The loader refuses, in words, a profile of the directory with another list than `[document]`,
+      `[email]` or `[document, email]`, a directory claim with no `identity.directory`, a passport whose match reads what
+      `evidence.document` does not store, an email challenge without `evidence.email` storing `address`, with
+      `modelVisible`, on a profile that takes nothing from the directory or on an automatic one, and an action that
+      declares it (before the schema).
+    - **The passport (IDENT-DIR-003):** the names of an entry are written as the machine-readable zone writes them, by the
+      table of ICAO Doc 9303, Part 3, section 6 (`src/core/icao.ts`): every form the table gives for a letter, its base
+      letter among them (`Müller` is `MUELLER`, `MUXXLLER` or `MULLER`; `Peña` is `PENA` or `PENXXA`; `ß` is `SS`), an
+      apostrophe dropped, any other sign a separator. The last name equals the document's word for word; the words of the
+      first name are words of the given names, in order (not necessarily side by side: `Ana Carmen` matches `ANA MARIA
+      CARMEN`); the date of birth and the nationality (the zone's code, `D` for Germany) are equal. The document read does
+      not keep its format, so the zone is taken to have filled its name field when the field it rebuilds is 30, 31 or 39
+      characters long (TD1, TD2, TD3); then the last word it holds may begin the entry's, and a surname that filled it
+      left no given name to compare. A letter with no Latin form never matches. The birthdate and the nationality never
+      leave `UserDirectory.matchDocument`. The nationality comes from the chip's DG1, which the agent already reads
+      (D73): nothing changes in the VS Agent.
+    - **The email code (D89, INTX-AUTH-011..015, PROF-RUN-015, `src/core/emailCheck.ts`):** the issuing tool answers the
+      model that the system asks the person and ends the turn (`ToolResult.endTurn`): the orchestrator calls the model no
+      more, writes no empty reply, and streams the code's question as an `auth-challenge` entry. While the check waits in
+      a conversation, `AyniAgent.turn` gives the person's messages there, from any device, to the code before anything
+      else (one at a time per person): the address, then the tries. They and the code's answers are `auth-challenge`
+      entries that start no turn and never enter the model's window, summary or recall (`entryToMessages` gives them
+      nothing; they are not embedded); history shows them as messages. The answer to the address is one text; a code
+      goes, in the background, only to an address an entry holds, so that neither the words nor the time of the answer
+      tell which. Six digits (`randomInt`), kept as a keyed hash of the check and the code, ten minutes from its sending,
+      five tries, used once; the address waits sealed in the challenge record and is dropped at its end. A right code
+      records evidence `email` (`address`), and the issuance goes on by itself (`AyniAgent.continueIssuance`), the person
+      told its outcome by the code; the model reads `Identity check (email) for issue_credential: passed | failed |
+      expired` as a record of the system. A timer ends a check whose time is over, and the code says so; checks a restart
+      left waiting resume. The platform rules (add-on 3.3.0) tell the model, when a profile has an email check, never to
+      ask for an address or a code.
+    - **Issuing identifies nobody (IDENT-RES-017):** a guest who receives the badge of the authentication schema is asked
+      at once to present it (`IdentityRequests.request`, as the person's own request). When a guest identifies, what the
+      agent verified about them and what it issued them follow them to the identified Principal
+      (`EvidenceService.reassign`; PostgreSQL now updates `principal_id` of a record saved again): about-me shows the
+      address, and the badge is `held`.
+    - **Email (PLAT-MAIL-001/002, `src/platform/mail.ts`):** nodemailer 10.3.1, pinned, configured with the variables of
+      the 2060.io website (Fabrice, 2026-11-19): `MAIL_HOST`, `MAIL_PORT` (587, STARTTLS when offered), `MAIL_ENCRYPTION`
+      (`ssl`, or port 465: TLS from the start), `MAIL_USERNAME` and `MAIL_PASSWORD` (together, or neither),
+      `MAIL_FROM_ADDRESS` and `MAIL_FROM_NAME`; without `MAIL_HOST` and `MAIL_FROM_ADDRESS`, the email code is unavailable (its claims
+      `unavailable`, INTX-AUTH-011) and invitations answer `503 email-unavailable`, which the agent says at start, naming
+      the profiles and the templates. An email carries what its purpose needs and nothing else. `pnpm test:mail` sends
+      through a throwaway Mailpit (`axllent/mailpit:v1.32.0`) and reads it back from its API.
+    - **Invitations of other organizations (D90, SPACE-INV-001..005, PROF-DIR-002, `src/core/invitations.ts`):**
+      `GET {sessions}/organizations?q=` searches the Verana Graph (`VERANA_GRAPH_URL`, `POST /v4/graph/search`, the `Did`
+      surface, operators of kind `Organization`; key `org:<countryCode>:<registryId>`), one item per organization,
+      trusted only, its name containing `q` (two characters at least, case and marks aside), the agent's own excluded, at
+      most 20, to the people of the member picker. `POST {sessions}/spaces/{id}/members { organizationKey, email }`
+      refuses, in this order, a key or an address that is not one (`400` with the field), no SMTP (`503`), the agent's
+      own organization (`422 home-organization`), one the authentication does not accept (`409
+      organization-not-accepted`), one the graph does not hold trusted (`422 not-on-verana`); then records an `invited`
+      guest (the email sealed, its keyed index, the organization's name for the member list) and sends one email: who
+      invites, the space, the agent and its organization, the badge needed, and the app link `<APP_LINK_BASE>service/<did>`.
+      A Principal of that organization whose stored email matches is bound at once, asked nothing; one whose evidence
+      holds none is asked once per invitation for its badge again, now when its wallet is connected, else at its next
+      connection (`askedPrincipalIds`). A presented identity credential binds the invitations of its issuer's
+      organization key (from the proof) and its `email`, in lower case, to its Principal, as `guest`. The agent warns at
+      start when a list template exists and the authentication does not both ask for and store `email`, or when no
+      `VERANA_GRAPH_URL` is set.
+    - **Folded in from the integration check of the UI and the app (2026-11-19):** `GET {sessions}/spaces/{id}/shared` of
+      a space that takes no handover answers `200 { conversations: [] }`, its messages 404 (it answered `409
+      handover-not-allowed`, which §3.7 does not give). `turn-in-progress` is in §9 now (spec 84ec336); the profile
+      package drops `not-implemented`, which no route answers any more. About-me names `email` as the source of a verified
+      address and the issuing state as that of a document.
+    - **Choices of mine, to flag:** `cancel` (or stop, annuler, cancelar, parar, abbrechen) stops an email check; a text
+      that is not an address is asked again within the ten minutes and is not a try; every message while the check waits
+      is taken, a voice note or a file included; the check is never served on a DIDComm chat (that is the capability
+      channel): a badge asked from the wallet's own menu answers that the check runs in the app or the web; the outcome is
+      told to the person by the code as a message of the agent; a guest who receives the badge is asked to present it; an
+      invitation whose email cannot be sent is not recorded (`503`), and one whose organization the graph cannot be asked
+      about is refused as not on Verana; without `APP_LINK_BASE` the link is on `app.ayni.org`; the first-name words of a
+      passport match in order but not necessarily side by side; the zone's "filled" field is read from the length of the
+      names, the format of the document not being kept.
+    - **Found, not changed here:** the Principal keeps the stored claims of its identity credential in `identityAttributes`,
+      in the clear in the `principals` table (decision 43): with `email` stored for invitations, the address is there. The
+      messages of an email check are not ones a person can delete within the window (`TRANSCRIPT_MESSAGE_TYPES`). The
+      reference profile names the indexer (`VERANA_API_URL`) for the search of organizations; the graph is its own
+      service, `VERANA_GRAPH_URL` (a patch for spec #94 is handed over).
+    - **Tests:** `tests/icao.test.ts` (the table, separators, other scripts, truncation, the match), `tests/directoryBadge.test.ts`
+      (passport, email, both, `dateint`, `emailId`, the loader), `tests/emailCode.test.ts` (over the agent: pending claims,
+      the turn that ends, one check at a time, the same answer, five tries, the right code and the offer, the badge
+      presented and held, history and the model's requests, nothing in the clear, expiry by time and by timer, cancel,
+      no SMTP), `tests/invitations.test.ts` (the graph search, every refusal, the email, binding, guests, the known
+      Principal asked once), `tests/mail.test.ts` (the mailer, and Mailpit with `pnpm test:mail`), the shared list in
+      `tests/spaces.test.ts`, `tests/profileErrors.test.ts`, and on PostgreSQL the invitations by keyed index and no
+      address, code or invited email in any table. `pnpm e2e` (`scripts/e2e/spaces-people.e2e.ts`) runs the built agent
+      on PostgreSQL with Mailpit and a stand-in that plays the DIDComm agent, the trust resolver, the graph and the phone:
+      its report is in `scripts/e2e/report/`. A real VS Agent and a wallet are not part of any of them.
+    - **Devnet (the deploy pull request):** the Dev Agent's credential definition of schema 23 was created without
+      revocation: delete it in its VS Agent (`DELETE /v2/anoncreds/credential-definitions/{id}`) before a badge is issued
+      from the directory. The flow plugin's `POST /v2/didcomm/revocation-notification` is in the plugin since its first
+      release (`V2DidcommRevocationNotificationController`, registered by `AyniFlowPlugin`), so in the devnet image
+      `io2060/vs-agent-ayni:v2.0.0-ayni.5-ayni.0.1.7`. New environment: `MAIL_*` (`MAIL_USERNAME` and `MAIL_PASSWORD` in a Secret),
+      `VERANA_GRAPH_URL`.

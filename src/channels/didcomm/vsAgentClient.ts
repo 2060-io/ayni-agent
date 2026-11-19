@@ -318,31 +318,73 @@ export class VsAgentClient {
     })
   }
 
-  /** The credential definitions this DIDComm agent created, a page at a time. */
-  public listCredentialDefinitions(
-    cursor?: string
-  ): Promise<{ items: { id: string; relatedJsonSchemaCredentialId?: string }[]; nextCursor?: string | null }> {
+  /** The credential definitions this DIDComm agent created, a page at a time; each says whether it supports revocation. */
+  public listCredentialDefinitions(cursor?: string): Promise<{
+    items: { id: string; relatedJsonSchemaCredentialId?: string; supportRevocation?: boolean }[]
+    nextCursor?: string | null
+  }> {
     const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
     return this.request('GET', `/anoncreds/credential-definitions${query}`)
   }
 
-  /** Creates the credential definition of this DIDComm agent for a schema of an ecosystem. */
+  /**
+   * Creates the credential definition of this DIDComm agent for a schema of an ecosystem; with `supportRevocation` the
+   * credentials issued under it can be revoked, and each offer then names a revocation registry and an index.
+   */
   public createCredentialDefinition(body: {
     relatedJsonSchemaCredentialId: string
     supportRevocation?: boolean
-  }): Promise<{ id: string }> {
+  }): Promise<{ id: string; supportRevocation?: boolean }> {
     return this.request('POST', '/anoncreds/credential-definitions', body)
   }
 
-  /** Offers an AnonCreds credential on a connection; `autoAccept` issues it once the holder asks for it. */
+  /**
+   * Offers an AnonCreds credential on a connection; `autoAccept` issues it once the holder asks for it. Under a revocable
+   * definition the caller names the registry and the index the credential takes (VSA-ADM-DC-CE-OFFER); the DIDComm agent
+   * does not choose them.
+   */
   public offerCredential(body: {
     connectionId: string
     credentialDefinitionId: string
     claims: { name: string; value: string }[]
     autoAccept?: boolean
     parentThreadId?: string
+    revocationRegistryDefinitionId?: string
+    revocationRegistryIndex?: number
   }): Promise<{ credentialExchangeId: string }> {
     return this.request('POST', '/didcomm/credential-offer', body)
+  }
+
+  /** Creates a revocation registry, and its first status list, for a revocable credential definition (VSA-ADM-AC-RR-CREATE). */
+  public createRevocationRegistry(body: {
+    credentialDefinitionId: string
+    maximumCredentialNumber?: number
+  }): Promise<{ revocationRegistryDefinitionId: string }> {
+    return this.request('POST', '/anoncreds/revocation-registries', body)
+  }
+
+  /**
+   * Revokes one credential, by its registry and its index, and publishes the new status list (VSA-ADM-AC-CR-REVOKE). It
+   * sends nothing to the holder: the agent notifies it (`sendRevocationNotification`).
+   */
+  public revokeCredential(body: {
+    revocationRegistryDefinitionId: string
+    revocationRegistryIndex: number
+  }): Promise<{ revocationRegistryDefinitionId: string; revocationRegistryIndex: number; revokedAt: string }> {
+    return this.request('POST', '/anoncreds/revoke-credential', body)
+  }
+
+  /**
+   * `revocation_notification/2.0/revoke` to the holder (flow profile §6.12, FLOW-REVOKE-001, INTX-FLOW-007), through the
+   * plugin of the flow profile: `revocationId` is `<registry>::<index>` for AnonCreds.
+   */
+  public sendRevocationNotification(body: {
+    connectionId: string
+    revocationId: string
+    revocationFormat?: string
+    comment?: string
+  }): Promise<{ sent: true }> {
+    return this.request('POST', '/didcomm/revocation-notification', body)
   }
 
   public getPresentation(proofExchangeId: string): Promise<PresentationRecord> {

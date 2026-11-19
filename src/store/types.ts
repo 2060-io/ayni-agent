@@ -20,6 +20,9 @@ import type {
   RagChunk,
   Session,
   SessionState,
+  Space,
+  SpaceActivity,
+  SpaceMember,
   StatEvent,
   WorkingMemoryNote,
 } from '../core/types.js'
@@ -85,6 +88,11 @@ export interface ConversationRepo {
   listByPrincipal(principalId: string, states?: ConversationState[]): Promise<Conversation[]>
   /** every conversation, for the start job that seals what an earlier version kept in the clear (D77) */
   listAll(): Promise<Conversation[]>
+  /**
+   * the conversations of a space, of every Principal and in every state, newest activity first; only those their author
+   * shares with it when `shared` (SPACE-SHARE-002). For the space's retention and its handovers, never for the model
+   */
+  listBySpace(spaceId: string, opts?: { shared?: boolean }): Promise<Conversation[]>
 }
 
 export interface EntryRepo {
@@ -111,15 +119,32 @@ export interface EntryRepo {
   listWithPlainAttachments(limit: number): Promise<StoredEntry[]>
   listUnanchored(limit: number): Promise<StoredEntry[]>
   markAnchored(ids: string[], batchId: string): Promise<void>
-  listOlderThan(cutoffIso: string, state: LifecycleState, limit: number): Promise<StoredEntry[]>
+  /**
+   * the entries in a state created before the cutoff, of one space, or of the Personal spaces (`personal`), when named
+   * (PRIV-RETN-008)
+   */
+  listOlderThan(
+    cutoffIso: string,
+    state: LifecycleState,
+    limit: number,
+    filter?: { spaceId?: string; personal?: boolean }
+  ): Promise<StoredEntry[]>
+  /** the entries of a conversation follow it to another space, before its first message (SPACE-CONV-002) */
+  setSpace(conversationId: string, spaceId: string): Promise<void>
   setState(ids: string[], state: LifecycleState): Promise<void>
-  /** the entries of the given sessions become those of another Principal (a visitor who identifies, IDENT-RES-013) */
+  /**
+   * the entries of the given sessions become those of another Principal (a visitor who identifies, IDENT-RES-013); those
+   * of a Personal space go to the Personal space of that Principal (SPACE-DEF-002)
+   */
   reassign(sessionIds: string[], principalId: string): Promise<number>
   listAttachmentKeys(): Promise<{ entryId: string; state: LifecycleState; bucketKey: string }[]>
 }
 
 export interface WorkingMemoryRepo {
-  /** a retrieval: through the scope predicate (PRIV-SCOPE-003) */
+  /**
+   * a retrieval: through the scope predicate (PRIV-SCOPE-003), which names the space of the notes it reads, if any
+   * (MEM-SPACE-001). A note without a space is of the Personal space of its Principal
+   */
   query(scope: ScopePredicate): Promise<WorkingMemoryNote[]>
   /** the Principal's notes, for the writes of the working-memory tool */
   list(principalId: string): Promise<WorkingMemoryNote[]>
@@ -150,6 +175,16 @@ export interface EvidenceRepo {
   save(record: StoredEvidence): Promise<void>
   /** active records whose retention ended at or before the given time */
   listExpired(nowIso: string): Promise<StoredEvidence[]>
+  /**
+   * the issuance records whose claims came from the user directory, of one entry or of every entry, oldest first: what a
+   * removal from the directory revokes (IDENT-DIR-006, IDENT-ROLE-013)
+   */
+  listIssuedFromDirectory(directoryEntryId?: string): Promise<StoredEvidence[]>
+  /**
+   * the issuance records of the identity credential that identifies an actor, by the keyed index of the actor, newest
+   * first: how a presented credential finds the entry it was issued from (IDENT-ROLE-012)
+   */
+  listIssuedTo(holderIndex: string): Promise<StoredEvidence[]>
 }
 
 export interface ApprovalRepo {
@@ -213,7 +248,11 @@ export interface KvRepo {
 export interface AdminAuditRecord {
   id: string
   ts: string
-  action: 'erasure' | 'legal-hold' | 'legal-hold-release' | 'audit-read'
+  /**
+   * a call to the admin interface; what a reload of the user directory changed, entry by entry (IDENT-DIR-009); a
+   * credential revoked because its entry left the directory (IDENT-ROLE-013)
+   */
+  action: 'erasure' | 'legal-hold' | 'legal-hold-release' | 'audit-read' | 'directory-change' | 'credential-revocation'
   actor: string
   reason: string
   /** what it named and what came of it: entry ids, a conversation, a Principal, an evidence record, counts */
@@ -222,7 +261,35 @@ export interface AdminAuditRecord {
 
 export interface AdminAuditRepo {
   insert(record: AdminAuditRecord): Promise<void>
-  list(limit: number): Promise<AdminAuditRecord[]>
+  /** newest first; of one action when named, and after (older than) the record `before` names */
+  list(limit: number, filter?: { action?: AdminAuditRecord['action']; before?: string }): Promise<AdminAuditRecord[]>
+}
+
+/** The spaces of the agent (SPACE-DEF-001): title, purpose and brief sealed by the space service. */
+export interface SpaceRepo {
+  get(id: string): Promise<Space | undefined>
+  save(space: Space): Promise<void>
+  /** every space of an agent: those of a rule are evaluated per person, and are few */
+  list(agentId: string): Promise<Space[]>
+}
+
+export interface SpaceMemberRepo {
+  get(id: string): Promise<SpaceMember | undefined>
+  save(member: SpaceMember): Promise<void>
+  listBySpace(spaceId: string): Promise<SpaceMember[]>
+  listByPrincipal(principalId: string): Promise<SpaceMember[]>
+  /** the rows of a person of the user directory, in every space (SPACE-MEMB-002) */
+  listByDirectoryId(directoryId: string): Promise<SpaceMember[]>
+  /** the invitations of a person of another organization, by its organization key and the keyed index of its email (SPACE-INV-003) */
+  listByInvitee(organizationKey: string, emailIndex: string): Promise<SpaceMember[]>
+  /** a person removed while invited is removed, not `left` (SPACE-MEMB-004) */
+  delete(id: string): Promise<void>
+}
+
+export interface SpaceActivityRepo {
+  insert(activity: SpaceActivity): Promise<void>
+  /** newest first */
+  list(spaceId: string, limit: number): Promise<SpaceActivity[]>
 }
 
 export interface Store {
@@ -250,6 +317,9 @@ export interface Store {
   stats: StatsRepo
   kv: KvRepo
   adminAudit: AdminAuditRepo
+  spaces: SpaceRepo
+  spaceMembers: SpaceMemberRepo
+  spaceActivity: SpaceActivityRepo
 }
 
 export function cosine(a: number[], b: number[]): number {

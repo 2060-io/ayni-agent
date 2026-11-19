@@ -11,11 +11,24 @@ export type Relation = 'home' | 'partner' | 'unrecognized'
 export type ConnectionType = 'verifiable-user-agent' | 'verifiable-service'
 export type ToolNameOrStar = string
 
+/**
+ * A role: approval rights and flags, never a scope of conversation reads (RBAC-XSESS-005, decision 60): `crossSession`
+ * is withdrawn and a pack that declares it is refused at start.
+ */
 export interface RoleDefinition {
   description?: string
-  crossSession?: 'own-sessions' | 'own-backing-identity' | 'all'
   canApprove?: boolean
   auditor?: boolean
+  /** the role reads the admin view of roles and of the changes of the user directory (IDENT-DIR-008, decision 61) */
+  admin?: boolean
+}
+
+/**
+ * The user directory (ayni-spec D79, IDENT-ROLE-012): the people of the home organization, in a file mounted from a
+ * secret of the deployment and never written in the agent-pack. A relative path resolves from the pack directory.
+ */
+export interface UserDirectoryRef {
+  file: string
 }
 
 export interface RoleRule {
@@ -128,20 +141,45 @@ export interface PresentationEntry extends EvidencePolicy {
 
 /**
  * Where a claim of an issued credential comes from (D70, INTX-ISSUE-002): never the model. `evidence` is an
- * attribute of a verified presentation the pack stores; `computed` is a fixed function of the profile.
+ * attribute of a verified presentation, document read or email check the pack stores, `as: dateint` writing a calendar
+ * date as the integer `YYYYMMDD` (IDENT-DIR-005); `record` is a field of the person's entry of the user directory, found
+ * from their evidence (INTX-ISSUE-021); `computed` is a fixed function of the profile.
  */
 export type ClaimSource =
-  | { from: 'evidence'; entry: string; attribute: string }
+  | { from: 'evidence'; entry: string; attribute: string; as?: 'dateint' }
   | { from: 'computed'; fn: ComputedFunction; days?: number; value?: string }
+  | { from: 'record'; record: 'directory'; field: DirectoryField }
+
+/**
+ * The fields a claim may take from an entry of the user directory (INTX-ISSUE-021): `name` is the first and last name
+ * joined by a space. Never the birthdate or the nationality, which only the matching of a document reads (IDENT-DIR-007).
+ */
+export const DIRECTORY_FIELDS = ['name', 'firstName', 'lastName', 'email', 'department'] as const
+export type DirectoryField = (typeof DIRECTORY_FIELDS)[number]
 
 /**
  * The functions of a `computed` source, a closed list (INTX-ISSUE-015). `subjectId` is an identifier of the
  * subject, derived from the Principal and the profile (INTX-ISSUE-016): the number of a badge, for one.
  * `documentId` is an identifier of the document the Principal read, derived from its issuing state and its
- * number (INTX-ISSUE-019): one document gives one value, through whichever connection it is read.
+ * number (INTX-ISSUE-019): one document gives one value, through whichever connection it is read. `emailId` is an
+ * identifier of the address the Principal verified by an email code (INTX-ISSUE-020).
  */
-export const COMPUTED_FUNCTIONS = ['today', 'now', 'addDays', 'constant', 'subjectId', 'documentId'] as const
+export const COMPUTED_FUNCTIONS = ['today', 'now', 'addDays', 'constant', 'subjectId', 'documentId', 'emailId'] as const
 export type ComputedFunction = (typeof COMPUTED_FUNCTIONS)[number]
+
+/**
+ * One challenge of an issuance profile (INTX-ISSUE-010): those of any action, and `email`, the email code of a badge
+ * from the user directory (D89, INTX-AUTH-011), which no other action may declare.
+ */
+export interface IssuanceChallenge {
+  type: 'device' | 'face-match' | 'document' | 'email'
+  onChannelUnavailable?: 'fail' | 'degrade'
+  referenceImage?: 'badge-photo'
+  timeoutSeconds?: number
+}
+
+/** The one attribute of the evidence of an email check: the verified address (INTX-AUTH-015). */
+export const EMAIL_ATTRIBUTES = ['address'] as const
 
 /** A credential the agent may issue, and the source of each of its claims (D70, INTX-ISSUE-001). */
 export interface IssuanceProfile {
@@ -158,13 +196,49 @@ export interface IssuanceProfile {
   trigger?: 'model' | 'request' | 'automatic'
   /** the roles that may receive it; anyone of the subject kind when absent */
   roles?: string[]
-  /** enforced before the issuance, as for any action (INTX-ISSUE-010) */
-  authChallenge?: ActionPolicy['authChallenge']
+  /**
+   * enforced before the issuance, in order (INTX-ISSUE-010): one challenge or a list of them; a badge from the user
+   * directory declares `[document]`, `[email]` or `[document, email]` (IDENT-DIR-002). Read through `challengesOf`
+   */
+  authChallenge?: IssuanceChallenge | IssuanceChallenge[]
   /** evidence older than this is expired for the profile (INTX-ISSUE-013) */
   evidenceMaxAgeMinutes?: number
   claims: Record<string, ClaimSource>
   /** what is kept of an issuance beyond its audit fields: the issued claims, when asked, for the retention given */
   record?: { storeClaims?: boolean; retention?: { days?: number; onExpiry?: 'archive' | 'erase' } }
+}
+
+/** Whether a profile takes a claim from the user directory (`{ from: record, record: directory, field }`, INTX-ISSUE-021). */
+export function takesClaimsFromDirectory(profile: Pick<IssuanceProfile, 'claims'>): boolean {
+  return Object.values(profile.claims).some((source) => source.from === 'record' && source.record === 'directory')
+}
+
+/** The challenges a profile declares, in their order: one object or a list of them (IDENT-DIR-002). */
+export function challengesOf(profile: Pick<IssuanceProfile, 'authChallenge'>): IssuanceChallenge[] {
+  return ([] as IssuanceChallenge[]).concat(profile.authChallenge ?? [])
+}
+
+/** The types of the challenges a profile declares, in their order. */
+export function challengeTypesOf(profile: Pick<IssuanceProfile, 'authChallenge'>): IssuanceChallenge['type'][] {
+  return challengesOf(profile).map((c) => c.type)
+}
+
+/**
+ * Badges are obtained from the directory with a passport: then every entry carries a birthdate and a nationality,
+ * which only the matching of a document read reads (IDENT-ROLE-012, IDENT-DIR-002, IDENT-DIR-007).
+ */
+export function directoryReadsDocuments(pack: Pick<AgentPack, 'issuance'>): boolean {
+  return Object.values(pack.issuance ?? {}).some(
+    (profile) => takesClaimsFromDirectory(profile) && challengeTypesOf(profile).includes('document')
+  )
+}
+
+/**
+ * A credential that must be revocable: one whose claims come from the directory, revoked when its entry leaves it
+ * (D91, IDENT-ROLE-013, IDENT-DIR-006). The definition of its schema is created with revocation (decision 61).
+ */
+export function mustBeRevocable(profile: Pick<IssuanceProfile, 'claims'>): boolean {
+  return takesClaimsFromDirectory(profile)
 }
 
 /** The connection type a schema of the given subject kind is asked of (INTX-PRES-007). */
@@ -191,6 +265,8 @@ export interface PackIdentity {
   roles?: Record<string, RoleDefinition>
   roleRules: RoleRule[]
   perActorOverrides?: { actor: string; roles: string[]; comment?: string }[]
+  /** the people of the home organization and their roles, typed by hand (D79, D87, IDENT-ROLE-012) */
+  directory?: UserDirectoryRef
   /** Credentials requested on DIDComm connect (addition over schema 3.0, see docs/agent-pack.md). */
   credentials?: {
     userAgent?: CredentialRef
@@ -208,6 +284,11 @@ export interface MenuItemDef {
 
 export interface LlmConfig {
   provider: 'openai' | 'anthropic' | 'ollama' | 'openai-compatible' | 'azure-openai' | 'bedrock' | 'vertex' | 'stub'
+  /**
+   * the name of the model provider the spaces' `allowedProviders` list (SPACE-CONV-004), `kimi` for `openai-compatible` on
+   * Moonshot for example; `provider` when absent
+   */
+  providerName?: string
   model: string
   baseUrl?: string
   apiKeyEnv?: string
@@ -336,6 +417,35 @@ export interface Features {
   history: boolean
 }
 
+export type LawfulBasis = 'consent' | 'contract' | 'legitimate-interest'
+
+/**
+ * A kind of space the pack lets people create (SPACE-DEF-003, decision 60): who may create one, how its members are
+ * given, and the rules an owner may set, with their bounds. A rule without bounds keeps its default.
+ */
+export interface SpaceTemplate {
+  id: string
+  title: string
+  kind: 'team' | 'organization'
+  /** the roles of the people who may create a space from it */
+  creators: string[]
+  /** by a list the owner keeps, or by a rule over verified facts of the people of the home organization */
+  membership: { mode: 'list' } | { mode: 'rule'; rule: { department?: string; group?: string; organization?: true } }
+  rules?: {
+    retentionDays?: { default?: number; min?: number; max?: number }
+    lawfulBasis?: { default?: LawfulBasis; allowed?: LawfulBasis[] }
+    allowedProviders?: { default?: string[]; allowed?: string[] }
+    handover?: { default?: boolean; allowed?: boolean[] }
+  }
+}
+
+/** The rules of every Personal space (SPACE-DEF-002): 365 days, the conversation memory's basis, the agent's provider. */
+export interface PersonalSpaceRules {
+  retentionDays?: number
+  lawfulBasis?: LawfulBasis
+  allowedProviders?: string[]
+}
+
 export interface ImageProviderDef {
   name: string
   type: 'openai-image' | 'openai-compatible-image'
@@ -368,10 +478,10 @@ export interface AgentPack {
   /** the credentials the agent may ask for, by name; `authentication` is the entry of identity.authentication (D69) */
   presentations?: Record<string, PresentationEntry>
   /**
-   * The evidence that is not a credential: what is kept of a document read, the `document` challenge of an
-   * action, and what the model may read of it (D73, PRIV-EVID-003).
+   * The evidence that is not a credential: what is kept of a document read (the `document` challenge) and of an address
+   * verified by an email code (the `email` challenge, D89), and what the model may read of it (D73, PRIV-EVID-003).
    */
-  evidence?: { document?: EvidencePolicy }
+  evidence?: { document?: EvidencePolicy; email?: EvidencePolicy }
   /** the credentials the agent may issue, by name (D70) */
   issuance?: Record<string, IssuanceProfile>
   tools?: {
@@ -435,6 +545,26 @@ export interface AgentPack {
   integrity?: { anchoring?: { enabled?: boolean; batchIntervalSeconds?: number; maxBatchEntries?: number } }
   statistics?: { enabled?: boolean; sink?: 'redis-stream' | 'http'; httpUrl?: string }
   features?: Partial<Features>
+  /** what a person may do with their conversations (PRIV-ERASE-010) */
+  conversations?: {
+    /** a person deletes their own message, with the agent's reply, while it is younger than this; 600 by default */
+    messageDeletionWindowSeconds?: number
+  }
+  /** the rules of Personal and the spaces people may create in this agent (SPACE-DEF-002/003) */
+  spaces?: { personal?: PersonalSpaceRules; templates?: SpaceTemplate[] }
+}
+
+/** The retention of a space whose template or `spaces.personal` gives none (SPACE-DEF-002). */
+export const PERSONAL_RETENTION_DAYS = 365
+
+/** The model provider a space allows or not (SPACE-CONV-004): `llm.providerName`, else `llm.provider`. */
+export function providerNameOf(pack: Pick<AgentPack, 'llm'>): string {
+  return pack.llm.providerName ?? pack.llm.provider
+}
+
+/** The deletion window of a message (PRIV-ERASE-010), in seconds. */
+export function messageDeletionWindowSeconds(pack: Pick<AgentPack, 'conversations'>): number {
+  return pack.conversations?.messageDeletionWindowSeconds ?? 600
 }
 
 export const DEFAULT_FEATURES: Features = {

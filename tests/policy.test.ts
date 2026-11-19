@@ -80,7 +80,6 @@ describe('scope predicate (D12, D76, PRIV-SCOPE, PRIV-CLS-005)', () => {
     conversationId: 'c1',
     backingIdentity: { kind: 'org' as const, id: HOME },
     relation: 'home' as const,
-    crossSession: 'own-sessions' as const,
   }
   it('authorizes by construction: state active, visibility terms keyed on conversation, principal, backing identity', () => {
     const scope = buildScope(ctx)
@@ -130,6 +129,25 @@ describe('scope predicate (D12, D76, PRIV-SCOPE, PRIV-CLS-005)', () => {
     expect(notes).not.toContain('conversation_id')
     expect(storeShapeFaults()).toEqual([])
   })
+  it('reads a principal-private item of a space in that space only, where the store declares its space (MEM-SPACE-001)', () => {
+    const scope = buildScope({ ...ctx, spaceId: 'spc_truck' })
+    const note = (spaceId: string) => ({
+      visibility: 'principal-private' as const,
+      state: 'active',
+      principalId: 'p1',
+      spaceId,
+    })
+    expect(matchesScope(scope, note('spc_truck'), STORE_SHAPES.notes)).toBe(true)
+    expect(matchesScope(scope, note('personal:p1'), STORE_SHAPES.notes)).toBe(false)
+    // a preference carries no space: read in every one
+    expect(matchesScope(scope, note('anything'), STORE_SHAPES.preferences)).toBe(true)
+    expect(scopeToSql(scope, STORE_SHAPES.notes, 'n', 1).sql).toContain('n.space_id = $')
+    expect(scopeToSql(scope, STORE_SHAPES.preferences, 'p', 1).sql).not.toContain('space_id')
+    // a conversation-private entry is its conversation's, whatever the space; without a space nothing is narrowed
+    const entries = scopeToSql(scope, STORE_SHAPES.entries, 'e', 1).sql
+    expect(entries.match(/space_id/g)).toHaveLength(1)
+    expect(scopeToSql(buildScope(ctx), STORE_SHAPES.notes, 'n', 1).sql).not.toContain('space_id')
+  })
   it('refuses a store that holds a visibility without the column its terms compare (PRIV-SCOPE-003)', () => {
     const faults = storeShapeFaults([
       {
@@ -140,7 +158,8 @@ describe('scope predicate (D12, D76, PRIV-SCOPE, PRIV-CLS-005)', () => {
         columns: {},
       },
     ])
-    expect(faults.length).toBe(2)
+    // conversation-private compares its conversation only: no role reads across conversations (decision 60)
+    expect(faults.length).toBe(1)
     expect(faults[0]).toContain('store broken holds conversation-private but has no column for conversationId')
   })
 })

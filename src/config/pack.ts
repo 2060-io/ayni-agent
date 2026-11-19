@@ -8,13 +8,26 @@ import { fileURLToPath } from 'node:url'
 import { Ajv2020 } from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
 import { parse as parseYaml } from 'yaml'
-import type { AgentPack, AuthenticationEntry, EvidencePolicy, ToolAccess } from './packTypes.js'
-import { COMPUTED_FUNCTIONS, DOCUMENT_ATTRIBUTES, featuresOf } from './packTypes.js'
+import type { AgentPack, AuthenticationEntry, EvidencePolicy, SpaceTemplate, ToolAccess } from './packTypes.js'
+import {
+  COMPUTED_FUNCTIONS,
+  challengeTypesOf,
+  DOCUMENT_ATTRIBUTES,
+  EMAIL_ATTRIBUTES,
+  featuresOf,
+  PERSONAL_RETENTION_DAYS,
+  providerNameOf,
+  takesClaimsFromDirectory,
+} from './packTypes.js'
 
 /** The entry of the credential that authenticates a person (D65): never the name of a catalog entry. */
 export const AUTHENTICATION_ENTRY = 'authentication'
 /** The entry under which a document read is kept as evidence: the `document` evidence kind (D73). */
 export const DOCUMENT_ENTRY = 'document'
+/** The entry under which an address verified by an email code is kept as evidence: the `email` evidence kind (D89). */
+export const EMAIL_ENTRY = 'email'
+/** The attributes of a document read the matching of a directory entry reads (IDENT-DIR-003). */
+export const DIRECTORY_MATCH_ATTRIBUTES = ['lastName', 'firstName', 'dateOfBirth', 'nationality'] as const
 
 export class PackError extends Error {
   public constructor(
@@ -208,6 +221,184 @@ export function authenticationErrors(entry: AuthenticationEntry): string[] {
   return errors
 }
 
+/**
+ * What a role may no longer say (RBAC-XSESS-005, decision 60): a role carries no scope of conversation reads, so
+ * `crossSession` is withdrawn, whatever its value. Said in words before the schema, which would only name the key.
+ */
+export function removedCrossSessionErrors(doc: unknown): string[] {
+  const roles = (doc as { identity?: { roles?: Record<string, { crossSession?: unknown }> } })?.identity?.roles
+  if (!roles || typeof roles !== 'object') return []
+  return Object.entries(roles)
+    .filter(([, role]) => role && typeof role === 'object' && role.crossSession !== undefined)
+    .map(
+      ([name, role]) =>
+        `identity.roles.${name}.crossSession (${JSON.stringify(role.crossSession)}) is withdrawn: no role reads other people's conversations (RBAC-XSESS-005); remove it. A conversation is read by its author, by the active members of its space when its author shares it, and by an auditor through the admin interface (RBAC-XSESS-007)`
+    )
+}
+
+/**
+ * The people of the user directory are never written in the agent-pack (IDENT-ROLE-012, D79): the pack is versioned
+ * with the deployment and its history would keep every former employee. A pack that lists people, under
+ * `identity.directory` or beside it, is refused in words, before the schema, which would only name the key.
+ */
+export function inlineDirectoryErrors(doc: unknown): string[] {
+  const identity = (doc as { identity?: Record<string, unknown> })?.identity
+  if (!identity || typeof identity !== 'object') return []
+  const fix =
+    'the people of the user directory are never written in the agent-pack (IDENT-ROLE-012, D79): mount the list from a secret of the deployment and name its file with identity.directory.file'
+  const errors: string[] = []
+  const directory = identity.directory
+  if (Array.isArray(directory)) errors.push(`identity.directory is a list of people: ${fix}`)
+  else if (directory && typeof directory === 'object') {
+    for (const [key, value] of Object.entries(directory as Record<string, unknown>))
+      if (key !== 'file' && (Array.isArray(value) || key === 'people' || key === 'entries'))
+        errors.push(`identity.directory.${key}: ${fix}`)
+  }
+  for (const key of ['people', 'users', 'employees'])
+    if (identity[key] !== undefined) errors.push(`identity.${key}: ${fix}`)
+  return errors
+}
+
+/**
+ * The email code belongs to the issuance profiles that take claims from the user directory and to no other action
+ * (INTX-AUTH-011): an action that declares it is refused in words, before the schema, which would only name the value.
+ */
+export function emailChallengeActionErrors(doc: unknown): string[] {
+  const actions = (doc as { actions?: Record<string, { authChallenge?: { type?: unknown } }> })?.actions
+  if (!actions || typeof actions !== 'object') return []
+  return Object.entries(actions)
+    .filter(([, policy]) => policy?.authChallenge?.type === 'email')
+    .map(
+      ([tool]) =>
+        `actions.${tool}.authChallenge: the email code is the challenge of an issuance profile that takes claims from the user directory, and of no other action (INTX-AUTH-011)`
+    )
+}
+
+/**
+ * What an issuance profile may say of its challenges and of the user directory (IDENT-DIR-002, INTX-AUTH-011,
+ * INTX-ISSUE-019/020/021, D88, D89).
+ */
+export function issuanceChallengeErrors(pack: AgentPack): string[] {
+  const errors: string[] = []
+  const document = pack.evidence?.document
+  const email = pack.evidence?.email
+  for (const [name, profile] of Object.entries(pack.issuance ?? {})) {
+    const where = `issuance.${name}`
+    const types = challengeTypesOf(profile)
+    const fromDirectory = takesClaimsFromDirectory(profile)
+    const sources = Object.values(profile.claims)
+    if (fromDirectory) {
+      // IDENT-DIR-002: a document read, an email code, or both, in this order
+      const allowed = ['document', 'email', 'document,email']
+      if (!allowed.includes(types.join(',')))
+        errors.push(
+          `IDENT-DIR-002: ${where} takes claims from the user directory: its challenges are [document], [email] or [document, email], in this order (it declares [${types.join(', ')}])`
+        )
+      if (!pack.identity.directory)
+        errors.push(
+          `IDENT-DIR-002: ${where} takes claims from the user directory, and identity.directory names no file`
+        )
+      if (types.includes('document')) {
+        const unkept = DIRECTORY_MATCH_ATTRIBUTES.filter((a) => !document?.store?.attributes.includes(a))
+        if (unkept.length)
+          errors.push(
+            `IDENT-DIR-003: ${where} finds the entry of a passport: evidence.document must store [${unkept.join(', ')}]`
+          )
+      }
+    } else {
+      if (types.includes('email'))
+        errors.push(
+          `INTX-AUTH-011: ${where} declares an email challenge and takes no claim from the user directory: the email code belongs to a badge from the directory only`
+        )
+      if (types.length > 1)
+        errors.push(`INTX-ISSUE-010: ${where} declares several challenges: only a badge from the directory does`)
+    }
+    if (types.includes('email')) {
+      if (!email?.store?.attributes.includes('address'))
+        errors.push(
+          `INTX-AUTH-015: ${where} declares an email challenge: evidence.email must store [address], from which the entry and the badge number are found`
+        )
+      // the model is told the outcome of the check, never the address (INTX-AUTH-015)
+      if (profile.trigger === 'automatic')
+        errors.push(
+          `INTX-AUTH-012: ${where} declares an email challenge and is automatic: the email check is served in a conversation the person started`
+        )
+    }
+    const usesEmail = sources.some(
+      (s) => (s.from === 'computed' && s.fn === 'emailId') || (s.from === 'evidence' && s.entry === EMAIL_ENTRY)
+    )
+    if (usesEmail && !types.includes('email'))
+      errors.push(
+        `INTX-ISSUE-020: ${where} takes a claim from a verified address and declares no email challenge: nothing would verify it`
+      )
+    for (const [claim, source] of Object.entries(profile.claims)) {
+      if (source.from === 'evidence' && source.as === 'dateint' && source.entry === DOCUMENT_ENTRY) {
+        if (!['dateOfBirth', 'dateOfExpiry'].includes(source.attribute))
+          errors.push(
+            `IDENT-DIR-005: ${where}.claims.${claim} writes ${source.attribute} as a dateint, and it is not a date of the document`
+          )
+      }
+    }
+  }
+  if (email?.modelVisible?.length)
+    errors.push('INTX-AUTH-015: evidence.email.modelVisible: the model is never told the verified address')
+  if (email) {
+    const outside = (email.store?.attributes ?? []).filter((a) => !(EMAIL_ATTRIBUTES as readonly string[]).includes(a))
+    if (outside.length)
+      errors.push(
+        `INTX-AUTH-015: evidence.email stores [${outside.join(', ')}]: an email check has one attribute, address`
+      )
+  }
+  return errors
+}
+
+/** What a space template may not say (SPACE-DEF-003): its defaults lie within its bounds. */
+export function spaceTemplateErrors(pack: AgentPack): string[] {
+  const errors: string[] = []
+  const seen = new Set<string>()
+  for (const template of pack.spaces?.templates ?? []) {
+    const where = `spaces.templates.${template.id}`
+    if (seen.has(template.id)) errors.push(`rule 12: ${where} is declared twice`)
+    seen.add(template.id)
+    // a space of the whole organization has every person of it as a member (SPACE-DEF-003)
+    const m = template.membership
+    if (template.kind === 'organization' && !(m.mode === 'rule' && m.rule.organization))
+      errors.push(`rule 12: ${where} is of kind organization: its membership is the rule organization: true`)
+    errors.push(...templateBoundsErrors(pack, template, where))
+  }
+  return errors
+}
+
+function templateBoundsErrors(pack: AgentPack, template: SpaceTemplate, where: string): string[] {
+  const errors: string[] = []
+  const rules = template.rules ?? {}
+  const retention = rules.retentionDays
+  if (retention) {
+    if (retention.min !== undefined && retention.max !== undefined && retention.min > retention.max)
+      errors.push(`rule 12: ${where}.rules.retentionDays min is above max`)
+    const value = retention.default ?? PERSONAL_RETENTION_DAYS
+    if (retention.min !== undefined && value < retention.min)
+      errors.push(`rule 12: ${where}.rules.retentionDays default is below min`)
+    if (retention.max !== undefined && value > retention.max)
+      errors.push(`rule 12: ${where}.rules.retentionDays default is above max`)
+  }
+  const conversation = pack.privacy.processingActivities.find((a) => a.id === 'conversation-memory')
+  const lawful = rules.lawfulBasis?.default ?? conversation?.lawfulBasis ?? 'contract'
+  if (rules.lawfulBasis?.allowed && !rules.lawfulBasis.allowed.includes(lawful))
+    errors.push(`rule 12: ${where}.rules.lawfulBasis default is not among the allowed`)
+  const handover = rules.handover?.default ?? false
+  if (rules.handover?.allowed && !rules.handover.allowed.includes(handover))
+    errors.push(`rule 12: ${where}.rules.handover default is not among the allowed`)
+  const providers = rules.allowedProviders
+  const defaults = providers?.default ?? [providerNameOf(pack)]
+  if (providers?.allowed) {
+    const outside = defaults.filter((p) => !providers.allowed?.includes(p))
+    if (outside.length)
+      errors.push(`rule 12: ${where}.rules.allowedProviders default [${outside.join(', ')}] is not among the allowed`)
+  }
+  return errors
+}
+
 /** Cross-field rules 1 to 9 of docs/agent-pack.md plus PRIV-RETN-006. */
 export function crossFieldErrors(pack: AgentPack): string[] {
   const errors: string[] = []
@@ -232,22 +423,25 @@ export function crossFieldErrors(pack: AgentPack): string[] {
     if (name === AUTHENTICATION_ENTRY)
       errors.push('presentations: the name authentication is the entry of identity.authentication')
     if (name === DOCUMENT_ENTRY) errors.push('presentations: the name document is the entry of evidence.document')
+    if (name === EMAIL_ENTRY) errors.push('presentations: the name email is the entry of evidence.email')
     errors.push(...evidencePolicyErrors(`presentations.${name}`, entry, entry.attributes))
   }
   // a document read gives a closed list of attributes: only those can be stored (PRIV-EVID-012)
   const document = pack.evidence?.document
   if (document) errors.push(...evidencePolicyErrors('evidence.document', document, [...DOCUMENT_ATTRIBUTES]))
+  if (pack.evidence?.email)
+    errors.push(...evidencePolicyErrors('evidence.email', pack.evidence.email, [...EMAIL_ATTRIBUTES]))
   // every claim of an issued credential has a source the agent can resolve (INTX-ISSUE-001/002)
   for (const [name, profile] of Object.entries(pack.issuance ?? {})) {
     // what a profile takes from a document is read by its own challenge, or by nothing (INTX-AUTH-010)
     const readsDocument = Object.values(profile.claims).some((s) =>
-      s.from === 'computed' ? s.fn === 'documentId' : s.entry === DOCUMENT_ENTRY
+      s.from === 'computed' ? s.fn === 'documentId' : s.from === 'evidence' && s.entry === DOCUMENT_ENTRY
     )
     if (readsDocument && profile.trigger === 'automatic')
       errors.push(
         `INTX-AUTH-010: issuance.${name} takes claims from a document and is automatic: a person must ask before their document is read`
       )
-    if (readsDocument && profile.authChallenge?.type !== 'document')
+    if (readsDocument && !challengeTypesOf(profile).includes('document'))
       errors.push(
         `INTX-AUTH-010: issuance.${name} takes claims from a document and declares no document challenge: nothing would read it`
       )
@@ -257,6 +451,8 @@ export function crossFieldErrors(pack: AgentPack): string[] {
         `INTX-ISSUE-017: issuance.${name}.credential names one of credentialDefinitionId and jsonSchemaCredentialId`
       )
     for (const [claim, source] of Object.entries(profile.claims)) {
+      // a field of the directory entry: the loader of the schema checked the field (INTX-ISSUE-021)
+      if (source.from === 'record') continue
       if (source.from === 'computed') {
         if (!COMPUTED_FUNCTIONS.includes(source.fn))
           errors.push(`INTX-ISSUE-015: issuance.${name}.claims.${claim} names the unknown function ${source.fn}`)
@@ -277,13 +473,17 @@ export function crossFieldErrors(pack: AgentPack): string[] {
           ? identity.authentication?.[0]?.store?.attributes
           : source.entry === DOCUMENT_ENTRY
             ? document?.store?.attributes
-            : pack.presentations?.[source.entry]?.store?.attributes
+            : source.entry === EMAIL_ENTRY
+              ? pack.evidence?.email?.store?.attributes
+              : pack.presentations?.[source.entry]?.store?.attributes
       const known =
         source.entry === AUTHENTICATION_ENTRY
           ? authentication.length > 0
           : source.entry === DOCUMENT_ENTRY
             ? !!document
-            : !!pack.presentations?.[source.entry]
+            : source.entry === EMAIL_ENTRY
+              ? !!pack.evidence?.email
+              : !!pack.presentations?.[source.entry]
       if (!known)
         errors.push(`INTX-ISSUE-001: issuance.${name}.claims.${claim} names the unknown entry ${source.entry}`)
       else if (!stored?.includes(source.attribute))
@@ -292,6 +492,8 @@ export function crossFieldErrors(pack: AgentPack): string[] {
         )
     }
   }
+  // the challenges of the profiles and the badge from the directory (IDENT-DIR-002, INTX-AUTH-011)
+  errors.push(...issuanceChallengeErrors(pack))
   // home is the agent's own organization and no other: a pattern cannot give it (IDENT-ROLE-011)
   for (const [i, pattern] of (identity.organizations ?? []).entries()) {
     if ((pattern.relation as string) === 'home') {
@@ -311,6 +513,9 @@ export function crossFieldErrors(pack: AgentPack): string[] {
   for (const [i, o] of (identity.perActorOverrides ?? []).entries()) check(o.roles, `identity.perActorOverrides[${i}]`)
   for (const p of pack.purposes ?? []) check(p.permittedRoles, `purposes.${p.id}.permittedRoles`)
   for (const m of pack.persona.menu ?? []) check(m.roles, `persona.menu.${m.id}.roles`)
+  for (const t of pack.spaces?.templates ?? []) check(t.creators, `spaces.templates.${t.id}.creators`)
+  // rule 12: the defaults of a space template lie within its bounds (SPACE-DEF-003)
+  errors.push(...spaceTemplateErrors(pack))
 
   const purposeIds = new Set((pack.purposes ?? []).map((p) => p.id))
   const declaredTools = new Set<string>([...(pack.tools?.http ?? []).map((t) => t.name), ...bundledToolNames(pack)])
@@ -426,6 +631,16 @@ export function validatePackDocument(doc: unknown, env: Record<string, string | 
   if (!/^3\.\d+$/.test(version)) {
     throw new PackError(`schemaVersion "${version}" is not supported (CORE-PACK-004, major 3 required)`)
   }
+  // RBAC-XSESS-005: a role that declares crossSession is refused in words, before the schema names the key
+  const removed = removedCrossSessionErrors(coerced)
+  if (removed.length) throw new PackError('agent-pack names a cross-session scope that was removed', removed)
+  // IDENT-ROLE-012: the people of the user directory are refused in words, before the schema names the key
+  const inline = inlineDirectoryErrors(coerced)
+  if (inline.length) throw new PackError('agent-pack writes the people of the user directory inline', inline)
+  // INTX-AUTH-011: an action that declares the email code is refused in words, before the schema names the value
+  const email = emailChallengeActionErrors(coerced)
+  if (email.length)
+    throw new PackError('agent-pack declares an email challenge outside a badge from the directory', email)
   const ajv = new Ajv2020({ allErrors: true, strict: false, useDefaults: true })
   addFormats.default(ajv)
   const validate = ajv.compile(schema)

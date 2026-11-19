@@ -9,12 +9,13 @@ import {
 import { AUTHENTICATION_ENTRY } from '../config/pack.js'
 import type { AgentPack, ToolAccess } from '../config/packTypes.js'
 import { connectionTypeOf, featuresOf } from '../config/packTypes.js'
+import { EMAIL_CHECK_KIND } from '../core/emailCheck.js'
 import type { EvidenceService } from '../core/evidence.js'
 import { type IssuanceService, issuanceOutcomeForModel, offeredProfiles } from '../core/issuance.js'
 import type { Principal } from '../core/types.js'
 import type { MediaService } from '../media/service.js'
 import type { RagService } from '../memory/rag.js'
-import type { MemoryService } from '../memory/service.js'
+import { MemoryService } from '../memory/service.js'
 import type { StatsSink } from '../platform/stats.js'
 import type { Store } from '../store/types.js'
 import { nowIso } from '../util/ids.js'
@@ -146,7 +147,7 @@ export class BundledToolSource implements ToolSource {
           key: 'bundled:issue_credential',
           name: 'issue_credential',
           description: [
-            'Issues a credential of this agent to the person, to their wallet. Call credential_requirements first: issue only when the state is ready. For a credential made from a passport or an identity card, the call first asks the person to read the chip of their document with their phone, and can take up to five minutes; tell them before you call that their phone will ask for it. The agent fills every claim from what it verified; you give the name of the credential and nothing else. The call sends the offer and waits for the person to answer it in their wallet, up to two minutes: it returns whether they accepted, declined, did not answer, or their wallet refused it. Before you call, nothing has been sent: do not say it was. After it returns, tell the person what happened.',
+            'Issues a credential of this agent to the person, to their wallet. Call credential_requirements first: issue only when the state is ready. For a credential made from a passport or an identity card, the call first asks the person to read the chip of their document with their phone, and can take up to five minutes; tell them before you call that their phone will ask for it. For a credential that needs an email check, the call ends your turn: the system itself asks the person in this conversation for their address and a code, and issues by itself once the code is right. The agent fills every claim from what it verified; you give the name of the credential and nothing else. The call sends the offer and waits for the person to answer it in their wallet, up to two minutes: it returns whether they accepted, declined, did not answer, or their wallet refused it. Before you call, nothing has been sent: do not say it was. After it returns, tell the person what happened.',
             undefined,
             ...byModel.map(([name, p]) => `${name}${p.label ? `: ${p.label}` : ''}`),
           ].join('\n'),
@@ -167,6 +168,15 @@ export class BundledToolSource implements ToolSource {
               content: issuanceOutcomeForModel(result.outcome, result.requirements, result.reason),
               data: { credential: args.credential, outcome: result.outcome },
               isError: result.outcome === 'failed',
+              // an email check now waits in the conversation: the code asks, and the turn ends (INTX-AUTH-012)
+              ...(result.ask
+                ? {
+                    endTurn: {
+                      text: result.ask.text,
+                      payload: { kind: EMAIL_CHECK_KIND, challengeId: result.ask.challengeId, step: 'question' },
+                    },
+                  }
+                : {}),
             }
           },
         })
@@ -210,7 +220,7 @@ export class BundledToolSource implements ToolSource {
         key: 'bundled:working_memory',
         name: 'working_memory',
         description:
-          'Curates the durable notes about this person: add a note, update or remove one by id. Notes are listed to you every turn.',
+          'Curates the durable notes about this person in the space of this conversation: add a note, update or remove one by id. The notes of this space are listed to you every turn; write them in the language the person speaks with you.',
         parameters: {
           type: 'object',
           properties: {
@@ -224,19 +234,36 @@ export class BundledToolSource implements ToolSource {
         stepLabel: 'Updating notes',
         invoke: async (args, ctx) => {
           const content = typeof args.content === 'string' ? args.content.trim() : ''
+          // the notes of the space of the conversation, and no other (MEM-SPACE-002)
+          const spaceId = ctx.spaceId
+          const changed = (memoryId: string, action: 'added' | 'changed' | 'removed', space: string) =>
+            ctx.memoryChanged?.({ memoryId, spaceId: space, action })
           if (args.action === 'add') {
             if (!content) return { content: 'content is required', isError: true }
-            // the note cites the message it came from: its erasure flags the note (PRIV-ERASE-005)
-            const note = await this.deps.memory.addNote(ctx.principal, content, ctx.inboundId ? [ctx.inboundId] : [])
+            // the note cites the message it came from: deleting that message within its window deletes the note, its
+            // erasure by an operator flags it (decision 60, PRIV-ERASE-005)
+            const note = await this.deps.memory.addNote(
+              ctx.principal,
+              content,
+              ctx.inboundId ? [ctx.inboundId] : [],
+              spaceId
+            )
+            await changed(note.id, 'added', MemoryService.spaceOfNote(note))
             return { content: `note ${note.id} added` }
           }
           if (typeof args.id !== 'string') return { content: 'id is required', isError: true }
           if (args.action === 'update') {
-            const ok = await this.deps.memory.updateNote(ctx.principal, args.id, content)
-            return { content: ok ? `note ${args.id} updated` : 'note not found', isError: !ok }
+            if (!content) return { content: 'content is required', isError: true }
+            const note = await this.deps.memory.updateNote(ctx.principal, args.id, content, {
+              spaceId,
+              from: ctx.inboundId,
+            })
+            if (note) await changed(note.id, 'changed', MemoryService.spaceOfNote(note))
+            return { content: note ? `note ${args.id} updated` : 'note not found', isError: !note }
           }
-          const ok = await this.deps.memory.removeNote(ctx.principal, args.id)
-          return { content: ok ? `note ${args.id} removed` : 'note not found', isError: !ok }
+          const note = await this.deps.memory.removeNote(ctx.principal, args.id, { spaceId })
+          if (note) await changed(note.id, 'removed', MemoryService.spaceOfNote(note))
+          return { content: note ? `note ${args.id} removed` : 'note not found', isError: !note }
         },
       })
     }

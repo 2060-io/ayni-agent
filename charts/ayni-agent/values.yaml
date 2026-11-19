@@ -36,7 +36,8 @@ env:
     value: ayni-agent
 
 # Secret holding SESSION_TOKEN_SECRET, DATABASE_URL, REDIS_URL, OBJECT_STORE_ACCESS_KEY,
-# OBJECT_STORE_SECRET_KEY, ENTRY_ENCRYPTION_KEY, LLM_API_KEY, EMBEDDINGS_API_KEY, ANCHOR_SIGNER_MNEMONIC...
+# OBJECT_STORE_SECRET_KEY, ENTRY_ENCRYPTION_KEY, LLM_API_KEY, EMBEDDINGS_API_KEY, ANCHOR_SIGNER_MNEMONIC,
+# MAIL_USERNAME and MAIL_PASSWORD (the other MAIL_* and VERANA_GRAPH_URL may be plain values in env)...
 existingSecret: ""
 
 # The agent pack, one of: a pack shipped in the image (set AGENT_PACK_PATH to its directory, e.g.
@@ -44,6 +45,19 @@ existingSecret: ""
 # the pack given inline here (agentPack); the two ConfigMap forms are mounted at /app/agent-pack.
 agentPackConfigMap: ""
 agentPack: ""
+
+# More volumes for the pod, and where the agent's container mounts them: the user directory, for one, from a Secret
+# (identity.directory.file of the pack). Mount it without subPath: a Secret is updated by swapping the `..data` symlink
+# of its directory, which a subPath mount never sees, and the agent reloads the file on change (decision 61).
+#   extraVolumes:
+#     - name: user-directory
+#       secret: { secretName: my-agent-directory }
+#   extraVolumeMounts:
+#     - name: user-directory
+#       mountPath: /run/secrets/ayni
+#       readOnly: true
+extraVolumes: []
+extraVolumeMounts: []
 
 service:
   enabled: true

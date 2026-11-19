@@ -12,6 +12,9 @@ import type {
   PrincipalPreference,
   RagChunk,
   Session,
+  Space,
+  SpaceActivity,
+  SpaceMember,
   StatEvent,
   WorkingMemoryNote,
 } from '../core/types.js'
@@ -165,11 +168,26 @@ export class PostgresStore implements Store {
     listAll: () => this.many<Conversation>('SELECT data FROM conversations'),
     save: async (c: Conversation) => {
       await this.pool.query(
-        `INSERT INTO conversations (id, principal_id, state, last_activity_at, data) VALUES ($1,$2,$3,$4,$5)
-         ON CONFLICT (id) DO UPDATE SET principal_id=$2, state=$3, last_activity_at=$4, data=$5`,
-        [c.id, c.principalId, c.state, c.lastActivityAt, c]
+        `INSERT INTO conversations (id, principal_id, state, last_activity_at, space_id, shared_at, data)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (id) DO UPDATE SET principal_id=$2, state=$3, last_activity_at=$4, space_id=$5, shared_at=$6, data=$7`,
+        [
+          c.id,
+          c.principalId,
+          c.state,
+          c.lastActivityAt,
+          c.spaceId ?? `personal:${c.principalId}`,
+          c.sharedAt ?? null,
+          c,
+        ]
       )
     },
+    listBySpace: (spaceId: string, opts: { shared?: boolean } = {}) =>
+      this.many<Conversation>(
+        `SELECT data FROM conversations WHERE space_id = $1${opts.shared ? ' AND shared_at IS NOT NULL' : ''}
+         ORDER BY last_activity_at DESC`,
+        [spaceId]
+      ),
     listByPrincipal: (principalId: string, states?: Conversation['state'][]) =>
       states
         ? this.many<Conversation>(
@@ -184,9 +202,11 @@ export class PostgresStore implements Store {
 
   private entryFromRow(r: Row): StoredEntry {
     const data = r.data as StoredEntry
+    const spaceId = (r.space_id as string | null) ?? data.spaceId
     return {
       ...data,
       conversationId: String(r.conversation_id ?? data.conversationId),
+      ...(spaceId ? { spaceId } : {}),
       cipher: (r.cipher as Buffer | null) ?? null,
     }
   }
@@ -230,8 +250,8 @@ export class PostgresStore implements Store {
       await this.pool.query(
         `INSERT INTO entries (id, session_id, conversation_id, principal_id, role, source_type, completion, visibility, state,
            backing_identity_id, language, content_digest, enc_key_ref, cipher, external_id, initiated_at, created_at,
-           anchor_batch_id, data)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+           anchor_batch_id, data, space_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
         [
           e.id,
           e.sessionId,
@@ -252,6 +272,7 @@ export class PostgresStore implements Store {
           e.createdAt,
           e.anchorBatchId ?? null,
           this.entryData(e),
+          e.spaceId ?? (e.principalId ? `personal:${e.principalId}` : null),
         ]
       )
     },
@@ -360,17 +381,38 @@ export class PostgresStore implements Store {
         [ids, batchId]
       )
     },
-    listOlderThan: async (cutoff: string, state: LifecycleState, limit: number) =>
-      (
-        await this.rows('SELECT * FROM entries WHERE state = $1 AND created_at < $2 ORDER BY created_at LIMIT $3', [
-          state,
-          cutoff,
-          limit,
-        ])
-      ).map((r) => this.entryFromRow(r)),
+    listOlderThan: async (
+      cutoff: string,
+      state: LifecycleState,
+      limit: number,
+      filter: { spaceId?: string; personal?: boolean } = {}
+    ) => {
+      const params: unknown[] = [state, cutoff]
+      let space = ''
+      if (filter.spaceId !== undefined) {
+        params.push(filter.spaceId)
+        space = ` AND space_id = $${params.length}`
+      } else if (filter.personal) space = " AND (space_id IS NULL OR space_id LIKE 'personal:%')"
+      params.push(limit)
+      return (
+        await this.rows(
+          `SELECT * FROM entries WHERE state = $1 AND created_at < $2${space} ORDER BY created_at LIMIT $${params.length}`,
+          params
+        )
+      ).map((r) => this.entryFromRow(r))
+    },
+    setSpace: async (conversationId: string, spaceId: string) => {
+      await this.pool.query(
+        `UPDATE entries SET space_id = $2, data = jsonb_set(data, '{spaceId}', to_jsonb($2::text)) WHERE conversation_id = $1`,
+        [conversationId, spaceId]
+      )
+    },
     reassign: async (sessionIds: string[], principalId: string) => {
+      // what was of the visitor's Personal space is of the identified Principal's (SPACE-DEF-002)
       const result = await this.pool.query(
-        `UPDATE entries SET principal_id = $2, data = jsonb_set(data, '{principalId}', to_jsonb($2::text))
+        `UPDATE entries SET principal_id = $2,
+           space_id = CASE WHEN space_id IS NULL OR space_id LIKE 'personal:%' THEN 'personal:' || $2 ELSE space_id END,
+           data = jsonb_set(data, '{principalId}', to_jsonb($2::text))
          WHERE session_id = ANY($1) AND principal_id IS DISTINCT FROM $2`,
         [sessionIds, principalId]
       )
@@ -402,9 +444,9 @@ export class PostgresStore implements Store {
       this.many<WorkingMemoryNote>('SELECT data FROM working_memory WHERE principal_id = $1', [principalId]),
     save: async (n: WorkingMemoryNote) => {
       await this.pool.query(
-        `INSERT INTO working_memory (id, principal_id, visibility, state, data) VALUES ($1,$2,$3,$4,$5)
-         ON CONFLICT (id) DO UPDATE SET visibility = $3, state = $4, data = $5`,
-        [n.id, n.principalId, n.visibility, n.state, n]
+        `INSERT INTO working_memory (id, principal_id, visibility, state, space_id, data) VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (id) DO UPDATE SET visibility = $3, state = $4, space_id = $5, data = $6`,
+        [n.id, n.principalId, n.visibility, n.state, n.spaceId ?? `personal:${n.principalId}`, n]
       )
     },
     delete: async (id: string) => {
@@ -474,10 +516,21 @@ export class PostgresStore implements Store {
     save: async (e: StoredEvidence) => {
       const { cipher, ...data } = e
       await this.pool.query(
-        `INSERT INTO evidence (id, principal_id, state, verified_at, expires_at, data, cipher)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)
-         ON CONFLICT (id) DO UPDATE SET state = $3, expires_at = $5, data = $6, cipher = $7`,
-        [e.id, e.principalId, e.state, e.verifiedAt, e.expiresAt ?? null, data, cipher]
+        `INSERT INTO evidence (id, principal_id, state, verified_at, expires_at, data, cipher, directory_entry_id, holder_index)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         ON CONFLICT (id) DO UPDATE SET principal_id = $2, state = $3, expires_at = $5, data = $6, cipher = $7,
+           directory_entry_id = $8, holder_index = $9`,
+        [
+          e.id,
+          e.principalId,
+          e.state,
+          e.verifiedAt,
+          e.expiresAt ?? null,
+          data,
+          cipher,
+          e.kind === 'issuance' ? (e.directoryEntryId ?? null) : null,
+          e.kind === 'issuance' ? (e.holderIndex ?? null) : null,
+        ]
       )
     },
     listExpired: async (nowIso: string) =>
@@ -485,6 +538,22 @@ export class PostgresStore implements Store {
         await this.rows(
           "SELECT data, cipher FROM evidence WHERE state = 'active' AND expires_at IS NOT NULL AND expires_at <= $1",
           [nowIso]
+        )
+      ).map(this.evidenceOf),
+    listIssuedFromDirectory: async (directoryEntryId?: string) =>
+      (directoryEntryId === undefined
+        ? await this.rows(
+            'SELECT data, cipher FROM evidence WHERE directory_entry_id IS NOT NULL ORDER BY verified_at, id'
+          )
+        : await this.rows('SELECT data, cipher FROM evidence WHERE directory_entry_id = $1 ORDER BY verified_at, id', [
+            directoryEntryId,
+          ])
+      ).map(this.evidenceOf),
+    listIssuedTo: async (holderIndex: string) =>
+      (
+        await this.rows(
+          'SELECT data, cipher FROM evidence WHERE holder_index = $1 ORDER BY verified_at DESC, id DESC',
+          [holderIndex]
         )
       ).map(this.evidenceOf),
   }
@@ -665,8 +734,105 @@ export class PostgresStore implements Store {
         r,
       ])
     },
-    list: (limit: number) =>
-      this.many<AdminAuditRecord>('SELECT data FROM admin_audit ORDER BY ts DESC, id DESC LIMIT $1', [limit]),
+    // newest first; of two at the same time, the one written last first (seq)
+    list: (limit: number, filter: { action?: AdminAuditRecord['action']; before?: string } = {}) => {
+      const params: unknown[] = []
+      const where: string[] = ['true']
+      if (filter.action) {
+        params.push(filter.action)
+        where.push(`action = $${params.length}`)
+      }
+      if (filter.before) {
+        params.push(filter.before)
+        where.push(`(ts, seq) < (SELECT ts, seq FROM admin_audit WHERE id = $${params.length})`)
+      }
+      params.push(limit)
+      return this.many<AdminAuditRecord>(
+        `SELECT data FROM admin_audit WHERE ${where.join(' AND ')} ORDER BY ts DESC, seq DESC LIMIT $${params.length}`,
+        params
+      )
+    },
+  }
+
+  public spaces = {
+    get: (id: string) => this.one<Space>('SELECT data FROM spaces WHERE id = $1', [id]),
+    save: async (space: Space) => {
+      await this.pool.query(
+        `INSERT INTO spaces (id, agent_id, kind, template_id, membership_mode, created_at, updated_at, data)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         ON CONFLICT (id) DO UPDATE SET kind = $3, template_id = $4, membership_mode = $5, updated_at = $7, data = $8`,
+        [
+          space.id,
+          space.agentId,
+          space.kind,
+          space.templateId,
+          space.membership.mode,
+          space.createdAt,
+          space.updatedAt,
+          space,
+        ]
+      )
+    },
+    list: (agentId: string) =>
+      this.many<Space>('SELECT data FROM spaces WHERE agent_id = $1 ORDER BY created_at, id', [agentId]),
+  }
+
+  public spaceMembers = {
+    get: (id: string) => this.one<SpaceMember>('SELECT data FROM space_members WHERE id = $1', [id]),
+    save: async (m: SpaceMember) => {
+      await this.pool.query(
+        `INSERT INTO space_members (id, space_id, principal_id, directory_id, organization_key, email_index, state, role,
+           created_at, data)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+         ON CONFLICT (id) DO UPDATE SET principal_id = $3, directory_id = $4, organization_key = $5, email_index = $6,
+           state = $7, role = $8, data = $10`,
+        [
+          m.id,
+          m.spaceId,
+          m.principalId,
+          m.directoryId ?? null,
+          m.organizationKey ?? null,
+          m.emailIndex ?? null,
+          m.state,
+          m.role,
+          m.createdAt,
+          m,
+        ]
+      )
+    },
+    listBySpace: (spaceId: string) =>
+      this.many<SpaceMember>('SELECT data FROM space_members WHERE space_id = $1 ORDER BY created_at, id', [spaceId]),
+    listByPrincipal: (principalId: string) =>
+      this.many<SpaceMember>('SELECT data FROM space_members WHERE principal_id = $1', [principalId]),
+    listByDirectoryId: (directoryId: string) =>
+      this.many<SpaceMember>('SELECT data FROM space_members WHERE directory_id = $1 ORDER BY created_at, id', [
+        directoryId,
+      ]),
+    // the index space_members_invitee (schema 3.6.0) serves it
+    listByInvitee: (organizationKey: string, emailIndex: string) =>
+      this.many<SpaceMember>(
+        'SELECT data FROM space_members WHERE organization_key = $1 AND email_index = $2 ORDER BY created_at, id',
+        [organizationKey, emailIndex]
+      ),
+    delete: async (id: string) => {
+      await this.pool.query('DELETE FROM space_members WHERE id = $1', [id])
+    },
+  }
+
+  public spaceActivity = {
+    insert: async (a: SpaceActivity) => {
+      await this.pool.query('INSERT INTO space_activity (id, space_id, at, data) VALUES ($1,$2,$3,$4)', [
+        a.id,
+        a.spaceId,
+        a.at,
+        a,
+      ])
+    },
+    list: (spaceId: string, limit: number) =>
+      this.many<SpaceActivity>(
+        'SELECT data FROM space_activity WHERE space_id = $1 ORDER BY at DESC, seq DESC LIMIT $2',
+        [spaceId, limit]
+      ),
   }
 }
 

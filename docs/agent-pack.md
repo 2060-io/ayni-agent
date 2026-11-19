@@ -30,7 +30,7 @@ directory.
 |---------|----------|---------------|------|
 | `schemaVersion` | yes | `"3.x"`; the loader refuses another major | CORE-PACK-004 |
 | `metadata` | yes | id, display name, description, tags | |
-| `identity` | yes | the agent's DID, user-agent gate, the authentication schema, organization patterns, roles, role rules, per-actor overrides | D30, D34, D37, D38 |
+| `identity` | yes | the agent's DID, user-agent gate, the authentication schema, organization patterns, roles, role rules, per-actor overrides, the file of the user directory | D30, D34, D37, D38, D79 |
 | `language` | yes | the one agent language | D21 |
 | `persona` | yes | system prompt, greeting, contextual menu | D46, CORE-PROMPT |
 | `llm` | yes | model provider and model | LLM-PROV |
@@ -46,6 +46,8 @@ directory.
 | `approvals` | | default approval and elevation policy | INTX-APPR |
 | `actions` | | per-tool auth challenge and credential freshness | D7, D28, INTX-AUTH |
 | `sessions` | | idle timeout, binding expiry, liveness TTL, sibling sessions, device pairing window | D6, D7, D36, D51 |
+| `conversations` | | the window within which a person deletes a message of theirs | decision 60 of the agent |
+| `spaces` | | the templates people with a role create spaces from | decision 60 of the agent |
 | `channels` | | AG-UI and A2A adapters | D1, D2, CHAN-* |
 | `privacy` | yes | processing activities with lawful basis and retention, erasure | D18, PRIV-RETN |
 | `media` | | speech-to-text, vision, image generation, face verification | D45, INTX-AUTH-007 |
@@ -78,7 +80,7 @@ identity:
       relation: unrecognized
       roles: [visitor]
   roles:
-    finance-manager: { canApprove: true, crossSession: own-backing-identity }
+    finance-manager: { canApprove: true }
     auditor:         { auditor: true }
   roleRules:
     - when: { relation: home, claims: { department: [Finance, Treasury] } }
@@ -132,7 +134,8 @@ identity:
   stored to serve as the reference of a face-match challenge. The `principal_credentials` tool lists the
   records with the visible attributes.
 
-- **Role assignment is rules over verified facts, never rosters** (D34). A rule's `when` matches on the
+- **Role assignment is rules over verified facts and, with a user directory, the roles its entries give by hand**
+  (D34, D87; below). The directory is the only list of people. A rule's `when` matches on the
   Principal's `relation` to this agent (`home`, `partner`, `unrecognized`), its `connectionType`,
   whether the ECS-UserAgent credential was presented (`userAgentVerified`), and verified `claims`
   (ECS-Badge facts such as `department` or `title`; ECS-Service attributes for services). A list value
@@ -141,10 +144,13 @@ identity:
   organization gives no backing identity and `public` visibility only.
 - `perActorOverrides` apply before the rules, for named actors: a service by its DID, a person by the key
   above.
-- `roles` declares every role used anywhere in the pack. `crossSession` sets the role's cross-session
-  memory scope (RBAC-XSESS): `own-sessions` (default), `own-backing-identity`, `all`. `canApprove`
-  marks roles that may appear in `approvers`. `auditor` grants read-only access to the whole
-  persistent store outside LLM retrieval.
+- `roles` declares every role used anywhere in the pack. **No role reads other people's conversations**
+  (RBAC-XSESS-005/007): `crossSession`, the role-wide conversation reads of an earlier version, is withdrawn, and a
+  pack that declares it, whatever its value, is refused with a message that says so. A conversation is read by its
+  author, by the active members of its space once its author shares it with the space, and by an auditor through
+  the admin interface. `canApprove` marks roles that may appear in `approvers`. `auditor` grants read-only access to
+  the whole persistent store outside LLM retrieval. `admin` lets the role read the admin view of roles and changes
+  (IDENT-DIR-008, with the user directory).
 - **Who enters unidentified follows from `authentication`, and from nothing else** (D53, D72). A pack that
   names no authentication schema lets every wallet in, unidentified. One that names a schema is in one of
   three modes:
@@ -199,6 +205,68 @@ identity:
   the DIDComm agent can resolve, with optional `attributes`. The credential that authenticates a person
   is `authentication`, above; `credentials.badge` no longer exists.
 
+### The user directory (`identity.directory`)
+
+When no identity provider is configured, the people of the home organization and their roles are a **user directory**
+(ayni-spec D79, D87, D91, D92; agent decision 61): a file the pack names, mounted from a secret of the deployment.
+The people are **never written in the pack**, which is versioned with the deployment and would keep every former
+employee in its history: a pack that lists them (`identity.directory.people`, `identity.people`, or a list under
+`identity.directory`) is refused at start, in words.
+
+```yaml
+identity:
+  directory:
+    file: /run/secrets/ayni/directory.yaml    # a relative path resolves from the pack directory
+  roles:
+    dispatcher: { description: Dispatches the trucks. }
+    people-admin: { description: Reads who holds which role., admin: true }
+```
+
+```yaml
+# the file, YAML or JSON
+people:
+  - id: p-0042                    # stable, unique
+    firstName: Ana
+    lastName: Ríos
+    email: ana.rios@northwind.example        # unique, compared in lower case
+    birthDate: 19910521           # YYYYMMDD; only when badges are obtained with a passport
+    nationality: ESP              # the code of ICAO Doc 9303; idem
+    department: Depot Rotterdam   # optional: rule spaces only
+    groups: [fleet-safety, night-shift]      # optional, several: rule spaces only
+    roles: [dispatcher]           # typed by hand, roles of identity.roles
+```
+
+- **Validation.** Every scalar is read as text (an id `0042` keeps its zeros). Ids and emails are unique, roles are
+  declared, no other field is allowed, and a birthdate and a nationality are required on every entry when an issuance
+  profile obtains badges from the directory with a passport. At start a file that does not validate stops the agent,
+  naming each entry and field at fault; the message never carries a birthdate or a nationality.
+- **Reload.** The agent watches the directory of the file (a Kubernetes Secret is updated by swapping the `..data`
+  symlink in it, whatever the mount) and reads the file again every `DIRECTORY_POLL_SECONDS` (10; 0 watches only),
+  comparing its content by hash. A new version that does not validate is not loaded: the one in force stays and the
+  reason goes to the log.
+- **Roles by hand (D87).** A Principal holds the entry its identity credential was issued from, by this agent: the
+  issuance record names the entry, and the credential, once presented, finds its record. The entry's roles join those
+  of the Principal's verified facts, from its next request after a reload. No role rule reads an entry: a rule that
+  names `claims` does not match a Principal whose badge this agent issued from an entry (those claims are the entry's
+  fields); the relation keeps its rules, and the claims of badges issued by others keep theirs (IDENT-ROLE-014). A
+  Principal whose badge was not issued from an entry receives no role from the directory.
+- **`department` and `groups`** make people members of the rule spaces that name them (`spaces.templates[].membership`),
+  and nothing else.
+- **What each load changed** is written to the admin audit, one record per entry added, removed or changed: its id,
+  its name, the names of the fields that changed, the roles before and after; never a value of a birthdate or a
+  nationality. The last load is kept sealed in the store, so that what changed while the agent was down is recorded,
+  and acted on, at start.
+- **Removal (D91).** A person whose entry leaves the directory loses it and the roles it gave, and every session of
+  theirs is closed at once with `credential-invalid`, their devices unpaired; then every credential issued from the
+  entry is revoked and its holder told (`revocation_notification`). A revocation the DIDComm agent cannot make is made
+  again later. An invitation to a list space of a person no longer listed is removed.
+- **Who reads it.** The member picker of list spaces (`GET {sessions}/directory?q=`) gives names and departments, to a
+  person who owns a list space or may create one. The admin view (`GET {sessions}/admin/roles` and `/admin/changes`)
+  gives every entry with its roles and whether a Principal holds it, and the changes, to the holders of a role marked
+  `admin`. The model reads nothing of the directory.
+- **Badges from it.** An issuance profile may take its claims from the entry of the person, found with a passport or an
+  email code: see `issuance`, "A badge from the user directory".
+
 ## persona
 
 - `systemPrompt` is the author's prompt. The platform appends its own system-prompt add-on (working
@@ -226,6 +294,9 @@ API does not list it) and use `reasoningEffort: low | high | max` if wanted. Kim
 embeddings endpoint: keep another `embeddings.provider`. `apiKeyEnv` names the environment variable holding the
 key; keys never appear in the pack. `multimodal: true` lets a capable model receive referenced media;
 the agent never depends on it. Embeddings are configured independently and may use another provider.
+
+`providerName` names the model provider as the spaces' `allowedProviders` list it: `kimi` for `openai-compatible` on
+Moonshot, for example; `provider` when absent (SPACE-CONV-004).
 
 `maxInputTokens` is the model's input limit (Kimi K3: 1M); the agent refuses to start when
 `memory.contextWindowTokens` plus `maxOutputTokens` exceeds it (MEM-CTX-006). `cache` turns on the provider's
@@ -324,10 +395,13 @@ issuance:
   so, and the agent looks again at the next issuance.
 - **Sources.** `evidence` reads an attribute of a verified presentation: the `authentication`, or an entry
   of `presentations`. The attribute must be among those the entry **stores**, or the pack is refused: what
-  is not kept cannot be issued from. `computed` is `today`, `now`, `addDays` (with `days`), `constant`
-  (with `value`) or `subjectId`; the list is closed, and another name is refused. A system of record, a
-  human attestation and a value declared by the peer are named by the specification and not available in
-  this version. `evidence` also reads a **document**: see below.
+  is not kept cannot be issued from; `as: dateint` writes a calendar date as the integer `YYYYMMDD`.
+  `computed` is `today`, `now`, `addDays` (with `days`), `constant` (with `value`), `subjectId`,
+  `documentId` or `emailId`; the list is closed, and another name is refused. `record` reads a field of the
+  person's entry of the **user directory** (`record: directory`), the one system of record of this version:
+  see "A badge from the user directory" below. A human attestation and a value declared by the peer are
+  named by the specification and not available in this version. `evidence` also reads a **document** and a
+  **verified email address**: see below.
 - **An identifier of the subject.** `subjectId` gives a claim that numbers the holders of an issuer, such
   as `badgeNumber`: 16 characters derived from the Principal and the name of the profile with a key of the
   deployment (from `ENTRY_ENCRYPTION_KEY`). The same person gets the same number under the same profile at
@@ -379,11 +453,68 @@ issuance:
     attribute that is not of the list; a presentation entry named `document`.
   - **What it proves:** that the document was in hand. The chip is not checked against a copy, and nobody
     compares the holder with the portrait.
+- **A badge from the user directory (D88, D89; decision 62).** With a user directory the agent issues the badges of
+  its own organization from it. The person shows which entry is theirs as the profile's challenges say: a passport
+  (`[{ type: document }]`), an email code (`[{ type: email }]`), or both, in this order:
+
+  ```yaml
+  evidence:
+    email: { store: { attributes: [address], retention: { days: 30 } } }   # needed with an email code
+    document:                                    # needed with a passport: what the match reads
+      store: { attributes: [documentNumber, issuingState, nationality, lastName, firstName, dateOfBirth, portrait] }
+  issuance:
+    badge:
+      credential: { jsonSchemaCredentialId: <the ECS Badge schema of the ecosystem> }
+      label: Northwind badge
+      trigger: model
+      authChallenge: [{ type: email }]           # [{ type: document }], or [{ type: document }, { type: email }]
+      claims:
+        badgeNumber: { from: computed, fn: emailId }                    # documentId with a passport
+        name:        { from: record, record: directory, field: name }   # first and last name
+        email:       { from: record, record: directory, field: email }
+        department:  { from: record, record: directory, field: department }
+        birthDate:   { from: computed, fn: constant, value: "" }        # with a passport:
+                                                                        # { from: evidence, entry: document, attribute: dateOfBirth, as: dateint }
+        photo:       { from: computed, fn: constant, value: "" }        # with a passport: { from: evidence, entry: document, attribute: portrait }
+        phoneNumber: { from: computed, fn: constant, value: "" }
+  ```
+
+  - **The entry.** A passport finds the one entry whose date of birth and nationality equal the document's, whose last
+    name equals the document's and whose first names are among its given names, in their order, after the names of the
+    entry are written as the machine-readable zone writes them (ICAO Doc 9303, Part 3: capitals A to Z; `Ríos` is
+    `RIOS`, `Müller` is `MUELLER`, `MUXXLLER` or `MULLER`; an apostrophe dropped; a space or a hyphen a separator). A
+    name the zone cut for want of room matches what it holds. An email code finds the entry that holds the verified
+    address. With both, the two must find the same entry. None, two, or two different ones: the claims of the
+    directory are `missing`, and the log says why, with no value.
+  - **`record: directory`** takes `name` (first and last name), `firstName`, `lastName`, `email` or `department` (empty
+    when the entry has none). Before the evidence that finds the entry exists, the claim is `pending`, and its action is
+    the profile's own challenge: the credential is `ready`. The issuance record keeps the entry, which the person who
+    presents the badge then holds, with its roles; the badge is revoked when the entry leaves the directory.
+  - **The email code.** The issuing call ends the turn of the model with a question the agent's code writes in the
+    conversation: which address the organization knows the person by. The person's next messages there, from any
+    device, are the address and then the code: the code takes them, they start no turn and never reach the model. The
+    answer to the address is the same whether or not an entry holds it; a six-digit code is sent, by email, only to an
+    address an entry holds. It is valid ten minutes, with five tries; `cancel` stops the check. A right code records
+    the address as evidence (`evidence.email`, never shown to the model) and the issuance goes on by itself, offering
+    the badge with no new turn of the model. The model is told `passed`, `failed` or `expired`, and nothing else. A
+    guest who receives the badge is asked at once to present it, which identifies them (issuing identifies nobody).
+  - **`emailId`** numbers a badge by the verified address, as `documentId` does by the document: the same address gives
+    the same number to whoever proves it, an address that changes in the directory gives another one.
+  - **Email** goes through the SMTP server of the deployment (`MAIL_HOST`, `MAIL_PORT`, `MAIL_ENCRYPTION`, `MAIL_USERNAME`,
+    `MAIL_PASSWORD`, `MAIL_FROM_ADDRESS`, `MAIL_FROM_NAME`: the variables of the 2060.io website). Without `MAIL_HOST`
+    and `MAIL_FROM_ADDRESS`, the email code
+    is unavailable: the claims it serves are `unavailable`, and the agent says so at start, naming the profiles.
+  - **Refused by the loader:** a profile that takes a claim from the directory with no challenge, another challenge or
+    another order; a directory claim with no `identity.directory`; a passport without `nationality`, `lastName`,
+    `firstName` and `dateOfBirth` stored; an email challenge without `evidence.email` storing `address`, with
+    `evidence.email.modelVisible`, on a profile that takes nothing from the directory, on an `automatic` profile, or in
+    `actions` (in words, before the schema); `emailId` without an email challenge.
 - **Two tools.** `credential_requirements` is read-only and passes no gate. For each credential the person
   may receive it answers `held`, `ready` or `incomplete`, and for each claim a status without any value:
-  `available`, `missing`, `expired`, `not-revealed` or `unavailable`. A claim that is not available names
-  what obtains it: `request_presentation` with an entry, `issue_credential` when the issuance itself reads
-  the document it needs (the credential is then `ready`), or nothing to do. `issue_credential` takes the
+  `available`, `missing`, `expired`, `not-revealed`, `unavailable` or `pending` (a claim of the directory whose
+  evidence does not exist yet). A claim that is not available names what obtains it: `request_presentation`
+  with an entry, `issue_credential` with the profile and the `challenge` (`document` or `email`) when the
+  issuance itself obtains it (the credential is then `ready`), or nothing to do. `issue_credential` takes the
   name of the credential and nothing else: the agent resolves the claims itself, for the person of the
   session, offers the credential to their wallet, and issues nothing when a claim cannot be resolved,
   answering with the same list.
@@ -391,12 +522,21 @@ issuance:
   "Get <label>"; the credential is absent from the model's list. `automatic`: the agent issues as soon as
   every claim resolves, when evidence arrives. `credential_requirements` is there in the three cases.
 - **Gates.** `roles` limits who may receive the credential. `authChallenge` runs before the offer, as for
-  any action. A credential is issued once to a Principal.
+  any action: one challenge, or a list of them, run in their order (a list is for a badge from the directory
+  only). A credential is issued once to a Principal.
 - **Persons only** in this version: a credential is offered on the connection of the person, as an `issue`
   flow on a flow-capable wallet.
 - **The record.** Each issuance leaves a record built as evidence is: the audit fields always (the profile,
   the credential definition, the exchange, the evidence its claims came from), the issued claims sealed
   and kept only with `storeClaims`, for the `retention` given.
+- **Revocation (decision 61).** A credential that must be revocable, one whose claims come from the user directory, is
+  issued under a definition created with revocation, and nothing of it is issued otherwise. Under a revocable
+  definition every credential takes a revocation registry and an index, which the agent allocates (the DIDComm agent
+  takes both from the caller) and keeps in the record, with the entry it came from and a keyed index of the actor it
+  identifies. The DIDComm agent keeps one definition per schema: when the one it holds for the badge schema was created
+  without revocation, the agent issues no badge from the directory under it and says so in the log; delete that
+  definition in the DIDComm agent (`DELETE /v2/anoncreds/credential-definitions/{id}`) and the agent creates a
+  revocable one.
 
 ## tools, mcp and access tiers
 
@@ -465,6 +605,84 @@ one of them the whole conversation (D61, IDENT-SESS-016). The idle timeout still
 on its own; a device whose session was closed opens a new one on the same conversation and reads what it
 missed.
 
+## conversations
+
+`conversations.messageDeletionWindowSeconds` (600 by default) is how long a person may delete a message they
+wrote: with it go the agent's reply to it (its messages, the tool calls and the memory lines of the turn that
+answered it) and the memories the agent took from it, at once and on every device; a reply still being written is
+cancelled first (PRIV-ERASE-010..012). `0` turns deletion off: the descriptor then declares no `erasure`. After the
+window the message stays; an operator erases through the admin interface, which respects legal hold. A person
+cannot delete a conversation.
+
+```yaml
+conversations:
+  messageDeletionWindowSeconds: ${MESSAGE_DELETION_WINDOW_SECONDS:-600}
+```
+
+## spaces
+
+A space holds one piece of work in the agent: a title, a purpose, a brief, a language and its rules (ayni-spec D80,
+D84). Every conversation, and every entry of it, belongs to exactly one space; the default is the person's
+**Personal** space, which everyone has without its being declared (SPACE-DEF-002). People who hold a role create the
+others from the templates of `spaces.templates` (SPACE-DEF-003):
+
+```yaml
+spaces:
+  personal:                             # the rules of every Personal space
+    retentionDays: ${RETENTION_HISTORY_DAYS:-365}
+    # lawfulBasis: the one of conversation-memory by default
+    # allowedProviders: [<llm.providerName>] by default
+  templates:
+    - id: project                       # lowercase letters, digits and dashes
+      title: Project
+      kind: team                        # team or organization
+      creators: [employee]              # the roles of who may create one
+      membership: { mode: list }        # a list kept by the owner
+      rules:
+        retentionDays: { default: 365, min: 30, max: 1825 }
+        lawfulBasis: { default: contract, allowed: [contract, consent] }
+        allowedProviders: { default: [kimi], allowed: [kimi, anthropic] }
+        handover: { default: true, allowed: [true, false] }
+    - id: rotterdam
+      title: Depot Rotterdam
+      kind: team
+      creators: [manager]
+      membership: { mode: rule, rule: { department: Depot Rotterdam } }
+    - id: everyone
+      title: Northwind Logistics
+      kind: organization                # always the rule organization: true
+      creators: [manager]
+      membership: { mode: rule, rule: { organization: true } }
+```
+
+- **Membership** is a list the owner keeps (`mode: list`), or a rule over verified facts of the people of the
+  agent's own organization (`relation: home`): exactly one of a `department`, a `group`, or the whole
+  `organization`. A member list is a share, never a role: no role makes anyone a member (SPACE-MEMB-003). The owner
+  is always a member. Someone a rule no longer matches, or the owner removes from a list, is `left`: they keep
+  reading their own conversations of the space, and run nothing in it (`409 space-left`).
+- **Rules** have a default and the bounds an owner may change them within: `min` and `max` days for the retention,
+  the `allowed` values of the others. A rule with no bounds keeps its default. `retentionDays` (365 by default): the
+  entries of the space's conversations older than this are archived, never an entry on legal hold (PRIV-RETN-008).
+  `lawfulBasis` defaults to the one of `conversation-memory`. `allowedProviders`, as `llm.providerName` names a
+  provider, defaults to the agent's own: in a space that does not allow it the agent's code answers, with no model
+  call (SPACE-CONV-004). `handover` lets an author share a conversation with the members of its space, read-only; it
+  is off by default, and Personal takes none.
+- Personal's rules are `spaces.personal`; without it, 365 days (the deployment's `RETENTION_HISTORY_DAYS`), the
+  lawful basis of `conversation-memory` and the agent's provider.
+- The title, the purpose and the brief of a space are stored sealed, like a conversation's title (D77).
+- **People of other organizations (D90; decision 62).** The owner of a list space finds an organization in the trust
+  graph (`GET {sessions}/organizations?q=`, the Verana Graph of `VERANA_GRAPH_URL`, the agent's own excluded) and
+  invites a person of it by email (`POST {sessions}/spaces/{id}/members { organizationKey, email }`). The agent refuses
+  an organization the graph does not hold trusted (`422 not-on-verana`), its own (`422 home-organization`), one whose
+  badges `identity.authentication.issuers.organizations` does not accept (`409 organization-not-accepted`), and every
+  invitation without an SMTP server (`503 email-unavailable`). The email names who invites, the space, the agent and
+  its organization, says that a badge of that organization carrying the address is needed, and carries the app link to
+  the agent (`<APP_LINK_BASE>service/<did>`): no token, nothing that opens the space. The invitation binds to the first
+  person who presents a badge whose issuer is that organization and whose `email` is that address; they are then a
+  `guest` of the space. A person the agent knows already is compared on the email their stored evidence holds, and
+  asked nothing; one whose evidence holds none is asked once for their badge again. For this the authentication should
+  ask for and store `email`, which the agent says at start when a list template exists and it does not.
+
 ## privacy
 
 `processingActivities` enumerates the personal-data processing this agent performs and declares, for
@@ -489,7 +707,8 @@ enables crypto-erasure with its lineage cascade.
 1. `identity.authentication` holds at most one entry, whose `subjectKey` is among the `attributes` it asks;
    no `identity.organizations` pattern sets `relation: home`.
 2. Every role named in `roleRules`, `perActorOverrides`, `toolAccess.roles`, `approvers`,
-   `purposes[].permittedRoles` and `persona.menu[].roles` is declared in `identity.roles`.
+   `purposes[].permittedRoles`, `persona.menu[].roles` and `spaces.templates[].creators` is declared in
+   `identity.roles`.
 3. Every role in an `approvers` list has `canApprove: true`.
 4. Every id in `toolAccess.elevation[].purposes` exists in `purposes`.
 5. Tool names in `toolAccess`, `actions` and `persona.menu[].action.tool` refer to a declared HTTP or
@@ -503,6 +722,14 @@ enables crypto-erasure with its lineage cascade.
 9. `channels.agui.walletLinkTemplate` starts with `https://` and contains `{oob}`.
 10. `memory.contextWindowTokens` plus `llm.maxOutputTokens` fits in `llm.maxInputTokens` when it is set (MEM-CTX-006).
 11. A `partner-shared` RAG source names its `partner`, and only a `partner-shared` source names one (MEM-RAG-005).
+12. A space template is declared once; its `creators` are declared in `identity.roles` (rule 2); the default of
+    each of its rules lies within its bounds; a template of kind `organization` has the rule `organization: true`
+    (SPACE-DEF-003).
+13. A badge from the user directory: see `issuance`, "Refused by the loader" (IDENT-DIR-002/003, INTX-AUTH-011/012/015,
+    INTX-ISSUE-020). A profile that takes nothing from the directory declares at most one challenge, never `email`.
+
+Before the schema, a role that declares `crossSession` is refused in words (RBAC-XSESS-005), and so is an action that
+declares the email code (INTX-AUTH-011).
 
 ## Differences from the previous generation of packs
 

@@ -1,6 +1,7 @@
 /**
  * The AG-UI channel endpoints of the Ayni AG-UI Profile v3 (CHAN-ADP-004, PROF-*):
- * descriptor, sessions, binding refresh, session stream, runs and cancellation, history, attachments.
+ * descriptor, sessions, binding refresh, session stream, runs and cancellation, history, attachments; spaces, the
+ * person's memories, handover (§3.7, §3.8); the member picker and the admin view of the user directory (§3.9).
  */
 
 import { readFileSync } from 'node:fs'
@@ -17,28 +18,43 @@ import {
 import { Ajv2020 } from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
+import { messageDeletionWindowSeconds } from '../../config/packTypes.js'
 import type { AyniAgent, QueuedRun } from '../../core/agent.js'
 import { conversationOf } from '../../core/conversationOf.js'
 import { conversationKey, type TurnEvent, type TurnSink } from '../../core/orchestrator.js'
 import { normalizeClient, SessionError } from '../../core/sessions.js'
-import type { ClientDescription, Conversation, MessageEntry, Session } from '../../core/types.js'
+import { type SpaceAccess, SpaceError, spaceIdOf } from '../../core/spaces.js'
+import {
+  type ClientDescription,
+  type Conversation,
+  DIRECTORY_ACTOR,
+  type MessageEntry,
+  type Principal,
+  type Session,
+  type Space,
+  type SpaceActivity,
+  type SpaceMember,
+} from '../../core/types.js'
 import { TooManyWaiting } from '../../core/waiting.js'
 import { canonicalMime, mimeAllowed } from '../../media/service.js'
+import { MemoryService } from '../../memory/service.js'
+import { displayName } from '../../policy/approvals.js'
 import { prefixedId } from '../../util/ids.js'
 import type { Logger } from '../../util/logger.js'
 import type { AgUiAdapter } from './adapter.js'
 import { type AgUiEvent, ev, sse } from './events.js'
-import { attachmentActivity, entryToMessages, replyReference } from './mapping.js'
+import { attachmentActivity, entryToMessages, replyReference, sharedEntryToMessages } from './mapping.js'
 import { RunMirror } from './mirror.js'
 import type { SessionStreams } from './streams.js'
 import { uploadMeasures } from './uploadMeasures.js'
 import { uploadName } from './uploadName.js'
 
 /**
- * The profile revision this agent implements: 3.1 (session grant, flows and `ayni.flow`, `flowId` on routed
- * capabilities, client platform and description).
+ * The profile revision this agent implements: 3.3 (spaces, the person's memories and preferences, the deletion window
+ * of a message; decision 60), over 3.1 (session grant, flows and `ayni.flow`, `flowId` on routed capabilities, client
+ * platform and description).
  */
-const AGENT_PROFILE_VERSION = '3.1'
+const AGENT_PROFILE_VERSION = '3.3'
 /** A run's response gets a comment this often: it stays open while the run waits or a tool takes its time. */
 const RUN_HEARTBEAT_MS = 15_000
 
@@ -62,6 +78,30 @@ addFormats.default(ajv)
 const validateCreate = ajv.compile(createSessionSchema)
 const validateAction = ajv.compile(actionSchema)
 
+/** What a member of a space reads of a conversation shared with it: the messages of its transcript (PROF-SPACE-007). */
+const SHARED_SOURCE_TYPES = ['text', 'voice', 'media']
+
+/** What a request is told of a space it may see (decision 60): the person's own conversations and the people. */
+interface SpaceViewContext {
+  conversations: Conversation[]
+  principals: Principal[]
+}
+
+/** The status of each code of a `SessionError` (profile §9); `ERROR_STATUS` of the profile package lists the same. */
+export const SESSION_ERROR_STATUS: Record<SessionError['code'], number> = {
+  unauthorized: 401,
+  'not-bound': 403,
+  'not-found': 404,
+  conflict: 409,
+  'pairing-expired': 409,
+  'pairing-invalid': 409,
+  'grant-used': 409,
+  'grant-expired': 409,
+  final: 409,
+  closed: 410,
+  forbidden: 403,
+}
+
 /** The attachments of a message as its sender gets them back: a voice note with its transcription (PROF-MAP-006). */
 function attachmentEcho(entry: MessageEntry): AgUiEvent[] {
   return entry.attachments.map((a) =>
@@ -70,8 +110,14 @@ function attachmentEcho(entry: MessageEntry): AgUiEvent[] {
 }
 
 export class AgUiRoutes {
-  /** the runs in progress; `conversation` on the one the agent started for what waited (PROF-RUN-012) */
-  private readonly runs = new Map<string, { sessionId: string; controller: AbortController; conversation?: string }>()
+  /**
+   * the runs in progress, each with the key of its conversation; `conversation` on the one the agent started for what
+   * waited, which any device of the conversation may stop (PROF-RUN-012)
+   */
+  private readonly runs = new Map<
+    string,
+    { sessionId: string; controller: AbortController; key: string; conversation?: string }
+  >()
   /** the run requests being answered, each until its response has ended; and who waits for none to be */
   private answering = 0
   private readonly whenQuiet: (() => void)[] = []
@@ -123,8 +169,11 @@ export class AgUiRoutes {
         peerStatus: this.agent.peerStatus?.declared === true,
         // the context figure of a conversation in state.ayni.context (D74, PROF-DESC-008)
         context: true,
-        // a Principal erases what they wrote (D78, PROF-DESC-008)
-        erasure: true,
+        // a person deletes their own message, with the reply to it, within the pack's window; none with a window of 0
+        // (decision 60, PROF-DESC-008)
+        ...(messageDeletionWindowSeconds(this.agent.pack) > 0
+          ? { erasure: { windowSeconds: messageDeletionWindowSeconds(this.agent.pack) } }
+          : {}),
       },
       locales: [this.agent.pack.language.agent],
     }
@@ -151,21 +200,30 @@ export class AgUiRoutes {
     }
   }
 
+  /** A bound session and its Principal, or the answer that refuses the request. */
+  private async bound(
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<{ session: Session; principal: Principal } | undefined> {
+    const session = await this.session(request, reply, true)
+    if (!session) return undefined
+    const principal = await this.agent.principalOf(session)
+    if (!principal) {
+      reply.code(404).send({ error: 'not-found' })
+      return undefined
+    }
+    return { session, principal }
+  }
+
   private sendError(reply: FastifyReply, error: unknown): void {
+    if (error instanceof SpaceError) {
+      reply
+        .code(error.status)
+        .send({ error: error.code, message: error.message, ...(error.field ? { field: error.field } : {}) })
+      return
+    }
     if (error instanceof SessionError) {
-      const code = {
-        unauthorized: 401,
-        'not-bound': 403,
-        'not-found': 404,
-        conflict: 409,
-        'pairing-expired': 409,
-        'pairing-invalid': 409,
-        'grant-used': 409,
-        'grant-expired': 409,
-        final: 409,
-        closed: 410,
-        forbidden: 403,
-      }[error.code]
+      const code = SESSION_ERROR_STATUS[error.code]
       reply.code(code).send({
         error: error.code === 'not-found' ? 'not-found' : error.code,
         ...(error.reason ? { reason: error.reason } : {}),
@@ -193,6 +251,8 @@ export class AgUiRoutes {
         newConversation?: boolean
         grant?: string
         silent?: boolean
+        /** the space of the new conversation (PROF-CONV-011) */
+        spaceId?: string
       }
       if (!validateCreate(body))
         return reply.code(400).send({ error: 'bad-request', message: ajv.errorsText(validateCreate.errors) })
@@ -206,7 +266,8 @@ export class AgUiRoutes {
             body.grant,
             body.conversationId,
             body.newConversation === true,
-            body.resumeSessionId
+            body.resumeSessionId,
+            body.spaceId
           )
           const principal = await this.agent.principalOf(session)
           await this.agent.welcome(session)
@@ -237,7 +298,8 @@ export class AgUiRoutes {
             body.locale,
             body.resumeSessionId,
             body.conversationId,
-            body.newConversation === true
+            body.newConversation === true,
+            body.spaceId
           )
           const principal = await this.agent.principalOf(session)
           await this.agent.welcome(session)
@@ -270,7 +332,8 @@ export class AgUiRoutes {
           body.deviceProof,
           body.conversationId,
           body.newConversation === true,
-          body.silent === true
+          body.silent === true,
+          body.spaceId
         )
         if (session.state === 'bound') {
           // a paired device: bound at once, no phone round trip (PROF-SESS-010)
@@ -304,11 +367,12 @@ export class AgUiRoutes {
       }
     })
 
-    // PROF-CONV-001: the Principal's conversations
+    // PROF-CONV-001: the Principal's conversations, of one space when one is named (decision 60)
     app.get(`${base}/conversations`, async (request, reply) => {
       const session = await this.session(request, reply, true)
       if (!session) return
-      const list = await this.agent.sessions.listConversations(session.principalId ?? '')
+      const { spaceId } = request.query as { spaceId?: string }
+      const list = await this.agent.sessions.listConversations(session.principalId ?? '', spaceId || undefined)
       return {
         conversations: list.map((c) => ({
           id: c.id,
@@ -320,6 +384,8 @@ export class AgUiRoutes {
           open: c.open,
           unread: c.unread ?? 0,
           readUpTo: c.readUpTo ?? null,
+          spaceId: c.spaceId,
+          shared: !!c.sharedAt,
         })),
       }
     })
@@ -329,19 +395,37 @@ export class AgUiRoutes {
       const session = await this.session(request, reply, true)
       if (!session) return
       const { conversationId: id } = request.params as { conversationId: string }
-      const body = (request.body ?? {}) as { title?: string; state?: string }
+      const body = (request.body ?? {}) as { title?: string; state?: string; spaceId?: unknown }
       try {
         const principal = await this.agent.principalOf(session)
         if (!principal) return reply.code(404).send({ error: 'not-found' })
         let conversation = await this.agent.sessions.conversationOf(principal, id)
+        // another space, only before its first message (PROF-CONV-011, SPACE-CONV-002): checked before anything changes
+        if (body.spaceId !== undefined) {
+          if (typeof body.spaceId !== 'string' || !body.spaceId)
+            return reply.code(400).send({ error: 'bad-request', message: 'spaceId must be a space id' })
+          if (await this.agent.sessions.hasStarted(conversation))
+            throw new SpaceError('the conversation has a message: its space is fixed', 'has-messages')
+          await this.agent.spaces.usable(principal, body.spaceId)
+        }
+        if (body.state !== undefined && body.state !== 'active' && body.state !== 'archived')
+          return reply.code(400).send({ error: 'bad-request', message: 'state must be active or archived' })
         if (typeof body.title === 'string')
           conversation = await this.agent.sessions.renameConversation(conversation, body.title)
-        if (body.state !== undefined) {
-          if (body.state !== 'active' && body.state !== 'archived')
-            return reply.code(400).send({ error: 'bad-request', message: 'state must be active or archived' })
+        if (body.state === 'active' || body.state === 'archived')
           conversation = await this.agent.sessions.setConversationState(conversation, body.state)
+        if (typeof body.spaceId === 'string' && body.spaceId !== spaceIdOf(conversation)) {
+          conversation = await this.agent.sessions.setConversationSpace(conversation, body.spaceId)
+          // the header of every device that shows it names the new space (state.ayni.space)
+          for (const shown of await this.agent.sessions.sessionsOfConversation(conversation))
+            await this.adapter.pushState(shown).catch(() => undefined)
         }
-        return { id: conversation.id, title: conversation.title, state: conversation.state }
+        return {
+          id: conversation.id,
+          title: conversation.title,
+          state: conversation.state,
+          spaceId: spaceIdOf(conversation),
+        }
       } catch (error) {
         return this.sendError(reply, error)
       }
@@ -363,22 +447,9 @@ export class AgUiRoutes {
       }
     })
 
-    // PROF-CONV-009: every message the Principal wrote in a conversation, erased for good
-    app.post(`${base}/conversations/:conversationId/erasure`, async (request, reply) => {
-      const session = await this.session(request, reply, true)
-      if (!session) return
-      const { conversationId: id } = request.params as { conversationId: string }
-      try {
-        const principal = await this.agent.principalOf(session)
-        if (!principal) return reply.code(404).send({ error: 'not-found' })
-        const conversation = await this.agent.sessions.conversationOf(principal, id)
-        const { erased, held, clientIds } = await this.agent.eraseOwnConversation(principal, conversation.id)
-        if (erased.length) await this.announceErased(principal.id, conversation.id, erased, clientIds)
-        return { erased: erased.length, held: held.length }
-      } catch (error) {
-        return this.sendError(reply, error)
-      }
-    })
+    // a person cannot delete a conversation (PRIV-ERASE-007; PROF-CONV-009 is withdrawn, 404): the erasure of every message of theirs in one is removed,
+    // operators erase through the admin interface. Handover: its author shares it with its own space, or stops
+    this.registerSpaces(app, base)
 
     // PROF-SESS-011: the Principal's paired devices
     app.get(`${base}/devices`, async (request, reply) => {
@@ -497,6 +568,9 @@ export class AgUiRoutes {
         if (p.menuId && p.itemId) resumeAction = { kind: 'menu.select', menuId: p.menuId, itemId: p.itemId }
       }
       const effective = resumeAction ?? action
+      // a conversation of a space its author left: 409 space-left, nothing recorded (PROF-RUN-014)
+      const refusal = await this.agent.runRefusal(session, effective.kind)
+      if (refusal) return reply.code(refusal.status).send({ error: refusal.code, message: refusal.message })
       await this.run(session, input.runId, effective, text, reply, request, last?.id ? String(last.id) : undefined)
     })
 
@@ -515,7 +589,7 @@ export class AgUiRoutes {
       return reply.code(202).send()
     })
 
-    // PROF-HIST-010: a message the Principal wrote, erased for good
+    // PROF-HIST-010, decision 60: a message the Principal wrote, deleted within its window with the reply to it
     app.delete(`${base}/:id/messages/:messageId`, async (request, reply) => {
       const session = await this.session(request, reply, true)
       if (!session) return
@@ -524,7 +598,7 @@ export class AgUiRoutes {
       if (!principal) return reply.code(404).send({ error: 'not-found' })
       const result = await this.agent.eraseOwnMessage(session, principal, messageId)
       if (result.outcome === 'not-found') return reply.code(404).send({ error: 'not-found' })
-      if (result.outcome === 'legal-hold') return reply.code(409).send({ error: 'legal-hold' })
+      if (result.outcome !== 'erased') return reply.code(409).send({ error: result.outcome })
       await this.announceErased(principal.id, result.conversationId, result.messageIds, result.clientIds)
       return reply.code(204).send()
     })
@@ -595,6 +669,482 @@ export class AgUiRoutes {
     })
   }
 
+  // ---- spaces, memories, handover (decision 60, profile 3.3 §3.7 and §3.8) ------------------------------------
+
+  private async spaceViewContext(principal: Principal): Promise<SpaceViewContext> {
+    return {
+      conversations: await this.agent.sessions.allConversations(principal.id),
+      principals: await this.agent.store.principals.list(),
+    }
+  }
+
+  private nameOf(principals: Principal[], id: string): string {
+    const p = principals.find((each) => each.id === id)
+    return p ? this.personName(p) : id
+  }
+
+  /** A person of the home organization by the name the user directory gives them, else as the agent names them. */
+  private personName(principal: Principal): string {
+    return this.directoryName(principal.directoryEntryId) ?? displayName(principal)
+  }
+
+  /** The name the user directory gives a person, when the agent has one and holds the entry (decision 61). */
+  private directoryName(directoryId: string | undefined): string | undefined {
+    return directoryId ? this.agent.people?.directory?.view(directoryId)?.name : undefined
+  }
+
+  /**
+   * A member of a list space as its members see it (PROF-SPACE-003): a person who holds a Principal by their name; one
+   * of the directory still invited by the name the directory gives them; one of another organization by the address
+   * they were invited at, until the invitation binds.
+   */
+  private memberInfo(m: SpaceMember, principals: Principal[]) {
+    const p = m.principalId ? principals.find((each) => each.id === m.principalId) : undefined
+    return {
+      memberId: m.id,
+      name: p ? this.personName(p) : (this.directoryName(m.directoryId) ?? m.email ?? m.directoryId ?? m.id),
+      organization:
+        p?.backingIdentity?.name ?? m.organizationName ?? p?.backingIdentity?.id ?? m.organizationKey ?? null,
+      state: m.state,
+      role: m.role,
+    }
+  }
+
+  /**
+   * A space as the person sees it (PROF-SPACE-001): its fields, its rules, its membership, its owner, their role and
+   * state in it, and the unread messages of their own conversations of it.
+   */
+  private async spaceInfo(access: SpaceAccess, ctx: SpaceViewContext, rows?: SpaceMember[]) {
+    const { space } = access
+    const personal = space.kind === 'personal'
+    const mine = ctx.conversations.filter((c) => spaceIdOf(c) === space.id && c.state !== 'final')
+    const members = rows ?? (personal ? [] : await this.agent.spaces.memberRows(space.id))
+    const last = mine.map((c) => c.lastActivityAt).sort()
+    return {
+      id: space.id,
+      kind: space.kind,
+      title: space.title,
+      purpose: space.purpose,
+      brief: space.brief,
+      templateId: personal ? null : space.templateId,
+      language: space.language,
+      rules: space.rules,
+      membership: {
+        mode: space.membership.mode,
+        ...(space.membership.mode === 'rule' ? { rule: space.membership.rule } : {}),
+        memberCount: this.agent.spaces.memberCount(space, members, ctx.principals),
+      },
+      owner: { name: this.nameOf(ctx.principals, space.ownerIds[0] ?? '') },
+      role: access.role ?? access.member?.role ?? 'member',
+      state: access.left ? 'left' : 'active',
+      unread: mine.reduce((sum, c) => sum + (c.unread ?? 0), 0),
+      lastActivityAt: last[last.length - 1] ?? space.updatedAt,
+    }
+  }
+
+  /** A space and, for an active member of a list space, its members (PROF-SPACE-003). */
+  private async spaceDetail(access: SpaceAccess, ctx: SpaceViewContext) {
+    const { space } = access
+    const rows = space.kind === 'personal' ? [] : await this.agent.spaces.memberRows(space.id)
+    return {
+      ...(await this.spaceInfo(access, ctx, rows)),
+      ...(space.membership.mode === 'list' && space.kind !== 'personal' && !access.left
+        ? { members: rows.map((m) => this.memberInfo(m, ctx.principals)) }
+        : {}),
+      createdAt: space.createdAt,
+      updatedAt: space.updatedAt,
+    }
+  }
+
+  /** A template the person may create from: its title, kind and membership, and the bounds an owner works within. */
+  private templateInfo(template: ReturnType<AyniAgent['spaces']['templates']>[number]) {
+    const resolved = this.agent.spaces.resolve(template)
+    const m = template.membership
+    return {
+      id: template.id,
+      title: template.title,
+      kind: template.kind,
+      membership: m.mode,
+      ...(m.mode === 'rule' ? { rule: m.rule } : {}),
+      rules: {
+        retentionDays: resolved.retentionDays,
+        lawfulBasis: resolved.lawfulBasis,
+        allowedProviders: resolved.allowedProviders,
+        handover: resolved.handover,
+      },
+    }
+  }
+
+  /**
+   * One line of a space's activity (PROF-SPACE-006): who did what, and to whom; never the value of a field. What a reload
+   * of the user directory did names no one as `by`.
+   */
+  private async activityItem(a: SpaceActivity, principals: Principal[]) {
+    const member = a.memberId ? await this.agent.store.spaceMembers.get(a.memberId) : undefined
+    const principalId = member?.principalId ?? a.principalId
+    const name = principalId
+      ? this.nameOf(principals, principalId)
+      : this.directoryName(member?.directoryId ?? a.directoryId)
+    return {
+      id: a.id,
+      at: a.at,
+      kind: a.action,
+      ...(a.actorId === DIRECTORY_ACTOR ? {} : { by: { name: this.nameOf(principals, a.actorId) } }),
+      ...(name ? { member: { name } } : {}),
+      ...(a.fields ? { fields: a.fields } : {}),
+      ...(a.conversationId ? { conversationId: a.conversationId } : {}),
+    }
+  }
+
+  /**
+   * Every bound session showing a conversation of the space: its header names the space again when the space's title
+   * changes (PROF-STREAM-009).
+   */
+  private async spaceRenamed(spaceId: string): Promise<void> {
+    for (const conversation of await this.agent.sessions.conversationsOfSpace(spaceId))
+      for (const shown of await this.agent.sessions.sessionsOfConversation(conversation))
+        await this.adapter.pushState(shown).catch(() => undefined)
+  }
+
+  /** The endpoints of spaces, handover and the person's memories (profile 3.3, decision 60). */
+  private registerSpaces(app: FastifyInstance, base: string): void {
+    const handle =
+      (
+        work: (
+          bound: { session: Session; principal: Principal },
+          request: FastifyRequest,
+          reply: FastifyReply
+        ) => Promise<unknown>
+      ) =>
+      async (request: FastifyRequest, reply: FastifyReply) => {
+        const bound = await this.bound(request, reply)
+        if (!bound) return
+        try {
+          return await work(bound, request, reply)
+        } catch (error) {
+          return this.sendError(reply, error)
+        }
+      }
+    const visible = async (principal: Principal, spaceId: string): Promise<SpaceAccess> => {
+      const access = await this.agent.spaces.access(principal, spaceId)
+      if (!access) throw new SpaceError('space not found', 'not-found')
+      return access
+    }
+    /** A shared conversation of a space, for one of its active members (PROF-SPACE-007); 404 for anything else. */
+    const sharedConversation = async (principal: Principal, spaceId: string, conversationId: string) => {
+      const takes = await this.agent.spaces.readsHandovers(principal, spaceId)
+      const conversation = await this.agent.sessions.conversationById(conversationId)
+      if (!takes || !conversation || spaceIdOf(conversation) !== spaceId || !conversation.sharedAt)
+        throw new SpaceError('conversation not found', 'not-found')
+      return conversation
+    }
+
+    // the person's spaces, Personal first, and the templates they may create from (PROF-SPACE-001)
+    app.get(
+      `${base}/spaces`,
+      handle(async ({ principal }) => {
+        const ctx = await this.spaceViewContext(principal)
+        const spaces = []
+        for (const access of await this.agent.spaces.listFor(principal)) spaces.push(await this.spaceInfo(access, ctx))
+        return { spaces, templates: this.agent.spaces.creatable(principal).map((t) => this.templateInfo(t)) }
+      })
+    )
+
+    // PROF-SPACE-002
+    app.post(
+      `${base}/spaces`,
+      handle(async ({ principal }, request, reply) => {
+        const body = (request.body ?? {}) as Record<string, unknown>
+        if (typeof body.templateId !== 'string') throw new SpaceError('templateId is required', 'bad-request')
+        const space = await this.agent.spaces.create(principal, {
+          templateId: body.templateId,
+          title: body.title as string,
+          purpose: body.purpose as string,
+          brief: body.brief as string | undefined,
+        })
+        const access = await visible(principal, space.id)
+        return reply.code(201).send(await this.spaceDetail(access, await this.spaceViewContext(principal)))
+      })
+    )
+
+    // PROF-SPACE-003
+    app.get(
+      `${base}/spaces/:spaceId`,
+      handle(async ({ principal }, request) => {
+        const { spaceId } = request.params as { spaceId: string }
+        return this.spaceDetail(await visible(principal, spaceId), await this.spaceViewContext(principal))
+      })
+    )
+
+    // PROF-SPACE-004: the owner, within the bounds of the template
+    app.patch(
+      `${base}/spaces/:spaceId`,
+      handle(async ({ principal }, request) => {
+        const { spaceId } = request.params as { spaceId: string }
+        const body = (request.body ?? {}) as Record<string, unknown>
+        const before = await this.agent.spaces.find(spaceId)
+        const space = await this.agent.spaces.update(principal, spaceId, {
+          title: body.title as string | undefined,
+          purpose: body.purpose as string | undefined,
+          brief: body.brief as string | undefined,
+          language: body.language as string | null | undefined,
+          rules: (body.rules ?? undefined) as Partial<Space['rules']> | undefined,
+        })
+        if (before && before.title !== space.title) await this.spaceRenamed(space.id)
+        return this.spaceDetail(await visible(principal, spaceId), await this.spaceViewContext(principal))
+      })
+    )
+
+    // PROF-SPACE-005: a person of the user directory by `directoryId`, `invited` until a Principal holds that entry
+    // (SPACE-MEMB-002). A person of another organization comes with the invitations (agent phase 2b: 501 meanwhile)
+    app.post(
+      `${base}/spaces/:spaceId/members`,
+      handle(async ({ principal }, request, reply) => {
+        const { spaceId } = request.params as { spaceId: string }
+        const row = await this.agent.spaces.addMember(
+          principal,
+          spaceId,
+          (request.body ?? {}) as Record<string, unknown>
+        )
+        return reply.code(201).send(this.memberInfo(row, await this.agent.store.principals.list()))
+      })
+    )
+
+    app.delete(
+      `${base}/spaces/:spaceId/members/:memberId`,
+      handle(async ({ principal }, request, reply) => {
+        const { spaceId, memberId } = request.params as { spaceId: string; memberId: string }
+        await this.agent.spaces.removeMember(principal, spaceId, memberId)
+        return reply.code(204).send()
+      })
+    )
+
+    // PROF-SPACE-006, SPACE-MEMB-007: a member of a list space by `memberId`; a person the rule of a rule space matches,
+    // who holds a Principal, by `directoryId`
+    app.post(
+      `${base}/spaces/:spaceId/owner`,
+      handle(async ({ principal }, request) => {
+        const { spaceId } = request.params as { spaceId: string }
+        const { memberId, directoryId } = (request.body ?? {}) as { memberId?: unknown; directoryId?: unknown }
+        if (memberId === undefined && directoryId === undefined)
+          throw new SpaceError('memberId or directoryId is required', 'bad-request')
+        await this.agent.spaces.transferOwner(principal, spaceId, { memberId, directoryId })
+        return this.spaceDetail(await visible(principal, spaceId), await this.spaceViewContext(principal))
+      })
+    )
+
+    app.get(
+      `${base}/spaces/:spaceId/activity`,
+      handle(async ({ principal }, request) => {
+        const { spaceId } = request.params as { spaceId: string }
+        const { before, limit } = request.query as { before?: string; limit?: string }
+        const page = await this.agent.spaces.activity(principal, spaceId, {
+          before: before || undefined,
+          limit: Number(limit) || undefined,
+        })
+        const principals = await this.agent.store.principals.list()
+        const activity = []
+        for (const a of page.items) activity.push(await this.activityItem(a, principals))
+        return { activity, nextBefore: page.nextBefore }
+      })
+    )
+
+    // handover (S5, PROF-CONV-012): the author shares a conversation with its own space, read-only for its members,
+    // live until the author stops (H1 and H2 were not answered: these two limits are flagged in decision 60)
+    app.post(
+      `${base}/conversations/:conversationId/share`,
+      handle(async ({ principal }, request) => {
+        const { conversationId } = request.params as { conversationId: string }
+        let conversation = await this.agent.sessions.conversationOf(principal, conversationId)
+        const space = await this.agent.spaces.mayShare(principal, conversation)
+        if (!conversation.sharedAt) {
+          conversation = await this.agent.sessions.setConversationShared(conversation, new Date().toISOString())
+          await this.agent.spaces.record(space.id, principal.id, 'shared', { conversationId })
+        }
+        return { shared: true, sharedAt: conversation.sharedAt, conversationId, spaceId: space.id }
+      })
+    )
+
+    app.delete(
+      `${base}/conversations/:conversationId/share`,
+      handle(async ({ principal }, request, reply) => {
+        const { conversationId } = request.params as { conversationId: string }
+        const conversation = await this.agent.sessions.conversationOf(principal, conversationId)
+        if (conversation.sharedAt) {
+          await this.agent.sessions.setConversationShared(conversation, null)
+          await this.agent.spaces.record(spaceIdOf(conversation), principal.id, 'unshared', { conversationId })
+        }
+        return reply.code(204).send()
+      })
+    )
+
+    // PROF-SPACE-007: what an active member reads of the handovers of a space
+    app.get(
+      `${base}/spaces/:spaceId/shared`,
+      handle(async ({ principal }, request) => {
+        const { spaceId } = request.params as { spaceId: string }
+        // a space that takes no handover has nothing shared (PROF-SPACE-007)
+        if (!(await this.agent.spaces.readsHandovers(principal, spaceId))) return { conversations: [] }
+        const principals = await this.agent.store.principals.list()
+        const shared = await this.agent.sessions.conversationsOfSpace(spaceId, true)
+        return {
+          conversations: shared.map((c) => ({
+            id: c.id,
+            title: c.title,
+            author: { name: this.nameOf(principals, c.principalId) },
+            sharedAt: c.sharedAt,
+            lastActivityAt: c.lastActivityAt,
+          })),
+        }
+      })
+    )
+
+    // its transcript as it is now, read-only, without what is the author's own
+    app.get(
+      `${base}/spaces/:spaceId/shared/:conversationId/messages`,
+      handle(async ({ principal }, request) => {
+        const { spaceId, conversationId } = request.params as { spaceId: string; conversationId: string }
+        const conversation = await sharedConversation(principal, spaceId, conversationId)
+        const { before, limit } = request.query as { before?: string; limit?: string }
+        const entries = await this.agent.memory.sharedHistory(
+          principal,
+          conversation,
+          this.agent.sessions.scopeOf(conversation),
+          { before, limit: Math.min(Number(limit) || 50, 200), sourceTypes: SHARED_SOURCE_TYPES }
+        )
+        const messages = [...entries].reverse().flatMap(sharedEntryToMessages)
+        return { messages, nextBefore: entries.length ? entries[entries.length - 1]?.id : null }
+      })
+    )
+
+    // and its attachments, as the history names them
+    app.get(
+      `${base}/spaces/:spaceId/shared/:conversationId/attachments/:attachmentId`,
+      handle(async ({ principal }, request, reply) => {
+        const { spaceId, conversationId, attachmentId } = request.params as {
+          spaceId: string
+          conversationId: string
+          attachmentId: string
+        }
+        const conversation = await sharedConversation(principal, spaceId, conversationId)
+        const object = await this.agent.media.openShared(
+          principal,
+          conversation,
+          this.agent.sessions.scopeOf(conversation),
+          attachmentId
+        )
+        if (!object) return reply.code(404).send({ error: 'not-found' })
+        reply.header('content-type', object.mimeType)
+        reply.header('cache-control', 'private, max-age=300')
+        if (object.filename)
+          reply.header('content-disposition', `inline; filename="${encodeURIComponent(object.filename)}"`)
+        return reply.send(object.bytes)
+      })
+    )
+
+    // the person's own memories and preferences (PROF-MEM-001/002): they see and delete them, and change them by
+    // telling the agent in a conversation
+    app.get(
+      `${base}/memories`,
+      handle(async ({ session, principal }, request) => {
+        const { spaceId } = request.query as { spaceId?: string }
+        const preferences = await this.agent.memory.ownPreferences(principal, session)
+        const notes = await this.agent.memory.ownNotes(principal, session, spaceId || undefined)
+        const memories = []
+        for (const n of notes) {
+          // the conversation it came from, while the person can still read it
+          const from = n.lineageRefs[0] ? await this.agent.store.entries.get(n.lineageRefs[0]) : undefined
+          const kept = from && from.principalId === principal.id && from.state !== 'crypto-erased'
+          const conversation = kept ? await this.agent.sessions.conversationById(from.conversationId) : undefined
+          const readable = conversation && conversation.principalId === principal.id && conversation.state !== 'final'
+          memories.push({
+            id: n.id,
+            spaceId: MemoryService.spaceOfNote(n),
+            content: n.content,
+            createdAt: n.createdAt,
+            updatedAt: n.updatedAt,
+            ...(readable ? { source: { conversationId: conversation.id, title: conversation.title } } : {}),
+          })
+        }
+        return {
+          preferences: preferences.map((p) => ({ key: p.key, value: p.value, updatedAt: p.updatedAt })),
+          memories,
+        }
+      })
+    )
+
+    app.delete(
+      `${base}/memories/:memoryId`,
+      handle(async ({ principal }, request, reply) => {
+        const { memoryId } = request.params as { memoryId: string }
+        const removed = await this.agent.memory.removeNote(principal, memoryId)
+        if (!removed) return reply.code(404).send({ error: 'not-found' })
+        return reply.code(204).send()
+      })
+    )
+
+    app.delete(
+      `${base}/preferences/:key`,
+      handle(async ({ principal }, request, reply) => {
+        const { key } = request.params as { key: string }
+        const removed = await this.agent.memory.deletePreference(principal, key)
+        return removed ? reply.code(204).send() : reply.code(404).send({ error: 'not-found' })
+      })
+    )
+
+    // PROF-MEM-003: what the agent keeps about the person
+    app.get(
+      `${base}/about-me`,
+      handle(async ({ session, principal }) => this.agent.aboutMe(principal, session))
+    )
+
+    // PROF-DIR-001, SPACE-MEMB-005: the member picker, to a person who owns a list space or may create one; names and
+    // departments only, never an email, a birthdate or a nationality (IDENT-DIR-007)
+    app.get(
+      `${base}/directory`,
+      handle(async ({ principal }, request) => {
+        const { q } = request.query as { q?: string }
+        const people = this.agent.people
+        if (!people)
+          throw new SpaceError('only the owner of a list space, or who may create one, picks people', 'not-creator')
+        return people.search(principal, typeof q === 'string' ? q : '')
+      })
+    )
+
+    // PROF-DIR-002, SPACE-INV-001: the organizations of the trust graph a person of another organization is invited from,
+    // the agent's own excluded; to the same people as the member picker
+    app.get(
+      `${base}/organizations`,
+      handle(async ({ principal }, request) => {
+        const { q } = request.query as { q?: string }
+        const invitations = this.agent.invitations
+        if (!invitations)
+          throw new SpaceError('only the owner of a list space, or who may create one, invites people', 'not-creator')
+        return invitations.search(principal, typeof q === 'string' ? q : '')
+      })
+    )
+
+    // PROF-DIR-003, IDENT-DIR-008/009: who holds which role and why, and what each reload changed; to an admin only
+    app.get(
+      `${base}/admin/roles`,
+      handle(async ({ principal }) => {
+        if (!this.agent.people) throw new SpaceError('only an admin of the agent reads the admin view', 'not-admin')
+        return this.agent.people.adminRoles(principal)
+      })
+    )
+    app.get(
+      `${base}/admin/changes`,
+      handle(async ({ principal }, request) => {
+        if (!this.agent.people) throw new SpaceError('only an admin of the agent reads the admin view', 'not-admin')
+        const { before, limit } = request.query as { before?: string; limit?: string }
+        return this.agent.people.adminChanges(principal, {
+          before: before || undefined,
+          limit: Number(limit) || undefined,
+        })
+      })
+    )
+  }
+
   private corsHeaders(request: FastifyRequest): Record<string, string> {
     const origin = request.headers.origin
     const allowed = this.agent.env.aguiAllowedOrigins.length
@@ -617,7 +1167,7 @@ export class AgUiRoutes {
     clientMessageId?: string
   ): Promise<void> {
     const controller = new AbortController()
-    this.runs.set(runId, { sessionId: session.id, controller })
+    this.runs.set(runId, { sessionId: session.id, controller, key: conversationKey(session) })
     // counted until its response has ended: a process that ends lets it end first (PLAT-DEPLOY-005)
     this.answering++
     reply.raw.writeHead(200, {
@@ -667,6 +1217,8 @@ export class AgUiRoutes {
         switch (event.type) {
           case 'turn-start':
             return
+          case 'custom':
+            return emit(ev.custom(event.name, event.value))
           case 'text-start':
             return emit(ev.textStart(event.messageId))
           case 'text-delta':
@@ -780,6 +1332,20 @@ export class AgUiRoutes {
   }
 
   /**
+   * Cancels the runs in progress on a conversation, as the person stopping them would (CORE-MSG-009): a message deleted
+   * while its reply is written stops that reply first (PRIV-ERASE-011). Returns how many it stopped.
+   */
+  public cancelConversation(key: string): number {
+    let stopped = 0
+    for (const run of this.runs.values()) {
+      if (run.key !== key || run.controller.signal.aborted) continue
+      run.controller.abort()
+      stopped++
+    }
+    return stopped
+  }
+
+  /**
    * Resolves when no run is being answered any more, or after `withinMs`. A process that ends waits here before it
    * closes the connections: a turn that ended in time is told to its client as any other, with the end of its run
    * (PLAT-DEPLOY-005), where closing at once cut the response between the reply and `RunFinished`.
@@ -806,7 +1372,12 @@ export class AgUiRoutes {
     const targets = [session, ...(await this.agent.sessions.conversationPeers(session))].filter(
       (s) => s.channelType === 'ag-ui' && s.state === 'bound'
     )
-    this.runs.set(runId, { sessionId: session.id, controller, conversation: conversationKey(session) })
+    this.runs.set(runId, {
+      sessionId: session.id,
+      controller,
+      key: conversationKey(session),
+      conversation: conversationKey(session),
+    })
     const mirror = new RunMirror(
       this.streams,
       targets.map((s) => s.id),
@@ -818,6 +1389,8 @@ export class AgUiRoutes {
         switch (event.type) {
           case 'turn-start':
             return mirror.begin()
+          case 'custom':
+            return mirror.event(ev.custom(event.name, event.value))
           case 'text-start':
             return mirror.event(ev.textStart(event.messageId))
           case 'text-delta':
@@ -873,6 +1446,8 @@ export class AgUiRoutes {
           state: conversation.state,
           unread: conversation.unread ?? 0,
           readUpTo: conversation.readUpTo ?? null,
+          spaceId: spaceIdOf(conversation),
+          shared: !!conversation.sharedAt,
         })
       )
     }

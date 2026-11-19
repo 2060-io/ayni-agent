@@ -5,7 +5,7 @@
 import type { Features } from '../config/packTypes.js'
 import { estimateTokens } from '../util/tokens.js'
 
-export const PROMPT_ADDON_VERSION = '3.1.0'
+export const PROMPT_ADDON_VERSION = '3.3.0'
 export const PROMPT_ADDON_TOKEN_BUDGET = 500
 
 export interface AddonContext {
@@ -18,6 +18,8 @@ export interface AddonContext {
   issuance?: boolean
   /** when set, the model may send the person to places in the app with links on this base (PROF-LINK-001) */
   appLinkBase?: string
+  /** a credential is obtained with an email code, which the system runs in the conversation (D89, INTX-AUTH-012) */
+  emailChecks?: boolean
 }
 
 /** The destinations of the AG-UI profile §10 the model may link to (relative to the app-link base). */
@@ -44,7 +46,7 @@ export function renderPromptAddon(ctx: AddonContext): string {
   ]
   if (ctx.features.workingMemory) {
     lines.push(
-      'Working memory: durable notes about this person that you curate with the working_memory tool. Add a note when you learn a stable fact or preference worth keeping, update or remove notes that became wrong. The person cannot read these notes; never quote them as a list.'
+      "Working memory: durable notes about this person that you curate with the working_memory tool; you see the notes of this conversation's space only. Add a note when you learn a stable fact worth keeping, update or remove notes that became wrong, as the person tells you. Write every note in the language the person speaks with you. The person can see and delete their notes; never quote them as a list."
     )
   }
   if (ctx.features.preferences) {
@@ -80,6 +82,10 @@ export function renderPromptAddon(ctx: AddonContext): string {
   if (ctx.challengesConfigured)
     lines.push(
       "Identity checks (device confirmation, face check, document read) are triggered by the system on the person's phone; never ask the person to perform one yourself."
+    )
+  if (ctx.emailChecks)
+    lines.push(
+      'An email check is run by the system in the conversation: never ask the person for an email address or a code yourself, and never repeat one; you are told only whether the check passed.'
     )
   if (ctx.features.reactions)
     lines.push(

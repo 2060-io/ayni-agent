@@ -10,6 +10,9 @@ import {
   APP_LINK_DOMAIN,
   buildAppLink,
   CLIENT_PLATFORMS,
+  CUSTOM_EVENT,
+  ERROR_CODES,
+  ERROR_STATUS,
   INVITATION_GOAL_CODE,
   isAppLink,
   isClientPlatform,
@@ -24,14 +27,34 @@ const schema = (name: string) => JSON.parse(readFileSync(join(schemasDir, name),
 const ajv = new Ajv2020({ strict: false })
 addFormats(ajv)
 
-describe('profile 3.1 constants', () => {
+describe('profile 3.3 constants', () => {
   it('names the revision', () => {
     expect(PROFILE_VERSION).toBe(`${PROFILE_MAJOR}.${PROFILE_MINOR}`)
+    expect(PROFILE_VERSION).toBe('3.3')
+    // 3.3: a memory the agent changed, live and in history
+    expect(CUSTOM_EVENT.memoryUpdated).toBe('ayni.memory.updated')
+    expect(ACTIVITY.memoryUpdate).toBe('ayni.memory-update')
     expect(ACTIVITY.flow).toBe('ayni.flow')
     expect(INVITATION_GOAL_CODE.linkSession).toBe('ayni.link-session')
     expect(CLIENT_PLATFORMS).toEqual(['web', 'ios', 'android'])
     expect(isClientPlatform('ios')).toBe(true)
     expect(isClientPlatform('Firefox on Linux')).toBe(false)
+  })
+})
+
+describe('errors (§9, PROF-ERR-001)', () => {
+  it('gives each code its status, as profile.md does', () => {
+    expect(ERROR_STATUS['has-messages']).toBe(409)
+    expect(ERROR_STATUS['out-of-bounds']).toBe(422)
+    expect(ERROR_STATUS['space-left']).toBe(409)
+    expect(ERROR_STATUS['not-admin']).toBe(403)
+    expect(ERROR_STATUS['not-creator']).toBe(403)
+    expect(ERROR_STATUS['already-member']).toBe(409)
+    expect(ERROR_STATUS['legal-hold']).toBe(409)
+    expect(ERROR_STATUS['not-on-verana']).toBe(422)
+    expect(ERROR_STATUS['email-unavailable']).toBe(503)
+    expect(ERROR_CODES).not.toContain('conversation-started')
+    expect(ERROR_CODES).not.toContain('left-space')
   })
 })
 
@@ -58,6 +81,16 @@ describe('schemas', () => {
     // PROF-DESC-007: additive, a boolean
     expect(validate({ ...base, features: { ...base.features, peerStatus: true } })).toBe(true)
     expect(validate({ ...base, features: { ...base.features, peerStatus: 'yes' } })).toBe(false)
+    // 3.3: the deletion window of a message, spaces and memories
+    expect(
+      validate({
+        ...base,
+        profileVersion: '3.3',
+        features: { ...base.features, erasure: { windowSeconds: 600 } },
+      })
+    ).toBe(true)
+    expect(validate({ ...base, features: { ...base.features, erasure: { windowSeconds: -1 } } })).toBe(false)
+    expect(validate({ ...base, features: { ...base.features, erasure: {} } })).toBe(false)
     expect(
       validate({ ...base, binding: { modes: ['cross-device'], walletLinkTemplate: 'didcomm://x?oob={oob}' } })
     ).toBe(false)
@@ -74,6 +107,15 @@ describe('schemas', () => {
       })
     ).toBe(true)
     expect(validate({ client: { name: 'ayni-ui' } })).toBe(false)
+    // 3.3: the space of the new conversation
+    expect(
+      validate({
+        client: { name: 'ayni-ui', version: '3.3.0', platform: 'web' },
+        newConversation: true,
+        spaceId: 'spc_1',
+      })
+    ).toBe(true)
+    expect(validate({ client: { name: 'ayni-ui', version: '3.3.0', platform: 'web' }, spaceId: 7 })).toBe(false)
   })
 })
 

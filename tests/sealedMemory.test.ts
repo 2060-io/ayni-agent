@@ -62,13 +62,13 @@ describe('working-memory notes, sealed (D77)', () => {
     expect((await memory.notes(ana, session(ana.id))).map((n) => n.content)).toEqual(['is allergic to penicillin'])
 
     const keyRef = raw?.sealed?.keyRef
-    expect(await memory.updateNote(ana, note.id, 'is allergic to amoxicillin')).toBe(true)
+    expect((await memory.updateNote(ana, note.id, 'is allergic to amoxicillin'))?.id).toBe(note.id)
     const [updated] = await store.notes.list(ana.id)
     expect(updated?.sealed?.keyRef).toBe(keyRef)
     expect(JSON.stringify(updated)).not.toContain('amoxicillin')
     expect((await memory.notes(ana, session(ana.id)))[0]?.content).toBe('is allergic to amoxicillin')
 
-    expect(await memory.removeNote(ana, note.id)).toBe(true)
+    expect((await memory.removeNote(ana, note.id))?.id).toBe(note.id)
     expect(await store.notes.list(ana.id)).toEqual([])
   })
 })

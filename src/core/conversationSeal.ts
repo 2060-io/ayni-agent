@@ -34,6 +34,7 @@ export function sealedConversations(repo: ConversationRepo, crypto: EntryCrypto)
     listByPrincipal: async (principalId, states) =>
       (await repo.listByPrincipal(principalId, states)).map((c) => open(c) as Conversation),
     listAll: async () => (await repo.listAll()).map((c) => open(c) as Conversation),
+    listBySpace: async (spaceId, opts) => (await repo.listBySpace(spaceId, opts)).map((c) => open(c) as Conversation),
     sealPlain: async () => {
       let sealed = 0
       for (const c of await repo.listAll()) {

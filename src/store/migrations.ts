@@ -1,5 +1,5 @@
 /** Memory schema versions (CORE-VER-001/002). Each migration is applied once, in order. */
-export const MEMORY_SCHEMA_VERSION = '3.5.0'
+export const MEMORY_SCHEMA_VERSION = '3.7.0'
 
 export const MIGRATIONS: { version: string; sql: string }[] = [
   {
@@ -247,6 +247,90 @@ CREATE INDEX IF NOT EXISTS admin_audit_ts ON admin_audit (ts DESC);
     sql: `
 ALTER TABLE preferences ADD COLUMN IF NOT EXISTS enc_key_ref TEXT;
 ALTER TABLE preferences ADD COLUMN IF NOT EXISTS cipher BYTEA;
+`,
+  },
+  {
+    // decision 60 (SPACE-DEF, SPACE-CONV-001, MEM-SPACE-001): spaces, their members and what was done in them; a space's title, purpose and brief and a member's
+    // email are sealed in `data`, which keeps in the clear only what the lists and the membership need. Every
+    // conversation and every note belongs to a space: those of an earlier version to the Personal space of their
+    // Principal. A conversation its author shares with its space carries the time it was shared
+    version: '3.6.0',
+    sql: `
+CREATE TABLE IF NOT EXISTS spaces (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('team','organization')),
+  template_id TEXT NOT NULL,
+  membership_mode TEXT NOT NULL CHECK (membership_mode IN ('rule','list')),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  data JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS spaces_agent ON spaces (agent_id, created_at);
+
+CREATE TABLE IF NOT EXISTS space_members (
+  id TEXT PRIMARY KEY,
+  space_id TEXT NOT NULL,
+  principal_id TEXT,
+  directory_id TEXT,
+  organization_key TEXT,
+  email_index TEXT,
+  state TEXT NOT NULL CHECK (state IN ('invited','active','left')),
+  role TEXT NOT NULL CHECK (role IN ('owner','member','guest')),
+  created_at TIMESTAMPTZ NOT NULL,
+  data JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS space_members_space ON space_members (space_id, created_at);
+CREATE INDEX IF NOT EXISTS space_members_principal ON space_members (principal_id);
+CREATE INDEX IF NOT EXISTS space_members_invitee ON space_members (organization_key, email_index);
+
+CREATE TABLE IF NOT EXISTS space_activity (
+  seq BIGSERIAL PRIMARY KEY,
+  id TEXT NOT NULL UNIQUE,
+  space_id TEXT NOT NULL,
+  at TIMESTAMPTZ NOT NULL,
+  data JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS space_activity_space ON space_activity (space_id, at DESC, seq DESC);
+
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS space_id TEXT;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS shared_at TIMESTAMPTZ;
+UPDATE conversations SET space_id = COALESCE(data->>'spaceId', 'personal:' || principal_id) WHERE space_id IS NULL;
+UPDATE conversations SET data = jsonb_set(data, '{spaceId}', to_jsonb(space_id)) WHERE data->>'spaceId' IS NULL;
+ALTER TABLE conversations ALTER COLUMN space_id SET NOT NULL;
+CREATE INDEX IF NOT EXISTS conversations_space ON conversations (space_id, last_activity_at DESC);
+
+-- every entry carries the space of its conversation (SPACE-CONV-001); the retention of a space reads it (PRIV-RETN-008)
+ALTER TABLE entries ADD COLUMN IF NOT EXISTS space_id TEXT;
+UPDATE entries e SET space_id = c.space_id FROM conversations c WHERE c.id = e.conversation_id AND e.space_id IS NULL;
+UPDATE entries SET space_id = 'personal:' || principal_id WHERE space_id IS NULL AND principal_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS entries_space_retention ON entries (space_id, state, created_at);
+
+ALTER TABLE working_memory ADD COLUMN IF NOT EXISTS space_id TEXT;
+UPDATE working_memory SET space_id = COALESCE(data->>'spaceId', 'personal:' || principal_id) WHERE space_id IS NULL;
+UPDATE working_memory SET data = jsonb_set(data, '{spaceId}', to_jsonb(space_id)) WHERE data->>'spaceId' IS NULL;
+ALTER TABLE working_memory ALTER COLUMN space_id SET NOT NULL;
+DROP INDEX IF EXISTS working_memory_scope;
+CREATE INDEX IF NOT EXISTS working_memory_scope ON working_memory (state, visibility, principal_id, space_id);
+`,
+  },
+  {
+    // decision 61 (IDENT-DIR-006, IDENT-ROLE-012/013, D91): an issuance record names, in its audit fields, the entry of the
+    // user directory its claims came from and a keyed index of the actor its identity credential identifies; both are
+    // columns, so that a removal from the directory finds what to revoke and a presented badge finds its entry. The
+    // members of a space are found by their entry, and a reload's changes are listed from the admin audit, newest first
+    // (IDENT-DIR-009): its rows get the order they were written in
+    version: '3.7.0',
+    sql: `
+ALTER TABLE evidence ADD COLUMN IF NOT EXISTS directory_entry_id TEXT;
+ALTER TABLE evidence ADD COLUMN IF NOT EXISTS holder_index TEXT;
+CREATE INDEX IF NOT EXISTS evidence_directory_entry ON evidence (directory_entry_id) WHERE directory_entry_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS evidence_holder ON evidence (holder_index) WHERE holder_index IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS space_members_directory ON space_members (directory_id) WHERE directory_id IS NOT NULL;
+
+ALTER TABLE admin_audit ADD COLUMN IF NOT EXISTS seq BIGSERIAL;
+CREATE INDEX IF NOT EXISTS admin_audit_action ON admin_audit (action, ts DESC, seq DESC);
 `,
   },
 ]

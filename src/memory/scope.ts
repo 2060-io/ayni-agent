@@ -5,8 +5,13 @@
  */
 import type { BackingIdentity, Relation, Visibility } from '../core/types.js'
 
-export type CrossSessionScope = 'own-sessions' | 'own-backing-identity' | 'all'
-
+/**
+ * What a retrieval reads. No role widens it (RBAC-XSESS-001/007): a conversation is read only through the conversation itself;
+ * the role-wide reads of every conversation of a backing identity (`own-backing-identity`) or of everyone (`all`) are
+ * gone, and a pack that names them is refused. A space's members read a conversation its author shares with the space
+ * through the space (src/core/spaces.ts), never through the model's retrieval; an auditor reads through the admin
+ * interface (RBAC-XSESS-006).
+ */
 export interface ScopeContext {
   principalId: string
   /** the conversation of the session (D76): its `conversation-private` entries are readable */
@@ -14,7 +19,11 @@ export interface ScopeContext {
   backingIdentity: BackingIdentity | null
   /** the relation of the backing identity to this agent: `home` is the agent's own organization only (D64) */
   relation: Relation
-  crossSession: CrossSessionScope
+  /**
+   * the space of the conversation (MEM-SPACE-001): a `principal-private` item of a space (a memory, an entry) is read
+   * only in that space's conversations, in the stores that declare their items scoped by space
+   */
+  spaceId?: string
 }
 
 /** The dimensions a term may compare, besides visibility and lifecycle state. */
@@ -31,16 +40,14 @@ export interface ScopeTerm {
 export interface ScopePredicate {
   state: 'active'
   terms: ScopeTerm[]
+  /** the space a `principal-private` item must belong to, in a store scoped by space (MEM-SPACE-001) */
+  spaceId?: string
 }
 
 export function buildScope(ctx: ScopeContext): ScopePredicate {
   const terms: ScopeTerm[] = [{ visibility: 'public' }]
-  // conversation-private: this conversation; wider cross-session reads by role (RBAC-XSESS-001)
-  if (ctx.crossSession === 'all') terms.push({ visibility: 'conversation-private' })
-  else if (ctx.crossSession === 'own-backing-identity' && ctx.backingIdentity) {
-    terms.push({ visibility: 'conversation-private', backingIdentityId: ctx.backingIdentity.id })
-    terms.push({ visibility: 'conversation-private', conversationId: ctx.conversationId })
-  } else terms.push({ visibility: 'conversation-private', conversationId: ctx.conversationId })
+  // conversation-private: this conversation, and no other, whatever the role (RBAC-XSESS-001)
+  terms.push({ visibility: 'conversation-private', conversationId: ctx.conversationId })
   terms.push({ visibility: 'principal-private', principalId: ctx.principalId })
   if (ctx.backingIdentity) {
     // organization-shared: the Principals of the agent's own organization, which `home` already means (PRIV-CLS-005)
@@ -50,7 +57,7 @@ export function buildScope(ctx: ScopeContext): ScopePredicate {
       terms.push({ visibility: 'partner-shared', backingIdentityId: ctx.backingIdentity.id })
     }
   }
-  return { state: 'active', terms }
+  return { state: 'active', terms, ...(ctx.spaceId ? { spaceId: ctx.spaceId } : {}) }
 }
 
 /** A provisional session has zero access (CHAN-BIND-004): no term matches anything. */
@@ -67,12 +74,17 @@ export interface StoreShape {
   visibilityColumn: string
   stateColumn: string
   columns: Partial<Record<ScopeDimension, string>>
+  /**
+   * the column of the space its `principal-private` items belong to (MEM-SPACE-001): a store that declares it is read,
+   * for those items, in the space of the predicate only; one that does not (preferences) is read in every space
+   */
+  spaceColumn?: string
 }
 
 /** The dimensions the terms of each visibility may compare, whatever the role (buildScope above). */
 export const DIMENSIONS_OF: Record<Visibility, readonly ScopeDimension[]> = {
   public: [],
-  'conversation-private': ['conversationId', 'backingIdentityId'],
+  'conversation-private': ['conversationId'],
   'principal-private': ['principalId'],
   'organization-shared': [],
   'partner-shared': ['backingIdentityId'],
@@ -90,14 +102,18 @@ export const STORE_SHAPES = {
       principalId: 'principal_id',
       backingIdentityId: 'backing_identity_id',
     },
+    spaceColumn: 'space_id',
   },
+  // a memory is read in the conversations of its space only (MEM-SPACE-001)
   notes: {
     name: 'working_memory',
     holds: ['principal-private'],
     visibilityColumn: 'visibility',
     stateColumn: 'state',
     columns: { principalId: 'principal_id' },
+    spaceColumn: 'space_id',
   },
+  // a preference carries no space and is read in every one (MEM-SPACE-001)
   preferences: {
     name: 'preferences',
     holds: ['principal-private'],
@@ -143,18 +159,28 @@ export interface Scoped {
   conversationId?: string | null
   principalId?: string | null
   backingIdentityId?: string | null
+  /** the space of the item, in a store scoped by space */
+  spaceId?: string | null
+}
+
+/** A term compares the space of the item: a `principal-private` term of a predicate with a space, in a store with one. */
+function spaced(scope: ScopePredicate, shape: StoreShape, term: ScopeTerm): string | undefined {
+  return term.visibility === 'principal-private' && shape.spaceColumn ? scope.spaceId : undefined
 }
 
 /** JS compilation of the predicate for a store, used by the in-memory store and by tests. */
 export function matchesScope(scope: ScopePredicate, row: Scoped, shape: StoreShape = STORE_SHAPES.entries): boolean {
   if (row.state !== scope.state) return false
-  return termsFor(scope, shape).some(
-    (t) =>
+  return termsFor(scope, shape).some((t) => {
+    const space = spaced(scope, shape, t)
+    return (
       t.visibility === row.visibility &&
       (t.conversationId === undefined || t.conversationId === row.conversationId) &&
       (t.principalId === undefined || t.principalId === row.principalId) &&
-      (t.backingIdentityId === undefined || t.backingIdentityId === row.backingIdentityId)
-  )
+      (t.backingIdentityId === undefined || t.backingIdentityId === row.backingIdentityId) &&
+      (space === undefined || space === row.spaceId)
+    )
+  })
 }
 
 /**
@@ -185,6 +211,8 @@ export function scopeToSql(
     if (t.conversationId !== undefined) parts.push(`${column('conversationId')} = ${next(t.conversationId)}`)
     if (t.principalId !== undefined) parts.push(`${column('principalId')} = ${next(t.principalId)}`)
     if (t.backingIdentityId !== undefined) parts.push(`${column('backingIdentityId')} = ${next(t.backingIdentityId)}`)
+    const space = spaced(scope, shape, t)
+    if (space !== undefined) parts.push(`${alias}.${shape.spaceColumn} = ${next(space)}`)
     return `(${parts.join(' AND ')})`
   })
   return { sql: `${alias}.${shape.stateColumn} = ${next(scope.state)} AND (${disjuncts.join(' OR ')})`, params }
