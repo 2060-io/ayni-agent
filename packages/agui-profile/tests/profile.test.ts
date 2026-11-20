@@ -16,10 +16,14 @@ import {
   INVITATION_GOAL_CODE,
   isAppLink,
   isClientPlatform,
+  noTurnOf,
   PROFILE_MAJOR,
   PROFILE_MINOR,
   PROFILE_VERSION,
   parseAppLink,
+  SPACE_CALL_RULES,
+  SPACE_TOOL_STATES,
+  TOOL_EFFECTS,
 } from '../src/index.js'
 
 const schemasDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'schemas')
@@ -27,10 +31,16 @@ const schema = (name: string) => JSON.parse(readFileSync(join(schemasDir, name),
 const ajv = new Ajv2020({ strict: false })
 addFormats(ajv)
 
-describe('profile 3.3 constants', () => {
+describe('profile 3.4 constants', () => {
   it('names the revision', () => {
     expect(PROFILE_VERSION).toBe(`${PROFILE_MAJOR}.${PROFILE_MINOR}`)
-    expect(PROFILE_VERSION).toBe('3.3')
+    expect(PROFILE_VERSION).toBe('3.4')
+    // 3.4: a change of a space's tools applied or dropped, and the decision run of a confirmation
+    expect(CUSTOM_EVENT.spaceToolsChanged).toBe('ayni.space.tools.changed')
+    expect(noTurnOf({ type: 'RUN_STARTED', noTurn: 'decision' })).toBe('decision')
+    expect(SPACE_TOOL_STATES).toEqual(['available', 'setup', 'ready', 'off'])
+    expect(SPACE_CALL_RULES).toEqual(['none', 'confirm', 'approval', 'off'])
+    expect(TOOL_EFFECTS).toEqual(['read', 'write', 'delete', 'external'])
     // 3.3: a memory the agent changed, live and in history
     expect(CUSTOM_EVENT.memoryUpdated).toBe('ayni.memory.updated')
     expect(ACTIVITY.memoryUpdate).toBe('ayni.memory-update')
@@ -45,6 +55,11 @@ describe('profile 3.3 constants', () => {
 describe('errors (§9, PROF-ERR-001)', () => {
   it('gives each code its status, as profile.md does', () => {
     expect(ERROR_STATUS['has-messages']).toBe(409)
+    // 3.4: the refusals of the tools of a space (§3.10)
+    expect(ERROR_STATUS['change-pending']).toBe(409)
+    expect(ERROR_STATUS['confirmation-unavailable']).toBe(409)
+    expect(ERROR_STATUS['looser-than-pack']).toBe(422)
+    expect(ERROR_STATUS['bad-token']).toBe(422)
     expect(ERROR_STATUS['out-of-bounds']).toBe(422)
     expect(ERROR_STATUS['space-left']).toBe(409)
     expect(ERROR_STATUS['not-admin']).toBe(403)
@@ -90,6 +105,9 @@ describe('schemas', () => {
       })
     ).toBe(true)
     expect(validate({ ...base, features: { ...base.features, erasure: { windowSeconds: -1 } } })).toBe(false)
+    // 3.4: the tools, a boolean (PROF-DESC-009)
+    expect(validate({ ...base, profileVersion: '3.4', features: { ...base.features, tools: true } })).toBe(true)
+    expect(validate({ ...base, features: { ...base.features, tools: 'yes' } })).toBe(false)
     expect(validate({ ...base, features: { ...base.features, erasure: {} } })).toBe(false)
     expect(
       validate({ ...base, binding: { modes: ['cross-device'], walletLinkTemplate: 'didcomm://x?oob={oob}' } })
@@ -116,6 +134,23 @@ describe('schemas', () => {
       })
     ).toBe(true)
     expect(validate({ client: { name: 'ayni-ui', version: '3.3.0', platform: 'web' }, spaceId: 7 })).toBe(false)
+    // 3.4: the version of the profile the client implements (PROF-SESS-016)
+    expect(validate({ client: { name: 'ayni-ui', version: '3.4.0', platform: 'web', profileVersion: '3.4' } })).toBe(
+      true
+    )
+    expect(validate({ client: { name: 'ayni-ui', version: '3.4.0', platform: 'web', profileVersion: 'four' } })).toBe(
+      false
+    )
+  })
+
+  it('takes the scope of a decision on a confirmation (PROF-TOOL-008)', () => {
+    const validate = ajv.compile(schema('ayni-action.schema.json'))
+    expect(validate({ kind: 'approval.decide', approvalId: 'apr_1', decision: 'approve', scope: 'conversation' })).toBe(
+      true
+    )
+    expect(validate({ kind: 'approval.decide', approvalId: 'apr_1', decision: 'approve', scope: 'forever' })).toBe(
+      false
+    )
   })
 })
 

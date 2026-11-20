@@ -100,6 +100,10 @@
           "type": "boolean",
           "description": "the agent tells a wallet where it stands with peer-status/1.0/status; a wallet asks for a session grant once a status lists ag-ui as open (PROF-DESC-007)"
         },
+        "tools": {
+          "type": "boolean",
+          "description": "the agent serves the tools of a space (section 3.10), the confirmation card of a tool call and the sources of replies and conversations (3.4, PROF-DESC-009)"
+        },
         "erasure": {
           "type": "object",
           "required": ["windowSeconds"],

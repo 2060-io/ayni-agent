@@ -1,6 +1,14 @@
 /**
- * Ayni AG-UI Profile 3.3 (2060-io/ayni-spec, v4/ayni-agui-profile/profile.md).
+ * Ayni AG-UI Profile 3.4 (2060-io/ayni-spec, v4/ayni-agui-profile/profile.md).
  * Every name below cites the section or the PROF-* requirement it implements.
+ *
+ * 3.4 over 3.3 (ayni-spec agent D96 to D100, tools, phase 1): the tools of a space, read by its members and managed by
+ * its owner, a change that grants something confirmed on the owner's phone (§3.10, PROF-TOOL-001..006,
+ * `ayni.space.tools.changed`); the confirmation card of a tool call, an `ayni.approval` of kind `confirmation` decided by
+ * `approval.decide` while the turn waits (`scope`, `noTurn: 'decision'`, PROF-TOOL-007/008); the exact action on the
+ * approval of a tool call (`action`, `space`, PROF-TOOL-009); the sources a reply used and those a conversation holds
+ * (`metadata.sources`, `GET /conversations/{id}/sources`, PROF-TOOL-010/011); stopping an allowance (PROF-TOOL-012);
+ * `features.tools` (PROF-DESC-009) and `client.profileVersion` (PROF-SESS-016); the errors of §3.10.
  *
  * 3.3 over 3.2 (ayni-spec agent D80 to D93; ayni-agent decision 60): spaces, their templates, members, activity,
  * ownership and handover (§3.7, PROF-SPACE-*); a conversation belongs to a space (`spaceId`, `shared`,
@@ -19,9 +27,9 @@
  * `grant-expired` errors (§9), app links (§10, PROF-LINK-*). A 3.0 UI keeps working against a 3.1 agent.
  */
 
-export const PROFILE_VERSION = '3.3'
+export const PROFILE_VERSION = '3.4'
 export const PROFILE_MAJOR = 3
-export const PROFILE_MINOR = 3
+export const PROFILE_MINOR = 4
 
 /** DID Document service type that references the descriptor (PROF-DESC-001). */
 export const DID_SERVICE_TYPE = 'AyniAgUI'
@@ -82,6 +90,12 @@ export interface DescriptorFeatures {
    * `true` here: a UI reads a boolean as no window it knows, and offers no deletion.
    */
   erasure?: { windowSeconds: number }
+  /**
+   * the agent serves the tools of a space (§3.10), the confirmation card of a tool call and the exact action on its
+   * approval (§6), and the sources of replies and conversations (§3.6, §8): 3.4, PROF-DESC-009. A UI shows no Tools
+   * segment and asks for no sources of an agent that does not declare it.
+   */
+  tools?: boolean
 }
 
 export type BindingMode = 'cross-device' | 'same-device'
@@ -141,6 +155,11 @@ export interface ClientDescription {
   platform: ClientPlatform | (string & {})
   /** what the phone shows when it links this session: "Firefox on Linux", "Ayni on iPhone" (PROF-SESS-014) */
   description?: string
+  /**
+   * the version of this profile the client implements (3.4, PROF-SESS-016): the agent asks the confirmation of a tool
+   * call only of sessions whose client declared 3.4 or later. A client that implements 3.4 sends it.
+   */
+  profileVersion?: string
 }
 
 export function isClientPlatform(value: unknown): value is ClientPlatform {
@@ -256,7 +275,24 @@ export const CUSTOM_EVENT = {
   messagesWithheld: 'ayni.messages.withheld',
   /** the agent added, changed or removed one of the person's memories in a conversation (3.3) */
   memoryUpdated: 'ayni.memory.updated',
+  /** a change of a space's tools applied or was dropped: to every bound session of the space's owner (3.4, PROF-TOOL-006) */
+  spaceToolsChanged: 'ayni.space.tools.changed',
 } as const
+
+/** What became of a change of a space's tools (3.4, PROF-TOOL-006). */
+export type SpaceToolChangeOutcome = 'applied' | 'declined' | 'expired' | 'failed' | 'cancelled'
+
+/**
+ * `ayni.space.tools.changed` (3.4, PROF-TOOL-006): a change of a space's tools applied or was dropped. A change that
+ * applied at once (`200`) is announced with `outcome: 'applied'` and no `changeId`.
+ */
+export interface SpaceToolsChangedValue {
+  spaceId: string
+  source: string
+  state: SpaceToolState
+  changeId?: string
+  outcome: SpaceToolChangeOutcome
+}
 
 /** `ayni.messages.erased` (PROF-STREAM-008). */
 export interface MessagesErasedValue {
@@ -343,7 +379,24 @@ export interface CapabilityRoutedValue {
 }
 
 export type ApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED' | 'EXPIRED'
-export type ApprovalKind = 'sensitivity' | 'elevation'
+/** `confirmation` (3.4): the person's own decision on a call of theirs, shown in its conversation only (PROF-TOOL-007) */
+export type ApprovalKind = 'sensitivity' | 'elevation' | 'confirmation'
+
+/** Whose account a tool call runs with (3.4): none, the agent's, or the space's. */
+export type AccountKind = 'none' | 'agent' | 'space'
+
+/**
+ * A tool call as its card shows it (3.4, PROF-TOOL-007/009): the action's title, its source, whose account, and every
+ * argument the tool will receive, the pinned ones first, each value whole, as text. After the message whose turn asked
+ * for it is deleted within the window, `fields` is empty and `erased` true (agent INTX-APPR-015).
+ */
+export interface ToolAction {
+  title: string
+  source: { id: string; title: string }
+  account: { kind: AccountKind; space?: { id: string; title: string } }
+  fields: { label: string; value: string; pinned?: boolean }[]
+  erased?: boolean
+}
 
 export interface ApprovalPolicyDisplay {
   type: 'count' | 'percentage'
@@ -355,7 +408,8 @@ export interface ApprovalRequestValue {
   approvalId: string
   kind: ApprovalKind
   tool: string
-  requester: { displayName: string; role?: string }
+  /** `name` is the requester's name as the 3.4 cards write it; `displayName` the same, as earlier revisions did */
+  requester: { displayName: string; name?: string; role?: string }
   purpose?: { id: string; label: string }
   justification?: string
   policy: ApprovalPolicyDisplay
@@ -365,6 +419,10 @@ export interface ApprovalRequestValue {
   own?: boolean
   /** true when the receiving Principal may decide */
   canDecide?: boolean
+  /** the call of a tool, as its card shows it (3.4, PROF-TOOL-009) */
+  action?: ToolAction
+  /** the space whose owner approves the call of a tool of the space (3.4, PROF-TOOL-009) */
+  space?: { id: string; title: string }
 }
 
 export interface ApprovalUpdateValue {
@@ -372,6 +430,30 @@ export interface ApprovalUpdateValue {
   status: ApprovalStatus
   decidedBy?: string
   grantExpiresAt?: string
+  /** a confirmation allowed: for this call, or for the conversation (3.4) */
+  scope?: 'once' | 'conversation'
+  /** the allowance a confirmation gave ended (3.4, PROF-TOOL-012) */
+  allowanceEnded?: boolean
+}
+
+/**
+ * The confirmation card of a tool call (3.4, PROF-TOOL-007): an `ayni.approval` activity of `kind: 'confirmation'`, in
+ * the run of the turn and on every other session of the conversation, never an `ayni.approval.request`, never counted
+ * in `pendingApprovals`. `allowForConversation` says whether the card offers "Allow for this conversation"; `untrusted`
+ * names the untrusted sources the turn read when they made the card ask.
+ */
+export interface ConfirmationActivity {
+  approvalId: string
+  kind: 'confirmation'
+  status: ApprovalStatus
+  expiresAt: string
+  requester: { name: string; displayName?: string }
+  tool: string
+  action: ToolAction
+  untrusted?: { sources: string[] }
+  allowForConversation: boolean
+  scope?: 'once' | 'conversation'
+  allowanceEnded?: boolean
 }
 
 /**
@@ -406,6 +488,18 @@ export interface MessageMetadata {
   usedPreferences?: string[]
   /** `false` on a message of the person that the model never received (PROF-HIST-013, 3.3 amended); absent otherwise */
   modelVisible?: false
+  /**
+   * on a message of the agent whose turn ran tools: the sources of the tool results that turn read, and whose account
+   * read them, one item per source and account (3.4, PROF-TOOL-010); absent on a message whose turn ran none
+   */
+  sources?: MessageSource[]
+}
+
+/** A source of a reply (3.4, PROF-TOOL-010). */
+export interface MessageSource {
+  source: string
+  title: string
+  account: AccountKind
 }
 
 export type ReceiptState = 'received' | 'viewed'
@@ -427,6 +521,7 @@ export interface CustomEventValueMap {
   'ayni.messages.erased': MessagesErasedValue
   'ayni.messages.withheld': MessagesWithheldValue
   'ayni.memory.updated': MemoryUpdatedValue
+  'ayni.space.tools.changed': SpaceToolsChangedValue
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -541,7 +636,14 @@ export type AyniAction =
   | { kind: 'text'; replyTo?: string }
   | { kind: 'menu.select'; menuId: string; itemId: string }
   | { kind: 'contextual.select'; itemId: string }
-  | { kind: 'approval.decide'; approvalId: string; decision: 'approve' | 'reject'; note?: string }
+  | {
+      kind: 'approval.decide'
+      approvalId: string
+      decision: 'approve' | 'reject'
+      note?: string
+      /** on a confirmation: Allow (`once`) or Allow for this conversation (3.4, PROF-TOOL-008) */
+      scope?: 'once' | 'conversation'
+    }
   | { kind: 'approval.cancel'; approvalId: string }
   | { kind: 'elevation.request'; tool: string; purposeId: string; justification: string }
   | { kind: 'reaction'; messageId: string; emoji: string; action: 'add' | 'remove' }
@@ -665,7 +767,17 @@ export interface MergedRunOutcome {
  * agent refused it (too many wait), or the caller gave up while its action waited for its turn. Carried by the
  * run's `RunStarted` as `noTurn`.
  */
-export type NoTurn = 'waiting' | 'refused' | 'withdrawn'
+export type NoTurn = 'waiting' | 'refused' | 'withdrawn' | 'decision'
+
+/**
+ * The outcome of an `approval.decide` run on a confirmation (3.4, PROF-TOOL-008): it starts no turn, and says the status
+ * the confirmation has now: the one it took, or the one an earlier decision gave it.
+ */
+export interface DecisionRunOutcome {
+  type: 'decision'
+  approvalId: string
+  status: ApprovalStatus
+}
 
 /** The outcome of a run whose message waits: the agent's id for it (PROF-RUN-011). */
 export interface WaitingRunOutcome {
@@ -679,7 +791,10 @@ export interface WaitingRunOutcome {
  */
 export function noTurnOf(event: { type?: unknown; noTurn?: unknown }): NoTurn | undefined {
   if (event.type !== 'RUN_STARTED') return undefined
-  return event.noTurn === 'waiting' || event.noTurn === 'refused' || event.noTurn === 'withdrawn'
+  return event.noTurn === 'waiting' ||
+    event.noTurn === 'refused' ||
+    event.noTurn === 'withdrawn' ||
+    event.noTurn === 'decision'
     ? event.noTurn
     : undefined
 }
@@ -829,6 +944,24 @@ export const ERROR_STATUS = {
   forbidden: 403,
   /** 3.3: a message whose reply is being written, whose turn did not stop in time: nothing changed, ask again (PROF-HIST-010) */
   'turn-in-progress': 409,
+  /** 3.4: the source is in the space already (§3.10) */
+  'already-added': 409,
+  /** 3.4: a source `available` or `off` takes no bindings, rules or account (§3.10) */
+  'not-added': 409,
+  /** 3.4: a change of the source waits for the owner's phone (§3.10, PROF-TOOL-002..004) */
+  'change-pending': 409,
+  /** 3.4: the calls of the source do not run with an account of the space (§3.10, PROF-TOOL-004) */
+  'no-space-account': 409,
+  /** 3.4: no capability channel of the owner can serve the confirmation of a change (§3.10) */
+  'confirmation-unavailable': 409,
+  /** 3.4: a binding the source does not declare, or a value that does not match its pattern, with `field` (§3.10) */
+  'bad-binding': 422,
+  /** 3.4: a binding the agent-pack sets, with `field` (§3.10) */
+  'pinned-by-pack': 422,
+  /** 3.4: a rule looser than the agent-pack's, with `field` (§3.10) */
+  'looser-than-pack': 422,
+  /** 3.4: a token empty, longer than 4096 characters, or not matching the account's pattern (§3.10) */
+  'bad-token': 422,
 } as const
 
 export type ErrorCode = keyof typeof ERROR_STATUS
@@ -1047,6 +1180,11 @@ export type AddMemberRequest = { directoryId: string } | { organizationKey: stri
 export type OwnerTransferRequest = { memberId: string } | { directoryId: string }
 
 export type SpaceActivityKind =
+  | 'tool-added'
+  | 'tool-changed'
+  | 'tool-removed'
+  | 'account-set'
+  | 'account-cleared'
   | 'created'
   | 'joined'
   | 'left'
@@ -1067,6 +1205,8 @@ export interface SpaceActivityItem {
   /** the names of the fields a `rules-changed` changed */
   fields?: string[]
   conversationId?: string
+  /** the source a change of the space's tools concerns (3.4); never a value of its account */
+  tool?: { source: string; title: string }
 }
 
 export interface SpaceActivityPage {
@@ -1183,4 +1323,101 @@ export interface AboutMeResponse {
   memoriesBySpace: { spaceId: string; title: string; count: number }[]
   conversations: { spaceId: string; title: string; count: number; retentionDays: number | null }[]
   verified: { label: string; source: string | null; verifiedAt: string; expiresAt: string | null }[]
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tools (3.4, §3.10 and §3.6): `{sessions}/spaces/{id}/tools`, `/conversations/{id}/sources`, `/allowances`
+
+/** What a tool does (agent D99): it gives its default rule. */
+export type ToolEffect = 'read' | 'write' | 'delete' | 'external'
+export const TOOL_EFFECTS: readonly ToolEffect[] = ['read', 'write', 'delete', 'external']
+/** What a call needs: nothing, the person's confirmation, an approval; `off` in a space: not given to the model. */
+export type SpaceCallRule = 'none' | 'confirm' | 'approval' | 'off'
+export const SPACE_CALL_RULES: readonly SpaceCallRule[] = ['none', 'confirm', 'approval', 'off']
+/** A source in a space: offered, added but not bound or without its account, ready, or an automatic one removed. */
+export type SpaceToolState = 'available' | 'setup' | 'ready' | 'off'
+export const SPACE_TOOL_STATES: readonly SpaceToolState[] = ['available', 'setup', 'ready', 'off']
+
+/**
+ * A source of a space, as `GET {sessions}/spaces/{id}/tools` gives it (PROF-TOOL-001). To the owner, every source the
+ * template names, with every field; to another active member, the `ready` sources, without `add`, the bindings' `name`,
+ * `setBy` and `pattern`, the tools' `name` and `packRule`, the account's status, and `pending`. No answer carries a token.
+ */
+export interface SpaceTool {
+  source: string
+  title: string
+  description?: string
+  state: SpaceToolState
+  /** the owner's: added to every space of the template (`auto`) or by each owner (`owner`) */
+  add?: 'auto' | 'owner'
+  guests: boolean
+  account: {
+    kind: AccountKind
+    /** the owner's, for a `space` account: what is asked, the pattern, whether it is set, when and by whom */
+    label?: string
+    pattern?: string
+    set?: boolean
+    setAt?: string | null
+    setBy?: { name: string } | null
+  }
+  bindings: {
+    name?: string
+    label: string
+    value: string | null
+    setBy?: 'pack' | 'owner'
+    pattern?: string | null
+  }[]
+  tools: {
+    name?: string
+    title: string
+    effect: ToolEffect | null
+    /** the rule in force in this space */
+    rule: SpaceCallRule
+    /** the owner's: the agent-pack's rule, the loosest the owner may choose */
+    packRule?: Exclude<SpaceCallRule, 'off'>
+    stepUp: 'device' | 'face-match' | 'document' | null
+  }[]
+  /** the owner's: the change waiting for the owner's phone */
+  pending?: { changeId: string; summary: string; code: string; expiresAt: string } | null
+}
+
+export interface SpaceToolsResponse {
+  tools: SpaceTool[]
+}
+
+/** `POST {sessions}/spaces/{id}/tools` (PROF-TOOL-002): answered `202 { tool }` with its `pending` change. */
+export interface AddSpaceToolRequest {
+  source: string
+  bindings?: Record<string, string>
+  calls?: Record<string, SpaceCallRule>
+}
+
+/** `PATCH {sessions}/spaces/{id}/tools/{source}` (PROF-TOOL-003): `200` applied, or `202` with `pending`. */
+export interface SpaceToolPatch {
+  bindings?: Record<string, string>
+  calls?: Record<string, SpaceCallRule>
+}
+
+/** `PUT {sessions}/spaces/{id}/tools/{source}/account` (PROF-TOOL-004): answered `202 { tool }` with `pending`. */
+export interface SpaceAccountRequest {
+  token: string
+}
+
+export interface SpaceToolResponse {
+  tool: SpaceTool
+}
+
+/** One source of `GET {sessions}/conversations/{id}/sources` (PROF-TOOL-011). */
+export interface ConversationSource {
+  source: string
+  title: string
+  account: { kind: AccountKind; space?: { id: string; title: string } }
+  /** how many results of it the conversation holds */
+  results: number
+  /** the time of the latest */
+  lastAt: string
+}
+
+export interface ConversationSourcesResponse {
+  sources: ConversationSource[]
 }

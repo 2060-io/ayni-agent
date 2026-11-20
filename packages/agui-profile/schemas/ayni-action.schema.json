@@ -56,6 +56,10 @@
         },
         "note": {
           "type": "string"
+        },
+        "scope": {
+          "enum": ["once", "conversation"],
+          "description": "on a confirmation: Allow (once) or Allow for this conversation (3.4, PROF-TOOL-008)"
         }
       },
       "required": ["kind", "approvalId", "decision"],
