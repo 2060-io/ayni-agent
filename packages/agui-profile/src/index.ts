@@ -408,8 +408,7 @@ export interface ApprovalRequestValue {
   approvalId: string
   kind: ApprovalKind
   tool: string
-  /** `name` is the requester's name as the 3.4 cards write it; `displayName` the same, as earlier revisions did */
-  requester: { displayName: string; name?: string; role?: string }
+  requester: { displayName: string; role?: string }
   purpose?: { id: string; label: string }
   justification?: string
   policy: ApprovalPolicyDisplay
@@ -447,7 +446,7 @@ export interface ConfirmationActivity {
   kind: 'confirmation'
   status: ApprovalStatus
   expiresAt: string
-  requester: { name: string; displayName?: string }
+  requester: { displayName: string; role?: string }
   tool: string
   action: ToolAction
   untrusted?: { sources: string[] }

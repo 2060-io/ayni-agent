@@ -427,6 +427,7 @@ export class ToolGate {
       // in the clear, beside the sealed arguments and result (TOOL-PROV-001)
       provenance: {
         sourceId: tool.source.name,
+        sourceKind: tool.source.kind,
         toolName: tool.spec.rawName,
         account: callAccount,
         untrusted: tool.untrusted,
@@ -435,12 +436,15 @@ export class ToolGate {
       },
     })
     if (tool.untrusted) state.untrustedRead.set(tool.source.name, tool.source.title)
-    const key = `${tool.source.name}|${callAccount.kind}|${callAccount.spaceId ?? ''}`
-    state.sources.set(key, {
-      sourceId: tool.source.name,
-      accountKind: callAccount.kind,
-      ...(callAccount.spaceId ? { spaceId: callAccount.spaceId } : {}),
-    })
+    // the sources of a reply are the MCP servers and the HTTP tools its turn read, never a bundled tool (TOOL-PROV-002)
+    if (tool.source.kind !== 'bundled') {
+      const key = `${tool.source.name}|${callAccount.kind}|${callAccount.spaceId ?? ''}`
+      state.sources.set(key, {
+        sourceId: tool.source.name,
+        accountKind: callAccount.kind,
+        ...(callAccount.spaceId ? { spaceId: callAccount.spaceId } : {}),
+      })
+    }
     await this.finish(record, isError ? 'failed' : 'completed')
     return content.slice(0, 20000)
   }
@@ -531,7 +535,7 @@ export class ToolGate {
       kind: 'confirmation',
       status: record.status,
       expiresAt: record.expiresAt,
-      requester: { displayName: record.requesterName, name: record.requesterName },
+      requester: { displayName: record.requesterName, role: record.requesterRole },
       tool: record.toolName,
       ...(record.action ? { action: record.action } : {}),
       ...(record.untrustedSources?.length ? { untrusted: { sources: record.untrustedSources } } : {}),
@@ -936,7 +940,7 @@ export class ToolGate {
       approvalId: record.id,
       kind: record.kind,
       tool: record.toolName,
-      requester: { displayName: record.requesterName, name: record.requesterName, role: record.requesterRole },
+      requester: { displayName: record.requesterName, role: record.requesterRole },
       policy: { type: record.policy.type, value: record.policy.value, vetoOnRefusal: record.policy.vetoOnRefusal },
       expiresAt: record.expiresAt,
       status: record.status,
@@ -1122,6 +1126,9 @@ export class ToolGate {
       if (row.sourceType !== 'tool-call' || !row.provenance) continue
       if (row.state === 'crypto-erased' || row.state === 'deleted') continue
       const p = row.provenance
+      // a bundled tool acts on the agent's own records: no source of what the conversation holds (TOOL-PROV-003)
+      const kind = p.sourceKind ?? this.deps.catalog.source(p.sourceId)?.kind ?? 'bundled'
+      if (kind === 'bundled') continue
       const key = `${p.sourceId}|${p.account.kind}|${p.account.spaceId ?? ''}`
       const group = groups.get(key) ?? { sourceId: p.sourceId, account: p.account, results: 0, lastAt: row.createdAt }
       group.results++

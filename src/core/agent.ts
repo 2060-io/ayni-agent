@@ -1285,7 +1285,7 @@ export class AyniAgent {
       approvalId: record.id,
       kind: record.kind,
       tool: record.toolName,
-      requester: { displayName: record.requesterName, name: record.requesterName, role: record.requesterRole },
+      requester: { displayName: record.requesterName, role: record.requesterRole },
       policy: { type: record.policy.type, value: record.policy.value, vetoOnRefusal: record.policy.vetoOnRefusal },
       expiresAt: record.expiresAt,
       status: record.status,
