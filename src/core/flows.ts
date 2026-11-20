@@ -81,6 +81,8 @@ export interface FlowOpenOptions {
   origin?: Session
   /** whether the flow is recorded as a card in the origin conversation (default: when the origin is bound) */
   card?: boolean
+  /** the origin names its session and no conversation: a change of a space's tools (TOOL-SPACE-008) */
+  withoutConversation?: boolean
   expiresAt?: string
   expiresInMs?: number
   requires?: string[]
@@ -148,13 +150,13 @@ export class FlowService {
     this.agentDid = did
   }
 
-  public originOf(session: Session | undefined): FlowOrigin {
+  public originOf(session: Session | undefined, withoutConversation = false): FlowOrigin {
     if (!session) return { channel: 'none' }
     return {
       channel: 'ag-ui',
       agentDid: this.agentDid,
       sessionId: session.id,
-      conversationId: session.conversationId,
+      ...(withoutConversation ? {} : { conversationId: session.conversationId }),
       client: clientDescriptionOf(session),
     }
   }
@@ -170,7 +172,7 @@ export class FlowService {
         kind: opts.kind,
         title: opts.title,
         description: opts.description,
-        origin: this.originOf(opts.origin),
+        origin: this.originOf(opts.origin, opts.withoutConversation === true),
         expiresTime: expiresAt,
         requires: opts.requires,
       })

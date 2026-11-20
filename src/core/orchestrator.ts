@@ -10,7 +10,8 @@ import type { ObjectStore } from '../media/objectStore.js'
 import type { MemoryService, NewEntry, Recalled } from '../memory/service.js'
 import type { StatsSink } from '../platform/stats.js'
 import type { ApprovalService } from '../policy/approvals.js'
-import type { ToolRegistry, VisibleTool } from '../tools/registry.js'
+import { ToolCatalog } from '../tools/catalog.js'
+import type { ToolRegistry } from '../tools/registry.js'
 import type { EndTurnMessage, MemoryChange, ToolContext } from '../tools/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
@@ -22,8 +23,9 @@ import { isEmailCheckMessage, withheldRecordText } from './emailCheck.js'
 import { nameForModel } from './evidence.js'
 import type { PrincipalService } from './principals.js'
 import { addonTokenCount, renderPromptAddon } from './promptAddon.js'
-import { personalSpaceId } from './spaces.js'
-import type { ApprovalRecord, MessageEntry, Principal, ReactionPolicy, Session } from './types.js'
+import { isPersonalSpace, personalSpaceId } from './spaces.js'
+import type { ToolGate, TurnTool, TurnToolState } from './toolGate.js'
+import type { ApprovalRecord, MessageEntry, Principal, ReactionPolicy, Session, TurnSource } from './types.js'
 
 /** The memories and preferences a turn was given (MEM-SPACE-006): what an answer's Info lists. */
 export interface UsedMemory {
@@ -183,15 +185,23 @@ export class Orchestrator {
   public providerRefusal?: (session: Session, principal: Principal, spaceId: string) => Promise<string | undefined>
   /** the messages each conversation's turn in progress answers: deleting one cancels the turn first (PRIV-ERASE-011) */
   private readonly answering = new Map<string, Set<string>>()
+  /**
+   * What a call needs and its record (ayni-spec D99, D100): every call of a turn goes through it. Set by the composition
+   * root.
+   */
+  public gate?: ToolGate
+  /** the space a session's conversation is in, opened: for the rules of its tools; set by the composition root */
+  public spaceById?: (spaceId: string) => Promise<TurnToolState['space']>
 
   public constructor(
     private readonly pack: AgentPack,
     private readonly llm: ChatModel,
     private readonly memory: MemoryService,
     private readonly principals: PrincipalService,
-    private readonly registry: ToolRegistry,
+    // the tools of a turn come from the gate (D96): the registry and the challenges are its
+    _registry: ToolRegistry,
     private readonly approvals: ApprovalService,
-    private readonly challenges: ChallengeService,
+    _challenges: ChallengeService,
     private readonly objects: ObjectStore,
     private readonly stats: StatsSink,
     private readonly hooks: OrchestratorHooks,
@@ -210,6 +220,8 @@ export class Orchestrator {
       issuance: Object.keys(pack.issuance ?? {}).length > 0,
       appLinkBase: pack.channels?.agui?.appLinkBase,
       emailChecks: Object.values(pack.issuance ?? {}).some((p) => challengeTypesOf(p).includes('email')),
+      // the person or an approver may be asked before an action runs (TOOL-CALL-010)
+      toolsMayAsk: new ToolCatalog(pack).mayAsk(),
     })
     const tokens = addonTokenCount(this.addon)
     if (tokens > 500) logger.warn({ tokens }, 'system-prompt add-on exceeds its 500-token target (CORE-PROMPT-004)')
@@ -432,9 +444,10 @@ export class Orchestrator {
     if (refusal) return this.refuse(session, principal, inbounds, refusal, sink, context)
     const { messages: system, used } = await this.systemMessages(principal, session, spaceId)
     const grants = await this.approvals.activeGrants(principal.id)
-    const visible = await this.registry.visible(principal.roles, grants, principal)
-    // a fixed order: the start of the request stays the same from one turn to the next (MEM-CTX-001)
-    const tools = this.registry.toDefinitions(visible).sort((a, b) => a.name.localeCompare(b.name))
+    // the tools of the turn, taken once: they change only between turns (TOOL-AVAIL-006), in a fixed order, so that the
+    // start of the request stays the same from one turn to the next (MEM-CTX-001)
+    const turnTools = await this.toolsOf(principal, spaceId, grants)
+    const tools = turnTools.map((t) => t.definition)
     const userTurn = await this.userTurn(inbounds, imageBytes)
     const topK = this.pack.memory?.retrieval?.topK ?? 8
     const assembled = await this.context.assemble({
@@ -463,6 +476,17 @@ export class Orchestrator {
 
     /** the memories the turn changed: told as lines of the conversation once its reply is written (MEM-SPACE-005) */
     const changes: MemoryChange[] = []
+    /** what the turn's calls read: the untrusted content (TOOL-CALL-008) and the sources (TOOL-PROV-002) */
+    const toolState: TurnToolState = {
+      conversationId,
+      spaceId,
+      ...(isPersonalSpace(spaceId) ? {} : { space: await this.spaceById?.(spaceId) }),
+      untrustedRead: new Map(),
+      sources: new Map(),
+      newMessage: false,
+      signal,
+    }
+    const turnSources = (): TurnSource[] => [...toolState.sources.values()]
     /** a tool ended the turn with a message of the code (INTX-AUTH-012) */
     let ended: EndTurnMessage | undefined
     const toolCtx: ToolContext = {
@@ -515,6 +539,8 @@ export class Orchestrator {
           usedMemories: used.memories,
           usedPreferences: used.preferences,
         },
+        // the sources whose tools ran in the turn so far (TOOL-PROV-002)
+        sources: turnSources(),
       })
       written.push(entry)
       return entry
@@ -522,7 +548,8 @@ export class Orchestrator {
     const emitText = async (delta: string) => {
       let more = delta
       if (pausedAt !== undefined && started && text.trim()) {
-        if (Date.now() - pausedAt >= this.resumeAsNewMessageMs) {
+        // after a card waited for the person, the reply goes on as a new message (TOOL-CALL-007, CORE-MSG-011)
+        if (toolState.newMessage || Date.now() - pausedAt >= this.resumeAsNewMessageMs) {
           // the agent resumes after a pause: what it said before is a message, and this is another
           await sink.emit({ type: 'text-end', messageId })
           await save('complete', text.trim())
@@ -536,6 +563,7 @@ export class Orchestrator {
         }
       }
       pausedAt = undefined
+      toolState.newMessage = false
       if (!more) return
       if (!started) {
         started = true
@@ -588,9 +616,16 @@ export class Orchestrator {
         if (calls.length === 0) break
         messages.push({ role: 'assistant', content: roundText, toolCalls: calls })
         if (pausedAt === undefined) pausedAt = Date.now()
+        // one at a time, in the model's order: while a card waits no other call starts (TOOL-CALL-007)
         for (const call of calls) {
           if (signal.aborted) throw new TurnCancelled()
-          const result = await this.executeToolCall(call, visible, session, principal, inbound, toolCtx, sink)
+          const result = await this.gateOf().execute(call, turnTools, toolState, {
+            session,
+            principal,
+            inbound,
+            toolCtx,
+            sink,
+          })
           messages.push({ role: 'tool', toolCallId: call.id, name: call.name, content: result })
         }
         // the code takes the conversation over: no model call after it in this turn (INTX-AUTH-012)
@@ -618,6 +653,15 @@ export class Orchestrator {
     if (ended)
       reply = await this.codeMessage(session, principal, ended, sink, { after: reply?.initiatedAt, inboundIds })
     if (!reply) throw new Error('a turn ended with no message')
+    // every message of the reply records the sources of its turn, those written before its tools ran included
+    // (TOOL-PROV-002)
+    const sources = turnSources()
+    if (sources.length)
+      for (const message of written)
+        if ((message.sources?.length ?? 0) !== sources.length) {
+          message.sources = sources
+          await this.memory.rewrite(message)
+        }
     // the turn keeps its usage with its reply (LLM-USAGE-002), and the conversation its figure (LLM-USAGE-003)
     if (usage.calls > 0) {
       reply.payload = { ...(reply.payload ?? {}), usage }
@@ -807,17 +851,31 @@ export class Orchestrator {
     this.stats.emit('llm-output', counts.outputTokens, dims)
   }
 
-  /** Runs a tool directly (contextual-menu tool items, approved actions) with the same gates. */
+  private gateOf(): ToolGate {
+    if (!this.gate) throw new Error('the tool gate is not wired')
+    return this.gate
+  }
+
+  /** The tools of a turn in a space (RBAC-FILTER-004): through the gate when it is wired. */
+  private async toolsOf(
+    principal: Principal,
+    spaceId: string,
+    grants: Awaited<ReturnType<ApprovalService['activeGrants']>>
+  ): Promise<TurnTool[]> {
+    return this.gateOf().toolsFor(principal, spaceId, grants)
+  }
+
+  /** Runs a tool directly (contextual-menu tool items) with the same gates as a call of the model. */
   public async invokeTool(
     name: string,
     args: Record<string, unknown>,
     session: Session,
     principal: Principal,
-    sink: TurnSink,
-    skipApproval = false
+    sink: TurnSink
   ): Promise<string> {
     const grants = await this.approvals.activeGrants(principal.id)
-    const visible = await this.registry.visible(principal.roles, grants, principal)
+    const spaceId = await this.spaceOf(session, principal)
+    const tools = await this.toolsOf(principal, spaceId, grants)
     const changes: MemoryChange[] = []
     const ctx: ToolContext = {
       principal,
@@ -825,134 +883,24 @@ export class Orchestrator {
       roles: principal.roles,
       logger: this.logger,
       language: this.pack.language.agent,
-      spaceId: await this.spaceOf(session, principal),
+      spaceId,
       memoryChanged: async (change) => {
         changes.push(change)
       },
     }
+    const state: TurnToolState = {
+      conversationId: conversationOf(session),
+      spaceId,
+      ...(isPersonalSpace(spaceId) ? {} : { space: await this.spaceById?.(spaceId) }),
+      untrustedRead: new Map(),
+      sources: new Map(),
+      newMessage: false,
+      signal: new AbortController().signal,
+    }
     const call = { id: prefixedId('call'), name, arguments: args }
-    const result = await this.executeToolCall(call, visible, session, principal, undefined, ctx, sink, skipApproval)
+    const result = await this.gateOf().execute(call, tools, state, { session, principal, toolCtx: ctx, sink })
     await this.recordMemoryChanges(session, principal, changes, sink, { after: nowIso() })
     return result
-  }
-
-  private async executeToolCall(
-    call: ToolCallRequest,
-    visible: VisibleTool[],
-    session: Session,
-    principal: Principal,
-    inbound: MessageEntry | undefined,
-    ctx: ToolContext,
-    sink: TurnSink,
-    skipApproval = false
-  ): Promise<string> {
-    const tool = visible.find((t) => t.spec.name === call.name)
-    if (!tool) return `Tool ${call.name} is not available to this person.`
-    const rawName = tool.spec.key.split(':').pop() ?? call.name
-    const policy = this.pack.actions?.[rawName]
-
-    // APPROVAL tier: per-use human approval unless the requester may self-approve (RBAC-TOOL-003, INTX-APPR-005)
-    if (tool.resolution.tier === 'APPROVAL' && tool.resolution.approvalRule && !skipApproval) {
-      const rule = tool.resolution.approvalRule
-      if (!this.approvals.canSelfApprove(principal, rule)) {
-        const record = await this.approvals.requestSensitivity({
-          principal,
-          role: principal.roles.find((r) => true) ?? '',
-          originSessionId: session.id,
-          toolName: rawName,
-          serverName: tool.spec.serverName,
-          args: call.arguments,
-          rule,
-          inboundId: inbound?.id,
-        })
-        const entry = await this.memory.append({
-          sessionId: session.id,
-          principalId: principal.id,
-          role: 'system',
-          sourceType: 'approval',
-          text: `Approval requested for ${rawName} (${record.id})`,
-          backingIdentity: principal.backingIdentity,
-          payload: { approvalId: record.id, kind: record.kind, toolName: rawName, status: record.status },
-        })
-        await this.hooks.onApprovalPending(session, principal, record, entry)
-        return `The action ${rawName} needs an approval by ${rule.approvers.join(' or ')}. The request ${record.id} is pending; the action runs automatically once approved. Tell the person.`
-      }
-    }
-
-    // credential freshness (IDENT-LIVE-011, INTX-CRED-002)
-    if (policy?.maxCredentialAge !== undefined) {
-      const verdict = await this.principals.ensureLive(principal, policy.maxCredentialAge)
-      if (!verdict.ok) {
-        if (verdict.reason !== 'unavailable') await this.hooks.onCredentialInvalid(principal)
-        return `The action ${rawName} was aborted: the person's identity credential could not be verified (${verdict.reason ?? 'invalid'}).`
-      }
-    }
-
-    // auth challenge declared for the action (INTX-AUTH-002/003/006)
-    if (policy?.authChallenge) {
-      await sink.emit({ type: 'step-started', label: 'Waiting for your confirmation on your phone' })
-      const { outcome, record } = await this.challenges.run({
-        principal,
-        originSession: session,
-        toolName: rawName,
-        policy: policy.authChallenge,
-        purpose: tool.spec.stepLabel ?? rawName,
-      })
-      await sink.emit({ type: 'step-finished', label: 'Waiting for your confirmation on your phone' })
-      await this.memory.append({
-        sessionId: session.id,
-        principalId: principal.id,
-        role: 'system',
-        sourceType: 'auth-challenge',
-        text: `Identity check (${policy.authChallenge.type}) for ${rawName}: ${outcome}`,
-        backingIdentity: principal.backingIdentity,
-        payload: {
-          challengeId: record?.id,
-          type: policy.authChallenge.type,
-          outcome,
-          toolName: rawName,
-          // served as a `confirm` flow: the flow card is the UI record, this note is for the model (D55)
-          ...(typeof record?.details?.flowId === 'string' ? { flowId: record.details.flowId } : {}),
-        },
-      })
-      if (outcome !== 'completed' && outcome !== 'degraded')
-        return `The action ${rawName} did not run: the identity check ${outcome === 'failed' ? 'failed' : outcome === 'expired' ? 'timed out' : 'was not possible'}.`
-    }
-
-    const label = tool.spec.stepLabel ?? 'Working'
-    await sink.emit({ type: 'step-started', label })
-    let content: string
-    let isError = false
-    try {
-      // a tool call already executing completes even if the turn is cancelled (D47): no run signal here
-      const result = await tool.spec.invoke(call.arguments, ctx)
-      content = result.content
-      isError = result.isError === true
-      if (result.endTurn) ctx.turnEnded?.(result.endTurn)
-    } catch (error) {
-      content = `tool failed: ${error instanceof Error ? error.message : String(error)}`
-      isError = true
-    }
-    await sink.emit({ type: 'step-finished', label })
-    this.stats.emit('tool-call', 1, { tool: rawName, error: String(isError) })
-    await this.memory.append({
-      sessionId: session.id,
-      principalId: principal.id,
-      role: 'agent',
-      sourceType: 'tool-call',
-      text: `Used ${rawName}${isError ? ' (failed)' : ''}: ${content.slice(0, 200)}`,
-      backingIdentity: principal.backingIdentity,
-      payload: {
-        name: call.name,
-        server: tool.spec.serverName,
-        arguments: call.arguments,
-        result: content.slice(0, 20000),
-        isError,
-        inboundId: inbound?.id,
-        ...(ctx.inboundIds?.length ? { inboundIds: ctx.inboundIds } : {}),
-      },
-    })
-    return content.slice(0, 20000)
   }
 }
 

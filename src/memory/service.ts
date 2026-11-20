@@ -6,6 +6,7 @@ import type { AgentPack } from '../config/packTypes.js'
 import { conversationOf } from '../core/conversationOf.js'
 import { personalSpaceId, spaceIdOf } from '../core/spaces.js'
 import type {
+  ApprovalRecord,
   BackingIdentity,
   LifecycleState,
   MemoryAccessLog,
@@ -52,6 +53,10 @@ export interface NewEntry {
   externalId?: string
   initiatedAt?: string
   id?: string
+  /** on a `tool-call` entry: its source, its tool, whose account, its trust, its approval (TOOL-PROV-001) */
+  provenance?: MessageEntry['provenance']
+  /** on a message of the agent: the sources of its turn (TOOL-PROV-002) */
+  sources?: MessageEntry['sources']
 }
 
 /** What of an attachment is content: sealed with the entry, never beside it (PRIV-ERASE-001, D77). */
@@ -91,6 +96,11 @@ export interface ErasureResult {
 /** What the rest of the agent does when a conversation loses an entry: its summary, its last text (PRIV-ERASE-005). */
 export interface ErasureHooks {
   conversationErased?(conversationId: string): Promise<void>
+  /**
+   * the approvals asked in the turn of an erased message (INTX-APPR-015): their cards keep their outcome and lose the
+   * values of their arguments, and one still pending is cancelled
+   */
+  approvalsErased?: (approvals: ApprovalRecord[]) => Promise<void>
 }
 
 /**
@@ -229,6 +239,8 @@ export class MemoryService {
       externalId: input.externalId,
       initiatedAt: input.initiatedAt ?? now,
       createdAt: now,
+      ...(input.provenance ? { provenance: input.provenance } : {}),
+      ...(input.sources?.length ? { sources: input.sources } : {}),
     }
     const stored = this.seal(entry)
     entry.contentDigest = stored.contentDigest
@@ -581,9 +593,11 @@ export class MemoryService {
       await this.destroy(row)
       cascaded.push(row.id)
     }
-    for (const approval of await this.store.approvals.list({ inboundId: entryId })) {
+    const approvals = await this.store.approvals.list({ inboundId: entryId })
+    for (const approval of approvals) {
       await this.store.approvals.save({ ...approval, actionArgs: undefined, argsErased: true })
     }
+    if (approvals.length) await this.hooks.approvalsErased?.(approvals)
     this.logger.info({ entryId, cascaded: cascaded.length }, 'entry crypto-erased')
     await this.hooks.conversationErased?.(stored.conversationId)
     return { erased: true, cascaded, conversationId: stored.conversationId }
@@ -635,9 +649,11 @@ export class MemoryService {
       }
     }
     for (const row of erased) await this.destroy(row)
-    for (const approval of await this.store.approvals.list({ inboundId: entryId })) {
+    const approvals = await this.store.approvals.list({ inboundId: entryId })
+    for (const approval of approvals) {
       await this.store.approvals.save({ ...approval, actionArgs: undefined, argsErased: true })
     }
+    if (approvals.length) await this.hooks.approvalsErased?.(approvals)
     this.logger.info(
       { entryId, cascaded: turn.length, memories: memoryIds.length },
       'message deleted by its author, with its reply'

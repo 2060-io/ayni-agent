@@ -65,6 +65,16 @@ export type SpaceErrorCode =
   | 'home-organization'
   | 'organization-not-accepted'
   | 'email-unavailable'
+  // the tools of a space (profile 3.4 §3.10)
+  | 'already-added'
+  | 'not-added'
+  | 'change-pending'
+  | 'no-space-account'
+  | 'confirmation-unavailable'
+  | 'bad-binding'
+  | 'pinned-by-pack'
+  | 'looser-than-pack'
+  | 'bad-token'
 
 /** The status of each refusal (profile 3.3 §9); `ERROR_STATUS` of the profile package lists the same. */
 export const SPACE_ERROR_STATUS: Record<SpaceErrorCode, number> = {
@@ -87,6 +97,15 @@ export const SPACE_ERROR_STATUS: Record<SpaceErrorCode, number> = {
   'home-organization': 422,
   'organization-not-accepted': 409,
   'email-unavailable': 503,
+  'already-added': 409,
+  'not-added': 409,
+  'change-pending': 409,
+  'no-space-account': 409,
+  'confirmation-unavailable': 409,
+  'bad-binding': 422,
+  'pinned-by-pack': 422,
+  'looser-than-pack': 422,
+  'bad-token': 422,
 }
 
 export class SpaceError extends Error {
@@ -254,6 +273,10 @@ export class SpaceService {
   public people?: DirectoryPeople
   /** the invitations of people of other organizations (SPACE-INV); none without an SMTP server */
   public outsiders?: OutsiderInvitations
+  /** a space was created: the sources its template adds by itself come with it (TOOL-SPACE-001) */
+  public onCreated?: (space: Space) => Promise<void>
+  /** a space passed to another owner: its tools stay, its pending changes are dropped (TOOL-SPACE-011) */
+  public onOwnerChanged?: (space: Space) => Promise<void>
 
   public constructor(
     private readonly store: Store,
@@ -542,6 +565,7 @@ export class SpaceService {
     await this.members.save(owner)
     await this.record(space.id, principal.id, 'created', {})
     this.logger.info({ spaceId: space.id, templateId: template.id, principalId: principal.id }, 'space created')
+    await this.onCreated?.(space)
     return space
   }
 
@@ -797,6 +821,7 @@ export class SpaceService {
     }
     await this.spaces.save(next)
     await this.record(space.id, principal.id, 'owner-changed', { memberId: row.id, directoryId })
+    await this.onOwnerChanged?.(next)
     return next
   }
 
@@ -825,6 +850,7 @@ export class SpaceService {
     const next: Space = { ...space, ownerIds, updatedAt: now }
     await this.spaces.save(next)
     await this.record(spaceId, principal.id, 'owner-changed', { memberId })
+    await this.onOwnerChanged?.(next)
     return next
   }
 
@@ -847,7 +873,7 @@ export class SpaceService {
     spaceId: string,
     actorId: string,
     action: SpaceActivity['action'],
-    detail: Pick<SpaceActivity, 'fields' | 'memberId' | 'conversationId' | 'principalId' | 'directoryId'>
+    detail: Pick<SpaceActivity, 'fields' | 'memberId' | 'conversationId' | 'principalId' | 'directoryId' | 'sourceId'>
   ): Promise<void> {
     await this.store.spaceActivity.insert({ id: prefixedId('act'), spaceId, at: nowIso(), actorId, action, ...detail })
   }

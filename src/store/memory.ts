@@ -12,9 +12,13 @@ import type {
   RagChunk,
   Session,
   Space,
+  SpaceAccountRecord,
   SpaceActivity,
   SpaceMember,
+  SpaceToolRecord,
   StatEvent,
+  ToolAllowance,
+  ToolCallRecord,
   WorkingMemoryNote,
 } from '../core/types.js'
 import { matchesScope, type ScopePredicate, STORE_SHAPES } from '../memory/scope.js'
@@ -25,6 +29,7 @@ import {
   type Store,
   type StoredEntry,
   type StoredEvidence,
+  type ToolCallQuery,
   type TranslationRecord,
   type VectorHit,
 } from './types.js'
@@ -566,5 +571,67 @@ export class MemoryStore implements Store {
       if (filter.before && from === 0) return []
       return clone(rows.slice(from, from + limit))
     },
+  }
+
+  private readonly spaceToolRows = new Map<string, SpaceToolRecord>()
+  public spaceTools = {
+    get: async (spaceId: string, sourceId: string) => clone(this.spaceToolRows.get(`${spaceId}\n${sourceId}`)),
+    save: async (r: SpaceToolRecord) => {
+      this.spaceToolRows.set(`${r.spaceId}\n${r.sourceId}`, clone(r))
+    },
+    delete: async (spaceId: string, sourceId: string) => {
+      this.spaceToolRows.delete(`${spaceId}\n${sourceId}`)
+    },
+    listBySpace: async (spaceId: string) =>
+      clone([...this.spaceToolRows.values()].filter((r) => r.spaceId === spaceId)),
+    listAll: async () => clone([...this.spaceToolRows.values()]),
+  }
+
+  private readonly spaceAccountRows = new Map<string, SpaceAccountRecord>()
+  public spaceAccounts = {
+    get: async (spaceId: string, sourceId: string) => clone(this.spaceAccountRows.get(`${spaceId}\n${sourceId}`)),
+    save: async (r: SpaceAccountRecord) => {
+      this.spaceAccountRows.set(`${r.spaceId}\n${r.sourceId}`, clone(r))
+    },
+    delete: async (spaceId: string, sourceId: string) => {
+      this.spaceAccountRows.delete(`${spaceId}\n${sourceId}`)
+    },
+    listAll: async () => clone([...this.spaceAccountRows.values()]),
+  }
+
+  private readonly allowanceRows = new Map<string, ToolAllowance>()
+  public toolAllowances = {
+    get: async (approvalId: string) => clone(this.allowanceRows.get(approvalId)),
+    save: async (a: ToolAllowance) => {
+      this.allowanceRows.set(a.approvalId, clone(a))
+    },
+    listByConversation: async (conversationId: string) =>
+      clone([...this.allowanceRows.values()].filter((a) => a.conversationId === conversationId)),
+    listBySpaceSource: async (spaceId: string, sourceId: string) =>
+      clone([...this.allowanceRows.values()].filter((a) => a.spaceId === spaceId && a.sourceId === sourceId)),
+  }
+
+  private readonly toolCallRows = new Map<string, ToolCallRecord>()
+  public toolCalls = {
+    get: async (id: string) => clone(this.toolCallRows.get(id)),
+    save: async (r: ToolCallRecord) => {
+      this.toolCallRows.set(r.id, clone(r))
+    },
+    list: async (q: ToolCallQuery) =>
+      clone(
+        [...this.toolCallRows.values()]
+          .filter(
+            (r) =>
+              (!q.principalId || r.principalId === q.principalId) &&
+              (!q.spaceId || r.spaceId === q.spaceId) &&
+              (!q.conversationId || r.conversationId === q.conversationId) &&
+              (!q.sourceId || r.sourceId === q.sourceId) &&
+              (!q.from || r.at >= q.from) &&
+              (!q.to || r.at < q.to)
+          )
+          .reverse()
+          .sort((a, b) => b.at.localeCompare(a.at))
+          .slice(0, q.limit)
+      ),
   }
 }

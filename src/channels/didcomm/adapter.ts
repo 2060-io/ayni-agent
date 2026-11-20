@@ -7,7 +7,12 @@
  */
 import { randomBytes } from 'node:crypto'
 import type { AyniAgent } from '../../core/agent.js'
-import { type CapabilityChannelOps, challengeCode, confirmationText } from '../../core/challenges.js'
+import {
+  type CapabilityChannelOps,
+  type ConfirmationOptions,
+  challengeCode,
+  confirmationText,
+} from '../../core/challenges.js'
 import {
   type Capability,
   type ChannelAdapter,
@@ -121,10 +126,11 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
     connectionId: string,
     challenge: AuthChallengeRecord,
     purpose: string,
-    originSession: Session
+    originSession: Session,
+    options: ConfirmationOptions = {}
   ): Promise<{ threadId: string; flowId?: string }> {
-    const text = confirmationText(purpose)
-    const code = challengeCode(challenge)
+    const text = options.text ?? confirmationText(purpose)
+    const code = options.code ?? challengeCode(challenge)
     const name = this.agent?.pack.metadata.displayName ?? 'The agent'
     if (this.flows && (await this.flowMode(connectionId))) {
       const flow = await this.flows.open({
@@ -134,6 +140,8 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
         description: `${name} asks you to confirm this action.`,
         origin: originSession,
         expiresAt: challenge.expiresAt,
+        ...(options.card === false ? { card: false } : {}),
+        ...(options.withoutConversation ? { withoutConversation: true } : {}),
       })
       try {
         const exchange = await this.client.sendConfirmRequest({
@@ -154,6 +162,11 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
       ['Yes', 'No']
     )
     return { threadId }
+  }
+
+  /** Closes the flow of a confirmation the agent withdrew (TOOL-SPACE-009). */
+  public async cancelConfirmation(flowId: string): Promise<void> {
+    await this.flows?.close(flowId, 'cancelled', { reason: 'The change was withdrawn.' })
   }
 
   /**
@@ -346,11 +359,13 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
       return 'ok'
     }
     if (!a.attested || !this.flows || !kv || open) return 'ok'
+    // a tool call's approval: the exact call as its justification, the action's title as its purpose (INTX-APPR-013)
+    const call = a.action ? authorizeOfCall(a) : undefined
     const flow = await this.flows.open({
       connectionId,
       kind: 'authorize',
-      title: `${a.requesterName} asks to run ${a.toolName}`,
-      description: a.justification ?? a.purpose,
+      title: `${a.requesterName} asks to run ${a.action?.title ?? a.toolName}`,
+      description: call?.justification ?? a.justification ?? a.purpose,
       expiresAt: a.expiresAt,
       ref: { type: 'approval', id: a.id },
     })
@@ -360,9 +375,9 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
         flowId: flow.flowId,
         request: {
           requester: { name: a.requesterName, role: a.requesterRole || null, did: null },
-          purpose: { id: a.purpose ?? a.toolName, label: a.purpose ?? a.toolName },
-          justification: a.justification ?? '',
-          scope: [`tool:${a.serverName ? `${a.serverName}.` : ''}${a.toolName}`],
+          purpose: call?.purpose ?? { id: a.purpose ?? a.toolName, label: a.purpose ?? a.toolName },
+          justification: call?.justification ?? a.justification ?? '',
+          scope: call?.scope ?? [`tool:${a.serverName ? `${a.serverName}.` : ''}${a.toolName}`],
           expiresAt: a.expiresAt,
           attested: true,
         },
@@ -432,3 +447,28 @@ export function clientOfConnection(label: string | undefined, version?: string):
 }
 
 export const didcommLogger = (logger: Logger) => logger.child({ channel: 'didcomm' })
+
+/**
+ * The `authorize` request of a tool call's approval (INTX-APPR-013): its purpose names the action, its justification is the
+ * exact call as text (the source's title and whose account on the first line, then one line per argument, its label, a
+ * colon and its whole value), and its scope names the tool and the space.
+ */
+export function authorizeOfCall(a: ApprovalRecord): {
+  purpose: { id: string; label: string }
+  justification: string
+  scope: string[]
+} {
+  const action = a.action as NonNullable<ApprovalRecord['action']>
+  const whose =
+    action.account.kind === 'space'
+      ? `with the account of ${action.account.space?.title ?? 'the space'}`
+      : action.account.kind === 'agent'
+        ? "with the agent's account"
+        : 'with no account'
+  const lines = [`${action.source.title}, ${whose}`, ...action.fields.map((f) => `${f.label}: ${f.value}`)]
+  return {
+    purpose: { id: 'tool-call', label: action.title },
+    justification: lines.join('\n'),
+    scope: [`tool:${action.source.id}.${a.toolName}`, ...(a.spaceId ? [`space:${a.spaceId}`] : [])],
+  }
+}

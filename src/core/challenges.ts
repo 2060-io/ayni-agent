@@ -25,8 +25,11 @@ export interface CapabilityChannelOps {
     connectionId: string,
     challenge: AuthChallengeRecord,
     purpose: string,
-    originSession: Session
+    originSession: Session,
+    options?: ConfirmationOptions
   ): Promise<{ threadId: string; flowId?: string }>
+  /** Closes the flow of a confirmation the agent withdrew (TOOL-SPACE-009). */
+  cancelConfirmation?(flowId: string): Promise<void>
   /** call offer whose room the face-verification service joins (INTX-AUTH-007); returns the call thread id */
   offerFaceMatchCall(connectionId: string, challenge: AuthChallengeRecord, description: string): Promise<string>
   /**
@@ -40,6 +43,44 @@ export interface CapabilityChannelOps {
     originSession: Session
   ): Promise<{ threadId: string; flowId: string }>
 }
+
+/**
+ * How a device confirmation is asked when it is not a step-up of an action: a change of a space's tools (TOOL-SPACE-008),
+ * whose text is the change's summary as written, whose code is the one the screen shows, and which belongs to no
+ * conversation and leaves no card in one.
+ */
+export interface ConfirmationOptions {
+  /** the text as written, with no "Confirm:" before it */
+  text?: string
+  /** the code the screen shows */
+  code?: string
+  /** a card in the origin's conversation: none for a change of a space's tools */
+  card?: boolean
+  /** the origin names its session but no conversation */
+  withoutConversation?: boolean
+}
+
+/** A device confirmation of a change of a space's tools, as `confirmChange` sends it (TOOL-SPACE-008). */
+export interface ChangeConfirmation {
+  principal: Principal
+  originSession: Session
+  /** the change's summary: the space, the source and every value but the token */
+  text: string
+  code: string
+  expiresAt: string
+  changeId: string
+}
+
+/** No capability channel can serve the confirmation of a change (`409 confirmation-unavailable`). */
+export class ConfirmationUnavailable extends Error {
+  public constructor() {
+    super('no capability channel of the owner can serve the confirmation')
+    this.name = 'ConfirmationUnavailable'
+  }
+}
+
+/** The kind of a challenge that confirms a change of a space's tools (its `details.kind`). */
+export const SPACE_TOOL_CHANGE = 'space-tool-change'
 
 export interface ChallengeRequest {
   principal: Principal
@@ -66,6 +107,73 @@ export class ChallengeService {
 
   public setChannelOps(ops: CapabilityChannelOps): void {
     this.ops = ops
+  }
+
+  /** Told when a challenge ends, whoever waits for it: the changes of a space's tools follow theirs (TOOL-SPACE-008). */
+  public onSettled?: (record: AuthChallengeRecord) => Promise<void>
+
+  /**
+   * Sends the device confirmation of a change of a space's tools (TOOL-SPACE-008): a `confirm` flow (`attested`) on the
+   * owner's capability channel, or its question-answer form, whose text is the change's summary and whose code is the
+   * screen's; its origin is the requesting session, with no conversation, and it leaves no card in any (TOOL-SPACE-009).
+   * The answer, the expiry or a withdrawal ends it through `onSettled`. Throws `ConfirmationUnavailable` with no channel.
+   */
+  public async confirmChange(req: ChangeConfirmation): Promise<AuthChallengeRecord> {
+    const capability = await this.router.capabilitySession(req.principal)
+    if (!capability || !this.ops) throw new ConfirmationUnavailable()
+    const record: AuthChallengeRecord = {
+      id: prefixedId('chl'),
+      type: 'device',
+      principalId: req.principal.id,
+      originSessionId: req.originSession.id,
+      toolName: SPACE_TOOL_CHANGE,
+      token: prefixedId('tok', 24),
+      outcome: 'pending',
+      createdAt: nowIso(),
+      expiresAt: req.expiresAt,
+      details: { kind: SPACE_TOOL_CHANGE, changeId: req.changeId, silent: true },
+    }
+    await this.store.challenges.save(record)
+    const connectionId = capability.externalRef
+    try {
+      const sent = await this.ops.askConfirmation(connectionId, record, req.text, req.originSession, {
+        text: req.text,
+        code: req.code,
+        card: false,
+        withoutConversation: true,
+      })
+      record.details = {
+        ...(record.details ?? {}),
+        threadId: sent.threadId,
+        connectionId,
+        ...(sent.flowId ? { flowId: sent.flowId } : {}),
+      }
+      await this.store.challenges.save(record)
+    } catch (error) {
+      record.outcome = 'unavailable'
+      record.completedAt = nowIso()
+      await this.store.challenges.save(record)
+      this.logger.error({ err: error, challengeId: record.id }, 'the confirmation of a change could not be sent')
+      throw new ConfirmationUnavailable()
+    }
+    const timer = setTimeout(
+      () => void this.complete(record.id, 'expired'),
+      Math.max(0, Date.parse(req.expiresAt) - Date.now())
+    )
+    timer.unref?.()
+    return record
+  }
+
+  /** Withdraws a confirmation of a change (TOOL-SPACE-009): its flow closes as cancelled, and it ends as cancelled. */
+  public async withdraw(challengeId: string): Promise<void> {
+    const record = await this.store.challenges.get(challengeId)
+    if (record?.outcome !== 'pending') return
+    const flowId = record.details?.flowId
+    await this.complete(challengeId, 'failed', { cancelled: true })
+    if (typeof flowId === 'string')
+      await this.ops
+        ?.cancelConfirmation?.(flowId)
+        .catch((err) => this.logger.warn({ err, challengeId }, 'the flow of a withdrawn confirmation did not close'))
   }
 
   /** Runs one challenge end to end and returns its outcome; fallback policy applies without a servable channel (CHAN-PROF-003/004). */
@@ -161,7 +269,11 @@ export class ChallengeService {
     await this.store.challenges.save(record)
     this.pending.get(challengeId)?.resolve(outcome)
     this.pending.delete(challengeId)
-    await this.router.notifyOrigin(record.originSessionId, routed(record, outcome))
+    // a confirmation of a change of a space's tools is told to no conversation (TOOL-SPACE-009)
+    if (record.details?.silent !== true) await this.router.notifyOrigin(record.originSessionId, routed(record, outcome))
+    await this.onSettled?.(record).catch((err) =>
+      this.logger.error({ err, challengeId }, 'what follows a challenge did not run')
+    )
   }
 
   public async findByToken(token: string): Promise<AuthChallengeRecord | undefined> {

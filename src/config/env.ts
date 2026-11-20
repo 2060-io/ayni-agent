@@ -68,6 +68,10 @@ export interface Env {
   visionUrl?: string
   webrtcServerUrl?: string
   faceMatchTimeoutSeconds: number
+  /** how long a connection to an MCP server opened for a space's account stays open unused (TOOL-ACCESS-007); 600 */
+  toolConnectionIdleSeconds?: number
+  /** how long the owner's phone has to confirm a change of a space's tools (TOOL-SPACE-008); 300 */
+  toolChangeConfirmationSeconds?: number
 
   statsEnabled: boolean
   statsSink: 'redis-stream' | 'http'
@@ -178,6 +182,8 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
     visionUrl: source.VISION_URL || undefined,
     webrtcServerUrl: source.WEBRTC_SERVER_URL || undefined,
     faceMatchTimeoutSeconds: num(source.FACE_MATCH_TIMEOUT_SECONDS, 180) as number,
+    toolConnectionIdleSeconds: num(source.TOOL_CONNECTION_IDLE_SECONDS, 600),
+    toolChangeConfirmationSeconds: num(source.TOOL_CHANGE_CONFIRMATION_SECONDS, 300),
 
     statsEnabled: bool(source.STATS_ENABLED, false),
     statsSink: (source.STATS_SINK as Env['statsSink']) ?? 'redis-stream',

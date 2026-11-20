@@ -13,9 +13,13 @@ import type {
   RagChunk,
   Session,
   Space,
+  SpaceAccountRecord,
   SpaceActivity,
   SpaceMember,
+  SpaceToolRecord,
   StatEvent,
+  ToolAllowance,
+  ToolCallRecord,
   WorkingMemoryNote,
 } from '../core/types.js'
 import { type ScopePredicate, STORE_SHAPES, scopeToSql } from '../memory/scope.js'
@@ -28,6 +32,7 @@ import type {
   Store,
   StoredEntry,
   StoredEvidence,
+  ToolCallQuery,
   TranslationRecord,
   VectorHit,
 } from './types.js'
@@ -842,6 +847,108 @@ export class PostgresStore implements Store {
       ),
     delete: async (id: string) => {
       await this.pool.query('DELETE FROM space_members WHERE id = $1', [id])
+    },
+  }
+
+  public spaceTools = {
+    get: (spaceId: string, sourceId: string) =>
+      this.one<SpaceToolRecord>('SELECT data FROM space_tools WHERE space_id = $1 AND source_id = $2', [
+        spaceId,
+        sourceId,
+      ]),
+    save: async (r: SpaceToolRecord) => {
+      await this.pool.query(
+        'INSERT INTO space_tools (space_id, source_id, data) VALUES ($1,$2,$3) ON CONFLICT (space_id, source_id) DO UPDATE SET data=$3',
+        [r.spaceId, r.sourceId, r]
+      )
+    },
+    delete: async (spaceId: string, sourceId: string) => {
+      await this.pool.query('DELETE FROM space_tools WHERE space_id = $1 AND source_id = $2', [spaceId, sourceId])
+    },
+    listBySpace: (spaceId: string) =>
+      this.many<SpaceToolRecord>('SELECT data FROM space_tools WHERE space_id = $1 ORDER BY source_id', [spaceId]),
+    listAll: () => this.many<SpaceToolRecord>('SELECT data FROM space_tools ORDER BY space_id, source_id', []),
+  }
+
+  /** the token only as ciphertext, its wrapped key beside it: deleting the row destroys the key (TOOL-ACCESS-004) */
+  private accountFromRow(r: Row): SpaceAccountRecord {
+    return {
+      spaceId: String(r.space_id),
+      sourceId: String(r.source_id),
+      encKeyRef: String(r.enc_key_ref),
+      cipher: (r.cipher as Buffer).toString('base64'),
+      setAt: new Date(r.set_at as string).toISOString(),
+      setByPrincipalId: String(r.set_by),
+    }
+  }
+
+  public spaceAccounts = {
+    get: async (spaceId: string, sourceId: string) => {
+      const [row] = await this.rows('SELECT * FROM space_accounts WHERE space_id = $1 AND source_id = $2', [
+        spaceId,
+        sourceId,
+      ])
+      return row ? this.accountFromRow(row) : undefined
+    },
+    save: async (r: SpaceAccountRecord) => {
+      await this.pool.query(
+        `INSERT INTO space_accounts (space_id, source_id, enc_key_ref, cipher, set_at, set_by) VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (space_id, source_id) DO UPDATE SET enc_key_ref=$3, cipher=$4, set_at=$5, set_by=$6`,
+        [r.spaceId, r.sourceId, r.encKeyRef, Buffer.from(r.cipher, 'base64'), r.setAt, r.setByPrincipalId]
+      )
+    },
+    delete: async (spaceId: string, sourceId: string) => {
+      await this.pool.query('DELETE FROM space_accounts WHERE space_id = $1 AND source_id = $2', [spaceId, sourceId])
+    },
+    listAll: async () => (await this.rows('SELECT * FROM space_accounts', [])).map((r) => this.accountFromRow(r)),
+  }
+
+  public toolAllowances = {
+    get: (approvalId: string) =>
+      this.one<ToolAllowance>('SELECT data FROM tool_allowances WHERE approval_id = $1', [approvalId]),
+    save: async (a: ToolAllowance) => {
+      await this.pool.query(
+        `INSERT INTO tool_allowances (approval_id, conversation_id, space_id, source_id, data) VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (approval_id) DO UPDATE SET data=$5`,
+        [a.approvalId, a.conversationId, a.spaceId ?? null, a.sourceId, a]
+      )
+    },
+    listByConversation: (conversationId: string) =>
+      this.many<ToolAllowance>('SELECT data FROM tool_allowances WHERE conversation_id = $1', [conversationId]),
+    listBySpaceSource: (spaceId: string, sourceId: string) =>
+      this.many<ToolAllowance>('SELECT data FROM tool_allowances WHERE space_id = $1 AND source_id = $2', [
+        spaceId,
+        sourceId,
+      ]),
+  }
+
+  public toolCalls = {
+    get: (id: string) => this.one<ToolCallRecord>('SELECT data FROM tool_calls WHERE id = $1', [id]),
+    save: async (r: ToolCallRecord) => {
+      await this.pool.query(
+        `INSERT INTO tool_calls (id, at, principal_id, conversation_id, space_id, source_id, data) VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (id) DO UPDATE SET data=$7`,
+        [r.id, r.at, r.principalId, r.conversationId, r.spaceId, r.sourceId, r]
+      )
+    },
+    list: (q: ToolCallQuery) => {
+      const where: string[] = ['true']
+      const params: unknown[] = []
+      const add = (column: string, op: string, value: unknown) => {
+        params.push(value)
+        where.push(`${column} ${op} $${params.length}`)
+      }
+      if (q.principalId) add('principal_id', '=', q.principalId)
+      if (q.spaceId) add('space_id', '=', q.spaceId)
+      if (q.conversationId) add('conversation_id', '=', q.conversationId)
+      if (q.sourceId) add('source_id', '=', q.sourceId)
+      if (q.from) add('at', '>=', q.from)
+      if (q.to) add('at', '<', q.to)
+      params.push(q.limit)
+      return this.many<ToolCallRecord>(
+        `SELECT data FROM tool_calls WHERE ${where.join(' AND ')} ORDER BY at DESC, id DESC LIMIT $${params.length}`,
+        params
+      )
     },
   }
 

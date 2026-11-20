@@ -24,6 +24,7 @@ import { conversationOf } from '../../core/conversationOf.js'
 import { conversationKey, type TurnEvent, type TurnSink } from '../../core/orchestrator.js'
 import { normalizeClient, SessionError } from '../../core/sessions.js'
 import { type SpaceAccess, SpaceError, spaceIdOf } from '../../core/spaces.js'
+import type { SpaceToolsChanged } from '../../core/spaceTools.js'
 import {
   type ClientDescription,
   type Conversation,
@@ -50,11 +51,12 @@ import { uploadMeasures } from './uploadMeasures.js'
 import { uploadName } from './uploadName.js'
 
 /**
- * The profile revision this agent implements: 3.3 (spaces, the person's memories and preferences, the deletion window
- * of a message; decision 60), over 3.1 (session grant, flows and `ayni.flow`, `flowId` on routed capabilities, client
- * platform and description).
+ * The profile revision this agent implements: 3.4 (the tools of a space, the confirmation card of a tool call, the sources
+ * of replies and conversations; ayni-spec D96 to D100), over 3.3 (spaces, the person's memories and preferences, the
+ * deletion window of a message; decision 60) and 3.1 (session grant, flows and `ayni.flow`, `flowId` on routed
+ * capabilities, client platform and description).
  */
-const AGENT_PROFILE_VERSION = '3.3'
+const AGENT_PROFILE_VERSION = '3.4'
 /** A run's response gets a comment this often: it stays open while the run waits or a tool takes its time. */
 const RUN_HEARTBEAT_MS = 15_000
 
@@ -174,6 +176,9 @@ export class AgUiRoutes {
         ...(messageDeletionWindowSeconds(this.agent.pack) > 0
           ? { erasure: { windowSeconds: messageDeletionWindowSeconds(this.agent.pack) } }
           : {}),
+        // the tools of a space, the confirmation card of a call, the sources of replies (ayni-spec D96 to D100,
+        // PROF-DESC-009)
+        tools: true,
       },
       locales: [this.agent.pack.language.agent],
     }
@@ -450,6 +455,7 @@ export class AgUiRoutes {
     // a person cannot delete a conversation (PRIV-ERASE-007; PROF-CONV-009 is withdrawn, 404): the erasure of every message of theirs in one is removed,
     // operators erase through the admin interface. Handover: its author shares it with its own space, or stops
     this.registerSpaces(app, base)
+    this.registerTools(app, base)
 
     // PROF-SESS-011: the Principal's paired devices
     app.get(`${base}/devices`, async (request, reply) => {
@@ -613,7 +619,7 @@ export class AgUiRoutes {
         before,
         limit: Math.min(Number(limit) || 50, 200),
       })
-      const messages = [...entries].reverse().flatMap(entryToMessages)
+      const messages = [...entries].reverse().flatMap((e) => entryToMessages(e, this.titleOf))
       return { messages, nextBefore: entries.length ? entries[entries.length - 1].id : null }
     })
 
@@ -793,8 +799,13 @@ export class AgUiRoutes {
       ...(name ? { member: { name } } : {}),
       ...(a.fields ? { fields: a.fields } : {}),
       ...(a.conversationId ? { conversationId: a.conversationId } : {}),
+      // the source of a change of the space's tools, never a value of its account (PROF-TOOL-006)
+      ...(a.sourceId ? { tool: { source: a.sourceId, title: this.titleOf(a.sourceId) } } : {}),
     }
   }
+
+  /** A source's title, as people read it (TOOL-CAT-001). */
+  private readonly titleOf = (sourceId: string): string => this.agent.catalog?.source(sourceId)?.title ?? sourceId
 
   /**
    * Every bound session showing a conversation of the space: its header names the space again when the space's title
@@ -1012,7 +1023,7 @@ export class AgUiRoutes {
           this.agent.sessions.scopeOf(conversation),
           { before, limit: Math.min(Number(limit) || 50, 200), sourceTypes: SHARED_SOURCE_TYPES }
         )
-        const messages = [...entries].reverse().flatMap(sharedEntryToMessages)
+        const messages = [...entries].reverse().flatMap((e) => sharedEntryToMessages(e, this.titleOf))
         return { messages, nextBefore: entries.length ? entries[entries.length - 1]?.id : null }
       })
     )
@@ -1143,6 +1154,136 @@ export class AgUiRoutes {
         })
       })
     )
+  }
+
+  /** The endpoints of the tools of a space, the sources of a conversation and its allowances (profile 3.4). */
+  private registerTools(app: FastifyInstance, base: string): void {
+    const handle =
+      (
+        work: (
+          bound: { session: Session; principal: Principal },
+          request: FastifyRequest,
+          reply: FastifyReply
+        ) => Promise<unknown>
+      ) =>
+      async (request: FastifyRequest, reply: FastifyReply) => {
+        const bound = await this.bound(request, reply)
+        if (!bound) return
+        try {
+          return await work(bound, request, reply)
+        } catch (error) {
+          return this.sendError(reply, error)
+        }
+      }
+    const tools = () => {
+      if (!this.agent.spaceTools) throw new SpaceError('the tools of the spaces are not served here', 'not-found')
+      return this.agent.spaceTools
+    }
+    type Params = { spaceId: string; source: string }
+
+    // PROF-TOOL-001: the owner reads every source of the template, a member the ready ones
+    app.get(
+      `${base}/spaces/:spaceId/tools`,
+      handle(async ({ principal }, request) => {
+        const { spaceId } = request.params as Params
+        return { tools: await tools().list(principal, spaceId) }
+      })
+    )
+    // PROF-TOOL-002: add an available source, or switch an off one back on: 202 with the change pending
+    app.post(
+      `${base}/spaces/:spaceId/tools`,
+      handle(async ({ session, principal }, request, reply) => {
+        const { spaceId } = request.params as Params
+        const tool = await tools().add(principal, session, spaceId, (request.body ?? {}) as Record<string, unknown>)
+        return reply.code(202).send({ tool })
+      })
+    )
+    // PROF-TOOL-003: 200 applied when it only tightens, 202 pending when any part of it grants something
+    app.patch(
+      `${base}/spaces/:spaceId/tools/:source`,
+      handle(async ({ session, principal }, request, reply) => {
+        const { spaceId, source } = request.params as Params
+        const result = await tools().patch(
+          principal,
+          session,
+          spaceId,
+          source,
+          (request.body ?? {}) as Record<string, unknown>
+        )
+        return reply.code(result.status).send({ tool: result.tool })
+      })
+    )
+    // PROF-TOOL-004: the space's account, typed by its owner here and nowhere else (TOOL-ACCESS-003)
+    app.put(
+      `${base}/spaces/:spaceId/tools/:source/account`,
+      handle(async ({ session, principal }, request, reply) => {
+        const { spaceId, source } = request.params as Params
+        const body = (request.body ?? {}) as { token?: unknown }
+        const tool = await tools().setAccount(principal, session, spaceId, source, body.token)
+        return reply.code(202).send({ tool })
+      })
+    )
+    app.delete(
+      `${base}/spaces/:spaceId/tools/:source/account`,
+      handle(async ({ principal }, request) => {
+        const { spaceId, source } = request.params as Params
+        return { tool: await tools().clearAccount(principal, spaceId, source) }
+      })
+    )
+    // PROF-TOOL-005: remove the source at once; withdraw the pending change
+    app.delete(
+      `${base}/spaces/:spaceId/tools/:source/pending`,
+      handle(async ({ principal }, request, reply) => {
+        const { spaceId, source } = request.params as Params
+        await tools().withdraw(principal, spaceId, source)
+        return reply.code(204).send()
+      })
+    )
+    app.delete(
+      `${base}/spaces/:spaceId/tools/:source`,
+      handle(async ({ principal }, request) => {
+        const { spaceId, source } = request.params as Params
+        return { tool: await tools().remove(principal, spaceId, source) }
+      })
+    )
+    // PROF-TOOL-011: the sources of the tool results a conversation holds, for its Principal only
+    app.get(
+      `${base}/conversations/:conversationId/sources`,
+      handle(async ({ principal }, request) => {
+        const { conversationId } = request.params as { conversationId: string }
+        const conversation = await this.agent.sessions.conversationOf(principal, conversationId)
+        return { sources: (await this.agent.gate?.conversationSources(conversation.id)) ?? [] }
+      })
+    )
+    // PROF-TOOL-012: stop the allowance a confirmation gave
+    app.delete(
+      `${base}/conversations/:conversationId/allowances/:approvalId`,
+      handle(async ({ principal }, request, reply) => {
+        const { conversationId, approvalId } = request.params as { conversationId: string; approvalId: string }
+        const conversation = await this.agent.sessions.conversationOf(principal, conversationId)
+        const stopped = await this.agent.gate?.stopAllowance(conversation.id, approvalId)
+        return stopped ? reply.code(204).send() : reply.code(404).send({ error: 'not-found' })
+      })
+    )
+  }
+
+  /** A change of a space's tools applied or was dropped: every bound session of its owners hears it (PROF-TOOL-006). */
+  public async announceSpaceTools(space: Space, value: SpaceToolsChanged): Promise<void> {
+    for (const ownerId of space.ownerIds)
+      for (const session of await this.agent.store.sessions.listByPrincipal(ownerId, ['bound']))
+        if (session.channelType === 'ag-ui')
+          await this.streams.publish(session.id, ev.custom(CUSTOM_EVENT.spaceToolsChanged, { ...value }))
+  }
+
+  /** Events to every bound session of a conversation, outside a turn: an allowance ended, a card expired. */
+  public async announceToConversation(
+    conversationId: string,
+    events: { name: string; value: Record<string, unknown> }[]
+  ): Promise<void> {
+    const conversation = await this.agent.sessions.conversationById(conversationId)
+    if (!conversation) return
+    for (const session of await this.agent.sessions.sessionsOfConversation(conversation))
+      for (const event of events) await this.streams.publish(session.id, ev.custom(event.name, event.value))
   }
 
   private corsHeaders(request: FastifyRequest): Record<string, string> {
@@ -1280,6 +1421,12 @@ export class AgUiRoutes {
         )
       } else {
         result = await this.agent.action(session, action, sink, controller.signal)
+        // the person's decision on a confirmation: no turn of its own, the status it has now (PROF-TOOL-008)
+        if (result && 'decision' in result) {
+          start('decision')
+          write(ev.runFinished(session.id, runId, { type: 'decision', ...result.decision }))
+          return
+        }
         if (result && 'text' in result && result.text) {
           const id = prefixedId('msg')
           emit(ev.textStart(id))

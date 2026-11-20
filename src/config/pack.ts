@@ -8,8 +8,19 @@ import { fileURLToPath } from 'node:url'
 import { Ajv2020 } from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
 import { parse as parseYaml } from 'yaml'
-import type { AgentPack, AuthenticationEntry, EvidencePolicy, SpaceTemplate, ToolAccess } from './packTypes.js'
+import type {
+  AgentPack,
+  AuthenticationEntry,
+  EvidencePolicy,
+  SourceAccount,
+  SourceBinding,
+  SpaceTemplate,
+  ToolAccess,
+} from './packTypes.js'
 import {
+  ACCOUNT_KINDS,
+  AVAILABILITIES,
+  CALL_RULES,
   COMPUTED_FUNCTIONS,
   challengeTypesOf,
   DOCUMENT_ATTRIBUTES,
@@ -17,6 +28,8 @@ import {
   featuresOf,
   PERSONAL_RETENTION_DAYS,
   providerNameOf,
+  RESERVED_ACCOUNT_KINDS,
+  TOOL_EFFECTS,
   takesClaimsFromDirectory,
 } from './packTypes.js'
 
@@ -352,6 +365,292 @@ export function issuanceChallengeErrors(pack: AgentPack): string[] {
   return errors
 }
 
+/** The bundled tools a key of `tools.bundled` names, for the tool catalog (TOOL-CAT-001). */
+const BUNDLED_KEYS = [
+  'statistics',
+  'generateImage',
+  'principalCredentials',
+  'requestPresentation',
+  'credentialIssuance',
+  'principalPreferences',
+  'workingMemory',
+]
+
+type Doc = Record<string, unknown>
+
+/** Every source of a pack document before the schema, each with where it is written and its name (TOOL-CAT-001). */
+function docSources(doc: unknown): { where: string; name: string; kind: 'mcp' | 'http' | 'bundled'; body: Doc }[] {
+  const d = (doc ?? {}) as Doc
+  const out: { where: string; name: string; kind: 'mcp' | 'http' | 'bundled'; body: Doc }[] = []
+  const servers = ((d.mcp as Doc | undefined)?.servers ?? []) as unknown[]
+  if (Array.isArray(servers))
+    for (const [i, server] of servers.entries()) {
+      const body = (server ?? {}) as Doc
+      const name = typeof body.name === 'string' ? body.name : `#${i}`
+      out.push({ where: `mcp.servers.${name}`, name, kind: 'mcp', body })
+    }
+  const tools = (d.tools ?? {}) as Doc
+  const http = (tools.http ?? []) as unknown[]
+  if (Array.isArray(http))
+    for (const [i, tool] of http.entries()) {
+      const body = (tool ?? {}) as Doc
+      const name = typeof body.name === 'string' ? body.name : `#${i}`
+      out.push({ where: `tools.http.${name}`, name, kind: 'http', body })
+    }
+  const bundled = (tools.bundled ?? {}) as Doc
+  if (bundled && typeof bundled === 'object')
+    for (const [key, value] of Object.entries(bundled))
+      out.push({ where: `tools.bundled.${key}`, name: key, kind: 'bundled', body: (value ?? {}) as Doc })
+  return out
+}
+
+/**
+ * The kinds of account of the later phases (TOOL-CAT-002, O28, O29): a source that declares `personal` or `organization`
+ * is refused in words, before the schema, which would only name the value.
+ */
+export function reservedAccountErrors(doc: unknown): string[] {
+  const errors: string[] = []
+  for (const { where, body } of docSources(doc)) {
+    const kind = (body.account as Doc | undefined)?.kind
+    if (kind === 'personal')
+      errors.push(
+        `${where}.account.kind: personal is not available in this version: each person's own accounts come in phase 2 of the tools (TOOL-CAT-002, O28); use none, agent or space`
+      )
+    else if (kind === 'organization')
+      errors.push(
+        `${where}.account.kind: organization is not available in this version: the accounts the organization opens come in phase 3 of the tools (TOOL-CAT-002, O29); use none, agent or space`
+      )
+  }
+  return errors
+}
+
+/**
+ * What a source of the catalog may say, in words before the schema (TOOL-CAT-001/002): a known value for each of its
+ * answers, a name no other source has, and no account for a bundled tool. Each refusal names the source and the field.
+ */
+export function catalogValueErrors(doc: unknown): string[] {
+  const errors: string[] = []
+  const one = (where: string, field: string, value: unknown, allowed: readonly string[]) => {
+    if (value !== undefined && !allowed.includes(value as string))
+      errors.push(`${where}.${field}: ${JSON.stringify(value)} is not one of ${allowed.join(', ')} (TOOL-CAT-001)`)
+  }
+  const seen = new Map<string, string>()
+  for (const { where, name, kind, body } of docSources(doc)) {
+    const other = seen.get(name)
+    if (other)
+      errors.push(`${where}.name: ${name} is also the name of ${other}: a source's name is unique (TOOL-CAT-001)`)
+    else seen.set(name, where)
+    if (kind === 'bundled') {
+      if (!BUNDLED_KEYS.includes(name)) continue
+      if (body.account !== undefined)
+        errors.push(`${where}.account: a bundled tool's account is none and is not declared (TOOL-CAT-002)`)
+      one(where, 'availability', body.availability, AVAILABILITIES)
+      one(where, 'call', body.call, CALL_RULES)
+      continue
+    }
+    const account = body.account as Doc | undefined
+    if (account && !(RESERVED_ACCOUNT_KINDS as readonly unknown[]).includes(account.kind))
+      one(where, 'account.kind', account.kind, ACCOUNT_KINDS)
+    one(where, 'availability', body.availability, AVAILABILITIES)
+    if (kind === 'http') {
+      one(where, 'effect', body.effect, TOOL_EFFECTS)
+      one(where, 'call', body.call, CALL_RULES)
+    } else {
+      const declared = (body.tools ?? {}) as Doc
+      if (declared && typeof declared === 'object')
+        for (const [tool, decl] of Object.entries(declared)) {
+          one(where, `tools.${tool}.effect`, (decl as Doc | undefined)?.effect, TOOL_EFFECTS)
+          one(where, `tools.${tool}.call`, (decl as Doc | undefined)?.call, CALL_RULES)
+        }
+    }
+  }
+  const templates = (((doc ?? {}) as Doc).spaces as Doc | undefined)?.templates
+  if (Array.isArray(templates))
+    for (const template of templates) {
+      const t = (template ?? {}) as Doc
+      if (!Array.isArray(t.tools)) continue
+      for (const [i, entry] of (t.tools as Doc[]).entries())
+        one(`spaces.templates.${String(t.id)}.tools[${i}]`, 'add', entry?.add, ['auto', 'owner'])
+    }
+  return errors
+}
+
+/** Whether a text is a regular expression the agent can use. */
+function regexError(pattern: string | undefined): string | undefined {
+  if (pattern === undefined) return undefined
+  try {
+    new RegExp(pattern)
+    return undefined
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
+}
+
+/** The account, availability and bindings of one source (TOOL-CAT-002/004/005, TOOL-AVAIL-003). */
+function sourceErrors(
+  where: string,
+  source: {
+    account?: SourceAccount
+    availability?: string
+    bindings?: SourceBinding[]
+    transport?: string
+  }
+): string[] {
+  const errors: string[] = []
+  const account = source.account
+  const availability = source.availability ?? 'agent'
+  if (account?.kind === 'space') {
+    if (!account.label)
+      errors.push(`${where}.account.label: a space account says what its owner is asked for (TOOL-CAT-002)`)
+    if (!account.apply?.header)
+      errors.push(`${where}.account.apply: a space account says the header its token is sent in (TOOL-CAT-002)`)
+    if (availability !== 'spaces')
+      errors.push(
+        `${where}.availability: a source whose account is space is of availability spaces, not ${availability} (TOOL-AVAIL-003)`
+      )
+    if (source.transport === 'stdio')
+      errors.push(
+        `${where}.transport: a space account reaches a remote MCP server (sse or streamable-http), never a stdio one (TOOL-AVAIL-003)`
+      )
+  } else if (account && (account.label || account.pattern || account.apply))
+    errors.push(`${where}.account: label, pattern and apply belong to a space account only (TOOL-CAT-002)`)
+  const bad = regexError(account?.pattern)
+  if (bad) errors.push(`${where}.account.pattern is not a regular expression: ${bad}`)
+  const names = new Set<string>()
+  for (const binding of source.bindings ?? []) {
+    const at = `${where}.bindings.${binding.name}`
+    if (names.has(binding.name)) errors.push(`${at}: a binding's name is unique in its source (TOOL-CAT-004)`)
+    names.add(binding.name)
+    const wrong = regexError(binding.pattern)
+    if (wrong) errors.push(`${at}.pattern is not a regular expression: ${wrong}`)
+    else if (binding.value !== undefined && binding.pattern && !new RegExp(binding.pattern).test(binding.value))
+      errors.push(`${at}.value does not match its pattern (TOOL-CAT-004)`)
+    if (availability !== 'spaces' && binding.value === undefined)
+      errors.push(
+        `${at}.value: a source of availability ${availability} takes the value of every binding from the agent-pack (TOOL-CAT-005)`
+      )
+  }
+  return errors
+}
+
+/**
+ * The catalog of tool sources (TOOL-CAT, TOOL-AVAIL, D96 to D99): accounts, availability, bindings, the templates that
+ * offer the sources of spaces, the approvers of a rule `approval`.
+ */
+export function catalogErrors(pack: AgentPack): string[] {
+  const errors: string[] = []
+  const spacesSources = new Set<string>()
+  const availabilityOf = new Map<string, string>()
+  for (const server of pack.mcp?.servers ?? []) {
+    const where = `mcp.servers.${server.name}`
+    errors.push(...sourceErrors(where, server))
+    availabilityOf.set(server.name, server.availability ?? 'agent')
+    if (server.availability === 'spaces') spacesSources.add(server.name)
+    if (server.offer && new Set(server.offer).size !== server.offer.length)
+      errors.push(`${where}.offer names a tool twice (TOOL-CAT-003)`)
+    // a tool of the spaces is approved by the space's owner, never by roles (TOOL-CAT-009)
+    if (server.availability === 'spaces')
+      for (const entry of server.toolAccess?.approval ?? [])
+        errors.push(
+          `${where}.toolAccess.approval names [${entry.tools.join(', ')}], tools of availability spaces: a space's owner approves them (TOOL-CAT-009)`
+        )
+  }
+  const httpSpaces = new Set<string>()
+  for (const tool of pack.tools?.http ?? []) {
+    const where = `tools.http.${tool.name}`
+    errors.push(...sourceErrors(where, tool))
+    availabilityOf.set(tool.name, tool.availability ?? 'agent')
+    if (tool.availability === 'spaces') {
+      spacesSources.add(tool.name)
+      httpSpaces.add(tool.name)
+    }
+  }
+  for (const entry of pack.tools?.access?.approval ?? []) {
+    const named = entry.tools.filter((t) => httpSpaces.has(t))
+    if (named.length)
+      errors.push(
+        `tools.access.approval names [${named.join(', ')}], tools of availability spaces: a space's owner approves them (TOOL-CAT-009)`
+      )
+  }
+  const bundled = (pack.tools?.bundled ?? {}) as Record<string, { availability?: string } | undefined>
+  for (const [key, entry] of Object.entries(bundled)) {
+    availabilityOf.set(key, entry?.availability ?? 'agent')
+    if (entry?.availability === 'spaces') spacesSources.add(key)
+  }
+  // the templates name sources of spaces only (TOOL-AVAIL-002)
+  for (const template of pack.spaces?.templates ?? []) {
+    const named = new Set<string>()
+    for (const [i, entry] of (template.tools ?? []).entries()) {
+      const where = `spaces.templates.${template.id}.tools[${i}]`
+      const availability = availabilityOf.get(entry.source)
+      if (availability === undefined)
+        errors.push(`${where}.source: ${entry.source} is not a source of the agent-pack (TOOL-AVAIL-002)`)
+      else if (availability !== 'spaces')
+        errors.push(
+          `${where}.source: ${entry.source} is of availability ${availability}: a template names sources of availability spaces only (TOOL-AVAIL-002)`
+        )
+      if (named.has(entry.source)) errors.push(`${where}.source: ${entry.source} is named twice in the template`)
+      named.add(entry.source)
+    }
+  }
+  // the roles that approve a tool of the whole agent or of Personal (TOOL-CAT-009)
+  const roles = pack.identity.roles ?? {}
+  for (const role of pack.approvals?.approvers ?? []) {
+    if (!roles[role]) errors.push(`rule 2: role "${role}" in approvals.approvers is not declared in identity.roles`)
+    else if (!roles[role]?.canApprove)
+      errors.push(`rule 3: approver role "${role}" in approvals.approvers has no canApprove`)
+  }
+  return errors
+}
+
+/**
+ * What the catalog leaves to the operator's judgment (TOOL-AVAIL-002, TOOL-CAT-009): a source of spaces that no template
+ * names, and a tool whose rule the agent-pack sets to approval with no approver, whose calls are refused (`no-approver`).
+ */
+export function catalogWarnings(pack: AgentPack): string[] {
+  const warnings: string[] = []
+  const named = new Set((pack.spaces?.templates ?? []).flatMap((t) => (t.tools ?? []).map((e) => e.source)))
+  const sources: { where: string; name: string; availability?: string }[] = [
+    ...(pack.mcp?.servers ?? []).map((s) => ({
+      where: `mcp.servers.${s.name}`,
+      name: s.name,
+      availability: s.availability,
+    })),
+    ...(pack.tools?.http ?? []).map((t) => ({
+      where: `tools.http.${t.name}`,
+      name: t.name,
+      availability: t.availability,
+    })),
+  ]
+  for (const source of sources)
+    if (source.availability === 'spaces' && !named.has(source.name))
+      warnings.push(
+        `${source.where}: a source of availability spaces that no template of spaces names: no space can use it (TOOL-AVAIL-002)`
+      )
+  const fallback = pack.approvals?.approvers ?? []
+  const noApprover = (where: string, tool: string) =>
+    warnings.push(
+      `${where}: the rule of ${tool} is approval and no role approves it (no toolAccess.approval entry lists it, approvals.approvers is empty): its calls are refused as no-approver (TOOL-CAT-009)`
+    )
+  for (const tool of pack.tools?.http ?? []) {
+    if ((tool.availability ?? 'agent') === 'spaces') continue
+    const entry = pack.tools?.access?.approval?.some((r) => r.tools.includes(tool.name))
+    if (entry || fallback.length) continue
+    const effect = tool.effect ?? (tool.method === 'GET' ? 'read' : tool.method === 'DELETE' ? 'delete' : 'write')
+    const rule = tool.call ?? (effect === 'read' ? 'none' : effect === 'write' ? 'confirm' : 'approval')
+    if (rule === 'approval') noApprover(`tools.http.${tool.name}`, tool.name)
+  }
+  for (const server of pack.mcp?.servers ?? []) {
+    if ((server.availability ?? 'agent') === 'spaces' || fallback.length) continue
+    for (const [tool, decl] of Object.entries(server.tools ?? {})) {
+      if (server.toolAccess?.approval?.some((r) => r.tools.includes(tool))) continue
+      const rule = decl.call ?? (decl.effect === 'delete' || decl.effect === 'external' ? 'approval' : undefined)
+      if (rule === 'approval') noApprover(`mcp.servers.${server.name}.tools.${tool}`, tool)
+    }
+  }
+  return warnings
+}
+
 /** What a space template may not say (SPACE-DEF-003): its defaults lie within its bounds. */
 export function spaceTemplateErrors(pack: AgentPack): string[] {
   const errors: string[] = []
@@ -614,6 +913,8 @@ export function crossFieldErrors(pack: AgentPack): string[] {
       errors.push(`PRIV-RETN-006: processing activity "${id}" is enabled but declares no lawful basis`)
     }
   }
+  // the tool catalog: accounts, availability, bindings, templates, approvers (TOOL-CAT, TOOL-AVAIL, D96 to D99)
+  errors.push(...catalogErrors(pack))
   return errors
 }
 
@@ -641,6 +942,13 @@ export function validatePackDocument(doc: unknown, env: Record<string, string | 
   const email = emailChallengeActionErrors(coerced)
   if (email.length)
     throw new PackError('agent-pack declares an email challenge outside a badge from the directory', email)
+  // TOOL-CAT-002: the kinds of account of the later phases are refused in words, before the schema names the value
+  const reserved = reservedAccountErrors(coerced)
+  if (reserved.length)
+    throw new PackError('agent-pack names a kind of tool account this version does not offer', reserved)
+  // TOOL-CAT-001: each source answers with known values and a name of its own, named in words
+  const catalog = catalogValueErrors(coerced)
+  if (catalog.length) throw new PackError('agent-pack declares a tool source the catalog refuses', catalog)
   const ajv = new Ajv2020({ allErrors: true, strict: false, useDefaults: true })
   addFormats.default(ajv)
   const validate = ajv.compile(schema)

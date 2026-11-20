@@ -6,7 +6,7 @@ import type { ElevationGrant, Principal } from '../core/types.js'
 import type { ToolDefinition } from '../llm/types.js'
 import { resolveTier, type TierResolution } from '../policy/rbac.js'
 import type { Logger } from '../util/logger.js'
-import type { ToolSource, ToolSpec } from './types.js'
+import type { CallAccountSecret, ToolSource, ToolSpec } from './types.js'
 
 export interface VisibleTool {
   spec: ToolSpec
@@ -65,6 +65,21 @@ export class ToolRegistry {
       if (resolution.tier === 'REQUESTABLE') out.push({ spec, resolution })
     }
     return out
+  }
+
+  /** Discovers the tools of an MCP server of a space's account on that space's connection (TOOL-ACCESS-007). */
+  public async discover(sourceName: string, account: CallAccountSecret): Promise<void> {
+    await this.sources.find((s) => s.id === `mcp:${sourceName}`)?.discover?.(account)
+  }
+
+  /** Closes the connection a space's account opened to a server: the account ended or changed (TOOL-ACCESS-007). */
+  public async closeAccount(sourceName: string, spaceId: string): Promise<void> {
+    await this.sources.find((s) => s.id === `mcp:${sourceName}`)?.closeAccount?.(spaceId)
+  }
+
+  /** A tool source by its id (`mcp:<server>`, `http`, `bundled`), for the tests. */
+  public sourceById(id: string): ToolSource | undefined {
+    return this.sources.find((s) => s.id === id)
   }
 
   public toDefinitions(tools: VisibleTool[]): ToolDefinition[] {

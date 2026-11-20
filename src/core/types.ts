@@ -131,6 +131,11 @@ export interface ClientDescription {
   platform: string
   /** what the phone shows when it links this session: "Firefox on Linux", "Ayni on iPhone" (CHAN-BIND-015) */
   description?: string
+  /**
+   * the version of the AG-UI profile the client implements (PROF-SESS-016): a confirmation card is asked only of a
+   * session whose client declared 3.4 or later (TOOL-CALL-005); a session without it is one of profile 3.3
+   */
+  profileVersion?: string
 }
 
 export interface BindingState {
@@ -298,6 +303,38 @@ export interface MessageEntry {
   initiatedAt: string
   createdAt: string
   anchorBatchId?: string
+  /**
+   * on a `tool-call` entry, in the clear beside its sealed arguments and result: the source, the tool, whose account the
+   * call ran with, whether the source is untrusted, and the approval record it ran under (TOOL-PROV-001)
+   */
+  provenance?: ToolProvenance
+  /** on a message of the agent: the sources whose tools ran in its turn, each with its kind of account (TOOL-PROV-002) */
+  sources?: TurnSource[]
+}
+
+/** Whose account a call ran with (D97): none, the agent's, or the space's, with the space. */
+export interface CallAccount {
+  kind: 'none' | 'agent' | 'space'
+  spaceId?: string
+}
+
+/** What a tool result records of where it came from (TOOL-PROV-001, D100). */
+export interface ToolProvenance {
+  sourceId: string
+  toolName: string
+  account: CallAccount
+  untrusted: boolean
+  /** the confirmation or approval it ran under, or the confirmation whose allowance covered it */
+  approvalId?: string
+  /** its call record (TOOL-PROV-004) */
+  callId?: string
+}
+
+/** A source a turn's tools read, with whose account (TOOL-PROV-002). */
+export interface TurnSource {
+  sourceId: string
+  accountKind: CallAccount['kind']
+  spaceId?: string
 }
 
 export interface WorkingMemoryNote {
@@ -399,6 +436,11 @@ export interface SpaceMember {
 
 /** What happened in a space (profile 3.3 §3.7): `rules-changed` names the fields an owner changed, never their values. */
 export type SpaceActivityAction =
+  | 'tool-added'
+  | 'tool-changed'
+  | 'tool-removed'
+  | 'account-set'
+  | 'account-cleared'
   | 'created'
   | 'rules-changed'
   | 'joined'
@@ -424,6 +466,8 @@ export interface SpaceActivity {
   /** the directory entry of the member concerned: a person of the directory added, invited or removed */
   directoryId?: string
   conversationId?: string
+  /** the tool source a change of the space's tools concerns (TOOL-SPACE-010); never a value of its account */
+  sourceId?: string
 }
 
 /** The actor of what a reload of the user directory does in a space (SPACE-MEMB-008). */
@@ -516,7 +560,21 @@ export interface IssuedRevocation {
 }
 
 export type ApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED' | 'EXPIRED'
-export type ApprovalKind = 'sensitivity' | 'elevation'
+/** `confirmation`: the person's own decision on an action of theirs (D99, INTX-APPR-012) */
+export type ApprovalKind = 'sensitivity' | 'elevation' | 'confirmation'
+
+/**
+ * A tool call as its card shows it (TOOL-CALL-003, INTX-APPR-014): the action's title, the source, whose account, and
+ * every argument the tool will receive with its label and its whole value, the pinned ones first. Sealed in the store.
+ */
+export interface ToolAction {
+  title: string
+  source: { id: string; title: string }
+  account: { kind: CallAccount['kind']; space?: { id: string; title: string } }
+  fields: { label: string; value: string; pinned?: boolean }[]
+  /** the arguments were erased with the message whose turn asked for it (INTX-APPR-015) */
+  erased?: boolean
+}
 
 export interface ApprovalDecision {
   approverId: string
@@ -558,6 +616,33 @@ export interface ApprovalRecord {
   expiresAt: string
   createdAt: string
   updatedAt: string
+  /** a tool call's (D99): the conversation it was asked in, and the space whose owner approves a tool of a space */
+  conversationId?: string
+  spaceId?: string
+  /** a tool call's: its source, and the action as its card shows it, sealed in the store (INTX-APPR-014) */
+  sourceId?: string
+  action?: ToolAction
+  /** the space's owner approves it, whatever the roles (INTX-APPR-004) */
+  ownerApproval?: boolean
+  /** a confirmation: whether its card offers "Allow for this conversation" (PROF-TOOL-007) */
+  allowForConversation?: boolean
+  /** a confirmation allowed: for this call, or for the conversation (INTX-APPR-012) */
+  scope?: 'once' | 'conversation'
+  /** an allowance the confirmation gave ended (TOOL-CALL-006) */
+  allowanceEndedAt?: string
+  /** the titles of the untrusted sources the turn read, when they made the card ask (TOOL-CALL-008) */
+  untrustedSources?: string[]
+  /** the call record of the call it gates (TOOL-PROV-004) */
+  callId?: string
+  /** the approval entry of the conversation that shows it as a card */
+  entryId?: string
+  /** the other entries that carry its card with the action: the approvers' (INTX-APPR-015) */
+  cardEntryIds?: string[]
+  /**
+   * In the store only: the arguments and the action, sealed under a key of the record (INTX-APPR-014, D77); the approval
+   * repository opens them, and erasing them destroys that key
+   */
+  sealed?: { keyRef: string; cipher: string }
 }
 
 export interface ElevationGrant {
@@ -698,3 +783,102 @@ export const TRUST_BOUND_KINDS: readonly string[] = [
   'signature',
   'link-session',
 ]
+
+// ---- tools in spaces, allowances and the record of each call (ayni-spec D97 to D100) -----------------------------------
+
+/** What waits for the owner's phone (TOOL-SPACE-008): the change, the code the screen shows, and its challenge. */
+export interface PendingToolChange {
+  id: string
+  kind: 'add' | 'patch' | 'account'
+  /** what the change sets: bindings, rules; never the token, which is sealed apart */
+  bindings?: Record<string, string>
+  calls?: Record<string, 'none' | 'confirm' | 'approval' | 'off'>
+  /** a token the change carries, sealed under a key of its own, destroyed when the change is dropped */
+  sealedToken?: { keyRef: string; cipher: string }
+  summary: string
+  code: string
+  expiresAt: string
+  challengeId?: string
+  flowId?: string
+  /** the session that made the request */
+  sessionId: string
+  requestedBy: string
+}
+
+/** A source a space's template names, in that space (D98, TOOL-SPACE-001). */
+export interface SpaceToolRecord {
+  spaceId: string
+  sourceId: string
+  /** the owner added it, or it came with the space (`add: auto`) and was not removed */
+  added: boolean
+  /** an `add: auto` source its owner removed: `off` */
+  removed?: boolean
+  /** the owner's values of the bindings the agent-pack leaves to them */
+  bindings: Record<string, string>
+  /** the owner's rules, never looser than the pack's (TOOL-SPACE-006) */
+  calls: Record<string, 'none' | 'confirm' | 'approval' | 'off'>
+  pendingChange?: PendingToolChange
+  updatedAt: string
+  updatedBy?: string
+}
+
+/** The space's account of a source (D97, TOOL-ACCESS-004): its token sealed under a key of its own. */
+export interface SpaceAccountRecord {
+  spaceId: string
+  sourceId: string
+  /** the token, as ciphertext (base64); never in the clear */
+  cipher: string
+  /** its key, wrapped by the master key; destroyed with the record */
+  encKeyRef: string
+  setAt: string
+  setByPrincipalId: string
+}
+
+/** "Allow for this conversation" (TOOL-CALL-006). */
+export interface ToolAllowance {
+  approvalId: string
+  conversationId: string
+  sourceId: string
+  toolName: string
+  /** the space whose source it is, when it is a source of a space */
+  spaceId?: string
+  /** what it was given under: the rule, the bindings and the account; a change ends it */
+  fingerprint: string
+  since: string
+  endedAt?: string
+}
+
+/** What became of a call the model asked for (TOOL-PROV-004). */
+export type ToolCallOutcome =
+  | 'completed'
+  | 'failed'
+  | 'refused'
+  | 'expired'
+  | 'cancelled'
+  | 'not-approved'
+  | 'unavailable'
+  | 'no-approver'
+  | 'not-available'
+  /** waiting for another person's approval: the record is updated when the call runs or is not approved */
+  | 'pending'
+
+/** One call the model asked for (TOOL-PROV-004, D100): no argument, no result, no account value. */
+export interface ToolCallRecord {
+  id: string
+  at: string
+  principalId: string
+  conversationId: string
+  spaceId: string
+  sourceId: string
+  toolName: string
+  account: CallAccount
+  rule: 'none' | 'confirm' | 'approval'
+  raisedByUntrusted: boolean
+  confirmation?:
+    | { approvalId: string; status: ApprovalStatus; decidedBy?: string; at?: string }
+    | { allowanceApprovalId: string }
+  approval?: { approvalId: string; status: ApprovalStatus; decidedBy: string[] }
+  stepUp?: { type: string; outcome: string }
+  outcome: ToolCallOutcome
+  updatedAt: string
+}

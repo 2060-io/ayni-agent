@@ -5,7 +5,7 @@
 import type { Features } from '../config/packTypes.js'
 import { estimateTokens } from '../util/tokens.js'
 
-export const PROMPT_ADDON_VERSION = '3.4.0'
+export const PROMPT_ADDON_VERSION = '3.5.0'
 export const PROMPT_ADDON_TOKEN_BUDGET = 500
 
 export interface AddonContext {
@@ -23,6 +23,11 @@ export interface AddonContext {
    * email_check (D89, INTX-AUTH-012, INTX-AUTH-019)
    */
   emailChecks?: boolean
+  /**
+   * a tool's rule is not `none`, or untrusted content can make one ask: the person or an approver may be asked before an
+   * action runs (TOOL-CALL-010)
+   */
+  toolsMayAsk?: boolean
 }
 
 /** The destinations of the AG-UI profile §10 the model may link to (relative to the app-link base). */
@@ -69,7 +74,12 @@ export function renderPromptAddon(ctx: AddonContext): string {
     lines.push('Relevant earlier messages and notes may be supplied as context; cite them in your own words.')
   if (ctx.features.rag)
     lines.push('knowledge_search retrieves passages from the configured documents; prefer them to guessing.')
-  if (ctx.hasTools) {
+  if (ctx.hasTools && ctx.toolsMayAsk) {
+    // the person or an approver may be asked before an action runs (TOOL-CALL-010)
+    lines.push(
+      "Tools: only the tools listed are available to this person. Some actions ask the person on a card, an approver or an identity check before they run; the system asks, never you, and never in words in place of the card. Only the tool's answer says whether an action ran."
+    )
+  } else if (ctx.hasTools) {
     lines.push(
       'Tools: only the tools listed are available to this person. Some tools require a human approval or an identity check that the system performs before the tool runs; you are only told the outcome. Never promise an action before its tool succeeded.'
     )

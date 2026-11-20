@@ -17,6 +17,7 @@ import { MemoryService, type NewEntry } from '../memory/service.js'
 import type { StatsSink } from '../platform/stats.js'
 import { ApprovalError, type ApprovalService, displayName } from '../policy/approvals.js'
 import type { Store } from '../store/types.js'
+import type { ToolCatalog } from '../tools/catalog.js'
 import type { ToolRegistry } from '../tools/registry.js'
 import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
@@ -43,6 +44,8 @@ import type { PrincipalService, VerifiedFacts } from './principals.js'
 import type { ServiceLanguage } from './serviceLanguage.js'
 import { SessionError, type SessionService, TRANSCRIPT_MESSAGE_TYPES } from './sessions.js'
 import { isPersonalSpace, personalSpaceId, type SpaceError, type SpaceService, spaceIdOf } from './spaces.js'
+import type { SpaceToolService } from './spaceTools.js'
+import type { ToolGate } from './toolGate.js'
 import { TurnLock } from './turnLock.js'
 import type {
   ApprovalRecord,
@@ -147,6 +150,12 @@ export class AyniAgent {
   public serviceLanguage?: ServiceLanguage
   /** the invitations of people of other organizations, bound when their badge is presented (decision 62, D90) */
   public invitations?: InvitationService
+  /** what a tool call needs, its record, and the allowances (ayni-spec D99, D100); set by the composition root */
+  public gate?: ToolGate
+  /** the tool catalog (ayni-spec D96); set by the composition root */
+  public catalog?: ToolCatalog
+  /** the tools of each space (ayni-spec D98); set by the composition root */
+  public spaceTools?: SpaceToolService
   /** the agent's own DID, read from the DIDComm agent at start (IDENT-SELF-001) */
   public did = 'did:unknown'
   public readonly challenges: ChallengeService
@@ -700,8 +709,12 @@ export class AyniAgent {
         return taken
       }
     }
-    // while the process ends, as during a turn: the message waits, and the next process answers it
-    if (input.mayWait && (this.ending || this.turns.busy(key))) return this.wait(key, session, principal, input)
+    // while the process ends, as during a turn: the message waits, and the next process answers it. A confirmation card
+    // that waits in the conversation ends as cancelled: the person wrote instead of answering it (TOOL-CALL-004)
+    if (input.mayWait && (this.ending || this.turns.busy(key))) {
+      this.gate?.cancelConfirmations(conversationOf(session))
+      return this.wait(key, session, principal, input)
+    }
     return this.exclusive(session, signal, async () => {
       await sink.emit({ type: 'turn-start' })
       await this.sessions.noteActivity(session, input.entry.text, { title: true })
@@ -914,7 +927,12 @@ export class AyniAgent {
     action: AyniAction,
     sink: TurnSink,
     caller: AbortSignal
-  ): Promise<TurnResult | { text: string; await?: 'binding-code' } | undefined> {
+  ): Promise<
+    | TurnResult
+    | { text: string; await?: 'binding-code' }
+    | { decision: { approvalId: string; status: ApprovalRecord['status'] } }
+    | undefined
+  > {
     const signal = this.untilCut(caller)
     this.sessions.requireBound(session)
     const principal = await this.principalOf(session)
@@ -958,6 +976,15 @@ export class AyniAgent {
       case 'contextual.select':
         return this.contextualSelect(session, principal, action.itemId, sink, signal)
       case 'approval.decide': {
+        // the person's own confirmation of a call of theirs: decided while the turn waits, no turn of its own (PROF-TOOL-008)
+        const confirmation = await this.gate?.decideConfirmation(
+          action.approvalId,
+          principal,
+          session,
+          action.decision,
+          (action as { scope?: 'once' | 'conversation' }).scope
+        )
+        if (confirmation) return { decision: { approvalId: action.approvalId, status: confirmation.status } }
         try {
           const record = await this.approvals.decide(action.approvalId, principal, action.decision, action.note)
           return { text: `Approval ${record.id} ${record.status.toLowerCase()}.` }
@@ -1049,7 +1076,10 @@ export class AyniAgent {
   ): Promise<TurnResult | { text: string; await?: 'binding-code' }> {
     if (itemId === PLATFORM_MENU.approvals) {
       const pending = await this.approvals.pendingFor(principal)
-      const own = (await this.approvals.ownRequests(principal)).filter((r) => r.status === 'PENDING')
+      // a confirmation is the person's own card in its conversation, never a pending approval (INTX-APPR-012)
+      const own = (await this.approvals.ownRequests(principal)).filter(
+        (r) => r.status === 'PENDING' && r.kind !== 'confirmation'
+      )
       if (!pending.length && !own.length) return { text: 'No pending approvals.' }
       const lines = [
         ...pending.map(
@@ -1218,12 +1248,15 @@ export class AyniAgent {
   // ---- approvals: notifications and execution (INTX-APPR-006, RBAC-TOOL-003) --------------------
 
   private async approvalEntry(session: Session, principal: Principal, record: ApprovalRecord): Promise<MessageEntry> {
-    return this.memory.append({
+    // the approval of a tool call carries the action as its card shows it, and the space whose owner approves it
+    // (INTX-APPR-014, PROF-TOOL-009)
+    const card = record.action ? await this.approvalCard(record, principal) : undefined
+    const entry = await this.memory.append({
       sessionId: session.id,
       principalId: principal.id,
       role: 'system',
       sourceType: record.status === 'REJECTED' ? 'refusal' : 'approval',
-      text: `Approval ${record.id} for ${record.toolName}: ${record.status}`,
+      text: `Approval ${record.id} for ${record.action?.title ?? record.toolName}: ${record.status}`,
       backingIdentity: principal.backingIdentity,
       payload: {
         approvalId: record.id,
@@ -1231,22 +1264,59 @@ export class AyniAgent {
         toolName: record.toolName,
         status: record.status,
         purpose: record.purpose,
+        ...(card ? { card } : {}),
       },
     })
+    if (card) {
+      const fresh = await this.approvals.get(record.id)
+      if (fresh) {
+        fresh.cardEntryIds = [...(fresh.cardEntryIds ?? []), entry.id]
+        await this.approvals.save(fresh)
+      }
+    }
+    return entry
+  }
+
+  /** The card of an approval of a tool call, as `ayni.approval.request` and the activity carry it (PROF-TOOL-009). */
+  public async approvalCard(record: ApprovalRecord, viewer: Principal | null): Promise<Record<string, unknown>> {
+    const canDecide = !!viewer && record.status === 'PENDING' && (await this.approvals.isEligible(viewer, record))
+    const space = record.ownerApproval && record.spaceId ? await this.spaces.find(record.spaceId) : undefined
+    return {
+      approvalId: record.id,
+      kind: record.kind,
+      tool: record.toolName,
+      requester: { displayName: record.requesterName, name: record.requesterName, role: record.requesterRole },
+      policy: { type: record.policy.type, value: record.policy.value, vetoOnRefusal: record.policy.vetoOnRefusal },
+      expiresAt: record.expiresAt,
+      status: record.status,
+      own: record.requesterId === viewer?.id,
+      canDecide,
+      decidedBy: record.decisions.map((d) => d.approverName).join(', ') || undefined,
+      ...(record.action ? { action: record.action } : {}),
+      ...(space ? { space: { id: space.id, title: space.title } } : {}),
+    }
   }
 
   public async onApprovalChange(
     record: ApprovalRecord,
     change: 'created' | 'decided' | 'cancelled' | 'expired'
   ): Promise<void> {
+    // a confirmation is the person's own, in its conversation only: nobody else is told (INTX-APPR-012)
+    if (record.kind === 'confirmation') {
+      await this.gate?.onConfirmationChanged(record)
+      return
+    }
     const principals = await this.store.principals.list()
     for (const p of principals) {
-      const eligible = this.approvals.isEligible(p, record)
+      const eligible = await this.approvals.isEligible(p, record)
       const requester = p.id === record.requesterId
       if (!eligible && !requester) continue
       const sessions = await this.sessions.listOpen(p.id)
       for (const s of sessions) {
         if (requester && s.id === record.originSessionId && change === 'created') continue // the origin already has its card
+        // the requester's phone is no approver's: an attested request opens its `authorize` flow on the approvers' phones
+        // only (INTX-APPR-013)
+        if (requester && !eligible && s.channelType === 'didcomm') continue
         await this.router.deliver(s, {
           kind: 'approval',
           entry: await this.approvalEntry(s, p, record),
@@ -1256,29 +1326,33 @@ export class AyniAgent {
         await this.router.deliver(s, { kind: 'contextual-menu', sessionId: s.id })
       }
     }
+    // a tool call's approval decided, cancelled or expired: it runs, or its record says what became of it (TOOL-CALL-009)
+    if (record.sourceId && record.kind === 'sensitivity' && change !== 'created') {
+      await this.gate?.onApprovalDecided(record, (session) => new RouterSink(this, session))
+      return
+    }
     if (change === 'decided' && record.status === 'APPROVED' && record.kind === 'sensitivity')
       await this.executeApproved(record)
   }
 
+  /**
+   * An approval of a tool call recorded before tools phase 1 (no source, no call record) and approved after it: it does
+   * not run, since its card never showed the exact action (INTX-APPR-014); the person is told to ask again.
+   */
   private async executeApproved(record: ApprovalRecord): Promise<void> {
     const session = await this.sessions.get(record.originSessionId)
     const principal = await this.principals.get(record.requesterId)
     if (session?.state !== 'bound' || !principal) return
-    const sink = new RouterSink(this, session)
-    const content = await this.orchestrator.invokeTool(
-      record.toolName,
-      record.actionArgs ?? {},
-      session,
-      principal,
-      sink,
-      true
+    this.logger.warn(
+      { approvalId: record.id },
+      'an approval asked before tools phase 1 was approved: the action does not run'
     )
     const entry = await this.memory.append({
       sessionId: session.id,
       principalId: principal.id,
       role: 'agent',
       sourceType: 'text',
-      text: `The approved action ${record.toolName} ran. ${content.slice(0, 1500)}`,
+      text: 'An action you asked for earlier was approved, but it was asked before this version of the agent and does not run: ask for it again.',
       backingIdentity: principal.backingIdentity,
     })
     await this.router.deliver(session, { kind: 'text', entry })

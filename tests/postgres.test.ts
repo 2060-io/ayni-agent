@@ -10,7 +10,10 @@
  * entry, the changes newest first, nothing of a person of the directory in the clear but its id and audited name),
  * decision 62 (a badge by email code and an invitation of another organization: the invitations of a person found by
  * their keyed index, and neither the address, the code nor the invited email in the clear in any table), decision 64
- * (the service's sentences translated and kept: the migration to 3.8.0, reused by a new process, no address or code).
+ * (the service's sentences translated and kept: the migration to 3.8.0, reused by a new process, no address or code),
+ * tools phase 1 (ayni-spec D97 to D100: the migration to 3.9.0, a space's account only as ciphertext and destroyed with its
+ * row, the allowances of a conversation, the record of each call by space, source and period, the action of an approval
+ * sealed).
  */
 import { rmSync } from 'node:fs'
 import pg from 'pg'
@@ -27,6 +30,7 @@ import { createEntryCrypto, sealJson } from '../src/memory/crypto.js'
 import { buildScope } from '../src/memory/scope.js'
 import { MemoryService } from '../src/memory/service.js'
 import type { MailMessage } from '../src/platform/mail.js'
+import { sealedApprovals } from '../src/policy/approvals.js'
 import { MIGRATIONS } from '../src/store/migrations.js'
 import { PostgresStore } from '../src/store/postgres.js'
 import { createLogger } from '../src/util/logger.js'
@@ -1149,5 +1153,178 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
         rmSync(fixture.root, { recursive: true, force: true })
       }
     }, 30_000)
+  })
+
+  describe('tools, phase 1, in the store (ayni-spec D97 to D100, schema 3.9.0)', () => {
+    let url: string
+    let store: PostgresStore
+    beforeAll(async () => {
+      url = await freshDatabase()
+      // a store of the previous version, then this one
+      const client = new pg.Client({ connectionString: url })
+      await client.connect()
+      await client.query(
+        'CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())'
+      )
+      for (const m of MIGRATIONS.filter((m) => m.version < '3.9.0')) {
+        await client.query(m.sql)
+        await client.query('INSERT INTO schema_migrations (version) VALUES ($1)', [m.version])
+      }
+      await client.end()
+      store = new PostgresStore(url)
+      await store.init()
+    })
+    afterAll(async () => {
+      await store?.close()
+    })
+
+    it('adds the tables of the tools of the spaces, the accounts, the allowances and the call records', async () => {
+      const client = new pg.Client({ connectionString: url })
+      await client.connect()
+      const tables = (
+        await client.query(
+          "SELECT table_name FROM information_schema.tables WHERE table_name IN ('space_tools', 'space_accounts', 'tool_allowances', 'tool_calls') ORDER BY 1"
+        )
+      ).rows.map((r) => r.table_name)
+      expect(tables).toEqual(['space_accounts', 'space_tools', 'tool_allowances', 'tool_calls'])
+      const version = (await client.query('SELECT max(version) AS v FROM schema_migrations')).rows[0]?.v
+      expect(version).toBe('3.9.0')
+      await client.end()
+    })
+
+    it('keeps a space account only as ciphertext, and its key goes with the row it replaces or clears (TOOL-ACCESS-004)', async () => {
+      const token = 'crm|canary-token-7781'
+      const seal = (value: string) => {
+        const keyRef = crypto.newWrappedKey()
+        return { keyRef, cipher: sealJson(crypto, keyRef, { token: value }).cipher.toString('base64') }
+      }
+      const first = seal(token)
+      await store.spaceAccounts.save({
+        spaceId: 'spc_1',
+        sourceId: 'relaticle',
+        cipher: first.cipher,
+        encKeyRef: first.keyRef,
+        setAt: '2026-11-20T10:00:00.000Z',
+        setByPrincipalId: 'p-jonas',
+      })
+      const raw = new pg.Client({ connectionString: url })
+      await raw.connect()
+      const rows = async () =>
+        (await raw.query("SELECT t::text AS row, encode(cipher, 'escape') AS bytes FROM space_accounts t")).rows
+      for (const row of await rows()) {
+        expect(row.row).not.toContain('canary-token')
+        expect(row.bytes).not.toContain('canary-token')
+      }
+      const got = await store.spaceAccounts.get('spc_1', 'relaticle')
+      expect(got).toMatchObject({
+        sourceId: 'relaticle',
+        setByPrincipalId: 'p-jonas',
+        setAt: '2026-11-20T10:00:00.000Z',
+      })
+      // replaced: the former key is nowhere any more
+      const second = seal('crm|another-token-0001')
+      if (!got) throw new Error('no account')
+      await store.spaceAccounts.save({ ...got, cipher: second.cipher, encKeyRef: second.keyRef })
+      expect(JSON.stringify(await rows())).not.toContain(first.keyRef)
+      await store.spaceAccounts.delete('spc_1', 'relaticle')
+      expect(await rows()).toEqual([])
+      await raw.end()
+    })
+
+    it('keeps the tools of a space, the allowances of a conversation, and the call records by space, source and period', async () => {
+      await store.spaceTools.save({
+        spaceId: 'spc_1',
+        sourceId: 'relaticle',
+        added: true,
+        bindings: { workspace: 'sales-eu' },
+        calls: { 'create-note': 'approval' },
+        updatedAt: '2026-11-20T10:00:00.000Z',
+      })
+      expect(await store.spaceTools.get('spc_1', 'relaticle')).toMatchObject({ bindings: { workspace: 'sales-eu' } })
+      expect((await store.spaceTools.listBySpace('spc_1')).map((r) => r.sourceId)).toEqual(['relaticle'])
+      await store.toolAllowances.save({
+        approvalId: 'apr_1',
+        conversationId: 'conv_1',
+        sourceId: 'relaticle',
+        toolName: 'create-note',
+        spaceId: 'spc_1',
+        fingerprint: 'f',
+        since: '2026-11-20T10:00:00.000Z',
+      })
+      const allowance = await store.toolAllowances.get('apr_1')
+      if (!allowance) throw new Error('no allowance')
+      await store.toolAllowances.save({ ...allowance, endedAt: '2026-11-20T11:00:00.000Z' })
+      expect(await store.toolAllowances.listByConversation('conv_1')).toEqual([
+        expect.objectContaining({ approvalId: 'apr_1', endedAt: '2026-11-20T11:00:00.000Z' }),
+      ])
+      expect(await store.toolAllowances.listBySpaceSource('spc_1', 'relaticle')).toHaveLength(1)
+      const call = (id: string, at: string, sourceId = 'relaticle') => ({
+        id,
+        at,
+        principalId: 'p-ana',
+        conversationId: 'conv_1',
+        spaceId: 'spc_1',
+        sourceId,
+        toolName: 'create-note',
+        account: { kind: 'space' as const, spaceId: 'spc_1' },
+        rule: 'confirm' as const,
+        raisedByUntrusted: false,
+        outcome: 'completed' as const,
+        updatedAt: at,
+      })
+      await store.toolCalls.save(call('tcl_1', '2026-11-18T10:00:00.000Z'))
+      await store.toolCalls.save(call('tcl_2', '2026-11-20T10:00:00.000Z'))
+      await store.toolCalls.save(call('tcl_3', '2026-11-20T11:00:00.000Z', 'websearch'))
+      await store.toolCalls.save({ ...call('tcl_2', '2026-11-20T10:00:00.000Z'), outcome: 'refused' })
+      const week = await store.toolCalls.list({
+        spaceId: 'spc_1',
+        sourceId: 'relaticle',
+        from: '2026-11-19T00:00:00.000Z',
+        to: '2026-11-21T00:00:00.000Z',
+        limit: 10,
+      })
+      expect(week.map((r) => [r.id, r.outcome])).toEqual([['tcl_2', 'refused']])
+      expect((await store.toolCalls.list({ principalId: 'p-ana', limit: 10 })).map((r) => r.id)).toEqual([
+        'tcl_3',
+        'tcl_2',
+        'tcl_1',
+      ])
+    })
+
+    it('keeps the arguments and the action of an approval only as ciphertext (INTX-APPR-014, D77)', async () => {
+      const approvals = sealedApprovals(store.approvals, crypto)
+      await approvals.save({
+        id: 'apr_tool',
+        kind: 'sensitivity',
+        toolName: 'post_to_x',
+        actionArgs: { text: 'canary post 5521' },
+        action: {
+          title: 'Post on X',
+          source: { id: 'post_to_x', title: 'Post on X' },
+          account: { kind: 'space', space: { id: 'spc_1', title: 'Communication' } },
+          fields: [{ label: 'Post', value: 'canary post 5521' }],
+        },
+        requesterId: 'p-ana',
+        requesterName: 'Ana',
+        requesterRole: 'comms',
+        originSessionId: 'ses_1',
+        policy: { type: 'count', value: 1, vetoOnRefusal: false },
+        eligibleRoles: [],
+        decisions: [],
+        status: 'PENDING',
+        vetoed: false,
+        expiresAt: '2026-11-20T11:00:00.000Z',
+        createdAt: '2026-11-20T10:00:00.000Z',
+        updatedAt: '2026-11-20T10:00:00.000Z',
+      })
+      const raw = new pg.Client({ connectionString: url })
+      await raw.connect()
+      const row = (await raw.query("SELECT t::text AS row FROM approvals t WHERE id = 'apr_tool'")).rows[0]?.row
+      expect(row).not.toContain('canary post')
+      expect(row).not.toContain('Communication')
+      await raw.end()
+      expect((await approvals.get('apr_tool'))?.action?.fields[0]?.value).toBe('canary post 5521')
+      expect((await approvals.list({ requesterId: 'p-ana' }))[0]?.actionArgs).toEqual({ text: 'canary post 5521' })
+    })
   })
 })

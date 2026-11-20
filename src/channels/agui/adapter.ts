@@ -103,9 +103,13 @@ export class AgUiAdapter implements ChannelAdapter {
         const canDecide =
           !!principal &&
           !!this.agent &&
-          this.agent.approvals.isEligible(principal, event.approval) &&
-          event.approval.status === 'PENDING'
-        const value = approvalValue(event.approval, principal?.id ?? '', canDecide)
+          event.approval.status === 'PENDING' &&
+          (await this.agent.approvals.isEligible(principal, event.approval))
+        // a tool call's approval carries the action and the space whose owner approves it (PROF-TOOL-009)
+        const value =
+          event.approval.action && this.agent
+            ? ((await this.agent.approvalCard(event.approval, principal)) as ReturnType<typeof approvalValue>)
+            : approvalValue(event.approval, principal?.id ?? '', canDecide)
         if (event.update)
           await s.publish(
             session.id,
