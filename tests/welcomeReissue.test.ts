@@ -60,7 +60,8 @@ describe('Welcome to Ayni pack (CC-WEL-002/003)', () => {
     expect(pack.channels?.agui?.appLinkBase).toBe('https://app.dev.ayni.org/app/')
     expect(pack.channels?.agui?.walletLinkTemplate).toMatch(/^https:\/\/app\.ayni\.org\/app\/connect\?oob=\{oob\}$/)
     expect(pack.persona.systemPrompt).not.toMatch(/https?:\/\//)
-    expect(pack.tools?.access?.roles?.visitor).toEqual([])
+    // nothing that reaches the outside world: bundled tools only (D101)
+    expect(Object.values(pack.tools?.sources ?? {}).map((s) => s.type)).toEqual(['bundled', 'bundled', 'bundled'])
   })
 })
 

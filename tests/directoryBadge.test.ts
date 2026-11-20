@@ -440,9 +440,9 @@ describe('what the agent-pack may say of a badge from the directory (IDENT-DIR-0
   it('refuses the email code anywhere else, in words (INTX-AUTH-011)', () => {
     refused(
       packWith((doc) => {
-        doc.actions = { issue_credential: { authChallenge: { type: 'email' } } }
+        doc.tools.sources.echo.tools = { echo: { stepUp: { authChallenge: { type: 'email' } } } }
       }),
-      'actions.issue_credential.authChallenge: the email code is the challenge of an issuance profile that takes claims from the user directory'
+      'tools.sources.echo.tools.echo.stepUp.authChallenge: the email code is the challenge of an issuance profile that takes claims from the user directory'
     )
     refused(
       packWith((doc) => {

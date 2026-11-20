@@ -11,15 +11,19 @@ import { parse as parseYaml } from 'yaml'
 import type {
   AgentPack,
   AuthenticationEntry,
+  BundledName,
   EvidencePolicy,
-  SourceAccount,
-  SourceBinding,
   SpaceTemplate,
   ToolAccess,
+  ToolSourceDef,
 } from './packTypes.js'
 import {
   ACCOUNT_KINDS,
   AVAILABILITIES,
+  BUNDLED_NAMES,
+  BUNDLED_TOOLS,
+  bundledEnabled,
+  bundledSource,
   CALL_RULES,
   COMPUTED_FUNCTIONS,
   challengeTypesOf,
@@ -29,6 +33,7 @@ import {
   PERSONAL_RETENTION_DAYS,
   providerNameOf,
   RESERVED_ACCOUNT_KINDS,
+  SOURCE_TYPES,
   TOOL_EFFECTS,
   takesClaimsFromDirectory,
 } from './packTypes.js'
@@ -100,6 +105,24 @@ function resolveRef(root: Schema, ref: string): Schema {
   return (node ?? {}) as Schema
 }
 
+/**
+ * The properties of the branches of `allOf` whose `if` the value meets, an `if` on constant properties only: those of a
+ * source's type (`type: mcp`, D101), so that its connection is coerced too.
+ */
+function branchProperties(value: object, schema: Schema, root: Schema): Record<string, Schema> {
+  const out: Record<string, Schema> = {}
+  for (const branch of (schema.allOf ?? []) as Schema[]) {
+    const test = (branch.if as Schema | undefined)?.properties as Record<string, Schema> | undefined
+    if (!test || !branch.then) continue
+    const meets = Object.entries(test).every(([k, s]) => (value as Record<string, unknown>)[k] === s.const)
+    if (!meets) continue
+    let then = branch.then as Schema
+    if (then.$ref) then = resolveRef(root, then.$ref as string)
+    Object.assign(out, (then.properties ?? {}) as Record<string, Schema>)
+  }
+  return out
+}
+
 /** Coerces strings into the number, boolean or list the schema expects (docs/agent-pack.md step 3). */
 export function coerceBySchema(value: unknown, schema: Schema, root: Schema): unknown {
   if (schema.$ref) return coerceBySchema(value, resolveRef(root, schema.$ref as string), root)
@@ -135,7 +158,7 @@ export function coerceBySchema(value: unknown, schema: Schema, root: Schema): un
     return value.map((item) => coerceBySchema(item, items, root))
   }
   if (value && typeof value === 'object') {
-    const props = (schema.properties ?? {}) as Record<string, Schema>
+    const props = { ...((schema.properties ?? {}) as Record<string, Schema>), ...branchProperties(value, schema, root) }
     const additional = schema.additionalProperties
     const out: Record<string, unknown> = {}
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
@@ -147,22 +170,23 @@ export function coerceBySchema(value: unknown, schema: Schema, root: Schema): un
   return value
 }
 
+/** The bundled tools the model may be given, by their names (TOOL-HTTP-002): a source names each, or its default holds. */
 export function bundledToolNames(pack: AgentPack): string[] {
-  const b = pack.tools?.bundled ?? {}
+  const on = (name: BundledName) => bundledEnabled(pack, name)
   const names: string[] = []
-  if (b.statistics?.enabled) names.push('statistics')
-  if (b.generateImage?.enabled) names.push('generate_image')
-  if (b.principalCredentials?.enabled !== false) names.push('principal_credentials')
+  if (on('statistics')) names.push('statistics')
+  if (on('generateImage')) names.push('generate_image')
+  if (on('principalCredentials')) names.push('principal_credentials')
   const asksOnDemand = Object.values(pack.presentations ?? {}).some((e) => e.request === 'on-demand')
-  if (b.requestPresentation?.enabled !== false && (pack.identity.authentication?.length || asksOnDemand))
+  if (on('requestPresentation') && (pack.identity.authentication?.length || asksOnDemand))
     names.push('request_presentation')
-  if (b.credentialIssuance?.enabled !== false && Object.keys(pack.issuance ?? {}).length) {
+  if (on('credentialIssuance') && Object.keys(pack.issuance ?? {}).length) {
     names.push('credential_requirements')
     if (Object.values(pack.issuance ?? {}).some((p) => (p.trigger ?? 'model') === 'model'))
       names.push('issue_credential')
   }
-  if (b.principalPreferences?.enabled !== false) names.push('principal_preferences')
-  if (b.workingMemory?.enabled !== false) names.push('working_memory')
+  if (on('principalPreferences')) names.push('principal_preferences')
+  if (on('workingMemory')) names.push('working_memory')
   return names
 }
 
@@ -273,21 +297,6 @@ export function inlineDirectoryErrors(doc: unknown): string[] {
 }
 
 /**
- * The email code belongs to the issuance profiles that take claims from the user directory and to no other action
- * (INTX-AUTH-011): an action that declares it is refused in words, before the schema, which would only name the value.
- */
-export function emailChallengeActionErrors(doc: unknown): string[] {
-  const actions = (doc as { actions?: Record<string, { authChallenge?: { type?: unknown } }> })?.actions
-  if (!actions || typeof actions !== 'object') return []
-  return Object.entries(actions)
-    .filter(([, policy]) => policy?.authChallenge?.type === 'email')
-    .map(
-      ([tool]) =>
-        `actions.${tool}.authChallenge: the email code is the challenge of an issuance profile that takes claims from the user directory, and of no other action (INTX-AUTH-011)`
-    )
-}
-
-/**
  * What an issuance profile may say of its challenges and of the user directory (IDENT-DIR-002, INTX-AUTH-011,
  * INTX-ISSUE-019/020/021, D88, D89).
  */
@@ -365,43 +374,90 @@ export function issuanceChallengeErrors(pack: AgentPack): string[] {
   return errors
 }
 
-/** The bundled tools a key of `tools.bundled` names, for the tool catalog (TOOL-CAT-001). */
-const BUNDLED_KEYS = [
-  'statistics',
-  'generateImage',
-  'principalCredentials',
-  'requestPresentation',
-  'credentialIssuance',
-  'principalPreferences',
-  'workingMemory',
-]
-
 type Doc = Record<string, unknown>
 
-/** Every source of a pack document before the schema, each with where it is written and its name (TOOL-CAT-001). */
-function docSources(doc: unknown): { where: string; name: string; kind: 'mcp' | 'http' | 'bundled'; body: Doc }[] {
-  const d = (doc ?? {}) as Doc
-  const out: { where: string; name: string; kind: 'mcp' | 'http' | 'bundled'; body: Doc }[] = []
-  const servers = ((d.mcp as Doc | undefined)?.servers ?? []) as unknown[]
-  if (Array.isArray(servers))
-    for (const [i, server] of servers.entries()) {
-      const body = (server ?? {}) as Doc
-      const name = typeof body.name === 'string' ? body.name : `#${i}`
-      out.push({ where: `mcp.servers.${name}`, name, kind: 'mcp', body })
+const isObject = (value: unknown): value is Doc => !!value && typeof value === 'object' && !Array.isArray(value)
+
+/**
+ * The keys a pack may no longer use (D101, TOOL-CAT-011): every source is one entry of `tools.sources`, its tier model is
+ * its `access`, and a tool's step-up is in its own source. Each is refused in words before the schema, which would only
+ * name the key, with the key that replaces it.
+ */
+export function withdrawnToolKeyErrors(doc: unknown): string[] {
+  const d = isObject(doc) ? doc : {}
+  const errors: string[] = []
+  const named = (list: unknown, key: string): string[] =>
+    Array.isArray(list)
+      ? list.map((item, i) => (isObject(item) && typeof item[key] === 'string' ? (item[key] as string) : `#${i}`))
+      : []
+  if (d.mcp !== undefined) {
+    const servers = named(isObject(d.mcp) ? d.mcp.servers : undefined, 'name')
+    const fix =
+      'declare each MCP server as an entry of tools.sources keyed by its name, with type: mcp, and its toolAccess as access (D101, TOOL-CAT-011)'
+    if (servers.length) for (const name of servers) errors.push(`mcp.servers.${name} is withdrawn: ${fix}`)
+    else errors.push(`mcp is withdrawn: ${fix}`)
+  }
+  const tools = isObject(d.tools) ? d.tools : {}
+  if (tools.http !== undefined) {
+    const fix =
+      'declare each HTTP tool as an entry of tools.sources keyed by its name, with type: http (D101, TOOL-CAT-011)'
+    const names = named(tools.http, 'name')
+    if (names.length) for (const name of names) errors.push(`tools.http.${name} is withdrawn: ${fix}`)
+    else errors.push(`tools.http is withdrawn: ${fix}`)
+  }
+  if (tools.bundled !== undefined) {
+    const keys = isObject(tools.bundled) ? Object.keys(tools.bundled) : []
+    const fix = (key: string) =>
+      `declare it as an entry of tools.sources with type: bundled and bundled: ${key} (D101, TOOL-CAT-011)`
+    if (keys.length) for (const key of keys) errors.push(`tools.bundled.${key} is withdrawn: ${fix(key)}`)
+    else errors.push(`tools.bundled is withdrawn: ${fix('<its name>')}`)
+  }
+  if (tools.access !== undefined)
+    errors.push(
+      'tools.access is withdrawn: each source declares the tier model of its own tools in tools.sources.<id>.access (D101, TOOL-CAT-011)'
+    )
+  if (d.actions !== undefined) {
+    const entries = isObject(d.actions) ? Object.keys(d.actions) : []
+    if (entries.length)
+      for (const tool of entries)
+        errors.push(
+          `actions.${tool} is withdrawn: declare its step-up in the source of the tool, as tools.sources.<id>.tools.${tool}.stepUp (D101, TOOL-CAT-011)`
+        )
+    else
+      errors.push(
+        "actions is withdrawn: a tool's step-up is tools.sources.<id>.tools.<tool>.stepUp (D101, TOOL-CAT-011)"
+      )
+  }
+  return errors
+}
+
+/** Every source of a pack document before the schema: an entry of `tools.sources`, where it is written (TOOL-CAT-001). */
+function docSources(doc: unknown): { where: string; name: string; type: unknown; body: Doc }[] {
+  const tools = isObject(doc) && isObject(doc.tools) ? doc.tools : {}
+  const sources = isObject(tools.sources) ? tools.sources : {}
+  return Object.entries(sources).map(([name, value]) => {
+    const body = isObject(value) ? value : {}
+    return { where: `tools.sources.${name}`, name, type: body.type, body }
+  })
+}
+
+/**
+ * The email code belongs to the issuance profiles that take claims from the user directory and to no tool
+ * (INTX-AUTH-011): a step-up that declares it is refused in words, before the schema, which would only name the value.
+ */
+export function emailChallengeStepUpErrors(doc: unknown): string[] {
+  const errors: string[] = []
+  for (const { where, body } of docSources(doc)) {
+    if (!isObject(body.tools)) continue
+    for (const [tool, decl] of Object.entries(body.tools)) {
+      const challenge = isObject(decl) && isObject(decl.stepUp) ? decl.stepUp.authChallenge : undefined
+      if (isObject(challenge) && challenge.type === 'email')
+        errors.push(
+          `${where}.tools.${tool}.stepUp.authChallenge: the email code is the challenge of an issuance profile that takes claims from the user directory, and of no tool (INTX-AUTH-011)`
+        )
     }
-  const tools = (d.tools ?? {}) as Doc
-  const http = (tools.http ?? []) as unknown[]
-  if (Array.isArray(http))
-    for (const [i, tool] of http.entries()) {
-      const body = (tool ?? {}) as Doc
-      const name = typeof body.name === 'string' ? body.name : `#${i}`
-      out.push({ where: `tools.http.${name}`, name, kind: 'http', body })
-    }
-  const bundled = (tools.bundled ?? {}) as Doc
-  if (bundled && typeof bundled === 'object')
-    for (const [key, value] of Object.entries(bundled))
-      out.push({ where: `tools.bundled.${key}`, name: key, kind: 'bundled', body: (value ?? {}) as Doc })
-  return out
+  }
+  return errors
 }
 
 /**
@@ -411,7 +467,7 @@ function docSources(doc: unknown): { where: string; name: string; kind: 'mcp' | 
 export function reservedAccountErrors(doc: unknown): string[] {
   const errors: string[] = []
   for (const { where, body } of docSources(doc)) {
-    const kind = (body.account as Doc | undefined)?.kind
+    const kind = isObject(body.account) ? body.account.kind : undefined
     if (kind === 'personal')
       errors.push(
         `${where}.account.kind: personal is not available in this version: each person's own accounts come in phase 2 of the tools (TOOL-CAT-002, O28); use none, agent or space`
@@ -425,8 +481,10 @@ export function reservedAccountErrors(doc: unknown): string[] {
 }
 
 /**
- * What a source of the catalog may say, in words before the schema (TOOL-CAT-001/002): a known value for each of its
- * answers, a name no other source has, and no account for a bundled tool. Each refusal names the source and the field.
+ * What a source of the catalog may say, in words before the schema (TOOL-CAT-001/002, D101): a known type and a known
+ * value for each of its answers; for an HTTP tool, declarations of its one tool only, named by the source's id; for a
+ * bundled tool, a bundled tool no other source names, no account, and declarations of its own tools, with no effect and no
+ * trust. Each refusal names the source and the field.
  */
 export function catalogValueErrors(doc: unknown): string[] {
   const errors: string[] = []
@@ -434,40 +492,65 @@ export function catalogValueErrors(doc: unknown): string[] {
     if (value !== undefined && !allowed.includes(value as string))
       errors.push(`${where}.${field}: ${JSON.stringify(value)} is not one of ${allowed.join(', ')} (TOOL-CAT-001)`)
   }
-  const seen = new Map<string, string>()
-  for (const { where, name, kind, body } of docSources(doc)) {
-    const other = seen.get(name)
-    if (other)
-      errors.push(`${where}.name: ${name} is also the name of ${other}: a source's name is unique (TOOL-CAT-001)`)
-    else seen.set(name, where)
-    if (kind === 'bundled') {
-      if (!BUNDLED_KEYS.includes(name)) continue
-      if (body.account !== undefined)
-        errors.push(`${where}.account: a bundled tool's account is none and is not declared (TOOL-CAT-002)`)
-      one(where, 'availability', body.availability, AVAILABILITIES)
-      one(where, 'call', body.call, CALL_RULES)
+  const bundledBy = new Map<string, string>()
+  for (const { where, name, type, body } of docSources(doc)) {
+    if (type === undefined) {
+      errors.push(`${where}.type: a source says its type: mcp, http or bundled (TOOL-CAT-001)`)
       continue
     }
-    const account = body.account as Doc | undefined
+    if (!(SOURCE_TYPES as readonly unknown[]).includes(type)) {
+      one(where, 'type', type, SOURCE_TYPES)
+      continue
+    }
+    one(where, 'availability', body.availability, AVAILABILITIES)
+    const declared = isObject(body.tools) ? body.tools : {}
+    for (const [tool, decl] of Object.entries(declared)) {
+      const d = isObject(decl) ? decl : {}
+      one(where, `tools.${tool}.effect`, d.effect, TOOL_EFFECTS)
+      one(where, `tools.${tool}.call`, d.call, CALL_RULES)
+    }
+    if (type === 'bundled') {
+      const bundled = body.bundled
+      if (bundled === undefined) {
+        errors.push(`${where}.bundled: a bundled source names its bundled tool: ${BUNDLED_NAMES.join(', ')}`)
+        continue
+      }
+      one(where, 'bundled', bundled, BUNDLED_NAMES)
+      if (!(BUNDLED_NAMES as readonly unknown[]).includes(bundled)) continue
+      const other = bundledBy.get(bundled as string)
+      if (other)
+        errors.push(`${where}.bundled: ${String(bundled)} is also named by ${other}: one source per bundled tool`)
+      else bundledBy.set(bundled as string, where)
+      if (body.account !== undefined)
+        errors.push(`${where}.account: a bundled tool's account is none and is not declared (TOOL-CAT-002)`)
+      const own: readonly string[] = BUNDLED_TOOLS[bundled as BundledName]
+      for (const [tool, decl] of Object.entries(declared)) {
+        if (!own.includes(tool))
+          errors.push(
+            `${where}.tools.${tool}: ${String(bundled)} gives the model ${own.join(' and ')}, not ${tool} (TOOL-CAT-001)`
+          )
+        const d = isObject(decl) ? decl : {}
+        if (d.effect !== undefined)
+          errors.push(`${where}.tools.${tool}.effect: a bundled tool has no effect (TOOL-CAT-006)`)
+        if (d.untrusted !== undefined)
+          errors.push(`${where}.tools.${tool}.untrusted: a bundled tool is trusted (TOOL-CAT-008)`)
+      }
+      continue
+    }
+    const account = isObject(body.account) ? body.account : undefined
     if (account && !(RESERVED_ACCOUNT_KINDS as readonly unknown[]).includes(account.kind))
       one(where, 'account.kind', account.kind, ACCOUNT_KINDS)
-    one(where, 'availability', body.availability, AVAILABILITIES)
-    if (kind === 'http') {
-      one(where, 'effect', body.effect, TOOL_EFFECTS)
-      one(where, 'call', body.call, CALL_RULES)
-    } else {
-      const declared = (body.tools ?? {}) as Doc
-      if (declared && typeof declared === 'object')
-        for (const [tool, decl] of Object.entries(declared)) {
-          one(where, `tools.${tool}.effect`, (decl as Doc | undefined)?.effect, TOOL_EFFECTS)
-          one(where, `tools.${tool}.call`, (decl as Doc | undefined)?.call, CALL_RULES)
-        }
-    }
+    if (type === 'http')
+      for (const tool of Object.keys(declared))
+        if (tool !== name)
+          errors.push(
+            `${where}.tools.${tool}: an HTTP tool is one tool, named by its source's id: tools declares ${name} only (TOOL-CAT-001)`
+          )
   }
-  const templates = (((doc ?? {}) as Doc).spaces as Doc | undefined)?.templates
+  const templates = isObject(doc) && isObject(doc.spaces) ? doc.spaces.templates : undefined
   if (Array.isArray(templates))
     for (const template of templates) {
-      const t = (template ?? {}) as Doc
+      const t = isObject(template) ? template : {}
       if (!Array.isArray(t.tools)) continue
       for (const [i, entry] of (t.tools as Doc[]).entries())
         one(`spaces.templates.${String(t.id)}.tools[${i}]`, 'add', entry?.add, ['auto', 'owner'])
@@ -487,15 +570,7 @@ function regexError(pattern: string | undefined): string | undefined {
 }
 
 /** The account, availability and bindings of one source (TOOL-CAT-002/004/005, TOOL-AVAIL-003). */
-function sourceErrors(
-  where: string,
-  source: {
-    account?: SourceAccount
-    availability?: string
-    bindings?: SourceBinding[]
-    transport?: string
-  }
-): string[] {
+function sourceErrors(where: string, source: ToolSourceDef): string[] {
   const errors: string[] = []
   const account = source.account
   const availability = source.availability ?? 'agent'
@@ -508,7 +583,7 @@ function sourceErrors(
       errors.push(
         `${where}.availability: a source whose account is space is of availability spaces, not ${availability} (TOOL-AVAIL-003)`
       )
-    if (source.transport === 'stdio')
+    if (source.type === 'mcp' && source.transport === 'stdio')
       errors.push(
         `${where}.transport: a space account reaches a remote MCP server (sse or streamable-http), never a stdio one (TOOL-AVAIL-003)`
       )
@@ -517,7 +592,7 @@ function sourceErrors(
   const bad = regexError(account?.pattern)
   if (bad) errors.push(`${where}.account.pattern is not a regular expression: ${bad}`)
   const names = new Set<string>()
-  for (const binding of source.bindings ?? []) {
+  for (const binding of source.type === 'bundled' ? [] : (source.bindings ?? [])) {
     const at = `${where}.bindings.${binding.name}`
     if (names.has(binding.name)) errors.push(`${at}: a binding's name is unique in its source (TOOL-CAT-004)`)
     names.add(binding.name)
@@ -533,49 +608,32 @@ function sourceErrors(
   return errors
 }
 
+/** The tools of a source the pack can name before any discovery: an HTTP tool's own, a bundled tool's; none for MCP. */
+export function declaredToolsOf(id: string, source: ToolSourceDef): readonly string[] | undefined {
+  if (source.type === 'http') return [id]
+  if (source.type === 'bundled') return BUNDLED_TOOLS[source.bundled]
+  return undefined
+}
+
 /**
- * The catalog of tool sources (TOOL-CAT, TOOL-AVAIL, D96 to D99): accounts, availability, bindings, the templates that
- * offer the sources of spaces, the approvers of a rule `approval`.
+ * The catalog of tool sources (TOOL-CAT, TOOL-AVAIL, D96 to D99, D101): accounts, availability, bindings, the templates
+ * that offer the sources of spaces, the approvers of a rule `approval`.
  */
 export function catalogErrors(pack: AgentPack): string[] {
   const errors: string[] = []
-  const spacesSources = new Set<string>()
   const availabilityOf = new Map<string, string>()
-  for (const server of pack.mcp?.servers ?? []) {
-    const where = `mcp.servers.${server.name}`
-    errors.push(...sourceErrors(where, server))
-    availabilityOf.set(server.name, server.availability ?? 'agent')
-    if (server.availability === 'spaces') spacesSources.add(server.name)
-    if (server.offer && new Set(server.offer).size !== server.offer.length)
+  for (const [id, source] of Object.entries(pack.tools?.sources ?? {})) {
+    const where = `tools.sources.${id}`
+    errors.push(...sourceErrors(where, source))
+    availabilityOf.set(id, source.availability ?? 'agent')
+    if (source.type === 'mcp' && source.offer && new Set(source.offer).size !== source.offer.length)
       errors.push(`${where}.offer names a tool twice (TOOL-CAT-003)`)
     // a tool of the spaces is approved by the space's owner, never by roles (TOOL-CAT-009)
-    if (server.availability === 'spaces')
-      for (const entry of server.toolAccess?.approval ?? [])
+    if (source.availability === 'spaces')
+      for (const entry of source.access?.approval ?? [])
         errors.push(
-          `${where}.toolAccess.approval names [${entry.tools.join(', ')}], tools of availability spaces: a space's owner approves them (TOOL-CAT-009)`
+          `${where}.access.approval names [${entry.tools.join(', ')}], tools of availability spaces: a space's owner approves them (TOOL-CAT-009)`
         )
-  }
-  const httpSpaces = new Set<string>()
-  for (const tool of pack.tools?.http ?? []) {
-    const where = `tools.http.${tool.name}`
-    errors.push(...sourceErrors(where, tool))
-    availabilityOf.set(tool.name, tool.availability ?? 'agent')
-    if (tool.availability === 'spaces') {
-      spacesSources.add(tool.name)
-      httpSpaces.add(tool.name)
-    }
-  }
-  for (const entry of pack.tools?.access?.approval ?? []) {
-    const named = entry.tools.filter((t) => httpSpaces.has(t))
-    if (named.length)
-      errors.push(
-        `tools.access.approval names [${named.join(', ')}], tools of availability spaces: a space's owner approves them (TOOL-CAT-009)`
-      )
-  }
-  const bundled = (pack.tools?.bundled ?? {}) as Record<string, { availability?: string } | undefined>
-  for (const [key, entry] of Object.entries(bundled)) {
-    availabilityOf.set(key, entry?.availability ?? 'agent')
-    if (entry?.availability === 'spaces') spacesSources.add(key)
   }
   // the templates name sources of spaces only (TOOL-AVAIL-002)
   for (const template of pack.spaces?.templates ?? []) {
@@ -584,7 +642,7 @@ export function catalogErrors(pack: AgentPack): string[] {
       const where = `spaces.templates.${template.id}.tools[${i}]`
       const availability = availabilityOf.get(entry.source)
       if (availability === undefined)
-        errors.push(`${where}.source: ${entry.source} is not a source of the agent-pack (TOOL-AVAIL-002)`)
+        errors.push(`${where}.source: ${entry.source} is not a key of tools.sources (TOOL-AVAIL-002)`)
       else if (availability !== 'spaces')
         errors.push(
           `${where}.source: ${entry.source} is of availability ${availability}: a template names sources of availability spaces only (TOOL-AVAIL-002)`
@@ -610,42 +668,33 @@ export function catalogErrors(pack: AgentPack): string[] {
 export function catalogWarnings(pack: AgentPack): string[] {
   const warnings: string[] = []
   const named = new Set((pack.spaces?.templates ?? []).flatMap((t) => (t.tools ?? []).map((e) => e.source)))
-  const sources: { where: string; name: string; availability?: string }[] = [
-    ...(pack.mcp?.servers ?? []).map((s) => ({
-      where: `mcp.servers.${s.name}`,
-      name: s.name,
-      availability: s.availability,
-    })),
-    ...(pack.tools?.http ?? []).map((t) => ({
-      where: `tools.http.${t.name}`,
-      name: t.name,
-      availability: t.availability,
-    })),
-  ]
-  for (const source of sources)
-    if (source.availability === 'spaces' && !named.has(source.name))
+  const sources = Object.entries(pack.tools?.sources ?? {})
+  for (const [id, source] of sources)
+    if (source.type !== 'bundled' && source.availability === 'spaces' && !named.has(id))
       warnings.push(
-        `${source.where}: a source of availability spaces that no template of spaces names: no space can use it (TOOL-AVAIL-002)`
+        `tools.sources.${id}: a source of availability spaces that no template of spaces names: no space can use it (TOOL-AVAIL-002)`
       )
   const fallback = pack.approvals?.approvers ?? []
   const noApprover = (where: string, tool: string) =>
     warnings.push(
-      `${where}: the rule of ${tool} is approval and no role approves it (no toolAccess.approval entry lists it, approvals.approvers is empty): its calls are refused as no-approver (TOOL-CAT-009)`
+      `${where}: the rule of ${tool} is approval and no role approves it (no access.approval entry of its source lists it, approvals.approvers is empty): its calls are refused as no-approver (TOOL-CAT-009)`
     )
-  for (const tool of pack.tools?.http ?? []) {
-    if ((tool.availability ?? 'agent') === 'spaces') continue
-    const entry = pack.tools?.access?.approval?.some((r) => r.tools.includes(tool.name))
-    if (entry || fallback.length) continue
-    const effect = tool.effect ?? (tool.method === 'GET' ? 'read' : tool.method === 'DELETE' ? 'delete' : 'write')
-    const rule = tool.call ?? (effect === 'read' ? 'none' : effect === 'write' ? 'confirm' : 'approval')
-    if (rule === 'approval') noApprover(`tools.http.${tool.name}`, tool.name)
-  }
-  for (const server of pack.mcp?.servers ?? []) {
-    if ((server.availability ?? 'agent') === 'spaces' || fallback.length) continue
-    for (const [tool, decl] of Object.entries(server.tools ?? {})) {
-      if (server.toolAccess?.approval?.some((r) => r.tools.includes(tool))) continue
+  for (const [id, source] of sources) {
+    if (source.type === 'bundled' || (source.availability ?? 'agent') === 'spaces' || fallback.length) continue
+    const listed = (tool: string) => source.access?.approval?.some((r) => r.tools.includes(tool))
+    if (source.type === 'http') {
+      if (listed(id)) continue
+      const decl = source.tools?.[id]
+      const effect =
+        decl?.effect ?? (source.method === 'GET' ? 'read' : source.method === 'DELETE' ? 'delete' : 'write')
+      const rule = decl?.call ?? (effect === 'read' ? 'none' : effect === 'write' ? 'confirm' : 'approval')
+      if (rule === 'approval') noApprover(`tools.sources.${id}`, id)
+      continue
+    }
+    for (const [tool, decl] of Object.entries(source.tools ?? {})) {
+      if (listed(tool)) continue
       const rule = decl.call ?? (decl.effect === 'delete' || decl.effect === 'external' ? 'approval' : undefined)
-      if (rule === 'approval') noApprover(`mcp.servers.${server.name}.tools.${tool}`, tool)
+      if (rule === 'approval') noApprover(`tools.sources.${id}.tools.${tool}`, tool)
     }
   }
   return warnings
@@ -817,42 +866,45 @@ export function crossFieldErrors(pack: AgentPack): string[] {
   errors.push(...spaceTemplateErrors(pack))
 
   const purposeIds = new Set((pack.purposes ?? []).map((p) => p.id))
-  const declaredTools = new Set<string>([...(pack.tools?.http ?? []).map((t) => t.name), ...bundledToolNames(pack)])
-  const checkAccess = (access: ToolAccess | undefined, where: string, mcp: boolean) => {
+  const sources = Object.entries(pack.tools?.sources ?? {})
+  // the tools a menu item may name: the HTTP tools and the bundled tools the model may be given
+  const declaredTools = new Set<string>([
+    ...sources.filter(([, s]) => s.type === 'http').map(([id]) => id),
+    ...bundledToolNames(pack),
+  ])
+  // the tier model of each source names its own tools, roles declared, approvers that approve, known purposes (D101)
+  const checkAccess = (access: ToolAccess | undefined, where: string, own: readonly string[] | undefined) => {
     if (!access) return
     for (const [role, tools] of Object.entries(access.roles ?? {})) {
       check([role], `${where}.roles`)
-      if (!mcp) {
-        for (const t of tools) {
-          if (t !== '*' && !declaredTools.has(t))
-            errors.push(`rule 5: tool "${t}" in ${where}.roles.${role} is not declared`)
-        }
-      }
+      for (const t of tools)
+        if (own && t !== '*' && !own.includes(t))
+          errors.push(`rule 5: tool "${t}" in ${where}.roles.${role} is not a tool of the source`)
     }
     for (const rule of [...(access.approval ?? []), ...(access.elevation ?? [])]) {
       check(rule.approvers, where)
       for (const r of rule.approvers) {
         if (!identity.roles?.[r]?.canApprove) errors.push(`rule 3: approver role "${r}" in ${where} has no canApprove`)
       }
-      if (!mcp)
-        for (const t of rule.tools)
-          if (!declaredTools.has(t)) errors.push(`rule 5: tool "${t}" in ${where} is not declared`)
+      for (const t of rule.tools)
+        if (own && !own.includes(t)) errors.push(`rule 5: tool "${t}" in ${where} is not a tool of the source`)
     }
     for (const rule of access.elevation ?? []) {
       for (const p of rule.purposes)
         if (!purposeIds.has(p)) errors.push(`rule 4: purpose "${p}" in ${where}.elevation is not in purposes`)
     }
   }
-  checkAccess(pack.tools?.access, 'tools.access', false)
-  for (const s of pack.mcp?.servers ?? []) checkAccess(s.toolAccess, `mcp.servers.${s.name}.toolAccess`, true)
-
-  const hasMcp = (pack.mcp?.servers ?? []).length > 0
-  for (const [tool, policy] of Object.entries(pack.actions ?? {})) {
-    if (!declaredTools.has(tool) && !hasMcp) errors.push(`rule 5: actions.${tool} refers to an undeclared tool`)
-    if (policy.authChallenge?.type === 'face-match' && !pack.media?.faceVerification) {
-      errors.push(`rule 6: actions.${tool}.authChallenge face-match requires media.faceVerification`)
-    }
+  for (const [id, source] of sources) {
+    checkAccess(source.access, `tools.sources.${id}.access`, declaredToolsOf(id, source))
+    // a tool's step-up (TOOL-CAT-010): a face match needs the face-verification service
+    for (const [tool, decl] of Object.entries(source.tools ?? {}))
+      if (decl.stepUp?.authChallenge?.type === 'face-match' && !pack.media?.faceVerification)
+        errors.push(
+          `rule 6: tools.sources.${id}.tools.${tool}.stepUp.authChallenge face-match requires media.faceVerification`
+        )
   }
+
+  const hasMcp = sources.some(([, s]) => s.type === 'mcp')
   for (const m of pack.persona.menu ?? []) {
     if (m.action.type === 'tool' && m.action.tool && !declaredTools.has(m.action.tool) && !hasMcp) {
       errors.push(`rule 5: persona.menu.${m.id} refers to undeclared tool "${m.action.tool}"`)
@@ -868,11 +920,11 @@ export function crossFieldErrors(pack: AgentPack): string[] {
     errors.push('rule 7: features.imageGeneration requires media.imageGeneration')
   }
 
-  const gen = pack.tools?.bundled?.generateImage
-  if (gen?.enabled && gen.provider && !pack.media?.imageGeneration?.providers.some((p) => p.name === gen.provider)) {
-    errors.push(
-      `rule 8: tools.bundled.generateImage.provider "${gen.provider}" is not a media.imageGeneration provider`
-    )
+  const gen = bundledSource(pack, 'generateImage')
+  if (gen && gen[1].enabled !== false && gen[1].provider) {
+    const provider = gen[1].provider
+    if (!pack.media?.imageGeneration?.providers.some((p) => p.name === provider))
+      errors.push(`rule 8: tools.sources.${gen[0]}.provider "${provider}" is not a media.imageGeneration provider`)
   }
   const template = pack.channels?.agui?.walletLinkTemplate
   if (template && (!template.startsWith('https://') || !template.includes('{oob}'))) {
@@ -938,8 +990,12 @@ export function validatePackDocument(doc: unknown, env: Record<string, string | 
   // IDENT-ROLE-012: the people of the user directory are refused in words, before the schema names the key
   const inline = inlineDirectoryErrors(coerced)
   if (inline.length) throw new PackError('agent-pack writes the people of the user directory inline', inline)
-  // INTX-AUTH-011: an action that declares the email code is refused in words, before the schema names the value
-  const email = emailChallengeActionErrors(coerced)
+  // TOOL-CAT-011: the keys one map replaced are refused in words, with the key that replaces each (D101)
+  const withdrawn = withdrawnToolKeyErrors(coerced)
+  if (withdrawn.length)
+    throw new PackError('agent-pack declares tools under keys that tools.sources replaced (D101)', withdrawn)
+  // INTX-AUTH-011: a step-up that declares the email code is refused in words, before the schema names the value
+  const email = emailChallengeStepUpErrors(coerced)
   if (email.length)
     throw new PackError('agent-pack declares an email challenge outside a badge from the directory', email)
   // TOOL-CAT-002: the kinds of account of the later phases are refused in words, before the schema names the value
@@ -954,7 +1010,12 @@ export function validatePackDocument(doc: unknown, env: Record<string, string | 
   const validate = ajv.compile(schema)
   if (!validate(coerced)) {
     const details = (validate.errors ?? []).map((e) => {
-      const extra = e.params && 'additionalProperty' in e.params ? ` (${String(e.params.additionalProperty)})` : ''
+      const extra =
+        e.params && 'additionalProperty' in e.params
+          ? ` (${String(e.params.additionalProperty)})`
+          : e.params && 'unevaluatedProperty' in e.params
+            ? ` (${String(e.params.unevaluatedProperty)})`
+            : ''
       return `${e.instancePath || '$'} ${e.message ?? ''}${extra}`
     })
     throw new PackError('agent-pack fails schema validation (CORE-PACK-003)', details)

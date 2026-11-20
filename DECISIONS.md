@@ -1184,3 +1184,60 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       settings, the phone's confirmation, the account, the tools of a turn, the card and its decisions, allowances,
       untrusted content, rules, the owner's approval, provenance, the admin read, deletion within the window),
       `tests/postgres.test.ts` (the migration to 3.9.0 and the new tables).
+67. **Tools in one map: every tool source is one entry of `tools.sources`** (2026-11-20, Fabrice's decision; ayni-spec
+    PR #100, D101, D96 and D99 amended; CORE-PACK-001, IDENT-LIVE-011, RBAC-TOOL-001, TOOL-HTTP-001/002,
+    TOOL-CAT-001/006..011, TOOL-AVAIL-002/003, TOOL-SPACE-006, TOOL-CALL-001, INTX-AUTH-002). Nothing changes on the
+    AG-UI wire: profile 3.4, the source ids, the space-tools endpoints and the cards are as they were.
+    - **The pack (`schemas/agent-pack.schema.json`, `src/config/packTypes.ts`):** `tools.sources` is a map keyed by the
+      source id (`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`). Each entry is `$defs/toolSource`: `type` (`mcp`, `http`,
+      `bundled`), the common fields (`title`, `description`, `account`, `availability`, `access`, `tools.<name>` with
+      `title`, `effect`, `call`, `untrusted`, `stepUp`), and, through `if`/`then` on `type` with
+      `unevaluatedProperties: false`, the connection of its type: `mcpSource` (transport, url, command, args, env,
+      headers, lazy, reconnect, offer, bindings, untrusted), `httpSource` (description, method, url, headers,
+      parameters, bodyTemplate, timeoutSeconds, bindings, untrusted), `bundledSource` (bundled, enabled, endpoint,
+      defaultStatClass, provider). `stepUp` is `{ authChallenge, maxCredentialAge }`, what `actions.<tool>` held.
+      `mcp`, `tools.http`, `tools.bundled`, `tools.access` and `actions` are gone from the schema.
+    - **The loader (`src/config/pack.ts`):** the withdrawn keys are refused before the schema, one line per key found,
+      each naming the key that replaces it (`withdrawnToolKeyErrors`, TOOL-CAT-011). The checks in words are kept:
+      `catalogValueErrors` (type, values, bundled names, an HTTP tool's `tools` naming its own tool only, a bundled
+      tool's own tools with no effect and no trust), `reservedAccountErrors`, and `emailChallengeStepUpErrors` (the
+      email code on a step-up). The cross-field rules check each source's `access` against its own tools: an HTTP
+      tool's, a bundled tool's, or, for an MCP server, at discovery. A face match on a step-up needs
+      `media.faceVerification`, and the image provider is read from the source that names `generateImage`. The
+      coercion now follows the `if`/`then` branch of a source's type, so `offer: ${OFFER}` and
+      `timeoutSeconds: ${T}` still coerce.
+    - **The readers:**
+      - the catalog builds its sources from the map, the bundled ones from the source that names them, else under
+        their bundled name;
+      - `stepUpOf(source, tool)` replaces `pack.actions[tool]` in the gate (liveness, then the step-up) and in the
+        settings of a space (`stepUpTypeOf`);
+      - the MCP and HTTP sources take `[id, entry]` and the source's `access`;
+      - the bundled tools read `bundledEnabled` and their source's `access`;
+      - the orchestrator reads requestable tools and step-ups from the sources.
+    - **Packs migrated:**
+      - `agent-packs/dev`: `echo` and `wire_money` each carry their own `access`, and `wire_money` its `stepUp`;
+      - `agent-packs/example`: the CRM's `access` and the step-ups of `issue_refund` and `read_customer_record`;
+      - `agent-packs/welcome`: three bundled sources, no `access`. Its old `tools.access` gave nothing, since its
+        roles listed no tool and the bundled tools never read it.
+      - The tests' fixture pack and `scripts/validate-agent-pack.py` follow.
+    - **Choices of mine, to flag:**
+      - An HTTP source is one tool, named by the source's id; its `tools` may declare that one only.
+      - A bundled source names its bundled tool with a required `bundled`; its id may differ (`notes`). Only one
+        source may name a given bundled tool.
+      - Declaring a bundled source turns it on. `enabled: false` turns off one that is on by default.
+        `statistics: { enabled: false }` and `{ enabled: true }` for a default-on tool are now just "not declared"
+        and "declared".
+      - A bundled tool that acts on the person's own records stays open to every Principal (`default: all`) while
+        its source declares no `access`. When the source declares one, it applies. `statistics` and
+        `generate_image` are denied unless their source's `access` lists them, as they were unless `tools.access`
+        did.
+      - `untrusted` may now be declared per tool by an HTTP tool too; a bundled tool declares neither `effect` nor
+        `untrusted`.
+      - `offer` and `bindings` stay with MCP servers and HTTP tools as in phase 1. `preset` is not built, and the
+        schema refuses it as an unknown key until presets come (O32).
+    - **Tests:**
+      - `tests/toolSources.test.ts` (new): the withdrawn keys refused with their replacements; one entry per
+        source; coercion through the type's branch; another type's key refused; a step-up kept to its source when
+        two sources share a tool name; bundled sources (another id, on and off, access, refusals).
+      - `tests/toolCatalog.test.ts`, `tests/tools.test.ts` (the step-up now set in the CRM's source),
+        `tests/directoryBadge.test.ts` and `tests/welcomeReissue.test.ts` follow the map.

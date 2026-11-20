@@ -257,7 +257,7 @@ export class SpaceToolService {
         effect: this.catalog.effectOf(source, name, spec?.annotations) ?? null,
         rule,
         ...(owner ? { packRule } : {}),
-        stepUp: this.catalog.stepUpOf(name),
+        stepUp: this.catalog.stepUpTypeOf(source, name),
       })
     }
     const values = this.bindingValues(source, record)

@@ -213,10 +213,11 @@ export class Orchestrator {
       features,
       agentLanguage: pack.language.agent,
       hasTools: true,
-      hasRequestableTools:
-        (pack.tools?.access?.elevation?.length ?? 0) > 0 ||
-        (pack.mcp?.servers ?? []).some((s) => (s.toolAccess?.elevation?.length ?? 0) > 0),
-      challengesConfigured: Object.values(pack.actions ?? {}).some((a) => a.authChallenge),
+      hasRequestableTools: Object.values(pack.tools?.sources ?? {}).some((s) => (s.access?.elevation?.length ?? 0) > 0),
+      // a tool of some source declares a step-up (TOOL-CAT-010)
+      challengesConfigured: Object.values(pack.tools?.sources ?? {}).some((s) =>
+        Object.values(s.tools ?? {}).some((t) => t.stepUp?.authChallenge)
+      ),
       issuance: Object.keys(pack.issuance ?? {}).length > 0,
       appLinkBase: pack.channels?.agui?.appLinkBase,
       emailChecks: Object.values(pack.issuance ?? {}).some((p) => challengeTypesOf(p).includes('email')),

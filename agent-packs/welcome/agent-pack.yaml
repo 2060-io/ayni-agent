@@ -109,17 +109,13 @@ rag:
   enabled: false
   sources: []
 
+# the tool catalog (ayni-spec D101): the bundled tools that act on the person's own records, and nothing that reaches
+# the outside world
 tools:
-  http: []
-  bundled:
-    principalCredentials: { enabled: true }
-    principalPreferences: { enabled: true }
-    workingMemory: { enabled: true }
-  access:
-    default: none
-    roles:
-      visitor: []
-      team: []
+  sources:
+    principalCredentials: { type: bundled, bundled: principalCredentials }
+    principalPreferences: { type: bundled, bundled: principalPreferences }
+    workingMemory: { type: bundled, bundled: workingMemory }
 
 purposes: []
 

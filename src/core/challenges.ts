@@ -1,10 +1,10 @@
 /**
- * Auth challenges (D28, D32, INTX-AUTH-001..009): declared per action in the agent-pack, enforced by
+ * Auth challenges (D28, D32, INTX-AUTH-001..009): declared per action in the agent-pack (a tool's `stepUp`, D101), enforced by
  * the system, routed to the capability channel, result returned to the originating session only. On a
  * flow-capable wallet the device challenge is a `confirm` flow and the routed status carries its flow id
  * (D54, D58, INTX-FLOW-003).
  */
-import type { ActionPolicy, AgentPack } from '../config/packTypes.js'
+import type { AgentPack, AuthChallengePolicy } from '../config/packTypes.js'
 import type { Store } from '../store/types.js'
 import { Deferred } from '../util/async.js'
 import { nowIso, prefixedId } from '../util/ids.js'
@@ -86,7 +86,7 @@ export interface ChallengeRequest {
   principal: Principal
   originSession: Session
   toolName: string
-  policy: NonNullable<ActionPolicy['authChallenge']>
+  policy: AuthChallengePolicy
   purpose: string
 }
 

@@ -339,7 +339,7 @@ export interface ToolAccess {
   elevation?: ElevationRule[]
 }
 
-// ---- the tool catalog (ayni-spec D96 to D99, TOOL-CAT, TOOL-AVAIL) ----------------------------------------
+// ---- the tool catalog (ayni-spec D96 to D99, D101; TOOL-CAT, TOOL-AVAIL) ---------------------------------------
 
 /** Whose account a source's calls run with (D97, TOOL-CAT-002). `personal` and `organization` are refused (phases 2, 3). */
 export type AccountKind = 'none' | 'agent' | 'space'
@@ -353,12 +353,40 @@ export type ToolEffect = 'read' | 'write' | 'delete' | 'external'
 export type CallRule = 'none' | 'confirm' | 'approval'
 /** The rule the owner of a space sets for a tool there (TOOL-SPACE-006): a call rule, or `off`. */
 export type SpaceCallRule = CallRule | 'off'
+/** The type of a source of `tools.sources` (D101, TOOL-CAT-001). */
+export type SourceType = 'mcp' | 'http' | 'bundled'
 
 export const ACCOUNT_KINDS: readonly AccountKind[] = ['none', 'agent', 'space']
 export const AVAILABILITIES: readonly Availability[] = ['agent', 'personal', 'spaces']
 export const TOOL_EFFECTS: readonly ToolEffect[] = ['read', 'write', 'delete', 'external']
 export const CALL_RULES: readonly CallRule[] = ['none', 'confirm', 'approval']
 export const SPACE_CALL_RULES: readonly SpaceCallRule[] = ['none', 'confirm', 'approval', 'off']
+export const SOURCE_TYPES: readonly SourceType[] = ['mcp', 'http', 'bundled']
+
+/**
+ * The bundled tools a source of `type: bundled` may name (`bundled`), each with the tools it gives the model. A bundled
+ * tool no source names keeps its defaults: on, except `statistics` and `generateImage`; the tools of no name here
+ * (`knowledge_search`, `set_reaction_policy`, `email_check`) are sources of their own name (TOOL-CAT-001).
+ */
+export const BUNDLED_TOOLS = {
+  statistics: ['statistics'],
+  generateImage: ['generate_image'],
+  principalCredentials: ['principal_credentials'],
+  requestPresentation: ['request_presentation'],
+  credentialIssuance: ['credential_requirements', 'issue_credential'],
+  principalPreferences: ['principal_preferences'],
+  workingMemory: ['working_memory'],
+} as const satisfies Record<string, readonly string[]>
+export type BundledName = keyof typeof BUNDLED_TOOLS
+export const BUNDLED_NAMES = Object.keys(BUNDLED_TOOLS) as BundledName[]
+/** The bundled tools that are on while no source names them: those that act on the Principal's own records. */
+export const BUNDLED_ON_BY_DEFAULT: readonly BundledName[] = [
+  'principalCredentials',
+  'requestPresentation',
+  'credentialIssuance',
+  'principalPreferences',
+  'workingMemory',
+]
 
 /** The account of a source (TOOL-CAT-002). A `space` account declares what its owner is asked for and how it is sent. */
 export interface SourceAccount {
@@ -384,44 +412,51 @@ export interface SourceBinding {
   value?: string
 }
 
-/** What the agent-pack says of one tool of an MCP server (TOOL-CAT-001/006/007/008). */
+/** The auth challenge a tool's step-up asks before the call (D28, INTX-AUTH-002). */
+export interface AuthChallengePolicy {
+  type: 'device' | 'face-match' | 'document'
+  onChannelUnavailable?: 'fail' | 'degrade'
+  referenceImage?: 'badge-photo'
+  timeoutSeconds?: number
+}
+
+/**
+ * A tool's step-up (D101, TOOL-CAT-010): what `actions.<tool>` held, now in the tool's own source, so that two sources
+ * with a tool of one name never share it. `maxCredentialAge` in seconds: 0 forces a fresh liveness check (D7).
+ */
+export interface StepUp {
+  authChallenge?: AuthChallengePolicy
+  maxCredentialAge?: number
+}
+
+/** What the agent-pack says of one tool of a source (TOOL-CAT-001/006/007/008/010). */
 export interface ToolDeclaration {
   title?: string
   effect?: ToolEffect
   call?: CallRule
   untrusted?: boolean
+  stepUp?: StepUp
 }
 
-/** The fields every source of the catalog may declare (TOOL-CAT-001). */
-export interface CatalogFields {
-  /** what people read on the cards, in the sources and in a space's settings; the source's name by default */
+/** What every source of `tools.sources` may declare (D101, TOOL-CAT-001), whatever its type. */
+export interface SourceFields {
+  type: SourceType
+  /** what people read on the cards, in the sources and in a space's settings; the source's id by default */
   title?: string
   description?: string
-  /** `agent` by default for an MCP server and an HTTP tool */
+  /** `agent` by default for an MCP server and an HTTP tool; never declared for a bundled tool */
   account?: SourceAccount
   /** `agent` by default */
   availability?: Availability
-  bindings?: SourceBinding[]
-  untrusted?: boolean
+  /** the tier model of the source's tools (D12, D14, RBAC-TOOL): roles, approval, elevation, default */
+  access?: ToolAccess
+  /** what the agent-pack says of each tool of the source, by the tool's name */
+  tools?: Record<string, ToolDeclaration>
 }
 
-export interface HttpToolDef extends CatalogFields {
-  name: string
-  description: string
-  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
-  url: string
-  headers?: Record<string, string>
-  parameters?: Record<string, unknown>
-  bodyTemplate?: string
-  timeoutSeconds?: number
-  /** the tool's effect; from its method when absent (TOOL-CAT-006) */
-  effect?: ToolEffect
-  /** the tool's rule; from its effect when absent (TOOL-CAT-007) */
-  call?: CallRule
-}
-
-export interface McpServerDef extends CatalogFields {
-  name: string
+/** An MCP server (TOOL-MCP): its connection, the tools it offers, the parameters the agent pins, its trust. */
+export interface McpSource extends SourceFields {
+  type: 'mcp'
   transport: 'stdio' | 'sse' | 'streamable-http'
   url?: string
   command?: string
@@ -430,29 +465,61 @@ export interface McpServerDef extends CatalogFields {
   headers?: Record<string, string>
   lazy?: boolean
   reconnect?: boolean
-  toolAccess?: ToolAccess
   /** the tools of the server the model is given; every tool it lists when absent (TOOL-CAT-003) */
   offer?: string[]
-  /** what the agent-pack says of each tool: its title, effect, rule and trust */
-  tools?: Record<string, ToolDeclaration>
+  bindings?: SourceBinding[]
+  untrusted?: boolean
 }
 
-/** A bundled tool's entry of `tools.bundled` takes `title`, `availability` and a stricter `call` (reference profile). */
-export interface BundledEntry {
+/** An HTTP tool (TOOL-HTTP-001): one tool, named by the source's id, and its request. */
+export interface HttpSource extends SourceFields {
+  type: 'http'
+  /** what the model reads of the tool, and people of the source */
+  description: string
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+  url: string
+  headers?: Record<string, string>
+  parameters?: Record<string, unknown>
+  bodyTemplate?: string
+  timeoutSeconds?: number
+  bindings?: SourceBinding[]
+  untrusted?: boolean
+}
+
+/** A bundled tool (TOOL-HTTP-002): the one it names, on while the source is declared unless `enabled: false`. */
+export interface BundledSource extends SourceFields {
+  type: 'bundled'
+  bundled: BundledName
   enabled?: boolean
-  title?: string
-  availability?: Availability
-  call?: CallRule
+  /** `statistics`: where it reads from, and the class it reads by default */
+  endpoint?: string
+  defaultStatClass?: string
+  /** `generateImage`: the name of a `media.imageGeneration` provider */
+  provider?: string
 }
 
-export interface ActionPolicy {
-  authChallenge?: {
-    type: 'device' | 'face-match' | 'document'
-    onChannelUnavailable?: 'fail' | 'degrade'
-    referenceImage?: 'badge-photo'
-    timeoutSeconds?: number
-  }
-  maxCredentialAge?: number
+export type ToolSourceDef = McpSource | HttpSource | BundledSource
+
+/** The sources of one type, each with its id: the key of `tools.sources` (D101). */
+export function sourcesOfType<T extends SourceType>(
+  pack: Pick<AgentPack, 'tools'>,
+  type: T
+): [string, Extract<ToolSourceDef, { type: T }>][] {
+  return Object.entries(pack.tools?.sources ?? {}).filter(
+    (entry): entry is [string, Extract<ToolSourceDef, { type: T }>] => entry[1].type === type
+  )
+}
+
+/** The source that names a bundled tool, with its id, if one does. */
+export function bundledSource(pack: Pick<AgentPack, 'tools'>, name: BundledName): [string, BundledSource] | undefined {
+  return sourcesOfType(pack, 'bundled').find(([, s]) => s.bundled === name)
+}
+
+/** Whether a bundled tool is on: named by a source, unless `enabled: false`; else on by default for some (TOOL-HTTP-002). */
+export function bundledEnabled(pack: Pick<AgentPack, 'tools'>, name: BundledName): boolean {
+  const declared = bundledSource(pack, name)
+  if (declared) return declared[1].enabled !== false
+  return BUNDLED_ON_BY_DEFAULT.includes(name)
 }
 
 export type ProcessingActivityId =
@@ -578,20 +645,12 @@ export interface AgentPack {
   evidence?: { document?: EvidencePolicy; email?: EvidencePolicy }
   /** the credentials the agent may issue, by name (D70) */
   issuance?: Record<string, IssuanceProfile>
-  tools?: {
-    http?: HttpToolDef[]
-    bundled?: {
-      statistics?: BundledEntry & { endpoint?: string; defaultStatClass?: string }
-      generateImage?: BundledEntry & { provider?: string }
-      principalCredentials?: BundledEntry
-      requestPresentation?: BundledEntry
-      credentialIssuance?: BundledEntry
-      principalPreferences?: BundledEntry
-      workingMemory?: BundledEntry
-    }
-    access?: ToolAccess
-  }
-  mcp?: { servers: McpServerDef[] }
+  /**
+   * The catalog of tool sources (D101, TOOL-CAT-001): one map keyed by the source's id, each entry an MCP server, an HTTP
+   * tool or a bundled tool with everything the four questions ask of it. `mcp.servers`, `tools.http`, `tools.bundled`,
+   * `tools.access` and `actions` are withdrawn, and refused at start in words (TOOL-CAT-011).
+   */
+  tools?: { sources?: Record<string, ToolSourceDef> }
   purposes?: { id: string; label: string; description?: string; permittedRoles?: string[] }[]
   approvals?: {
     timeoutMinutes?: number
@@ -601,13 +660,12 @@ export interface AgentPack {
     attested?: boolean
     /**
      * the roles that approve a tool of the whole agent or of Personal whose rule is `approval` and that no
-     * `toolAccess.approval` entry lists (TOOL-CAT-009)
+     * `access.approval` entry of its source lists (TOOL-CAT-009)
      */
     approvers?: string[]
     /** how long a confirmation card waits for the person (TOOL-CALL-004): 300 seconds by default */
     confirmation?: { timeoutSeconds?: number }
   }
-  actions?: Record<string, ActionPolicy>
   sessions?: {
     idleTimeoutSeconds?: number
     bindingExpirySeconds?: number

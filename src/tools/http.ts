@@ -1,9 +1,10 @@
 /**
- * Declarative HTTP tools (TOOL-HTTP-001). Each is a source of the catalog (TOOL-CAT-001): the credentials of an `agent`
- * account come from the pack's headers, placeholders of the deployment's environment (TOOL-ACCESS-002); a `space` account
- * is the token the owner of a space set, sent in the header `account.apply` names, after its prefix (TOOL-ACCESS-005).
+ * Declarative HTTP tools (TOOL-HTTP-001): the sources of `type: http` of `tools.sources`, each one tool named by its
+ * source's id (D101, TOOL-CAT-001). The credentials of an `agent` account come from the source's headers, placeholders of
+ * the deployment's environment (TOOL-ACCESS-002); a `space` account is the token the owner of a space set, sent in the
+ * header `account.apply` names, after its prefix (TOOL-ACCESS-005).
  */
-import type { HttpToolDef, ToolAccess } from '../config/packTypes.js'
+import type { HttpSource } from '../config/packTypes.js'
 import type { ToolSource, ToolSpec } from './types.js'
 
 export function fillTemplate(template: string, args: Record<string, unknown>, encode: (v: string) => string): string {
@@ -15,15 +16,16 @@ export function fillTemplate(template: string, args: Record<string, unknown>, en
   })
 }
 
-export function httpToolSpec(def: HttpToolDef, access: ToolAccess | undefined): ToolSpec {
+export function httpToolSpec(id: string, def: HttpSource): ToolSpec {
   return {
-    key: `http:${def.name}`,
-    name: def.name,
-    source: def.name,
-    rawName: def.name,
+    key: `http:${id}`,
+    name: id,
+    source: id,
+    rawName: id,
     description: def.description,
     parameters: def.parameters ?? { type: 'object', properties: {} },
-    access,
+    // the tier model of its source (D101)
+    access: def.access,
     // a step label names no tool (PROF-TOOL-013): the source's title, when the pack gives one
     stepLabel: def.title ? `Using ${def.title}` : 'Working',
     async invoke(args, ctx) {
@@ -70,11 +72,9 @@ export function httpToolSpec(def: HttpToolDef, access: ToolAccess | undefined): 
 
 export class HttpToolSource implements ToolSource {
   public readonly id = 'http'
-  public constructor(
-    private readonly defs: HttpToolDef[],
-    private readonly access: ToolAccess | undefined
-  ) {}
+  /** the HTTP tools, each with its source's id */
+  public constructor(private readonly defs: [string, HttpSource][]) {}
   public async list(): Promise<ToolSpec[]> {
-    return this.defs.map((d) => httpToolSpec(d, this.access))
+    return this.defs.map(([id, def]) => httpToolSpec(id, def))
   }
 }

@@ -953,298 +953,17 @@
       }
     },
     "tools": {
-      "description": "Declarative HTTP tools and bundled tools (TOOL-HTTP, D41): each is a source of the tool catalog (TOOL-CAT, D96). The credentials of an agent account are deployment-held (TOOL-ACCESS-002); a space account is set by the space's owner (TOOL-ACCESS-003).",
+      "description": "The catalog of tool sources (D96, D101, TOOL-CAT): one map keyed by the source id. mcp.servers, tools.http, tools.bundled, tools.access and actions are withdrawn and refused at start (TOOL-CAT-011).",
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "http": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["name", "description", "method", "url"],
-            "properties": {
-              "name": {
-                "$ref": "#/$defs/toolName"
-              },
-              "description": {
-                "type": "string",
-                "minLength": 1
-              },
-              "method": {
-                "type": "string",
-                "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]
-              },
-              "url": {
-                "type": "string",
-                "description": "URL template; {param} placeholders are filled from parameters."
-              },
-              "headers": {
-                "type": "object",
-                "additionalProperties": {
-                  "type": "string"
-                }
-              },
-              "parameters": {
-                "type": "object",
-                "description": "JSON Schema (object) of the tool's parameters as shown to the model."
-              },
-              "bodyTemplate": {
-                "type": "string",
-                "description": "Request body template with {param} placeholders (non-GET)."
-              },
-              "timeoutSeconds": {
-                "type": "integer",
-                "minimum": 1,
-                "default": 30
-              },
-              "title": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 80,
-                "description": "What people read on the cards, in the sources and in a space's settings; the source's name by default (TOOL-CAT-001)."
-              },
-              "account": { "$ref": "#/$defs/sourceAccount" },
-              "availability": { "$ref": "#/$defs/availability" },
-              "bindings": { "type": "array", "items": { "$ref": "#/$defs/sourceBinding" } },
-              "untrusted": {
-                "type": "boolean",
-                "description": "What the source returns was written outside the organization (TOOL-CAT-008)."
-              },
-              "effect": { "$ref": "#/$defs/toolEffect" },
-              "call": { "$ref": "#/$defs/callRule" }
-            }
-          }
-        },
-        "bundled": {
+        "sources": {
           "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "statistics": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "title": { "type": "string", "minLength": 1, "maxLength": 80 },
-                "availability": { "$ref": "#/$defs/availability" },
-                "call": { "$ref": "#/$defs/callRule" },
-                "enabled": {
-                  "type": "boolean",
-                  "default": false
-                },
-                "endpoint": {
-                  "type": "string",
-                  "format": "uri"
-                },
-                "defaultStatClass": {
-                  "type": "string"
-                }
-              }
-            },
-            "generateImage": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "title": { "type": "string", "minLength": 1, "maxLength": 80 },
-                "availability": { "$ref": "#/$defs/availability" },
-                "call": { "$ref": "#/$defs/callRule" },
-                "enabled": {
-                  "type": "boolean",
-                  "default": false
-                },
-                "provider": {
-                  "type": "string",
-                  "description": "Name of a media.imageGeneration provider."
-                }
-              }
-            },
-            "principalCredentials": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "title": { "type": "string", "minLength": 1, "maxLength": 80 },
-                "availability": { "$ref": "#/$defs/availability" },
-                "call": { "$ref": "#/$defs/callRule" },
-                "enabled": {
-                  "type": "boolean",
-                  "default": true
-                }
-              },
-              "description": "get_principal_credentials (INTX-CRED-001)."
-            },
-            "requestPresentation": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "title": { "type": "string", "minLength": 1, "maxLength": 80 },
-                "availability": { "$ref": "#/$defs/availability" },
-                "call": { "$ref": "#/$defs/callRule" },
-                "enabled": {
-                  "type": "boolean",
-                  "default": true
-                }
-              },
-              "description": "request_presentation: the model asks the wallet for a credential the pack lists; the authentication schema while the connection is unidentified (INTX-PRES-003, IDENT-RES-015)."
-            },
-            "credentialIssuance": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "title": { "type": "string", "minLength": 1, "maxLength": 80 },
-                "availability": { "$ref": "#/$defs/availability" },
-                "call": { "$ref": "#/$defs/callRule" },
-                "enabled": {
-                  "type": "boolean",
-                  "default": true
-                }
-              },
-              "description": "credential_requirements and issue_credential (INTX-ISSUE-003/005)."
-            },
-            "principalPreferences": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "title": { "type": "string", "minLength": 1, "maxLength": 80 },
-                "availability": { "$ref": "#/$defs/availability" },
-                "call": { "$ref": "#/$defs/callRule" },
-                "enabled": {
-                  "type": "boolean",
-                  "default": true
-                }
-              },
-              "description": "save_principal_preference (INTX-PREF)."
-            },
-            "workingMemory": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "title": { "type": "string", "minLength": 1, "maxLength": 80 },
-                "availability": { "$ref": "#/$defs/availability" },
-                "call": { "$ref": "#/$defs/callRule" },
-                "enabled": {
-                  "type": "boolean",
-                  "default": true
-                }
-              },
-              "description": "Working-memory read/write tools (MEM-TIER)."
-            }
-          }
-        },
-        "access": {
-          "$ref": "#/$defs/toolAccess",
-          "description": "Access policy for http and bundled tools (same shape as mcp.servers[].toolAccess)."
-        }
-      }
-    },
-    "mcp": {
-      "description": "MCP servers the agent connects to as a client (TOOL-MCP, D41).",
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["servers"],
-      "properties": {
-        "servers": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["name", "transport"],
-            "properties": {
-              "name": {
-                "type": "string",
-                "pattern": "^[a-z0-9][a-z0-9-]*$"
-              },
-              "transport": {
-                "type": "string",
-                "enum": ["stdio", "sse", "streamable-http"]
-              },
-              "url": {
-                "type": "string",
-                "format": "uri"
-              },
-              "command": {
-                "type": "string"
-              },
-              "args": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                }
-              },
-              "env": {
-                "type": "object",
-                "additionalProperties": {
-                  "type": "string"
-                }
-              },
-              "headers": {
-                "type": "object",
-                "additionalProperties": {
-                  "type": "string"
-                },
-                "description": "Deployment-held credentials, typically ${VAR} placeholders."
-              },
-              "lazy": {
-                "type": "boolean",
-                "default": true,
-                "description": "Connect on first need (TOOL-MCP-002)."
-              },
-              "reconnect": {
-                "type": "boolean",
-                "default": true
-              },
-              "toolAccess": {
-                "$ref": "#/$defs/toolAccess"
-              },
-              "description": { "type": "string", "minLength": 1, "maxLength": 300 },
-              "title": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 80,
-                "description": "What people read on the cards, in the sources and in a space's settings; the source's name by default (TOOL-CAT-001)."
-              },
-              "account": { "$ref": "#/$defs/sourceAccount" },
-              "availability": { "$ref": "#/$defs/availability" },
-              "bindings": { "type": "array", "items": { "$ref": "#/$defs/sourceBinding" } },
-              "untrusted": {
-                "type": "boolean",
-                "description": "What the source returns was written outside the organization (TOOL-CAT-008)."
-              },
-              "offer": {
-                "type": "array",
-                "items": { "type": "string", "minLength": 1 },
-                "description": "The tools of the server the model is given; every tool it lists when absent (TOOL-CAT-003)."
-              },
-              "tools": {
-                "type": "object",
-                "additionalProperties": { "$ref": "#/$defs/toolDeclaration" },
-                "description": "What the agent-pack says of each tool: its title, effect, rule and trust (TOOL-CAT-006..008)."
-              }
-            },
-            "allOf": [
-              {
-                "if": {
-                  "properties": {
-                    "transport": {
-                      "const": "stdio"
-                    }
-                  }
-                },
-                "then": {
-                  "required": ["command"]
-                }
-              },
-              {
-                "if": {
-                  "properties": {
-                    "transport": {
-                      "enum": ["sse", "streamable-http"]
-                    }
-                  }
-                },
-                "then": {
-                  "required": ["url"]
-                }
-              }
-            ]
+          "propertyNames": {
+            "$ref": "#/$defs/sourceId"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/toolSource"
           }
         }
       }
@@ -1318,47 +1037,6 @@
               "default": 300,
               "description": "How long a confirmation card waits (TOOL-CALL-004)."
             }
-          }
-        }
-      }
-    },
-    "actions": {
-      "description": "Per-action (tool) policies: auth challenges and credential freshness (D7, D28, INTX-AUTH). Keys are tool names.",
-      "type": "object",
-      "additionalProperties": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "authChallenge": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["type"],
-            "properties": {
-              "type": {
-                "type": "string",
-                "enum": ["device", "face-match", "document"]
-              },
-              "onChannelUnavailable": {
-                "type": "string",
-                "enum": ["fail", "degrade"],
-                "default": "fail"
-              },
-              "referenceImage": {
-                "type": "string",
-                "enum": ["badge-photo"],
-                "default": "badge-photo",
-                "description": "face-match only: which credential photo is the reference (INTX-AUTH-007)."
-              },
-              "timeoutSeconds": {
-                "type": "integer",
-                "minimum": 30
-              }
-            }
-          },
-          "maxCredentialAge": {
-            "type": "integer",
-            "minimum": 0,
-            "description": "Seconds; 0 forces a fresh liveness check before each run; absent means the TTL N (D7)."
           }
         }
       }
@@ -1995,14 +1673,336 @@
       }
     },
     "toolDeclaration": {
-      "description": "What the agent-pack says of one tool of an MCP server (TOOL-CAT-001/006/007/008).",
+      "description": "What the agent-pack says of one tool of a source (TOOL-CAT-001/006/007/008/010): its title, effect, rule, trust and step-up.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
-        "effect": { "$ref": "#/$defs/toolEffect" },
-        "call": { "$ref": "#/$defs/callRule" },
-        "untrusted": { "type": "boolean" }
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "effect": {
+          "$ref": "#/$defs/toolEffect"
+        },
+        "call": {
+          "$ref": "#/$defs/callRule"
+        },
+        "untrusted": {
+          "type": "boolean"
+        },
+        "stepUp": {
+          "$ref": "#/$defs/stepUp"
+        }
+      }
+    },
+    "stepUp": {
+      "description": "A tool's step-up (D101, TOOL-CAT-010): the auth challenge and the credential's freshness asked before the call, for this tool of this source only.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "authChallenge": {
+          "$ref": "#/$defs/authChallenge"
+        },
+        "maxCredentialAge": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Seconds; 0 forces a fresh liveness check before each run; absent means the TTL N (D7)."
+        }
+      }
+    },
+    "authChallenge": {
+      "description": "The auth challenge a step-up asks before the call (D28, INTX-AUTH-002).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["device", "face-match", "document"]
+        },
+        "onChannelUnavailable": {
+          "type": "string",
+          "enum": ["fail", "degrade"],
+          "default": "fail"
+        },
+        "referenceImage": {
+          "type": "string",
+          "enum": ["badge-photo"],
+          "default": "badge-photo",
+          "description": "face-match only: which credential photo is the reference (INTX-AUTH-007)."
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 30
+        }
+      }
+    },
+    "sourceId": {
+      "description": "The id of a source: the key of tools.sources, the name the AG-UI profile carries as `source`; an HTTP tool's id is also its tool's name (D101).",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+    },
+    "toolSource": {
+      "description": "One source of the tool catalog (D96, D101, TOOL-CAT-001): its type with its connection, what people read of it, whose account its calls run with, where it is available, who may use its tools (access) and what the agent-pack says of each of them (tools).",
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["mcp", "http", "bundled"]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "What people read on the cards, in the sources and in a space's settings; the source's id by default (TOOL-CAT-001)."
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "account": {
+          "$ref": "#/$defs/sourceAccount"
+        },
+        "availability": {
+          "$ref": "#/$defs/availability"
+        },
+        "access": {
+          "$ref": "#/$defs/toolAccess",
+          "description": "The tier model of the source's tools (D12, D14, RBAC-TOOL); '*' names every tool of the source."
+        },
+        "tools": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/toolName"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/toolDeclaration"
+          },
+          "description": "What the agent-pack says of each tool of the source, by its name."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "mcp"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "$ref": "#/$defs/mcpSource"
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "http"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "$ref": "#/$defs/httpSource"
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "bundled"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "$ref": "#/$defs/bundledSource"
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "mcpSource": {
+      "description": "An MCP server (TOOL-MCP, D41): its connection, the tools it offers, the parameters it pins, its trust.",
+      "type": "object",
+      "required": ["transport"],
+      "properties": {
+        "transport": {
+          "type": "string",
+          "enum": ["stdio", "sse", "streamable-http"]
+        },
+        "url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "command": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Deployment-held credentials, typically ${VAR} placeholders."
+        },
+        "lazy": {
+          "type": "boolean",
+          "default": true,
+          "description": "Connect on first need (TOOL-MCP-002)."
+        },
+        "reconnect": {
+          "type": "boolean",
+          "default": true
+        },
+        "offer": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "The tools of the server the model is given; every tool it lists when absent (TOOL-CAT-003)."
+        },
+        "bindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/sourceBinding"
+          }
+        },
+        "untrusted": {
+          "type": "boolean",
+          "description": "What the source returns was written outside the organization (TOOL-CAT-008)."
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "transport": {
+                "const": "stdio"
+              }
+            }
+          },
+          "then": {
+            "required": ["command"]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "transport": {
+                "enum": ["sse", "streamable-http"]
+              }
+            }
+          },
+          "then": {
+            "required": ["url"]
+          }
+        }
+      ]
+    },
+    "httpSource": {
+      "description": "An HTTP tool (TOOL-HTTP-001): one tool, named by the source's id, and its request. `description` is what the model reads of the tool.",
+      "type": "object",
+      "required": ["description", "method", "url"],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]
+        },
+        "url": {
+          "type": "string",
+          "description": "URL template; {param} placeholders are filled from parameters."
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "parameters": {
+          "type": "object",
+          "description": "JSON Schema (object) of the tool's parameters as shown to the model."
+        },
+        "bodyTemplate": {
+          "type": "string",
+          "description": "Request body template with {param} placeholders (non-GET)."
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 30
+        },
+        "bindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/sourceBinding"
+          }
+        },
+        "untrusted": {
+          "type": "boolean",
+          "description": "What the source returns was written outside the organization (TOOL-CAT-008)."
+        }
+      }
+    },
+    "bundledSource": {
+      "description": "A bundled tool (TOOL-HTTP-002): the one it names, on while the source is declared unless enabled is false. A bundled tool no source names keeps its default (statistics and generateImage off, the others on).",
+      "type": "object",
+      "required": ["bundled"],
+      "properties": {
+        "bundled": {
+          "type": "string",
+          "enum": [
+            "statistics",
+            "generateImage",
+            "principalCredentials",
+            "requestPresentation",
+            "credentialIssuance",
+            "principalPreferences",
+            "workingMemory"
+          ],
+          "description": "statistics, generateImage, principalCredentials, requestPresentation (request_presentation), credentialIssuance (credential_requirements and issue_credential), principalPreferences, workingMemory (MEM-TIER)."
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "endpoint": {
+          "type": "string",
+          "format": "uri"
+        },
+        "defaultStatClass": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string",
+          "description": "Name of a media.imageGeneration provider."
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        }
       }
     },
     "issuanceChallenge": {
@@ -2117,7 +2117,7 @@
       }
     },
     "toolAccess": {
-      "description": "Tier model per (role, tool): ALLOW via roles, APPROVAL via approval, REQUESTABLE via elevation, DENY otherwise (D12, D14, RBAC-TOOL).",
+      "description": "The tier model of a source's tools, per (role, tool): ALLOW via roles, APPROVAL via approval, REQUESTABLE via elevation, DENY otherwise (D12, D14, RBAC-TOOL).",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -2143,7 +2143,7 @@
             },
             "uniqueItems": true
           },
-          "description": "role -> tools in its ALLOW set. '*' allows every tool of the server."
+          "description": "role -> tools in its ALLOW set. '*' allows every tool of the source."
         },
         "approval": {
           "type": "array",
