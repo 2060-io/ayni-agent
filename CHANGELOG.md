@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.25.0](https://github.com/2060-io/ayni-agent/compare/v0.24.0...v0.25.0) (2026-11-20)
+
+
+### Features
+
+* **email-check:** only an address or a code is taken; the model can resend or cancel; the check speaks the person's language; what the AI never read is marked ([#96](https://github.com/2060-io/ayni-agent/issues/96)) ([1c388d4](https://github.com/2060-io/ayni-agent/commit/1c388d42a1bbec0e96388562fc62e2c3e1d9bf1e))
+
 ## [0.24.0](https://github.com/2060-io/ayni-agent/compare/v0.23.1...v0.24.0) (2026-11-19)
 
 
