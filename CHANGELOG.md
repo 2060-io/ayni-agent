@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.26.0](https://github.com/2060-io/ayni-agent/compare/v0.25.0...v0.26.0) (2026-11-20)
+
+
+### Features
+
+* **tools:** the tool catalog, tools in spaces, call rules and provenance (tools phase 1) ([#98](https://github.com/2060-io/ayni-agent/issues/98)) ([8da0038](https://github.com/2060-io/ayni-agent/commit/8da00384c25db8c23b597de2190225f3cce7d1a8))
+
 ## [0.25.0](https://github.com/2060-io/ayni-agent/compare/v0.24.0...v0.25.0) (2026-11-20)
 
 
