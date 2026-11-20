@@ -966,3 +966,150 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       release (`V2DidcommRevocationNotificationController`, registered by `AyniFlowPlugin`), so in the devnet image
       `io2060/vs-agent-ayni:v2.0.0-ayni.5-ayni.0.1.7`. New environment: `MAIL_*` (`MAIL_USERNAME` and `MAIL_PASSWORD` in a Secret),
       `VERANA_GRAPH_URL`.
+
+63. **During an email check, only an address or a code is the code's; the model has a tool on the check** (2026-11-19,
+    found by Fabrice on devnet with 0.24.0; ayni-spec D89 amended, INTX-AUTH-013/014 amended, INTX-AUTH-016..019,
+    PROF-RUN-015 amended). The email never arrived (the SMTP server was misconfigured then); he typed "Resend the email"
+    and the code answered "That code is not right. 4 tries are left." Every message was the code's while the check
+    waited, and only the hidden word `cancel` got out. His words: "here it should detect it is not a code and pass it to
+    the LLM, else I'm stuck".
+    - **What the code takes (`carriedBy`, `src/core/emailCheck.ts`):** at the address step, a message that holds an email
+      address, taken from the words around it ("my email is **Ana.Rios@Northwind.example**." gives
+      `ana.rios@northwind.example`: the signs a sentence, a quote or markdown put around it are dropped, and the address
+      is checked as before); at the code step, a message that holds six digits, side by side or split by single spaces or
+      dashes (`482 913`, `482-913`, `4 8 2 9 1 3`), in a run of digits that is not longer, not part of a decimal number,
+      and not a date or a phone number; at either step a message that is only a stop word (`cancel.` too). A message
+      with two addresses, or two codes (`482913 or 123456`, or two groups of six in one run), is taken and answered with
+      a request for one, and counts no try. A taken message is recorded and answered as before. **Any other message is
+      the model's**: `take` returns before recording anything, `AyniAgent.turn` goes on as when no check waits, and the
+      check keeps waiting; it counts no try. An address at the code step, or a code at the address step, is the model's.
+    - **The tool `email_check` (`src/tools/bundled.ts`, INTX-AUTH-016..018):** in the model's list when an issuance
+      profile declares an `email` challenge, whatever `tools.bundled` says (it has no switch of its own), for every
+      Principal. `{ action: status | resend | cancel }`. `status` answers JSON: `waiting`, `conversation` (`this` or
+      `another`), `credential` (the label), `step`, `secondsLeft`, `triesLeft`, `resendsLeft`, `resendInSeconds` at the
+      code step. `resend` sends a new code to the sealed address (`EmailChecks.resend`): the hash of the previous code is
+      replaced, `codeSentAt` and `expiresAt` start again, `resends` counts; refused before an address (`no-address`),
+      after three (`limit`), within thirty seconds of the previous sending (`too-soon`, with the seconds). Its words and
+      its limits do not depend on whether an entry holds the address; the code goes, in the background, to a listed
+      address only, as at the address step. `cancel` ends the check as `failed`, as the stop word does: the address and
+      the hash go, the model reads `Identity check (email) for issue_credential: failed` as a record of the system. The
+      three run in the Principal's queue of the check, as `take` does. No answer and no `data` of the tool holds the
+      address or the code.
+    - **The words:** the platform rules (add-on 3.4.0) add "While one waits, email_check tells its step, sends a new code
+      or cancels it."; the answer to the address adds "If it does not arrive, say so: a new one can be sent."; the
+      issuing tool's `challenge-waiting` names `email_check`. The add-on with every feature, app links and an email check
+      is about 835 tokens by our estimate (about 800 before, the language key of decision 64 included): over the 500
+      target of CORE-PROMPT-004 already, as the orchestrator's warning says.
+    - **Kept:** five tries in all for the check, whichever code they are for (a resend does not give five more); ten
+      minutes from the last sending; the same answer to a listed and an unlisted address; the check on the store and its
+      resumption after a restart (`resends` is one more field of the challenge's `details`, so nothing changes in the
+      store); `cancel` and the other stop words.
+    - **Choices of mine, to flag:** the tool also acts on a check that waits in another conversation of the person, and
+      says so (`conversation: another`; a resend's answer says where to type the code); the tool exists for every pack
+      with an email challenge, with no `tools.bundled` switch; the model's `cancel` writes no message of the code in the
+      conversation (the model tells the person); an address typed at the code step goes to the model, which can `cancel`
+      and call `issue_credential` again to use another address; a message whose only text comes from an attachment (a
+      voice note's transcript, a PDF's text) is read as any message is, since that text is the message's.
+    - **Tests:** `tests/emailCheckMessages.test.ts` (what a message carries; the tool in the list and the rule only with
+      an email profile; over the agent: a message with no address and "Resend the email" reach the model and count no
+      try, the address from a sentence, `status` here and from another conversation, a resend too soon, then sent, the
+      first code a wrong try, the new one split by a space, nothing typed for the check in any model request, an unlisted
+      address resent with the same words and nothing sent, the fourth resend refused, the resends kept by a check that a
+      restart left waiting, two codes in one message, the model's `cancel` and the record it leaves);
+      `tests/emailCode.test.ts` now expects a text with no address to reach the model. The store is not touched, so the
+      PostgreSQL tests did not change.
+
+64. **The email check's own messages, in the person's language, translated by the model with no context and kept**
+    (2026-11-19, Fabrice's decisions; ayni-spec D94, INTX-AUTH-020..022, INTX-PREF-003, PROF-RUN-015 amended;
+    `src/core/serviceLanguage.ts`). His five points: (1) the messages the code writes in an email check are translated by
+    the model with no context, the request carrying the finished sentence and the target language only, never anything
+    the person typed; (2) translations are kept per finished sentence and language, persistently, finished sentences and
+    not templates; (3) no hand-written translations ship: the default message is in `language.agent`, the fallback
+    when a translation fails; (4) the person's language is the preference `language` (a BCP 47 tag), else the session's
+    locale, else `language.agent`, with no call when it is the text's language by primary subtag; (5) all in this PR,
+    before 0.25.0.
+    - **How point 3 is read (the coordinator's reading, flagged in both PRs):** the code's texts stay in English. When
+      `language.agent` is not English, the default message is the English sentence translated (and kept) into it. When
+      a translation into the person's language cannot be had, the message is in `language.agent`; in English only when
+      even that cannot be had, which the log says (`a message of the service is shown in English`).
+    - **The sentences:** every text `start()` and `take()` write (the question, the answer to the address, a wrong try,
+      the last try, a right code, an expired code, two addresses or two codes, the stop) and the two endings `expire()`
+      writes. `EmailChecks.text` renders each `ServiceSentence { text, keep }`: `keep` names the organization's name and the
+      credential's label when the sentence holds them. The entries are as before (`auth-challenge`, the same payload);
+      only their text is in the person's language, and the model reads them as the agent's (decision 65). The system record the
+      model reads (`Identity check (email) for issue_credential: …`) stays English: it is the model's.
+    - **The request (`ServiceLanguage.translate`):** two messages, a fixed instruction (`Translate the text of the user
+      from English into the language whose BCP 47 tag is <tag>. It is a message a service shows to a person. Keep every
+      number in digits. Keep these exactly as written: "<name>", … Answer with the translation only …`) and the sentence;
+      no tools, no cache key, temperature 0, 400 output tokens at most, cut after 5 seconds. It goes to the agent's model
+      only when the space of the conversation allows it (`SpaceService.providerRefusal`, as a turn does); its usage is
+      logged (`model call`, `purpose: translation`) and counted with `purpose: translation` and no conversation: it is no
+      part of a conversation's window or its measured context.
+    - **The checks:** every sequence of digits of the sentence, as many times, and every part to keep, as written; an
+      empty answer fails. A translation that fails a check, errs or takes too long is not kept, and the fallback applies.
+    - **Kept (`translations`, schema 3.8.0):** one row per digest of the English sentence (sha-256) and language tag,
+      with the sentence, the translation, the model and the time, in the clear: a sentence of the service holds no
+      personal data. The first translation kept stays (`ON CONFLICT DO NOTHING`). Two identical requests at once in one
+      process make one call. The in-memory store keeps them too.
+    - **The language (`ServiceLanguage.languageOf`):** the preference `language`, read by the code through the scope
+      predicate and logged as not shown to the model (`MemoryService.preferenceOf`), then `session.locale`, then
+      `language.agent`. `principal_preferences` stores `language` only as a valid tag, in its canonical form (`fr_ca` gives
+      `fr-CA`; a key `Language` is stored as `language`), and refuses anything else in words; its description and the
+      platform rules (add-on 3.4.0, this PR) say so.
+    - **Choices of mine, to flag:**
+      - Translations are kept by the full canonical tag: `es` and `es-MX` are two translations, two calls. Only "is it the
+        text's own language" and the fallback compare primary subtags.
+      - A tag is what `Intl.getCanonicalLocales` accepts with a primary subtag of two or three letters, `und` excluded:
+        `Spanish` is not a tag.
+      - The instruction names the parts to keep (they are parts of the sentence), so that a translator does not render
+        the label "Northwind badge" in its own words and fail the check.
+      - `cancel` is not kept as written: a translated word to stop that is not one of the stop words reaches the model,
+        which can cancel with `email_check`.
+      - In a space that does not allow the agent's model, a translation already kept is used: it is no model call.
+      - When `language.agent` is English and a translation fails, the English sentence is the default message: the log
+        says why the translation failed, not "last resort".
+      - Not translated, as out of the email check: the message of the issuance that follows a right code ("The
+        credential is in your wallet." and its other outcomes, `issuanceOutcomeForPerson`), the refusal of a space that
+        does not allow the model, and the greeting of the pack.
+    - **Tests:** `tests/serviceLanguage.test.ts` (tags; the checks; the language order; no call for English in any
+      region; the request with no context and its usage's purpose; kept and reused, by a new process too; the fallback
+      chain on an error, a dropped number and a time out; the default language, translated, then English with a warning;
+      an agent whose default language is Spanish; a space that refuses the model; over the agent: a check in Spanish by
+      the session's locale, the entries unchanged and read by the model as the agent's, a kept question reused for another
+      person, the preference stored as a tag and followed before the locale, and no address or code in any translation
+      request or kept translation); `tests/postgres.test.ts` (the migration to 3.8.0: an agent whose default language is
+      Spanish, its translations kept and reused by a new process with no call, and no address or code in the table).
+
+65. **The model reads the email check's messages as the agent's; what the code took is withheld from it, a record in
+    its place, and marked for the clients** (2026-11-19, Fabrice's decision after three designs for the bubbles;
+    ayni-spec D95, INTX-AUTH-013 and MEM-RET-006 amended, INTX-AUTH-023, PROF-STREAM-011, PROF-HIST-013, UI-CONV-044,
+    APP-CONV-045, UI-CONV-035 and APP-CONV-037 amended).
+    - **The model's conversation (`Orchestrator.entryToMessages`):** a message the code wrote in an email check (role
+      `agent`: the question, the answers, the endings) is an `assistant` message with its text, in the language it was
+      shown in (decision 64). A message of the person the code took is a `user` message holding a record of the system,
+      in the form every record has (`[system record, written by the system, not by the person and not by you: …]`):
+      "the person typed their email address here; the code of the service took it for the email check, and it is not
+      shown to you", with "a code", "more than one email address", "more than one code" or "a word that stops the email
+      check" in the place of "their email address". What was typed is named by the entry's new payload field `carried`
+      (`address`, `code`, `several`, `stop`), never by its content. The roles keep their order: the question
+      (`assistant`), a record (`user`), the answer (`assistant`). Summaries render through the same function, so they
+      hold the record too; neither kind is embedded for recall, as before.
+    - **The mark (`EmailChecks.take`, `src/channels/agui/mapping.ts`):** as soon as the code records the person's message,
+      it emits CUSTOM `ayni.messages.withheld` `{ conversationId, messageIds: [id], clientIds?: [externalId] }` in the run;
+      the run's mirror gives it to every other bound session of the conversation, as it does every event of a run.
+      History gives that message `metadata.modelVisible: false` (`isWithheldMessage`); no other message carries the field.
+    - **The profile package (`@ayni.org/ayni-agui-profile` 3.3.1):** `CUSTOM_EVENT.messagesWithheld`,
+      `MessagesWithheldValue`, `MessageMetadata.modelVisible`; the descriptor's `profileVersion` stays `3.3`.
+    - **Choices of mine, to flag:**
+      - The record's wording above, and the `user` role, as every record of the system has.
+      - The stop word and a message with two addresses or codes are marked too: they are messages the code took, and the
+        model never received them (the record names them without their content).
+      - Only the messages an email check took are marked: the person's messages in a space that refuses the agent's model
+        are not, since they are ordinary entries a later turn may give the model.
+      - The package is a patch release (3.3.1), as the amendments of 3.1 were, and `profileVersion` stays `3.3`: the
+        event and the field are additive, and a client that ignores them keeps working.
+    - **Tests:** `tests/emailCode.test.ts` (history marks the three messages the code took and none of the code's; the
+      model's request holds the code's messages as `assistant` messages and one record per message taken, in order, and
+      no address or code), `tests/emailCheckMessages.test.ts` (the event in the run and on another device of the
+      conversation, with both ids; none for an ordinary message; the code's messages in the model's request),
+      `tests/serviceLanguage.test.ts` (the Spanish messages in the model's request).

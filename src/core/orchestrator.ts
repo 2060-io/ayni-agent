@@ -18,7 +18,7 @@ import { estimateRequestTokens } from '../util/tokens.js'
 import type { ChallengeService } from './challenges.js'
 import type { ContextAssembler } from './context.js'
 import { conversationOf } from './conversationOf.js'
-import { isEmailCheckMessage } from './emailCheck.js'
+import { isEmailCheckMessage, withheldRecordText } from './emailCheck.js'
 import { nameForModel } from './evidence.js'
 import type { PrincipalService } from './principals.js'
 import { addonTokenCount, renderPromptAddon } from './promptAddon.js'
@@ -284,9 +284,15 @@ export class Orchestrator {
     // arrives as its own turn); approvals, challenges and the requests shown on the phone are records of the
     // system, told as such and never in the agent's voice
     if (entry.sourceType === 'state-update' || entry.sourceType === 'reaction') return []
-    // what the person typed in an email check, and what the code answered, never reach the model: only the outcome of
-    // the check does, as a record of the system (INTX-AUTH-013, MEM-RET-006)
-    if (isEmailCheckMessage(entry)) return []
+    // an email check (decision 65, INTX-AUTH-013, MEM-RET-006): the code's messages are the agent's, in the language
+    // they were shown in; what the person typed for it never reaches the model, a record of the system stands in its
+    // place, so that the model reads the order of what happened
+    if (isEmailCheckMessage(entry)) {
+      if (entry.role === 'agent') return [{ role: 'assistant', content: entry.text }]
+      return [
+        { role: 'user', content: systemRecord({ sourceType: 'auth-challenge', text: withheldRecordText(entry) }) },
+      ]
+    }
     if (
       entry.sourceType === 'approval' ||
       entry.sourceType === 'refusal' ||

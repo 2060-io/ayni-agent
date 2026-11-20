@@ -48,6 +48,7 @@ import { TrustGraph } from './core/organizations.js'
 import { PeopleService } from './core/people.js'
 import { PrincipalService } from './core/principals.js'
 import { PROMPT_ADDON_VERSION } from './core/promptAddon.js'
+import { LANGUAGE_PREFERENCE, ServiceLanguage } from './core/serviceLanguage.js'
 import { SessionService } from './core/sessions.js'
 import { SpaceService } from './core/spaces.js'
 import { AnchoringService, VeranaLedgerWriter } from './integrity/anchoring.js'
@@ -305,6 +306,7 @@ export async function buildAgent(
   let orchestratorRef: Orchestrator | undefined
   let identityRequestsRef: IdentityRequests | undefined
   let issuanceRef: IssuanceService | undefined
+  let emailChecksRef: EmailChecks | undefined
   registry.add(
     new BundledToolSource({
       pack,
@@ -319,6 +321,7 @@ export async function buildAgent(
       rag,
       stats,
       setReactionPolicy: (sid, policy) => orchestratorRef?.setReactionPolicy(sid, policy),
+      emailChecks: () => emailChecksRef,
     })
   )
   for (const source of createMcpSources(pack.mcp?.servers ?? [], logger)) registry.add(source, false)
@@ -492,6 +495,19 @@ export async function buildAgent(
     logger,
   })
   agent.people = people
+  // the service's own sentences in the person's language: translated with no context by a model the space of the
+  // conversation allows, kept by sentence and language (decision 64, INTX-AUTH-020..022)
+  const serviceLanguage = new ServiceLanguage({
+    store,
+    llm,
+    pack,
+    stats,
+    logger,
+    preferredLanguage: (principal, session) => memory.preferenceOf(principal, session, LANGUAGE_PREFERENCE),
+    modelAllowed: async (principal, session) =>
+      !(await spaces.providerRefusal(principal, await agent.spaceOfSession(session, principal))),
+  })
+  agent.serviceLanguage = serviceLanguage
   // the email code of a badge from the directory, served by the code in the conversation (D89, INTX-AUTH-011..015)
   const emailChecks = new EmailChecks({
     store,
@@ -502,6 +518,7 @@ export async function buildAgent(
     directory,
     mailer,
     organizationName: async () => (await home.name()) ?? undefined,
+    language: serviceLanguage,
     deliver: async (sessionId, entry) => {
       const session = await sessions.get(sessionId)
       if (session) await agent.deliverToConversation(session, entry)
@@ -510,6 +527,7 @@ export async function buildAgent(
     logger,
   })
   agent.emailChecks = emailChecks
+  emailChecksRef = emailChecks
   await emailChecks.resume()
   // the claims of a badge from the directory: the entry the person's evidence finds (D88, INTX-ISSUE-021)
   const directoryClaims = directory ? new DirectoryClaims(directory, evidence, logger, emailChecks) : undefined

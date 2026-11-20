@@ -403,6 +403,25 @@ export class MemoryService {
     return prefs
   }
 
+  /**
+   * The language the person reads, as their preference `language` holds it (INTX-PREF-003): read by the code for the
+   * messages it writes itself, through the scope predicate, logged as not shown to the model (PRIV-SCOPE-006).
+   */
+  public async preferenceOf(principal: Principal, session: Session, key: string): Promise<string | undefined> {
+    const scope = this.scopeFor(principal, session)
+    if (scope.terms.length === 0) return undefined
+    const pref = (await this.prefsRepo.query(scope)).find((p) => p.principalId === principal.id && p.key === key)
+    if (!pref) return undefined
+    await this.log(
+      principal,
+      scope,
+      'preferences',
+      [{ id: `pref:${preferenceIndex(this.crypto, pref.principalId, pref.key)}` }],
+      false
+    )
+    return pref.value
+  }
+
   /** Stores a preference of the Principal, sealed (D77). */
   public async setPreference(principal: Principal, key: string, value: string): Promise<void> {
     await this.prefsRepo.set({ principalId: principal.id, key, value, updatedAt: nowIso() })

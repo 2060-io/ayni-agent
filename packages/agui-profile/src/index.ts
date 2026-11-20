@@ -252,6 +252,8 @@ export const CUSTOM_EVENT = {
   conversationChanged: 'ayni.conversation.changed',
   /** messages of a conversation were erased for good: a UI removes them (PROF-STREAM-008) */
   messagesErased: 'ayni.messages.erased',
+  /** messages of the person the model never received, taken by an email check: a UI draws them apart (PROF-STREAM-011) */
+  messagesWithheld: 'ayni.messages.withheld',
   /** the agent added, changed or removed one of the person's memories in a conversation (3.3) */
   memoryUpdated: 'ayni.memory.updated',
 } as const
@@ -262,6 +264,19 @@ export interface MessagesErasedValue {
   /** the agent's ids of the erased messages */
   messageIds: string[]
   /** the ids the client gave those it sent: a client holds them so until it reads the history again */
+  clientIds?: string[]
+}
+
+/**
+ * `ayni.messages.withheld` (PROF-STREAM-011, 3.3 amended): messages of the person that the model never received, what
+ * the code of an email check took. Sent in the run that carried them; the same messages carry
+ * `metadata.modelVisible: false` in history (PROF-HIST-013).
+ */
+export interface MessagesWithheldValue {
+  conversationId: string
+  /** the agent's ids of the messages */
+  messageIds: string[]
+  /** the ids the client gave those it sent */
   clientIds?: string[]
 }
 
@@ -389,6 +404,8 @@ export interface MessageMetadata {
   usedMemories?: string[]
   /** on a message of the agent's reply: the names of the person's preferences the turn was given (3.3) */
   usedPreferences?: string[]
+  /** `false` on a message of the person that the model never received (PROF-HIST-013, 3.3 amended); absent otherwise */
+  modelVisible?: false
 }
 
 export type ReceiptState = 'received' | 'viewed'
@@ -408,6 +425,7 @@ export interface CustomEventValueMap {
   'ayni.reaction': ReactionValue
   'ayni.receipt': ReceiptValue
   'ayni.messages.erased': MessagesErasedValue
+  'ayni.messages.withheld': MessagesWithheldValue
   'ayni.memory.updated': MemoryUpdatedValue
 }
 

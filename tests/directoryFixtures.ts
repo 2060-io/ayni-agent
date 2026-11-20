@@ -156,6 +156,8 @@ export interface DirectoryPackOptions {
   acceptedOrganizations?: string[]
   /** the countries whose organizations are partners (`identity.organizations`) */
   partners?: string[]
+  /** the agent's default language (`language.agent`, `en` in the dev pack) */
+  language?: string
 }
 
 export function directoryPack(
@@ -204,6 +206,7 @@ export function directoryPack(
       ...(options.acceptedOrganizations ? { issuers: { organizations: options.acceptedOrganizations } } : {}),
     },
   ]
+  if (options.language) doc.language = { ...doc.language, agent: options.language }
   if (options.partners?.length)
     doc.identity.organizations = [{ match: { countryCode: options.partners }, relation: 'partner' }]
   if (options.badge) {
@@ -368,7 +371,7 @@ export async function present(
  * A guest: a person whose wallet connected and presented nothing (the authentication is asked on demand), with a web
  * session bound by the phone, as the person who asks for a badge from the directory is.
  */
-export async function guest(running: RunningAgent, id: string): Promise<Person> {
+export async function guest(running: RunningAgent, id: string, locale = 'en'): Promise<Person> {
   const connectionId = `conn-${id}`
   const { principal } = await running.agent.onPeerConnected(
     {
@@ -383,17 +386,18 @@ export async function guest(running: RunningAgent, id: string): Promise<Person> 
     { name: 'Ayni', version: '1.0.0', platform: 'ios' },
     { welcome: false }
   )
-  return { principal, ...(await bindWeb(running, principal, connectionId)), connectionId }
+  return { principal, ...(await bindWeb(running, principal, connectionId, locale)), connectionId }
 }
 
 /** A web session of a Principal, bound by its phone (CHAN-BIND-009). */
 export async function bindWeb(
   running: RunningAgent,
   principal: Principal,
-  connectionId: string
+  connectionId: string,
+  locale = 'en'
 ): Promise<{ sessionId: string; sessionToken: string }> {
   const created = (
-    await running.app.inject({ method: 'POST', url: '/agui/v3/sessions', payload: { client: webClient, locale: 'en' } })
+    await running.app.inject({ method: 'POST', url: '/agui/v3/sessions', payload: { client: webClient, locale } })
   ).json() as { sessionId: string; sessionToken: string }
   const session = await running.agent.sessions.get(created.sessionId)
   if (!session?.binding) throw new Error('no binding material')

@@ -309,7 +309,7 @@ describe('the email code of a badge from the directory (D89)', () => {
     ])
   })
 
-  it('shows the messages of the check in history as auth-challenge, and never gives them to the model (INTX-AUTH-013, PROF-RUN-015)', async () => {
+  it("shows the messages of the check in history as auth-challenge; the model reads the code's, never the person's (INTX-AUTH-013, PROF-RUN-015, D95)", async () => {
     const code = codeOf(sent[0])
     const history = await historyOf(running, ana)
     const check = history.filter((m) => m.metadata.sourceType === 'auth-challenge' && m.role !== 'activity')
@@ -323,14 +323,41 @@ describe('the email code of a badge from the directory (D89)', () => {
       ['user', code],
       ['assistant', 'Your email address is ve'],
     ])
+    // the person's messages the code took are marked as ones the model never received; the code's are not (PROF-HIST-013)
+    expect(check.map((m) => m.metadata.modelVisible)).toEqual([
+      undefined,
+      false,
+      undefined,
+      false,
+      undefined,
+      false,
+      undefined,
+    ])
     // the outcome is a record for the model: the code's message told the person; no capability card (profile §6)
     expect(history.filter((m) => m.role === 'activity' && m.metadata.sourceType === 'auth-challenge')).toEqual([])
     const events = await runText(running, ana, 'thanks, what did you check?')
     expect(textOf(events)).toMatch(/^You said:/)
-    const request = JSON.stringify(model().requests.at(-1)?.messages)
+    const messages = model().requests.at(-1)?.messages ?? []
+    const request = JSON.stringify(messages)
     expect(request).toContain('Identity check (email) for issue_credential: passed')
-    for (const secret of [code, 'ana.rios', 'Ana.Rios', 'Which email address', 'six-digit'])
-      expect(request).not.toContain(secret)
+    for (const secret of [code, 'ana.rios', 'Ana.Rios']) expect(request).not.toContain(secret)
+    // the code's messages are the agent's; a record stands in the place of each message the code took (decision 65)
+    const said = (start: string) => messages.find((m) => typeof m.content === 'string' && m.content.startsWith(start))
+    expect(said('To issue your Northwind badge')?.role).toBe('assistant')
+    expect(said('If this address is on the list')?.role).toBe('assistant')
+    expect(said('Your email address is verified')?.role).toBe('assistant')
+    const records = messages
+      .filter((m) => m.role === 'user' && String(m.content).includes('the code of the service took it'))
+      .map((m) => m.content)
+    expect(records).toEqual([
+      '[system record, written by the system, not by the person and not by you: the person typed their email address here; the code of the service took it for the email check, and it is not shown to you]',
+      '[system record, written by the system, not by the person and not by you: the person typed a code here; the code of the service took it for the email check, and it is not shown to you]',
+      '[system record, written by the system, not by the person and not by you: the person typed a code here; the code of the service took it for the email check, and it is not shown to you]',
+    ])
+    // in the order they happened: the question, the record of the address, the answer to it
+    const at = (m: unknown) => messages.indexOf(m as never)
+    expect(at(said('To issue your'))).toBeLessThan(at(messages.find((m) => m.content === records[0])))
+    expect(at(messages.find((m) => m.content === records[0]))).toBeLessThan(at(said('If this address')))
   })
 
   it("lets the person delete what they typed in the check within the window, with the code's answer to it (PROF-HIST-010)", async () => {
@@ -407,10 +434,11 @@ describe('the email code of a badge from the directory (D89)', () => {
     checks.minutes = 10
   })
 
-  it('stops when the person types cancel, and asks again for a text that is not an address', async () => {
+  it('stops when the person types cancel; a text with no address reaches the model, and the check waits (decision 63)', async () => {
     const quick = await guest(running, 'quick-wallet')
     await runText(running, quick, ISSUE)
-    expect(textOf(await runText(running, quick, 'my mail is ana'))).toMatch(/^That is not an email address\./)
+    expect(textOf(await runText(running, quick, 'my mail is ana'))).toMatch(/^You said: my mail is ana/)
+    expect(await pending()).toHaveLength(1)
     expect(textOf(await runText(running, quick, 'Cancel'))).toBe('The email check is stopped. Nothing was issued.')
     expect(textOf(await runText(running, quick, 'hello'))).toMatch(/^You said:/)
   })

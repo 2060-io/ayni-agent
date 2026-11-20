@@ -25,6 +25,7 @@ import {
   type Store,
   type StoredEntry,
   type StoredEvidence,
+  type TranslationRecord,
   type VectorHit,
 } from './types.js'
 
@@ -477,6 +478,16 @@ export class MemoryStore implements Store {
     delete: async (key: string) => {
       this.kvRows.delete(key)
     },
+  }
+
+  private readonly translationRows = new Map<string, TranslationRecord>()
+  public translations = {
+    get: async (digest: string, language: string) => clone(this.translationRows.get(`${digest}\n${language}`)),
+    set: async (record: TranslationRecord) => {
+      const key = `${record.digest}\n${record.language}`
+      if (!this.translationRows.has(key)) this.translationRows.set(key, clone(record))
+    },
+    list: async () => [...this.translationRows.values()].map((r) => clone(r) as TranslationRecord),
   }
 
   private readonly spaceRows = new Map<string, Space>()

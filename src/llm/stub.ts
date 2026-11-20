@@ -2,11 +2,13 @@
  * Deterministic stub model for development and tests: echoes the last user text word by word;
  * a user text of the form `/call <tool> <json>` triggers one tool call, and the stub then summarizes
  * the tool result; words before `/call` are said first, as a model that announces what it is about to do.
- * A summary request (the summarizer's instruction) is answered with the lines it was given, shortened.
+ * A summary request (the summarizer's instruction) is answered with the lines it was given, shortened; a translation
+ * request (the instruction of the service's sentences) with the sentence, marked `[<language tag>]`.
  * Usage is reported as a provider does (LLM-USAGE-001): the input is the estimate of the whole request, and with a
  * cache key the part of it that repeats the start of the key's previous request is "served from cache".
  * No network, no key.
  */
+import { TRANSLATION_INSTRUCTION_HEAD } from '../core/serviceLanguage.js'
 import { SUMMARY_INSTRUCTION_HEAD } from '../memory/summary.js'
 import { estimateRequestTokens, estimateTokens } from '../util/tokens.js'
 import type { ChatDelta, ChatModel, ChatRequest } from './types.js'
@@ -58,6 +60,15 @@ export class StubChatModel implements ChatModel {
       const summary = [kept && kept !== '(none)' ? kept : '', ...lines].filter(Boolean).join(' | ')
       yield { type: 'text', text: summary }
       yield this.usage(req, summary)
+      return
+    }
+    // a translation of a sentence of the service: the sentence, marked with the language it was asked in
+    if (instruction?.role === 'system' && instruction.content.startsWith(TRANSLATION_INSTRUCTION_HEAD)) {
+      const tag = /whose BCP 47 tag is (\S+?)\. /.exec(instruction.content)?.[1] ?? '?'
+      const asked = req.messages[req.messages.length - 1]
+      const translation = `[${tag}] ${asked && typeof asked.content === 'string' ? asked.content : ''}`
+      yield { type: 'text', text: translation }
+      yield this.usage(req, translation)
       return
     }
     const last = [...req.messages].reverse().find((m) => m.role === 'user' || m.role === 'tool')

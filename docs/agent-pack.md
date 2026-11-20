@@ -31,7 +31,7 @@ directory.
 | `schemaVersion` | yes | `"3.x"`; the loader refuses another major | CORE-PACK-004 |
 | `metadata` | yes | id, display name, description, tags | |
 | `identity` | yes | the agent's DID, user-agent gate, the authentication schema, organization patterns, roles, role rules, per-actor overrides, the file of the user directory | D30, D34, D37, D38, D79 |
-| `language` | yes | the one agent language | D21 |
+| `language` | yes | the one agent language; `language.agent` is also the language of the messages the agent's code writes itself (the email check's) for a person whose language is not known, and their fallback (decision 64) | D21, D94 |
 | `persona` | yes | system prompt, greeting, contextual menu | D46, CORE-PROMPT |
 | `llm` | yes | model provider and model | LLM-PROV |
 | `embeddings` | yes | embeddings provider and model | LLM-EMB |
@@ -491,13 +491,28 @@ issuance:
     the profile's own challenge: the credential is `ready`. The issuance record keeps the entry, which the person who
     presents the badge then holds, with its roles; the badge is revoked when the entry leaves the directory.
   - **The email code.** The issuing call ends the turn of the model with a question the agent's code writes in the
-    conversation: which address the organization knows the person by. The person's next messages there, from any
-    device, are the address and then the code: the code takes them, they start no turn and never reach the model. The
-    answer to the address is the same whether or not an entry holds it; a six-digit code is sent, by email, only to an
-    address an entry holds. It is valid ten minutes, with five tries; `cancel` stops the check. A right code records
-    the address as evidence (`evidence.email`, never shown to the model) and the issuance goes on by itself, offering
-    the badge with no new turn of the model. The model is told `passed`, `failed` or `expired`, and nothing else. A
-    guest who receives the badge is asked at once to present it, which identifies them (issuing identifies nobody).
+    conversation: which address the organization knows the person by. While the check waits, a message of the person
+    there, from any device, that holds an address (then a code of six digits, which may be split by spaces or dashes)
+    is the code's: it starts no turn and never reaches the model, which reads a record in its place, and the clients
+    draw it as a message the AI never read. The code's own messages are the agent's in the model's conversation. Any
+    other message ("the email did not arrive") goes
+    to the model as usual and counts no try. The answer to the address is the same whether or not an entry holds it;
+    a six-digit code is sent, by email, only to an address an entry holds. It is valid ten minutes, with five tries in
+    all; `cancel` stops the check. A right code records the address as evidence (`evidence.email`, never shown to the
+    model) and the issuance goes on by itself, offering the badge with no new turn of the model. The model is told
+    `passed`, `failed` or `expired`, and nothing else. A guest who receives the badge is asked at once to present it,
+    which identifies them (issuing identifies nobody).
+  - **Its messages are in the person's language** (decision 64): the language of the preference `language` (a BCP 47
+    tag the model stores when the person states one), else the locale of the session, else `language.agent`. The code
+    writes them in English and has the model translate each finished sentence once per language, with no context (the
+    sentence and the target language only, never anything the person typed); the translations are kept in the store.
+    A translation that fails, or drops a number or a name, is not used: the message is then in `language.agent`, and
+    in English when even that cannot be had. Nothing is configured for it.
+  - **The tool `email_check`** is given to the model whenever a profile declares an email challenge (it has no switch
+    in `tools.bundled`): `status` (whether a check waits, where, at which step, the time, tries and resends left),
+    `resend` (a new code to the same address, the previous one no longer valid and the ten minutes started again; three
+    times at most per check, thirty seconds apart, none before an address) and `cancel`. It never answers the address
+    or the code.
   - **`emailId`** numbers a badge by the verified address, as `documentId` does by the document: the same address gives
     the same number to whoever proves it, an address that changes in the directory gives another one.
   - **Email** goes through the SMTP server of the deployment (`MAIL_HOST`, `MAIL_PORT`, `MAIL_ENCRYPTION`, `MAIL_USERNAME`,

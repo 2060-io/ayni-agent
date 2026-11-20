@@ -635,7 +635,7 @@ export function issuanceOutcomeForModel(
     case 'challenge-started':
       return 'not issued yet: the system now asks the person, in this conversation, for the email address their organization knows them by, then for the code it sends there; it issues the credential by itself once the code is right. You will not see the address or the code. Your turn ends here.'
     case 'challenge-waiting':
-      return 'not issued: an email check of this person is already waiting in one of their conversations with this agent. They answer it there; do not call again.'
+      return 'not issued: an email check of this person is already waiting, in this conversation or another of theirs with this agent. email_check tells where and at which step, sends a new code, or cancels it; do not call again while it waits.'
     case 'declined':
       return 'not issued: the person declined the offer in their wallet.'
     case 'unanswered':

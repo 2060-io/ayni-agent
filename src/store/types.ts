@@ -238,6 +238,31 @@ export interface StatsRepo {
   }): Promise<{ bucket: string; statClass: string; count: number; sum: number }[]>
 }
 
+/**
+ * A sentence of the service translated into a language (decision 64, INTX-AUTH-021): kept by the digest of the English
+ * sentence and the language tag. A sentence of the service holds no personal data: no address, no code, nothing typed.
+ */
+export interface TranslationRecord {
+  /** sha-256 of the English sentence, hex */
+  digest: string
+  /** the BCP 47 tag of the translation */
+  language: string
+  /** the English sentence */
+  source: string
+  text: string
+  /** the model that translated it */
+  model: string
+  createdAt: string
+}
+
+export interface TranslationRepo {
+  get(digest: string, language: string): Promise<TranslationRecord | undefined>
+  /** keeps a translation; one already kept for the sentence and the language stays */
+  set(record: TranslationRecord): Promise<void>
+  /** every kept translation, for the tests and the operator */
+  list(): Promise<TranslationRecord[]>
+}
+
 export interface KvRepo {
   get(key: string): Promise<string | undefined>
   set(key: string, value: string): Promise<void>
@@ -316,6 +341,7 @@ export interface Store {
   rag: RagRepo
   stats: StatsRepo
   kv: KvRepo
+  translations: TranslationRepo
   adminAudit: AdminAuditRepo
   spaces: SpaceRepo
   spaceMembers: SpaceMemberRepo
