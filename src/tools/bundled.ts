@@ -27,6 +27,7 @@ import { MemoryService } from '../memory/service.js'
 import type { StatsSink } from '../platform/stats.js'
 import type { Store } from '../store/types.js'
 import { nowIso } from '../util/ids.js'
+import { bundledSourceOf } from './catalog.js'
 import type { ToolSource, ToolSpec } from './types.js'
 
 export interface BundledDeps {
@@ -61,7 +62,7 @@ export class BundledToolSource implements ToolSource {
     const features = featuresOf(pack)
     const bundled = pack.tools?.bundled ?? {}
     const access = pack.tools?.access
-    const specs: ToolSpec[] = []
+    const specs: Omit<ToolSpec, 'source' | 'rawName'>[] = []
 
     if (features.credentialTool && bundled.principalCredentials?.enabled !== false) {
       specs.push({
@@ -424,6 +425,7 @@ export class BundledToolSource implements ToolSource {
         },
       })
     }
-    return specs
+    // each is a source of the catalog: the key of `tools.bundled` that enables it, else its own name (TOOL-CAT-001)
+    return specs.map((spec) => ({ ...spec, source: bundledSourceOf(spec.name), rawName: spec.name }))
   }
 }

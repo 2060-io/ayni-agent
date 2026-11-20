@@ -21,9 +21,13 @@ import type {
   Session,
   SessionState,
   Space,
+  SpaceAccountRecord,
   SpaceActivity,
   SpaceMember,
+  SpaceToolRecord,
   StatEvent,
+  ToolAllowance,
+  ToolCallRecord,
   WorkingMemoryNote,
 } from '../core/types.js'
 import type { ScopePredicate } from '../memory/scope.js'
@@ -317,6 +321,55 @@ export interface SpaceActivityRepo {
   list(spaceId: string, limit: number): Promise<SpaceActivity[]>
 }
 
+/** The sources a space's template names, in each space (D98, TOOL-SPACE-001). */
+export interface SpaceToolRepo {
+  get(spaceId: string, sourceId: string): Promise<SpaceToolRecord | undefined>
+  save(record: SpaceToolRecord): Promise<void>
+  delete(spaceId: string, sourceId: string): Promise<void>
+  listBySpace(spaceId: string): Promise<SpaceToolRecord[]>
+  /** every record of every space: for the start, which aligns the spaces with their templates (TOOL-SPACE-011) */
+  listAll(): Promise<SpaceToolRecord[]>
+}
+
+/** The accounts of the spaces (D97, TOOL-ACCESS-004): a token only as ciphertext, its key with the row. */
+export interface SpaceAccountRepo {
+  get(spaceId: string, sourceId: string): Promise<SpaceAccountRecord | undefined>
+  save(record: SpaceAccountRecord): Promise<void>
+  /** destroys the account and its key: nothing can open the token again */
+  delete(spaceId: string, sourceId: string): Promise<void>
+  listAll(): Promise<SpaceAccountRecord[]>
+}
+
+/** "Allow for this conversation" (TOOL-CALL-006). */
+export interface ToolAllowanceRepo {
+  get(approvalId: string): Promise<ToolAllowance | undefined>
+  save(allowance: ToolAllowance): Promise<void>
+  /** the allowances of a conversation, ended ones included */
+  listByConversation(conversationId: string): Promise<ToolAllowance[]>
+  /** the allowances given on a source of a space, ended ones included */
+  listBySpaceSource(spaceId: string, sourceId: string): Promise<ToolAllowance[]>
+}
+
+export interface ToolCallQuery {
+  principalId?: string
+  spaceId?: string
+  conversationId?: string
+  sourceId?: string
+  /** from this time on, included */
+  from?: string
+  /** before this time */
+  to?: string
+  limit: number
+}
+
+/** The record of each call the model asks for (TOOL-PROV-004): kept indefinitely, never erased with its entry. */
+export interface ToolCallRepo {
+  get(id: string): Promise<ToolCallRecord | undefined>
+  save(record: ToolCallRecord): Promise<void>
+  /** newest first */
+  list(q: ToolCallQuery): Promise<ToolCallRecord[]>
+}
+
 export interface Store {
   readonly kind: 'postgres' | 'memory'
   /**
@@ -346,6 +399,10 @@ export interface Store {
   spaces: SpaceRepo
   spaceMembers: SpaceMemberRepo
   spaceActivity: SpaceActivityRepo
+  spaceTools: SpaceToolRepo
+  spaceAccounts: SpaceAccountRepo
+  toolAllowances: ToolAllowanceRepo
+  toolCalls: ToolCallRepo
 }
 
 export function cosine(a: number[], b: number[]): number {

@@ -1,6 +1,7 @@
 import type { ToolAccess } from '../config/packTypes.js'
 import type { Principal, Session } from '../core/types.js'
 import type { Logger } from '../util/logger.js'
+import type { ToolAnnotations } from './catalog.js'
 
 export interface ToolContext {
   principal: Principal
@@ -20,6 +21,22 @@ export interface ToolContext {
   memoryChanged?: (change: MemoryChange) => Promise<void>
   /** the tool ends the turn with a message of the code (INTX-AUTH-012): the model is called no more in it */
   turnEnded?: (message: EndTurnMessage) => void
+  /**
+   * the account the call runs with (D97): a space's token is opened in memory for this call only, and sent only as the
+   * source's `account.apply` says (TOOL-ACCESS-005); never logged, never put in a result
+   */
+  account?: CallAccountSecret
+}
+
+/** The account of one call: its kind, the space, and the space's token, opened for the call. */
+export interface CallAccountSecret {
+  kind: 'none' | 'agent' | 'space'
+  spaceId?: string
+  /** the space's token, in memory for this call only */
+  token?: string
+  /** the header it is sent in, after its prefix */
+  header?: string
+  prefix?: string
 }
 
 /**
@@ -51,6 +68,12 @@ export interface ToolResult {
 export interface ToolSpec {
   /** stable key: `http:name`, `bundled:name`, `mcp:<server>:name` */
   key: string
+  /** the source of the catalog the tool belongs to (TOOL-CAT-001): the server, the HTTP tool, the bundled key */
+  source: string
+  /** the tool's own name at its source */
+  rawName: string
+  /** an MCP tool's annotations, as its server lists them: they give defaults only (D99) */
+  annotations?: ToolAnnotations
   /** the name exposed to the model (unique across the registry) */
   name: string
   description: string
@@ -68,5 +91,12 @@ export interface ToolSpec {
 export interface ToolSource {
   readonly id: string
   list(): Promise<ToolSpec[]>
+  /**
+   * Discovers the tools of a source whose account is a space's, on that space's own connection (TOOL-ACCESS-007), when
+   * nothing listed them yet.
+   */
+  discover?(account: CallAccountSecret): Promise<void>
+  /** Closes the connection of a space's account: the account was cleared, replaced or removed (TOOL-ACCESS-004/007). */
+  closeAccount?(spaceId: string): Promise<void>
   close?(): Promise<void>
 }

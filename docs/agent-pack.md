@@ -555,13 +555,123 @@ issuance:
 
 ## tools, mcp and access tiers
 
-Tool credentials are held by the deployment and shared; the agent never accepts a credential from a
-principal (TOOL-ACCESS-001). Every `(role, tool)` resolves to one tier:
+Every MCP server of `mcp.servers`, every HTTP tool of `tools.http` and every key of `tools.bundled` is a **source** of
+the tool catalog (ayni-spec D96, TOOL-CAT-001). A source answers four questions, each by declaration or by default, and
+the layers below the pack (the owner of a space, then the person) can only narrow the answers:
+
+| Question | Key | Answers | Default |
+|---|---|---|---|
+| Where is it available | `availability` | `agent` (every conversation, Personal included), `personal` (Personal only), `spaces` (the spaces whose template names it) | `agent` |
+| Whose account its calls run with | `account.kind` | `none`, `agent` (credentials held by the deployment), `space` (a token the owner of each space sets) | `agent`; `none` for a bundled tool |
+| Who may use it | `toolAccess` / `tools.access` | roles, as the tiers below; the members of the space; guests only where the template says `guests: true` | |
+| What a call needs | `tools.<name>.effect`, `.call`; an HTTP tool's `effect`, `call` | `none`, `confirm` (the person's card), `approval` (another person), and a step-up from `actions` on top | from the tool's effect |
+
+`account.kind: personal` and `organization` are reserved for phases 2 and 3 (each person's own accounts, the accounts
+the organization opens): a pack that names either is refused at start, in words.
+
+### A full example
+
+```yaml
+identity:
+  roles:
+    employee: { description: Any home employee. }
+    manager: { description: Approves sensitive actions., canApprove: true }
+    sales: { description: The sales team. }
+    comms: { description: The communication team. }
+  roleRules: [ ... ]
+
+approvals:
+  approvers: [manager]                 # approve a tool of the whole agent or of Personal whose rule is approval
+  confirmation: { timeoutSeconds: 300 } # how long a confirmation card waits
+
+mcp:
+  servers:
+    - name: websearch
+      title: Web search
+      transport: streamable-http
+      url: https://search.example/mcp
+      headers: { Authorization: "Bearer ${SEARCH_API_KEY}" }   # the agent's account, from a Secret
+      account: { kind: agent }
+      availability: agent              # every conversation, Personal included
+      offer: [search]                  # the tools the model is given; the server lists more
+      untrusted: true                  # what it returns was written outside the organization
+      toolAccess: { roles: { employee: ["*"] } }
+
+    - name: relaticle
+      title: Relaticle CRM
+      description: The sales team's accounts, contacts and notes
+      transport: streamable-http       # a space account reaches a remote server only, never stdio
+      url: https://crm.dev.ayni.org/mcp
+      account:
+        kind: space                    # set by the owner of each space, in the space's settings
+        label: API token               # what the owner is asked for
+        pattern: "^[A-Za-z0-9|]{20,200}$"
+        apply: { header: Authorization, prefix: "Bearer " }
+      availability: spaces             # in the spaces whose template names it
+      offer: [list-companies, get-company, create-note, delete-note]
+      bindings:
+        - { name: workspace, label: Workspace, argument: workspace_id, pattern: "^[a-z0-9-]{1,64}$" }  # the owner's
+        - { name: region, label: Region, value: eu }                       # fixed by the pack, a label on the cards
+      tools:
+        list-companies: { effect: read, untrusted: false }
+        get-company:    { effect: read, untrusted: false }
+        create-note:    { title: Add a note, effect: write }   # confirm, by default
+        # delete-note carries no annotations: its effect is delete, its rule approval, by the space's owner
+      toolAccess: { roles: { sales: ["*"] } }
+
+tools:
+  http:
+    - name: post_to_x
+      title: Post on X
+      description: Posts a message on the X account of the space
+      method: POST
+      url: https://api.x.com/2/tweets
+      bodyTemplate: '{"text": "{text}"}'
+      parameters: { type: object, required: [text], properties: { text: { type: string, title: Post } } }
+      account: { kind: space, label: Access token of the X account, apply: { header: Authorization, prefix: "Bearer " } }
+      availability: spaces
+      bindings: [ { name: handle, label: X account } ]   # a label: the token decides which account posts
+      effect: external                                   # an approval, by the space's owner
+    - name: purge
+      title: Purge
+      description: Purges the cache.
+      method: DELETE                   # effect delete: approval, by approvals.approvers
+      url: https://cache.example/purge
+  bundled:
+    workingMemory: { enabled: true, title: Memory, call: none }   # title, availability and a stricter call only
+  access: { roles: { comms: [post_to_x], manager: [purge] } }
+
+actions:
+  create-note:
+    authChallenge: { type: device }    # a step-up on the phone, after the card
+
+spaces:
+  templates:
+    - id: sales
+      title: Sales
+      kind: team
+      creators: [manager]
+      membership: { mode: list }
+      tools:
+        - { source: relaticle, add: auto }     # in every Sales space; its owner binds it and sets its account
+    - id: comms
+      title: Communication
+      kind: team
+      creators: [comms]
+      membership: { mode: list }
+      tools:
+        - { source: post_to_x, add: owner, guests: false }   # offered; the owner adds it
+```
+
+### The tiers: who may use a tool
+
+Every `(role, tool)` resolves to one tier; availability, the state of a tool in a space, its owner's rules and the
+membership only narrow what the roles give (TOOL-AVAIL-005):
 
 | Tier | How it is configured | Behavior |
 |------|----------------------|----------|
-| ALLOW | tool listed in `toolAccess.roles[role]` (or `default: all`) | runs directly; the model sees the tool |
-| APPROVAL | tool listed in `toolAccess.approval[]` and in the role's set | runs after per-use human approval |
+| ALLOW | tool listed in `toolAccess.roles[role]` (or `default: all`) | the model sees the tool |
+| APPROVAL | tool listed in `toolAccess.approval[]` and in the role's set | the model sees the tool; its rule is `approval`, by that entry's approvers |
 | REQUESTABLE | tool listed in `toolAccess.elevation[]` and not in the role's set | hidden until an elevation grant is active |
 | DENY | otherwise | never available |
 
@@ -572,8 +682,65 @@ name `tools`, `approvers` (declared roles with `canApprove`), optional `timeoutM
 `purposes` (ids from the top-level `purposes`) and `grantTtlMinutes`. Defaults for all of them come
 from `approvals`.
 
+### The effect and the rule of a tool
+
+A tool's **effect** is `read`, `write`, `delete` or `external` (posting or sending outside the organization). The pack
+may declare it; otherwise it comes from the MCP annotations, an annotation the server leaves out taking MCP's default
+(`readOnlyHint` false, `destructiveHint` true, `openWorldHint` true): `read` when `readOnlyHint` is true, else `delete`
+when `destructiveHint` is true, else `external` when `openWorldHint` is true, else `write`. An HTTP tool's comes from
+its method (`GET` read, `DELETE` delete, the others write). A tool with no annotations is therefore a delete until the
+pack says otherwise. A bundled tool has no effect.
+
+A tool's **rule** is, in this order: `approval` with that entry's approvers when a `toolAccess.approval` entry lists it;
+else the rule the pack declares (`tools.<name>.call`, an HTTP tool's `call`, a bundled key's `call`); else the default
+of its effect (read: `none`; write: `confirm`; delete and external: `approval`); `none` for a bundled tool. In a space,
+the owner may make a rule stricter (`none`, `confirm`, `approval`, `off`), never looser; the rule that applies is the
+strictest of the two.
+
+A call then goes through, in order: the person's **confirmation** (a card in the conversation with the exact action,
+every argument whole, Allow, Refuse and "Allow for this conversation"); the **approval** (a tool of the whole agent or
+of Personal: the roles of its `toolAccess.approval` entry, else `approvals.approvers`, else the call is refused as
+`no-approver`; a tool of a space: the space's owner, on the phone as an attested `authorize` flow and in a card); the
+credential's **liveness** (`actions.<tool>.maxCredentialAge`); the **step-up** (`actions.<tool>.authChallenge`); the
+**call**, with the pinned arguments set by the code and the account opened for it.
+
+A source may be `untrusted` (and an MCP server may say so per tool, which wins); otherwise an MCP tool is untrusted
+unless its `openWorldHint` is false, and an HTTP or bundled tool is trusted. In a turn in which a tool of an untrusted
+source returned a result, every later call of a tool whose effect is not `read` asks the person's card, whatever its
+rule, with no "Allow for this conversation".
+
+### Bindings and accounts
+
+`bindings` are the parameters the agent pins: each has a `name`, a `label` people read, an optional `pattern`, an
+optional `value` and an optional `argument`, the input argument it fills (and the `{argument}` placeholder of an HTTP
+tool). The pinned argument is out of the input schema the model receives, and the code sets it on every call in place
+of anything the model gives. A source of availability `agent` or `personal` gives every binding its `value`; in a source
+of `spaces`, a binding the pack gives a value keeps it in every space, the others take theirs from each space's owner.
+
+A `space` account is a token the owner types in the space's settings (`PUT {sessions}/spaces/{id}/tools/{source}/account`)
+and nowhere else; it is sealed as it arrives under a key of its own, opened in memory for a call only, sent as
+`account.apply` says, never logged, never given to the model or to a client; a result that echoes it reads `[account]`.
+One connection per space account of an MCP server, closed after `TOOL_CONNECTION_IDLE_SECONDS` (600) unused. A change of
+a space's tools that grants something waits for the owner's phone for `TOOL_CHANGE_CONFIRMATION_SECONDS` (300).
+
+### Refused by the loader
+
+- an unknown `availability`, `account.kind`, `effect`, `call` or template `add`, and two sources with one name, naming the
+  source and the field (TOOL-CAT-001); `account.kind: personal` or `organization` (TOOL-CAT-002);
+- an `account` on a bundled tool; a `space` account without `label` or `apply`; label, pattern or apply on an account that
+  is not a space's (TOOL-CAT-002);
+- a `space` account of an availability other than `spaces`, or on a `stdio` server (TOOL-AVAIL-003);
+- a binding of a source of availability `agent` or `personal` without a `value`; a value that does not match its
+  pattern; a pattern that is not a regular expression (TOOL-CAT-004/005);
+- a template tool that names an unknown source or one of another availability (TOOL-AVAIL-002);
+- a `toolAccess.approval` entry that lists a tool of availability `spaces`, whose owner approves it (TOOL-CAT-009);
+- a role of `approvals.approvers` that is not declared or has no `canApprove`.
+
+Warned at start: a source of `spaces` that no template names, and a tool whose rule the pack sets to `approval` with no
+role to approve it (its calls are refused as `no-approver`; the same is warned at discovery when the annotations set it).
+
 HTTP tools are declared with a JSON Schema for their parameters; `{param}` placeholders in `url` and
-`bodyTemplate` are filled from the model's arguments. MCP servers connect lazily by default.
+`bodyTemplate` are filled from the model's arguments and the pinned bindings. MCP servers connect lazily by default.
 
 ## purposes and approvals
 
@@ -581,7 +748,9 @@ HTTP tools are declared with a JSON Schema for their parameters; `{param}` place
 out-of-role tool (D15). `permittedRoles` optionally restricts who may declare a purpose. The model
 never declares a purpose and never approves. `approvals` holds the defaults: timeout, policy,
 `selfApproval` (a requester who is also an eligible approver runs without a prompt) and the default
-grant duration.
+grant duration; `approvers`, the roles that approve a tool of the whole agent or of Personal whose rule is `approval`
+and that no `toolAccess.approval` entry lists (TOOL-CAT-009); `confirmation.timeoutSeconds`, how long a confirmation card
+waits (300 by default, TOOL-CALL-004).
 
 ## actions
 
@@ -697,6 +866,15 @@ spaces:
   `guest` of the space. A person the agent knows already is compared on the email their stored evidence holds, and
   asked nothing; one whose evidence holds none is asked once for their badge again. For this the authentication should
   ask for and store `email`, which the agent says at start when a list template exists and it does not.
+- **Tools (D98; tools, phase 1).** A template's `tools` names the sources of availability `spaces` its spaces may use:
+  `add: auto` puts one in every space of the template from its creation (and, for a space created before the template
+  named it, from the next start), `add: owner` (the default) offers it to each owner; `guests: true` opens it to people
+  of other organizations. In a space a source is `available`, `setup` (a binding without a value or its account not
+  set), `ready` (its tools reach the model) or `off` (an `add: auto` one its owner removed). The owner manages them on
+  the web and on the phone (`{sessions}/spaces/{id}/tools`, profile §3.10); a change that grants something (adding,
+  binding, setting the account, loosening a rule) waits for the owner's phone, a `confirm` flow whose code the screen
+  shows; a change that only narrows applies at once. A source the template no longer names leaves its spaces at the next
+  start, its account's key destroyed. Personal takes no tool from a template.
 
 ## privacy
 
@@ -743,8 +921,11 @@ enables crypto-erasure with its lineage cascade.
 13. A badge from the user directory: see `issuance`, "Refused by the loader" (IDENT-DIR-002/003, INTX-AUTH-011/012/015,
     INTX-ISSUE-020). A profile that takes nothing from the directory declares at most one challenge, never `email`.
 
+14. The tool catalog: see `tools, mcp and access tiers`, "Refused by the loader" (TOOL-CAT-001..009, TOOL-AVAIL-002/003).
+
 Before the schema, a role that declares `crossSession` is refused in words (RBAC-XSESS-005), and so is an action that
-declares the email code (INTX-AUTH-011).
+declares the email code (INTX-AUTH-011), a kind of account of a later phase (`personal`, `organization`, TOOL-CAT-002),
+and a source of the catalog with an unknown value or a name another source has (TOOL-CAT-001).
 
 ## Differences from the previous generation of packs
 
@@ -752,6 +933,6 @@ For readers of the earlier `hologram-ai-agent` packs: `languages` (per-language 
 one `language.agent` and the frontend's presentation language; `flows.authentication`
 (credential definition ids, roles attribute, admin users) is replaced by `identity` (Verifiable Trust
 resolution, role rules over verified facts, no admin bypass); `accessMode: user-controlled` and
-`userConfig` are gone (deployment-held credentials only); `imageGeneration`, `speechToText` and
+`userConfig` are gone (deployment-held credentials, and from tools phase 1 a space's account set by its owner in the space's settings); `imageGeneration`, `speechToText` and
 `vision` moved under `media`; `integrations` is gone (deployment values are environment variables);
 `privacy`, `purposes`, `actions`, `sessions`, `channels`, `integrity` and `features` are new.

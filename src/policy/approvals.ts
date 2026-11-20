@@ -4,7 +4,8 @@
  */
 import type { AgentPack, ApprovalPolicy, ApprovalRule, ElevationRule } from '../config/packTypes.js'
 import type { ApprovalDecision, ApprovalRecord, ElevationGrant, Principal } from '../core/types.js'
-import type { Store } from '../store/types.js'
+import { type EntryCrypto, openJson, sealJson } from '../memory/crypto.js'
+import type { ApprovalRepo, Store } from '../store/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
 
 export interface ApprovalEvents {
@@ -40,9 +41,44 @@ export class ApprovalService {
     return { type: p.type, value: p.value ?? (p.type === 'count' ? 1 : 100), vetoOnRefusal: p.vetoOnRefusal ?? false }
   }
 
-  public isEligible(principal: Principal, record: ApprovalRecord): boolean {
+  /**
+   * The owners of a space, as they are now: for a call of a tool of a space, the eligible approver is its owner at the time
+   * of the decision, and nobody else (INTX-APPR-004). Set by the composition root.
+   */
+  public spaceOwners?: (spaceId: string) => Promise<string[]>
+
+  /**
+   * Who may decide: those whose role grants approval rights (INTX-APPR-004); for a tool of a space, its owner now and
+   * nobody else; for a confirmation, nobody but the person, who decides it in the conversation (INTX-APPR-012).
+   */
+  public async isEligible(principal: Principal, record: ApprovalRecord): Promise<boolean> {
+    if (record.kind === 'confirmation') return false
+    if (record.ownerApproval && record.spaceId) {
+      const owners = (await this.spaceOwners?.(record.spaceId)) ?? []
+      return owners.includes(principal.id)
+    }
     if (record.approverConnectionType && principal.connectionType !== record.approverConnectionType) return false
     return principal.roles.some((r) => record.eligibleRoles.includes(r) && this.pack.identity.roles?.[r]?.canApprove)
+  }
+
+  /** A record as it is stored (sealed by the repository). */
+  public async get(id: string): Promise<ApprovalRecord | undefined> {
+    return this.store.approvals.get(id)
+  }
+
+  public async save(record: ApprovalRecord): Promise<void> {
+    await this.store.approvals.save(record)
+  }
+
+  /** The agent withdraws a pending request (the message whose turn asked it was deleted, INTX-APPR-015). */
+  public async cancelBySystem(approvalId: string): Promise<ApprovalRecord | undefined> {
+    const record = await this.store.approvals.get(approvalId)
+    if (record?.status !== 'PENDING') return record
+    record.status = 'CANCELLED'
+    record.updatedAt = nowIso()
+    await this.store.approvals.save(record)
+    await this.events.onChange(record, 'cancelled')
+    return record
   }
 
   /** INTX-APPR-005: a requester who holds an approver role proceeds without a prompt. */
@@ -61,6 +97,8 @@ export class ApprovalService {
     rule: ApprovalRule
     /** the person's message whose turn asks for it: an erasure of that message erases the arguments (PRIV-ERASE-005) */
     inboundId?: string
+    /** a tool call's (D99): the action as its card shows it, its source, its conversation, the space whose owner approves */
+    tool?: Pick<ApprovalRecord, 'action' | 'sourceId' | 'conversationId' | 'spaceId' | 'ownerApproval' | 'callId'>
   }): Promise<ApprovalRecord> {
     const timeout = (opts.rule.timeoutMinutes ?? this.pack.approvals?.timeoutMinutes ?? 60) * 60_000
     const record: ApprovalRecord = {
@@ -84,6 +122,7 @@ export class ApprovalService {
       expiresAt: new Date(Date.now() + timeout).toISOString(),
       createdAt: nowIso(),
       updatedAt: nowIso(),
+      ...(opts.tool ?? {}),
     }
     await this.store.approvals.save(record)
     await this.events.onChange(record, 'created')
@@ -140,8 +179,9 @@ export class ApprovalService {
   }
 
   private async eligibleCount(record: ApprovalRecord): Promise<number> {
-    const principals = await this.store.principals.list()
-    return principals.filter((p) => this.isEligible(p, record)).length
+    let n = 0
+    for (const p of await this.store.principals.list()) if (await this.isEligible(p, record)) n++
+    return n
   }
 
   /** Applies the policy: count (N distinct approvers) or percentage of eligible approvers; veto on refusal. */
@@ -174,7 +214,7 @@ export class ApprovalService {
     const record = await this.store.approvals.get(approvalId)
     if (!record) throw new ApprovalError('approval not found', 'not-found')
     if (record.status !== 'PENDING') throw new ApprovalError(`approval is ${record.status}`, 'not-pending')
-    if (!this.isEligible(approver, record))
+    if (!(await this.isEligible(approver, record)))
       throw new ApprovalError('principal is not an eligible approver', 'not-eligible')
     if (record.decisions.some((d) => d.approverId === approver.id))
       throw new ApprovalError('already decided', 'not-eligible')
@@ -241,10 +281,10 @@ export class ApprovalService {
   }
 
   public async pendingFor(principal: Principal): Promise<ApprovalRecord[]> {
-    const pending = await this.store.approvals.list({ status: 'PENDING' })
-    return pending.filter(
-      (r) => this.isEligible(principal, r) && !r.decisions.some((d) => d.approverId === principal.id)
-    )
+    const out: ApprovalRecord[] = []
+    for (const r of await this.store.approvals.list({ status: 'PENDING' }))
+      if ((await this.isEligible(principal, r)) && !r.decisions.some((d) => d.approverId === principal.id)) out.push(r)
+    return out
   }
 
   public async ownRequests(principal: Principal): Promise<ApprovalRecord[]> {
@@ -258,4 +298,45 @@ export class ApprovalService {
 
 export function displayName(principal: Principal): string {
   return principal.identityAttributes.userName ?? principal.actorIdentity
+}
+
+interface SealedApprovalFields {
+  actionArgs?: Record<string, unknown>
+  action?: ApprovalRecord['action']
+}
+
+/**
+ * Approval records with the arguments of their action, and the action as its card shows it, sealed under a key of the
+ * record (INTX-APPR-014, D77): in the clear stay the tool, the source, the people, the status and the dates. A record
+ * whose arguments were erased (INTX-APPR-015) keeps the action's title, source and account, sealed under a new key, and
+ * the key of the arguments is destroyed.
+ */
+export function sealedApprovals(repo: ApprovalRepo, crypto: EntryCrypto): ApprovalRepo {
+  const open = (record: ApprovalRecord | undefined): ApprovalRecord | undefined => {
+    if (!record?.sealed) return record
+    const fields = openJson<SealedApprovalFields>(
+      crypto,
+      record.sealed.keyRef,
+      Buffer.from(record.sealed.cipher, 'base64')
+    )
+    const { sealed: _sealed, ...rest } = record
+    return {
+      ...rest,
+      ...(fields.actionArgs ? { actionArgs: fields.actionArgs } : {}),
+      ...(fields.action ? { action: fields.action } : {}),
+    }
+  }
+  const seal = (record: ApprovalRecord): ApprovalRecord => {
+    const { actionArgs, action, sealed: _previous, ...rest } = record
+    if (!actionArgs && !action) return rest
+    // a new key at each save: the former one, which could open erased arguments, is gone with the row it was in
+    const keyRef = crypto.newWrappedKey()
+    const { cipher } = sealJson(crypto, keyRef, { actionArgs, action } satisfies SealedApprovalFields)
+    return { ...rest, sealed: { keyRef, cipher: cipher.toString('base64') } }
+  }
+  return {
+    get: async (id) => open(await repo.get(id)),
+    save: (record) => repo.save(seal(record)),
+    list: async (filter) => (await repo.list(filter)).map((r) => open(r) as ApprovalRecord),
+  }
 }

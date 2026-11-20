@@ -177,6 +177,42 @@ export function buildAdmin(deps: AdminDeps): FastifyInstance {
     return { ...found, auditId }
   })
 
+  // TOOL-PROV-005: the record of each call the model asked for, by Principal, space, conversation, source and period; no
+  // argument, no result, no account value is in it, and the read is recorded with its auditor and reason
+  app.get('/admin/audit/tool-calls', async (request) => {
+    const { actor, reason } = actorOf(request, 'auditor')
+    const q = request.query as {
+      principalId?: string
+      spaceId?: string
+      conversationId?: string
+      sourceId?: string
+      from?: string
+      to?: string
+      limit?: string
+    }
+    for (const [name, value] of [
+      ['from', q.from],
+      ['to', q.to],
+    ] as const)
+      if (value !== undefined && Number.isNaN(Date.parse(value))) throw new AdminError(400, `${name} is not a time`)
+    const filter = {
+      principalId: q.principalId || undefined,
+      spaceId: q.spaceId || undefined,
+      conversationId: q.conversationId || undefined,
+      sourceId: q.sourceId || undefined,
+      from: q.from ? new Date(q.from).toISOString() : undefined,
+      to: q.to ? new Date(q.to).toISOString() : undefined,
+    }
+    const calls = await store.toolCalls.list({ ...filter, limit: Math.min(Number(q.limit) || 1000, LIMIT) })
+    const auditId = await record({
+      action: 'audit-read',
+      actor,
+      reason,
+      detail: { what: 'tool-calls', ...filter, count: calls.length },
+    })
+    return { calls, auditId }
+  })
+
   app.get('/admin/audit/log', async (request) => {
     const { actor, reason } = actorOf(request, 'auditor')
     const q = request.query as { limit?: string }

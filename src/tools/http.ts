@@ -1,4 +1,8 @@
-/** Declarative HTTP tools (TOOL-HTTP-001). Credentials come from the pack (deployment-held, TOOL-ACCESS-001). */
+/**
+ * Declarative HTTP tools (TOOL-HTTP-001). Each is a source of the catalog (TOOL-CAT-001): the credentials of an `agent`
+ * account come from the pack's headers, placeholders of the deployment's environment (TOOL-ACCESS-002); a `space` account
+ * is the token the owner of a space set, sent in the header `account.apply` names, after its prefix (TOOL-ACCESS-005).
+ */
 import type { HttpToolDef, ToolAccess } from '../config/packTypes.js'
 import type { ToolSource, ToolSpec } from './types.js'
 
@@ -15,10 +19,13 @@ export function httpToolSpec(def: HttpToolDef, access: ToolAccess | undefined): 
   return {
     key: `http:${def.name}`,
     name: def.name,
+    source: def.name,
+    rawName: def.name,
     description: def.description,
     parameters: def.parameters ?? { type: 'object', properties: {} },
     access,
-    stepLabel: def.description.split(/[.:\n]/)[0].slice(0, 60),
+    // a step label names no tool (PROF-TOOL-013): the source's title, when the pack gives one
+    stepLabel: def.title ? `Using ${def.title}` : 'Working',
     async invoke(args, ctx) {
       const url = fillTemplate(def.url, args, encodeURIComponent)
       const hasBody = def.method !== 'GET' && def.method !== 'DELETE'
@@ -27,6 +34,9 @@ export function httpToolSpec(def: HttpToolDef, access: ToolAccess | undefined): 
           ? fillTemplate(def.bodyTemplate, args, (v) => v)
           : JSON.stringify(args)
         : undefined
+      const account = ctx.account
+      if (def.account?.kind === 'space' && !account?.token)
+        return { content: 'The account of this space is not set.', isError: true }
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), (def.timeoutSeconds ?? 30) * 1000)
       const onAbort = () => controller.abort()
@@ -38,6 +48,10 @@ export function httpToolSpec(def: HttpToolDef, access: ToolAccess | undefined): 
             accept: 'application/json',
             ...(hasBody ? { 'content-type': 'application/json' } : {}),
             ...(def.headers ?? {}),
+            // the space's account, as `account.apply` says, and nowhere else (TOOL-ACCESS-005)
+            ...(account?.token && account.header
+              ? { [account.header]: `${account.prefix ?? ''}${account.token}` }
+              : {}),
           },
           body,
           signal: controller.signal,

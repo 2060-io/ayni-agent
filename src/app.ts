@@ -22,7 +22,7 @@ import { PeerStatusNotifier } from './channels/didcomm/peerStatus.js'
 import { CredentialRevocations } from './channels/didcomm/revocations.js'
 import { VsAgentClient } from './channels/didcomm/vsAgentClient.js'
 import { type Env, loadEnv } from './config/env.js'
-import { evidenceWarnings, loadPack } from './config/pack.js'
+import { catalogWarnings, evidenceWarnings, loadPack } from './config/pack.js'
 import {
   type AgentPack,
   admitsUnidentified,
@@ -51,6 +51,8 @@ import { PROMPT_ADDON_VERSION } from './core/promptAddon.js'
 import { LANGUAGE_PREFERENCE, ServiceLanguage } from './core/serviceLanguage.js'
 import { SessionService } from './core/sessions.js'
 import { SpaceService } from './core/spaces.js'
+import { SpaceToolService } from './core/spaceTools.js'
+import { cardCapable, ToolGate } from './core/toolGate.js'
 import { AnchoringService, VeranaLedgerWriter } from './integrity/anchoring.js'
 import { createChatModel, createEmbeddings } from './llm/index.js'
 import { createImageGenerators } from './media/imageGen.js'
@@ -66,12 +68,13 @@ import { buildAdmin } from './platform/admin.js'
 import { createMailer, type Mailer } from './platform/mail.js'
 import { RetentionService } from './platform/retention.js'
 import { HttpStats, NoopStats, RedisStreamStats, type StatsSink, StoreStats } from './platform/stats.js'
-import { ApprovalService } from './policy/approvals.js'
+import { ApprovalService, displayName as displayNameOf, sealedApprovals } from './policy/approvals.js'
 import { MEMORY_SCHEMA_VERSION } from './store/migrations.js'
 import { createStore } from './store/postgres.js'
 import { BundledToolSource } from './tools/bundled.js'
+import { ToolCatalog } from './tools/catalog.js'
 import { HttpToolSource } from './tools/http.js'
-import { createMcpSources } from './tools/mcp.js'
+import { createMcpSources, DEFAULT_IDLE_SECONDS } from './tools/mcp.js'
 import { ToolRegistry } from './tools/registry.js'
 import { schedule } from './util/async.js'
 import { createLogger, type Logger } from './util/logger.js'
@@ -133,6 +136,11 @@ export async function buildAgent(
 
   const store = createStore(env.store, env.databaseUrl)
   const crypto = createEntryCrypto(env.entryEncryptionKey)
+  // the arguments of an approval, and the action its card shows, are kept sealed (INTX-APPR-014, D77)
+  store.approvals = sealedApprovals(store.approvals, crypto)
+  // the tool catalog: what each source answers to the four questions (D96); what it leaves to the operator is said
+  const catalog = new ToolCatalog(pack)
+  for (const warning of catalogWarnings(pack)) logger.warn(`agent-pack: ${warning}`)
   // the user directory (D79, IDENT-ROLE-012): read before anything else, and a file that does not validate stops the
   // start, naming the entry and the field (IDENT-DIR-001)
   const directoryFile = pack.identity.directory?.file
@@ -228,6 +236,7 @@ export async function buildAgent(
   router.register(a2a)
 
   let aguiRoutes: AgUiRoutes | undefined
+  let gateRef: ToolGate | undefined
   const sessions = new SessionService(
     store,
     pack,
@@ -243,6 +252,8 @@ export async function buildAgent(
       onBindingRefreshed: async () => {},
       onConversationChanged: async (conversation) => {
         await aguiRoutes?.announceConversation(conversation)
+        // archived or closed for good: its allowances end (TOOL-CALL-006)
+        if (conversation.state !== 'active') await gateRef?.endConversationAllowances(conversation.id)
       },
     },
     logger,
@@ -324,7 +335,12 @@ export async function buildAgent(
       emailChecks: () => emailChecksRef,
     })
   )
-  for (const source of createMcpSources(pack.mcp?.servers ?? [], logger)) registry.add(source, false)
+  for (const source of createMcpSources(
+    pack.mcp?.servers ?? [],
+    logger,
+    env.toolConnectionIdleSeconds ?? DEFAULT_IDLE_SECONDS
+  ))
+    registry.add(source, false)
 
   const orchestrator = new Orchestrator(
     pack,
@@ -346,6 +362,66 @@ export async function buildAgent(
     context
   )
   orchestratorRef = orchestrator
+
+  // the tools of the spaces (D98) and what a call needs, with the record of each call (D99, D100)
+  const spaceTools = new SpaceToolService(
+    store,
+    pack,
+    catalog,
+    crypto,
+    spaces,
+    registry,
+    challenges,
+    logger,
+    env.toolChangeConfirmationSeconds ?? 300
+  )
+  const gate = new ToolGate({
+    pack,
+    store,
+    catalog,
+    registry,
+    spaces,
+    spaceTools,
+    approvals,
+    memory,
+    principals,
+    challenges,
+    stats,
+    logger,
+  })
+  orchestrator.gate = gate
+  gateRef = gate
+  orchestrator.spaceById = (spaceId) => spaces.find(spaceId)
+  approvals.spaceOwners = async (spaceId) => (await spaces.find(spaceId))?.ownerIds ?? []
+  challenges.onSettled = (record) => spaceTools.settle(record)
+  spaces.onCreated = (space) => spaceTools.onCreated(space)
+  spaces.onOwnerChanged = (space) => spaceTools.onOwnerChanged(space)
+  memory.hooks.approvalsErased = (records) => gate.onTurnErased(records)
+  spaceTools.hooks = {
+    accountEnded: (spaceId, sourceId) => registry.closeAccount(sourceId, spaceId),
+    endAllowances: (spaceId, sourceId) => gate.endAllowancesFor(spaceId, sourceId),
+    nameOf: async (principalId) => {
+      const principal = await principals.get(principalId)
+      return principal ? displayNameOf(principal) : ''
+    },
+    announce: async (space, value) => aguiRoutes?.announceSpaceTools(space, value),
+  }
+  gate.hooks = {
+    onApprovalPending: async (session, _principal, record, entry) => {
+      await router.deliver(session, { kind: 'approval', entry, approval: record })
+    },
+    onCredentialInvalid: (principal) => agentRef?.onCredentialInvalid(principal) ?? Promise.resolve(),
+    // a card is asked only of the sessions of a client of profile 3.4 or later (TOOL-CALL-005, PROF-SESS-016)
+    cardSessions: async (conversationId) => {
+      const conversation = await sessions.conversationById(conversationId)
+      if (!conversation) return []
+      return (await sessions.sessionsOfConversation(conversation)).filter((s) => cardCapable(s.client.profileVersion))
+    },
+    toConversation: async (conversationId, events) => aguiRoutes?.announceToConversation(conversationId, events),
+    deliver: async (session, entry) => {
+      await router.deliver(session, { kind: 'text', entry })
+    },
+  }
 
   const agent = new AyniAgent({
     env,
@@ -370,6 +446,9 @@ export async function buildAgent(
     logger,
   })
   agentRef = agent
+  agent.gate = gate
+  agent.spaceTools = spaceTools
+  agent.catalog = catalog
   // the notes the model reads and writes are those of the space of the conversation (MEM-SPACE-001), and a space may
   // not allow the model this agent uses (SPACE-CONV-004)
   orchestrator.spaceOf = (session, principal) => agent.spaceOfSession(session, principal)
@@ -385,7 +464,7 @@ export async function buildAgent(
   await app.register(cors, {
     origin: (origin, cb) => cb(null, !origin || allowedOrigins.includes(origin) || allowedOrigins.includes('*')),
     credentials: true,
-    methods: ['GET', 'HEAD', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['authorization', 'content-type', 'last-event-id', 'accept'],
     exposedHeaders: ['retry-after'],
   })
@@ -436,6 +515,8 @@ export async function buildAgent(
     if (session.channelType !== 'ag-ui' || !aguiRoutes) throw new Error('no channel shows this conversation')
     return aguiRoutes.queuedRun(session)
   }
+  // the spaces follow their templates: the sources they add by themselves, those no longer named leave (TOOL-SPACE-011)
+  await spaceTools.align()
   // what a restart left waiting is answered now
   await agent.resumeWaiting()
   if (did !== 'did:unknown') await declareAgUiService(vsAgent, did, env.publicBaseUrl, logger)
@@ -686,6 +767,8 @@ export async function buildAgent(
   const stops = [
     schedule('reap-sessions', 30_000, async () => void (await sessions.reap()), onJobError),
     schedule('expire-approvals', 60_000, async () => void (await approvals.expirePending()), onJobError),
+    // a change of a space's tools whose phone never answered is dropped as expired (TOOL-SPACE-008)
+    schedule('expire-tool-changes', 30_000, async () => void (await spaceTools.expirePending()), onJobError),
     schedule('retention', 6 * 3_600_000, () => retention.tick(), onJobError),
   ]
   if (anchoringEnabled)

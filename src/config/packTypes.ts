@@ -339,7 +339,73 @@ export interface ToolAccess {
   elevation?: ElevationRule[]
 }
 
-export interface HttpToolDef {
+// ---- the tool catalog (ayni-spec D96 to D99, TOOL-CAT, TOOL-AVAIL) ----------------------------------------
+
+/** Whose account a source's calls run with (D97, TOOL-CAT-002). `personal` and `organization` are refused (phases 2, 3). */
+export type AccountKind = 'none' | 'agent' | 'space'
+/** The kinds of account reserved for the later phases of the tools (O28, O29): an agent-pack that names one is refused. */
+export const RESERVED_ACCOUNT_KINDS = ['personal', 'organization'] as const
+/** Where a source is available (D96, TOOL-AVAIL-001). */
+export type Availability = 'agent' | 'personal' | 'spaces'
+/** What a tool does (D99, TOOL-CAT-006): it gives its default rule. */
+export type ToolEffect = 'read' | 'write' | 'delete' | 'external'
+/** What a call needs (D99, TOOL-CAT-007). */
+export type CallRule = 'none' | 'confirm' | 'approval'
+/** The rule the owner of a space sets for a tool there (TOOL-SPACE-006): a call rule, or `off`. */
+export type SpaceCallRule = CallRule | 'off'
+
+export const ACCOUNT_KINDS: readonly AccountKind[] = ['none', 'agent', 'space']
+export const AVAILABILITIES: readonly Availability[] = ['agent', 'personal', 'spaces']
+export const TOOL_EFFECTS: readonly ToolEffect[] = ['read', 'write', 'delete', 'external']
+export const CALL_RULES: readonly CallRule[] = ['none', 'confirm', 'approval']
+export const SPACE_CALL_RULES: readonly SpaceCallRule[] = ['none', 'confirm', 'approval', 'off']
+
+/** The account of a source (TOOL-CAT-002). A `space` account declares what its owner is asked for and how it is sent. */
+export interface SourceAccount {
+  kind: AccountKind
+  /** what the owner of a space is asked for ("API token") */
+  label?: string
+  /** a regular expression a token must match */
+  pattern?: string
+  /** the header the token is sent in, after its prefix (`Bearer `) */
+  apply?: { header: string; prefix?: string }
+}
+
+/**
+ * A parameter the agent pins (TOOL-CAT-004/005): its value comes from the agent-pack (`value`) or, in a space, from its
+ * owner. `argument` is the input argument it fills (and an HTTP tool's `{argument}` placeholder); without it the binding is
+ * a label the account's own scope enforces.
+ */
+export interface SourceBinding {
+  name: string
+  label: string
+  argument?: string
+  pattern?: string
+  value?: string
+}
+
+/** What the agent-pack says of one tool of an MCP server (TOOL-CAT-001/006/007/008). */
+export interface ToolDeclaration {
+  title?: string
+  effect?: ToolEffect
+  call?: CallRule
+  untrusted?: boolean
+}
+
+/** The fields every source of the catalog may declare (TOOL-CAT-001). */
+export interface CatalogFields {
+  /** what people read on the cards, in the sources and in a space's settings; the source's name by default */
+  title?: string
+  description?: string
+  /** `agent` by default for an MCP server and an HTTP tool */
+  account?: SourceAccount
+  /** `agent` by default */
+  availability?: Availability
+  bindings?: SourceBinding[]
+  untrusted?: boolean
+}
+
+export interface HttpToolDef extends CatalogFields {
   name: string
   description: string
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
@@ -348,9 +414,13 @@ export interface HttpToolDef {
   parameters?: Record<string, unknown>
   bodyTemplate?: string
   timeoutSeconds?: number
+  /** the tool's effect; from its method when absent (TOOL-CAT-006) */
+  effect?: ToolEffect
+  /** the tool's rule; from its effect when absent (TOOL-CAT-007) */
+  call?: CallRule
 }
 
-export interface McpServerDef {
+export interface McpServerDef extends CatalogFields {
   name: string
   transport: 'stdio' | 'sse' | 'streamable-http'
   url?: string
@@ -361,6 +431,18 @@ export interface McpServerDef {
   lazy?: boolean
   reconnect?: boolean
   toolAccess?: ToolAccess
+  /** the tools of the server the model is given; every tool it lists when absent (TOOL-CAT-003) */
+  offer?: string[]
+  /** what the agent-pack says of each tool: its title, effect, rule and trust */
+  tools?: Record<string, ToolDeclaration>
+}
+
+/** A bundled tool's entry of `tools.bundled` takes `title`, `availability` and a stricter `call` (reference profile). */
+export interface BundledEntry {
+  enabled?: boolean
+  title?: string
+  availability?: Availability
+  call?: CallRule
 }
 
 export interface ActionPolicy {
@@ -437,6 +519,18 @@ export interface SpaceTemplate {
     allowedProviders?: { default?: string[]; allowed?: string[] }
     handover?: { default?: boolean; allowed?: boolean[] }
   }
+  /** the sources of availability `spaces` its spaces may use (TOOL-AVAIL-002) */
+  tools?: TemplateTool[]
+}
+
+/**
+ * A source a template of spaces offers (TOOL-AVAIL-002): in every space of the template from its creation (`auto`), or
+ * when the owner of each space adds it (`owner`, the default); used by people of other organizations only with `guests`.
+ */
+export interface TemplateTool {
+  source: string
+  add?: 'auto' | 'owner'
+  guests?: boolean
 }
 
 /** The rules of every Personal space (SPACE-DEF-002): 365 days, the conversation memory's basis, the agent's provider. */
@@ -487,19 +581,32 @@ export interface AgentPack {
   tools?: {
     http?: HttpToolDef[]
     bundled?: {
-      statistics?: { enabled?: boolean; endpoint?: string; defaultStatClass?: string }
-      generateImage?: { enabled?: boolean; provider?: string }
-      principalCredentials?: { enabled?: boolean }
-      requestPresentation?: { enabled?: boolean }
-      credentialIssuance?: { enabled?: boolean }
-      principalPreferences?: { enabled?: boolean }
-      workingMemory?: { enabled?: boolean }
+      statistics?: BundledEntry & { endpoint?: string; defaultStatClass?: string }
+      generateImage?: BundledEntry & { provider?: string }
+      principalCredentials?: BundledEntry
+      requestPresentation?: BundledEntry
+      credentialIssuance?: BundledEntry
+      principalPreferences?: BundledEntry
+      workingMemory?: BundledEntry
     }
     access?: ToolAccess
   }
   mcp?: { servers: McpServerDef[] }
   purposes?: { id: string; label: string; description?: string; permittedRoles?: string[] }[]
-  approvals?: { timeoutMinutes?: number; policy?: ApprovalPolicy; selfApproval?: boolean; grantTtlMinutes?: number }
+  approvals?: {
+    timeoutMinutes?: number
+    policy?: ApprovalPolicy
+    selfApproval?: boolean
+    grantTtlMinutes?: number
+    attested?: boolean
+    /**
+     * the roles that approve a tool of the whole agent or of Personal whose rule is `approval` and that no
+     * `toolAccess.approval` entry lists (TOOL-CAT-009)
+     */
+    approvers?: string[]
+    /** how long a confirmation card waits for the person (TOOL-CALL-004): 300 seconds by default */
+    confirmation?: { timeoutSeconds?: number }
+  }
   actions?: Record<string, ActionPolicy>
   sessions?: {
     idleTimeoutSeconds?: number
@@ -586,4 +693,9 @@ export const DEFAULT_FEATURES: Features = {
 
 export function featuresOf(pack: AgentPack): Features {
   return { ...DEFAULT_FEATURES, ...(pack.features ?? {}) }
+}
+
+/** How long a confirmation card waits (TOOL-CALL-004), in seconds. */
+export function confirmationTimeoutSeconds(pack: Pick<AgentPack, 'approvals'>): number {
+  return pack.approvals?.confirmation?.timeoutSeconds ?? 300
 }

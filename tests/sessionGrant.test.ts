@@ -313,7 +313,7 @@ describe('session grant (D56, CHAN-BIND-014, PROF-SESS-013)', () => {
   it('declares features.sessionGrant in the descriptor (PROF-DESC-004)', async () => {
     const response = await running.app.inject({ method: 'GET', url: '/.well-known/ayni-agent.json' })
     expect(response.json().features).toMatchObject({ sessionGrant: true, flows: true })
-    expect(response.json().profileVersion).toBe('3.3')
+    expect(response.json().profileVersion).toBe('3.4')
   })
 })
 

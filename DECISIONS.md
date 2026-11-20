@@ -1113,3 +1113,74 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       no address or code), `tests/emailCheckMessages.test.ts` (the event in the run and on another device of the
       conversation, with both ids; none for an ordinary message; the code's messages in the model's request),
       `tests/serviceLanguage.test.ts` (the Spanish messages in the model's request).
+
+66. **Tools, phase 1: the catalog, tools in spaces, call rules and provenance** (2026-11-20, Fabrice's decisions TA1 to
+    TA11 of the tool access review; ayni-spec PR #99, D96 to D100, D41 and D80 amended, TOOL-ACCESS-001 withdrawn;
+    CORE-PACK-001, TOOL-ACCESS-002..007, TOOL-CAT-001..009, TOOL-AVAIL-001..006, TOOL-SPACE-001..011, TOOL-CALL-001..010,
+    TOOL-PROV-001..006, RBAC-FILTER-004, INTX-APPR-004/005/012..015, SPACE-MEMB-008; AG-UI profile 3.4).
+    - **The catalog (`src/tools/catalog.ts`, `src/config/pack.ts`):** every MCP server, HTTP tool and key of
+      `tools.bundled` is a source with a title, an account (`none`, `agent`, `space`), an availability (`agent`,
+      `personal`, `spaces`), its offered tools, its bindings and the effect, rule and trust of each tool. Effects come
+      from the pack, else the MCP annotations with MCP's defaults, else the HTTP method; rules from a
+      `toolAccess.approval` entry, else the pack, else the effect. `personal` and `organization` accounts, unknown values
+      and shared names are refused before the schema, in words naming the source and the field; the cross-field rules
+      refuse what TOOL-CAT and TOOL-AVAIL-002/003 refuse and warn of a source of spaces no template names and of a rule
+      of approval nobody approves.
+    - **The turn's tools and the gate (`src/core/toolGate.ts`):** a turn takes its tools once (TOOL-AVAIL-006), narrowed
+      in code to the offered tools of the sources available in the conversation's space, a source of a space only when
+      `ready` and not `off`, guests only where the template opens it, pinned arguments out of the schemas. Each call goes
+      through the confirmation, the approval, the liveness, the step-up and the call, in that order; untrusted content
+      raises a card with no allowance; the result is scrubbed of the space's token (`[account]`) before anything records
+      or reads it; the `tool-call` entry carries its provenance in the clear; every call leaves a `ToolCallRecord`.
+    - **Confirmations:** an approval record of kind `confirmation`, its card (`ayni.approval`, `kind: confirmation`) in
+      the run and mirrored to the conversation's other sessions, waited for in the turn; `approval.decide` decides it
+      from any session of the conversation with `noTurn: 'decision'`; expiry (`approvals.confirmation.timeoutSeconds`),
+      a stopped reply and a new message cancel it; "Allow for this conversation" makes a `ToolAllowance`, ended by
+      `DELETE …/allowances/{id}`, an archive, or a change of the source's rule, bindings or account.
+    - **Approvals of tool calls:** the action as its card shows it (`action`, sealed with the arguments under a key of the
+      record, `sealedApprovals`); a tool of a space approved by its owner at decision time (`ownerApproval`, attested, an
+      `authorize` flow whose purpose, justification and scope follow INTX-APPR-013); the owner asking in his own space
+      gets his own confirmation; approved, the call runs with the bindings and account in force and its outcome is told.
+    - **Tools in spaces (`src/core/spaceTools.ts`):** the state per space and source, the owner's endpoints of §3.10, the
+      space account sealed as it arrives and opened only for a call, a granting change held behind a `device` challenge
+      sent as a `confirm` flow with no conversation and no card (`ChallengeService.confirmChange`), narrowing changes at
+      once, `ayni.space.tools.changed` to the owner's sessions, the space's activity, the alignment with the templates at
+      start, ownership transfer.
+    - **MCP:** `offer` filters what the model is given (warned once of a name the server lacks); a server of space
+      accounts keeps one connection per space, opened on first need and closed after `TOOL_CONNECTION_IDLE_SECONDS`.
+    - **Provenance:** `sources` on every message of a turn that ran tools of MCP servers or HTTP tools (`metadata.sources`
+      in history, own and shared), the same sources in `GET {sessions}/conversations/{id}/sources`; never a bundled tool
+      (memory, knowledge search, the email check, reactions), whose entries keep their provenance with `sourceKind:
+      bundled`. `GET /admin/audit/tool-calls` for auditors (each read recorded).
+    - **Settled with the spec after review (2026-11-20):** the requester of every card is `{ displayName, role }`; a
+      `PATCH` that only narrows applies at once even while a granting change waits for the phone, and `409
+      change-pending` answers only a request that grants something; the member's view of a space's tools lists only the
+      tools members can use, none set `off`; bundled tools are no sources of a reply or a conversation.
+    - **Store (schema 3.9.0):** `space_tools`, `space_accounts` (the token only as ciphertext, its key in the row),
+      `tool_allowances`, `tool_calls`.
+    - **Choices of mine, to flag:**
+      - A bundled tool that no key of `tools.bundled` enables (`knowledge_search`, `set_reaction_policy`, `email_check`) is
+        a source of its own name, for its rule and its call record.
+      - Step labels say `Using <source title>` when the pack gives the source a title, and `Working` otherwise: never a
+        tool's name or description.
+      - The code of a change is two groups of two digits ("48 21"); the summary reads "Add X to S", "Change X in S: …",
+        "Set (Replace) the account of X in S", with every binding and rule of the change and never the token.
+      - A call record is written when the model asks, with the outcome `pending` while another person's approval waits.
+      - Arguments are validated before an approval as well as before a card; a server's `$schema` is ignored to validate.
+      - The tools of a server of space accounts are discovered on the first space connection and shared by every space
+        (definitions only); before any account exists, the settings list `offer` with the pack's effects and rules.
+      - The rules and the list of a turn are its start's; the bindings and the account are read at the call.
+      - An allowance carries a fingerprint (rule, bindings, when the account was set) checked at use, and ends when the
+        owner changes the source.
+      - `approval.decide` keeps its 3.3 answer for an approval decided by an approver; only a confirmation gets
+        `noTurn: 'decision'`.
+      - The arguments of every approval are now sealed in the store (they were in the clear in the approvals JSON).
+      - An approval asked before this version and approved after it does not run; the person is told to ask again.
+      - An attested request no longer opens an `authorize` flow on the requester's own phone.
+      - The platform rules' tools line is replaced, when a tool may ask, by one that says so (add-on 3.5.0), to stay
+        within the token budget.
+    - **Tests:** `tests/toolCatalog.test.ts` (the pack, effects, rules, trust, the offer, one connection per account),
+      `tests/tools.test.ts` (over the agent with fake MCP and HTTP servers, a scripted model and a stubbed phone: the
+      settings, the phone's confirmation, the account, the tools of a turn, the card and its decisions, allowances,
+      untrusted content, rules, the owner's approval, provenance, the admin read, deletion within the window),
+      `tests/postgres.test.ts` (the migration to 3.9.0 and the new tables).

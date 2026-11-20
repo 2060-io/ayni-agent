@@ -1,5 +1,5 @@
 /** Memory schema versions (CORE-VER-001/002). Each migration is applied once, in order. */
-export const MEMORY_SCHEMA_VERSION = '3.8.0'
+export const MEMORY_SCHEMA_VERSION = '3.9.0'
 
 export const MIGRATIONS: { version: string; sql: string }[] = [
   {
@@ -346,6 +346,55 @@ CREATE TABLE IF NOT EXISTS translations (
   data JSONB NOT NULL,
   PRIMARY KEY (digest, language)
 );
+`,
+  },
+  {
+    // tools, phase 1 (ayni-spec D97 to D100): the sources of each space and their state (TOOL-SPACE-001); the space's account
+    // of a source, its token only as ciphertext under a key of the row, which deleting the row destroys (TOOL-ACCESS-004);
+    // the allowances of a conversation (TOOL-CALL-006); the record of each call the model asks for, kept indefinitely and
+    // holding no argument, result or account value (TOOL-PROV-004)
+    version: '3.9.0',
+    sql: `
+CREATE TABLE IF NOT EXISTS space_tools (
+  space_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  data JSONB NOT NULL,
+  PRIMARY KEY (space_id, source_id)
+);
+
+CREATE TABLE IF NOT EXISTS space_accounts (
+  space_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  enc_key_ref TEXT NOT NULL,
+  cipher BYTEA NOT NULL,
+  set_at TIMESTAMPTZ NOT NULL,
+  set_by TEXT NOT NULL,
+  PRIMARY KEY (space_id, source_id)
+);
+
+CREATE TABLE IF NOT EXISTS tool_allowances (
+  approval_id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  space_id TEXT,
+  source_id TEXT NOT NULL,
+  data JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS tool_allowances_conversation ON tool_allowances (conversation_id);
+CREATE INDEX IF NOT EXISTS tool_allowances_space_source ON tool_allowances (space_id, source_id);
+
+CREATE TABLE IF NOT EXISTS tool_calls (
+  id TEXT PRIMARY KEY,
+  at TIMESTAMPTZ NOT NULL,
+  principal_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  space_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  data JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS tool_calls_principal ON tool_calls (principal_id, at DESC);
+CREATE INDEX IF NOT EXISTS tool_calls_space ON tool_calls (space_id, at DESC);
+CREATE INDEX IF NOT EXISTS tool_calls_conversation ON tool_calls (conversation_id, at DESC);
+CREATE INDEX IF NOT EXISTS tool_calls_source ON tool_calls (source_id, at DESC);
 `,
   },
 ]

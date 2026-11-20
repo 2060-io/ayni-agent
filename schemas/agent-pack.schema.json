@@ -953,7 +953,7 @@
       }
     },
     "tools": {
-      "description": "Declarative HTTP tools and bundled tools (TOOL-HTTP, D41). Tool credentials are deployment-held (TOOL-ACCESS-001).",
+      "description": "Declarative HTTP tools and bundled tools (TOOL-HTTP, D41): each is a source of the tool catalog (TOOL-CAT, D96). The credentials of an agent account are deployment-held (TOOL-ACCESS-002); a space account is set by the space's owner (TOOL-ACCESS-003).",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -997,7 +997,22 @@
                 "type": "integer",
                 "minimum": 1,
                 "default": 30
-              }
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "description": "What people read on the cards, in the sources and in a space's settings; the source's name by default (TOOL-CAT-001)."
+              },
+              "account": { "$ref": "#/$defs/sourceAccount" },
+              "availability": { "$ref": "#/$defs/availability" },
+              "bindings": { "type": "array", "items": { "$ref": "#/$defs/sourceBinding" } },
+              "untrusted": {
+                "type": "boolean",
+                "description": "What the source returns was written outside the organization (TOOL-CAT-008)."
+              },
+              "effect": { "$ref": "#/$defs/toolEffect" },
+              "call": { "$ref": "#/$defs/callRule" }
             }
           }
         },
@@ -1009,6 +1024,9 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
+                "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+                "availability": { "$ref": "#/$defs/availability" },
+                "call": { "$ref": "#/$defs/callRule" },
                 "enabled": {
                   "type": "boolean",
                   "default": false
@@ -1026,6 +1044,9 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
+                "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+                "availability": { "$ref": "#/$defs/availability" },
+                "call": { "$ref": "#/$defs/callRule" },
                 "enabled": {
                   "type": "boolean",
                   "default": false
@@ -1040,6 +1061,9 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
+                "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+                "availability": { "$ref": "#/$defs/availability" },
+                "call": { "$ref": "#/$defs/callRule" },
                 "enabled": {
                   "type": "boolean",
                   "default": true
@@ -1051,6 +1075,9 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
+                "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+                "availability": { "$ref": "#/$defs/availability" },
+                "call": { "$ref": "#/$defs/callRule" },
                 "enabled": {
                   "type": "boolean",
                   "default": true
@@ -1062,6 +1089,9 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
+                "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+                "availability": { "$ref": "#/$defs/availability" },
+                "call": { "$ref": "#/$defs/callRule" },
                 "enabled": {
                   "type": "boolean",
                   "default": true
@@ -1073,6 +1103,9 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
+                "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+                "availability": { "$ref": "#/$defs/availability" },
+                "call": { "$ref": "#/$defs/callRule" },
                 "enabled": {
                   "type": "boolean",
                   "default": true
@@ -1084,6 +1117,9 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
+                "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+                "availability": { "$ref": "#/$defs/availability" },
+                "call": { "$ref": "#/$defs/callRule" },
                 "enabled": {
                   "type": "boolean",
                   "default": true
@@ -1157,6 +1193,30 @@
               },
               "toolAccess": {
                 "$ref": "#/$defs/toolAccess"
+              },
+              "description": { "type": "string", "minLength": 1, "maxLength": 300 },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "description": "What people read on the cards, in the sources and in a space's settings; the source's name by default (TOOL-CAT-001)."
+              },
+              "account": { "$ref": "#/$defs/sourceAccount" },
+              "availability": { "$ref": "#/$defs/availability" },
+              "bindings": { "type": "array", "items": { "$ref": "#/$defs/sourceBinding" } },
+              "untrusted": {
+                "type": "boolean",
+                "description": "What the source returns was written outside the organization (TOOL-CAT-008)."
+              },
+              "offer": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 },
+                "description": "The tools of the server the model is given; every tool it lists when absent (TOOL-CAT-003)."
+              },
+              "tools": {
+                "type": "object",
+                "additionalProperties": { "$ref": "#/$defs/toolDeclaration" },
+                "description": "What the agent-pack says of each tool: its title, effect, rule and trust (TOOL-CAT-006..008)."
               }
             },
             "allOf": [
@@ -1243,6 +1303,22 @@
         "attested": {
           "type": "boolean",
           "description": "The decision must be device-authenticated (INTX-APPR-011)."
+        },
+        "approvers": {
+          "$ref": "#/$defs/roleList",
+          "description": "The roles that approve a tool of the whole agent or of Personal whose rule is approval and that no toolAccess.approval entry lists (TOOL-CAT-009)."
+        },
+        "confirmation": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 10,
+              "default": 300,
+              "description": "How long a confirmation card waits (TOOL-CALL-004)."
+            }
+          }
         }
       }
     },
@@ -1848,6 +1924,20 @@
                     }
                   }
                 }
+              },
+              "tools": {
+                "type": "array",
+                "description": "The sources of availability spaces the spaces of the template may use (TOOL-AVAIL-002).",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["source"],
+                  "properties": {
+                    "source": { "type": "string", "minLength": 1 },
+                    "add": { "type": "string", "enum": ["auto", "owner"], "default": "owner" },
+                    "guests": { "type": "boolean", "default": false }
+                  }
+                }
               }
             }
           }
@@ -1856,6 +1946,65 @@
     }
   },
   "$defs": {
+    "availability": {
+      "description": "Where a source is available (TOOL-AVAIL-001): the whole agent, Personal only, or the spaces of the templates that name it.",
+      "type": "string",
+      "enum": ["agent", "personal", "spaces"]
+    },
+    "toolEffect": {
+      "description": "What a tool does (TOOL-CAT-006): it gives its default rule.",
+      "type": "string",
+      "enum": ["read", "write", "delete", "external"]
+    },
+    "callRule": {
+      "description": "What a call needs (TOOL-CAT-007).",
+      "type": "string",
+      "enum": ["none", "confirm", "approval"]
+    },
+    "sourceAccount": {
+      "description": "Whose account a source's calls run with (TOOL-CAT-002). personal and organization are reserved for later phases and refused.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["none", "agent", "space"] },
+        "label": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "pattern": { "type": "string", "minLength": 1 },
+        "apply": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["header"],
+          "properties": {
+            "header": { "type": "string", "pattern": "^[A-Za-z0-9-]+$" },
+            "prefix": { "type": "string" }
+          }
+        }
+      }
+    },
+    "sourceBinding": {
+      "description": "A parameter the agent pins (TOOL-CAT-004/005).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "label"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "argument": { "type": "string", "minLength": 1 },
+        "pattern": { "type": "string", "minLength": 1 },
+        "value": { "type": "string" }
+      }
+    },
+    "toolDeclaration": {
+      "description": "What the agent-pack says of one tool of an MCP server (TOOL-CAT-001/006/007/008).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "effect": { "$ref": "#/$defs/toolEffect" },
+        "call": { "$ref": "#/$defs/callRule" },
+        "untrusted": { "type": "boolean" }
+      }
+    },
     "issuanceChallenge": {
       "description": "One challenge of an issuance profile (INTX-ISSUE-010): device, face-match or document as for any action; email, the email code of a badge from the user directory (D89, INTX-AUTH-011).",
       "type": "object",
