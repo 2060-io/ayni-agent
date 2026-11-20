@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.27.0](https://github.com/2060-io/ayni-agent/compare/v0.26.0...v0.27.0) (2026-11-20)
+
+
+### Features
+
+* **pack:** one map of tool sources, tools.sources, keyed by source id (D101) ([#100](https://github.com/2060-io/ayni-agent/issues/100)) ([9cb1264](https://github.com/2060-io/ayni-agent/commit/9cb12646c7230634aa2a2bab3412dff5b40b1521))
+
 ## [0.26.0](https://github.com/2060-io/ayni-agent/compare/v0.25.0...v0.26.0) (2026-11-20)
 
 
