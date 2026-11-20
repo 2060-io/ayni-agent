@@ -1033,7 +1033,14 @@ describe('the rules of the owner, and the approval of a tool of a space (TOOL-SP
     )
     const told = (await entries(anaConversation)).find((e) => e.text.startsWith('The approved action Post on X ran.'))
     expect(told?.sources).toEqual([{ sourceId: 'post_to_x', accountKind: 'space', spaceId: comms.id }])
-    expect(told?.text).toContain('[account]')
+    // the outcome, and no result: the result is in the tool call the model reads (TOOL-PROV-006)
+    expect(told?.text).toBe('The approved action Post on X ran.')
+    const result = (await entries(anaConversation)).find((e) => e.sourceType === 'tool-call')
+    expect(JSON.stringify(result?.payload)).toContain('[account]')
+    expect(JSON.stringify(result?.payload)).not.toContain(X_TOKEN)
+    // decided in the card, the flow on his phone closes (INTX-APPR-013)
+    const flowOfRequest = authorize.flowId as string
+    await until(() => ph.callsOf('closeFlow').some((c) => c.args[0] === flowOfRequest))
     const [record] = await running.agent.store.toolCalls.list({ conversationId: anaConversation, limit: 1 })
     expect(record).toMatchObject({
       outcome: 'completed',

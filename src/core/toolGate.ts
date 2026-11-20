@@ -1042,11 +1042,16 @@ export class ToolGate {
       spaceId,
       ...(record.inboundId ? { inboundId: record.inboundId, inboundIds: [record.inboundId] } : {}),
     }
-    const content = await this.run(tool, title, args, state, { session, principal, toolCtx, sink }, call, record.id)
+    await this.run(tool, title, args, state, { session, principal, toolCtx, sink }, call, record.id)
+    // the outcome, and no result: a tool's result reaches a client only through its cards (TOOL-PROV-006); the model
+    // reads it in the conversation's tool call
+    const outcome = (await this.store.toolCalls.get(call.id))?.outcome
     await this.tell(
       session,
       principal,
-      `The approved action ${title} ran. ${content.slice(0, 1500)}`,
+      outcome === 'completed'
+        ? `The approved action ${title} ran.`
+        : `The approved action ${title} did not run: ${outcome === 'failed' ? 'it failed' : 'a check did not pass'}.`,
       [...state.sources.values()],
       record.inboundId
     )
