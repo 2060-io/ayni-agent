@@ -1,24 +1,27 @@
 /**
- * The tool catalog (ayni-spec D96 to D99; TOOL-CAT, TOOL-AVAIL): every tool source of the agent-pack, an MCP server, an
- * HTTP tool or a bundled tool, with the answers it gives to the four questions: where it is available, whose account its
- * calls run with, who may use it (roles, through its `toolAccess`), and what a call needs (the effect and the rule of each
- * of its tools). The layers below the pack (the owner of a space, the person) only narrow these answers.
+ * The tool catalog (ayni-spec D96 to D99, D101; TOOL-CAT, TOOL-AVAIL): every tool source of the agent-pack, an entry of
+ * `tools.sources` (an MCP server, an HTTP tool or a bundled tool), with the answers it gives to the four questions: where
+ * it is available, whose account its calls run with, who may use it (roles, through its `access`), and what a call needs
+ * (the effect, the rule and the step-up of each of its tools). The layers below the pack (the owner of a space, the
+ * person) only narrow these answers.
  */
 import type {
   AgentPack,
   ApprovalRule,
   Availability,
-  BundledEntry,
+  BundledSource,
   CallRule,
-  McpServerDef,
+  McpSource,
   SourceAccount,
   SourceBinding,
   SpaceCallRule,
+  StepUp,
   TemplateTool,
   ToolAccess,
   ToolDeclaration,
   ToolEffect,
 } from '../config/packTypes.js'
+import { BUNDLED_NAMES, BUNDLED_TOOLS, bundledSource } from '../config/packTypes.js'
 
 export type SourceKind = 'mcp' | 'http' | 'bundled'
 
@@ -47,28 +50,21 @@ export interface CatalogSource {
   bindings: SourceBinding[]
   /** what the source declares of its trust, if anything */
   untrusted?: boolean
-  /** what the pack says of each of its tools (an MCP server's `tools`; an HTTP tool's own effect and rule) */
+  /** what the pack says of each of its tools, by name: title, effect, rule, trust, step-up (`tools.<name>`) */
   tools: Record<string, ToolDeclaration>
-  /** the tier model that governs its tools (an MCP server's `toolAccess`, else `tools.access`) */
+  /** the tier model that governs its tools: the source's own `access` */
   access?: ToolAccess
-  transport?: McpServerDef['transport']
+  transport?: McpSource['transport']
   method?: string
 }
 
-/** The bundled tools of each key of `tools.bundled`; the bundled tools no key names are sources of their own name. */
-export const BUNDLED_SOURCES: Record<string, string[]> = {
-  statistics: ['statistics'],
-  generateImage: ['generate_image'],
-  principalCredentials: ['principal_credentials'],
-  requestPresentation: ['request_presentation'],
-  credentialIssuance: ['credential_requirements', 'issue_credential'],
-  principalPreferences: ['principal_preferences'],
-  workingMemory: ['working_memory'],
-}
-
-/** The source of a bundled tool: the key of `tools.bundled` that enables it, else the tool's own name. */
-export function bundledSourceOf(toolName: string): string {
-  for (const [key, tools] of Object.entries(BUNDLED_SOURCES)) if (tools.includes(toolName)) return key
+/**
+ * The source of a bundled tool (TOOL-CAT-001): the id of the source that names its bundled tool, else the bundled tool's
+ * name (`workingMemory`), else, for a tool of no bundled name (`knowledge_search`), the tool's own name.
+ */
+export function bundledSourceOf(pack: Pick<AgentPack, 'tools'>, toolName: string): string {
+  for (const name of BUNDLED_NAMES)
+    if ((BUNDLED_TOOLS[name] as readonly string[]).includes(toolName)) return bundledSource(pack, name)?.[0] ?? name
   return toolName
 }
 
@@ -119,7 +115,7 @@ export function humanName(name: string): string {
 /** What the pack sets of a tool's rule, and the approval entry that sets it (TOOL-CAT-007). */
 export interface PackRule {
   rule: CallRule
-  /** the `toolAccess.approval` entry that lists the tool, with its approvers and policy */
+  /** the `access.approval` entry of its source that lists the tool, with its approvers and policy */
   approvalRule?: ApprovalRule
   /** where the rule comes from: an approval entry, a declaration, or the default of the tool's effect */
   from: 'approval-entry' | 'declared' | 'effect'
@@ -129,63 +125,45 @@ export class ToolCatalog {
   private readonly byName = new Map<string, CatalogSource>()
 
   public constructor(private readonly pack: AgentPack) {
-    for (const server of pack.mcp?.servers ?? []) {
-      this.byName.set(server.name, {
-        name: server.name,
-        kind: 'mcp',
-        title: server.title ?? server.name,
-        titleDeclared: !!server.title,
-        description: server.description,
-        account: server.account ?? { kind: 'agent' },
-        availability: server.availability ?? 'agent',
-        ...(server.offer ? { offer: server.offer } : {}),
-        bindings: server.bindings ?? [],
-        ...(server.untrusted !== undefined ? { untrusted: server.untrusted } : {}),
-        tools: server.tools ?? {},
-        access: server.toolAccess,
-        transport: server.transport,
+    for (const [id, def] of Object.entries(pack.tools?.sources ?? {})) {
+      if (def.type === 'bundled') continue
+      this.byName.set(id, {
+        name: id,
+        kind: def.type,
+        title: def.title ?? id,
+        titleDeclared: !!def.title,
+        description: def.description,
+        account: def.account ?? { kind: 'agent' },
+        availability: def.availability ?? 'agent',
+        ...(def.type === 'mcp' && def.offer ? { offer: def.offer } : {}),
+        bindings: def.bindings ?? [],
+        ...(def.untrusted !== undefined ? { untrusted: def.untrusted } : {}),
+        // an HTTP tool is one tool, named by its source's id (D101)
+        tools: def.type === 'http' ? { [id]: def.tools?.[id] ?? {} } : (def.tools ?? {}),
+        access: def.access,
+        ...(def.type === 'mcp' ? { transport: def.transport } : { method: def.method }),
       })
     }
-    for (const tool of pack.tools?.http ?? []) {
-      this.byName.set(tool.name, {
-        name: tool.name,
-        kind: 'http',
-        title: tool.title ?? tool.name,
-        titleDeclared: !!tool.title,
-        description: tool.description,
-        account: tool.account ?? { kind: 'agent' },
-        availability: tool.availability ?? 'agent',
-        bindings: tool.bindings ?? [],
-        ...(tool.untrusted !== undefined ? { untrusted: tool.untrusted } : {}),
-        tools: {
-          [tool.name]: {
-            ...(tool.title ? { title: tool.title } : {}),
-            ...(tool.effect ? { effect: tool.effect } : {}),
-            ...(tool.call ? { call: tool.call } : {}),
-          },
-        },
-        access: pack.tools?.access,
-        method: tool.method,
-      })
-    }
-    const bundled = (pack.tools?.bundled ?? {}) as Record<string, BundledEntry | undefined>
-    for (const [key, tools] of Object.entries(BUNDLED_SOURCES)) {
-      const entry = bundled[key]
-      this.byName.set(key, this.bundledSource(key, tools, entry))
+    // every bundled tool is a source: the one that names it, else one of its own name with its defaults
+    for (const name of BUNDLED_NAMES) {
+      const declared = bundledSource(pack, name)
+      const id = declared?.[0] ?? name
+      this.byName.set(id, this.bundledSource(id, BUNDLED_TOOLS[name], declared?.[1]))
     }
   }
 
-  private bundledSource(name: string, tools: string[], entry: BundledEntry | undefined): CatalogSource {
+  private bundledSource(name: string, tools: readonly string[], entry: BundledSource | undefined): CatalogSource {
     return {
       name,
       kind: 'bundled',
       title: entry?.title ?? name,
       titleDeclared: !!entry?.title,
+      ...(entry?.description ? { description: entry.description } : {}),
       account: { kind: 'none' },
       availability: entry?.availability ?? 'agent',
       bindings: [],
-      tools: Object.fromEntries(tools.map((t) => [t, entry?.call ? { call: entry.call } : {}])),
-      access: this.pack.tools?.access,
+      tools: Object.fromEntries(tools.map((t) => [t, entry?.tools?.[t] ?? {}])),
+      access: entry?.access,
     }
   }
 
@@ -194,7 +172,7 @@ export class ToolCatalog {
     return [...this.byName.values()]
   }
 
-  /** A source by its name; a bundled tool that no key of `tools.bundled` names is a source of its own name. */
+  /** A source by its id; a bundled tool that no source names is a source of its bundled name. */
   public source(name: string): CatalogSource | undefined {
     return this.byName.get(name)
   }
@@ -228,13 +206,13 @@ export class ToolCatalog {
   }
 
   /**
-   * Whether a tool's results are content written outside the organization (TOOL-CAT-008): an MCP server's declaration for
-   * the tool, else the source's, else untrusted unless `openWorldHint` is false; an HTTP tool or a bundled tool is trusted
-   * unless declared.
+   * Whether a tool's results are content written outside the organization (TOOL-CAT-008): the declaration for the tool,
+   * else the source's, else, for an MCP tool, untrusted unless `openWorldHint` is false; an HTTP tool is trusted unless
+   * declared, and a bundled tool always is.
    */
   public untrustedOf(source: CatalogSource, tool: string, annotations?: ToolAnnotations): boolean {
     if (source.kind === 'bundled') return false
-    const perTool = source.kind === 'mcp' ? source.tools[tool]?.untrusted : undefined
+    const perTool = source.tools[tool]?.untrusted
     if (perTool !== undefined) return perTool
     if (source.untrusted !== undefined) return source.untrusted
     if (source.kind === 'mcp') return annotations?.openWorldHint !== false
@@ -258,9 +236,17 @@ export class ToolCatalog {
     return (template?.tools ?? []).filter((t) => this.byName.get(t.source)?.availability === 'spaces')
   }
 
-  /** The step-up an action declares (TOOL-CALL-001), for the settings of a space. */
-  public stepUpOf(tool: string): 'device' | 'face-match' | 'document' | null {
-    return this.pack.actions?.[tool]?.authChallenge?.type ?? null
+  /**
+   * The step-up of a tool of a source (TOOL-CAT-010, TOOL-CALL-001): its source's `tools.<name>.stepUp`, so that a tool
+   * of the same name in another source never takes it.
+   */
+  public stepUpOf(source: CatalogSource, tool: string): StepUp | undefined {
+    return source.tools[tool]?.stepUp
+  }
+
+  /** The type of a tool's step-up, for the settings of a space (PROF-TOOL-001). */
+  public stepUpTypeOf(source: CatalogSource, tool: string): 'device' | 'face-match' | 'document' | null {
+    return this.stepUpOf(source, tool)?.authChallenge?.type ?? null
   }
 
   /** Whether some tool may ask before it runs: what the platform rules then tell the model (TOOL-CALL-010). */

@@ -7,8 +7,8 @@ import {
   presentationOutcomeForModel,
 } from '../channels/didcomm/identityRequests.js'
 import { AUTHENTICATION_ENTRY } from '../config/pack.js'
-import type { AgentPack, ToolAccess } from '../config/packTypes.js'
-import { challengeTypesOf, connectionTypeOf, featuresOf } from '../config/packTypes.js'
+import type { AgentPack, BundledName, ToolAccess } from '../config/packTypes.js'
+import { bundledEnabled, bundledSource, challengeTypesOf, connectionTypeOf, featuresOf } from '../config/packTypes.js'
 import { conversationOf } from '../core/conversationOf.js'
 import {
   EMAIL_CHECK_KIND,
@@ -60,18 +60,22 @@ export class BundledToolSource implements ToolSource {
   public async list(): Promise<ToolSpec[]> {
     const { pack } = this.deps
     const features = featuresOf(pack)
-    const bundled = pack.tools?.bundled ?? {}
-    const access = pack.tools?.access
+    // a bundled tool is on while a source names it (unless `enabled: false`), else by its default (TOOL-HTTP-002)
+    const on = (name: BundledName) => bundledEnabled(pack, name)
+    const source = (name: BundledName) => bundledSource(pack, name)?.[1]
+    // the tier model of its tools is its source's `access`; a tool that acts on the Principal's own records is allowed to
+    // every Principal while its source declares none, the others are denied (RBAC-TOOL-006)
+    const accessOf = (name: BundledName, otherwise: ToolAccess | undefined) => source(name)?.access ?? otherwise
     const specs: Omit<ToolSpec, 'source' | 'rawName'>[] = []
 
-    if (features.credentialTool && bundled.principalCredentials?.enabled !== false) {
+    if (features.credentialTool && on('principalCredentials')) {
       specs.push({
         key: 'bundled:principal_credentials',
         name: 'principal_credentials',
         description:
           'Lists what this agent verified about the person (a presented credential: which one, its issuing organization, when, whether it is still usable) with the attributes you are allowed to read. Other attributes exist and are not shown.',
         parameters: { type: 'object', properties: {} },
-        access: ALWAYS_ALLOWED,
+        access: accessOf('principalCredentials', ALWAYS_ALLOWED),
         stepLabel: 'Checking credentials',
         invoke: async (_args, ctx) => {
           // the evidence of the Principal, with the attributes the pack makes visible and no other (INTX-CRED-001)
@@ -87,7 +91,7 @@ export class BundledToolSource implements ToolSource {
     // person only (IDENT-RES-015); a catalog entry is for a peer of the subject kind of its schema.
     const onDemand = Object.entries(pack.presentations ?? {}).filter(([, e]) => e.request === 'on-demand')
     const authenticates = !!pack.identity.authentication?.length
-    if ((authenticates || onDemand.length) && bundled.requestPresentation?.enabled !== false) {
+    if ((authenticates || onDemand.length) && on('requestPresentation')) {
       const mayIdentify = (principal: Principal) =>
         authenticates && principal.connectionType === 'verifiable-user-agent' && !principal.identityCredentialRef
       const offered = (principal: Principal) =>
@@ -115,7 +119,7 @@ export class BundledToolSource implements ToolSource {
             },
           },
         },
-        access: ALWAYS_ALLOWED,
+        access: accessOf('requestPresentation', ALWAYS_ALLOWED),
         when: (principal) => mayIdentify(principal) || offered(principal).length > 0,
         stepLabel: 'Waiting for your wallet',
         invoke: async (args, ctx) => {
@@ -135,14 +139,14 @@ export class BundledToolSource implements ToolSource {
 
     // what the peer may receive and what is missing: read-only, no gate, never a value (INTX-ISSUE-005/006)
     const profiles = Object.entries(pack.issuance ?? {})
-    if (profiles.length && bundled.credentialIssuance?.enabled !== false) {
+    if (profiles.length && on('credentialIssuance')) {
       specs.push({
         key: 'bundled:credential_requirements',
         name: 'credential_requirements',
         description:
           'Tells which credentials this agent can issue to the person, and for each whether it is held, ready or incomplete. For an incomplete one, each claim has a status and, when something can be done, an action: do what it says (for example request_presentation with the entry it names), then look again. A credential is ready when the only thing missing is what its own issuance obtains: an action issue_credential means that issuing it starts with the person reading their passport or identity card on their phone. You never see or supply a value: the agent fills the credential itself.',
         parameters: { type: 'object', properties: {}, additionalProperties: false },
-        access: ALWAYS_ALLOWED,
+        access: accessOf('credentialIssuance', ALWAYS_ALLOWED),
         when: (principal) => offeredProfiles(pack, principal).length > 0,
         stepLabel: 'Checking what can be issued',
         invoke: async (_args, ctx) => {
@@ -168,7 +172,7 @@ export class BundledToolSource implements ToolSource {
             additionalProperties: false,
             properties: { credential: { type: 'string', enum: byModel.map(([name]) => name) } },
           },
-          access: ALWAYS_ALLOWED,
+          access: accessOf('credentialIssuance', ALWAYS_ALLOWED),
           when: (principal) => offeredProfiles(pack, principal).some(([, p]) => (p.trigger ?? 'model') === 'model'),
           stepLabel: 'Issuing your credential',
           invoke: async (args, ctx) => {
@@ -231,7 +235,7 @@ export class BundledToolSource implements ToolSource {
       })
     }
 
-    if (features.preferences && bundled.principalPreferences?.enabled !== false) {
+    if (features.preferences && on('principalPreferences')) {
       specs.push({
         key: 'bundled:principal_preferences',
         name: 'principal_preferences',
@@ -246,7 +250,7 @@ export class BundledToolSource implements ToolSource {
           },
           required: ['action'],
         },
-        access: ALWAYS_ALLOWED,
+        access: accessOf('principalPreferences', ALWAYS_ALLOWED),
         stepLabel: 'Updating preferences',
         invoke: async (args, ctx) => {
           if (args.action === 'set') {
@@ -275,7 +279,7 @@ export class BundledToolSource implements ToolSource {
       })
     }
 
-    if (features.workingMemory && bundled.workingMemory?.enabled !== false) {
+    if (features.workingMemory && on('workingMemory')) {
       specs.push({
         key: 'bundled:working_memory',
         name: 'working_memory',
@@ -290,7 +294,7 @@ export class BundledToolSource implements ToolSource {
           },
           required: ['action'],
         },
-        access: ALWAYS_ALLOWED,
+        access: accessOf('workingMemory', ALWAYS_ALLOWED),
         stepLabel: 'Updating notes',
         invoke: async (args, ctx) => {
           const content = typeof args.content === 'string' ? args.content.trim() : ''
@@ -374,8 +378,8 @@ export class BundledToolSource implements ToolSource {
       })
     }
 
-    if (bundled.statistics?.enabled) {
-      const statClass = bundled.statistics.defaultStatClass ?? 'conversation'
+    if (on('statistics')) {
+      const statClass = source('statistics')?.defaultStatClass ?? 'conversation'
       specs.push({
         key: 'bundled:statistics',
         name: 'statistics',
@@ -389,7 +393,7 @@ export class BundledToolSource implements ToolSource {
             granularity: { type: 'string', enum: ['hour', 'day', 'month'] },
           },
         },
-        access,
+        access: accessOf('statistics', undefined),
         stepLabel: 'Reading statistics',
         invoke: async (args) => {
           const to = typeof args.to === 'string' ? args.to : nowIso()
@@ -406,14 +410,14 @@ export class BundledToolSource implements ToolSource {
       })
     }
 
-    if (features.imageGeneration && bundled.generateImage?.enabled) {
-      const provider = bundled.generateImage.provider
+    if (features.imageGeneration && on('generateImage')) {
+      const provider = source('generateImage')?.provider
       specs.push({
         key: 'bundled:generate_image',
         name: 'generate_image',
         description: 'Generates an image from a prompt in the background; the image arrives as a separate message.',
         parameters: { type: 'object', properties: { prompt: { type: 'string' } }, required: ['prompt'] },
-        access,
+        access: accessOf('generateImage', undefined),
         stepLabel: 'Starting image generation',
         invoke: async (args, ctx) => {
           const prompt = typeof args.prompt === 'string' ? args.prompt : ''
@@ -425,7 +429,7 @@ export class BundledToolSource implements ToolSource {
         },
       })
     }
-    // each is a source of the catalog: the key of `tools.bundled` that enables it, else its own name (TOOL-CAT-001)
-    return specs.map((spec) => ({ ...spec, source: bundledSourceOf(spec.name), rawName: spec.name }))
+    // each is a source of the catalog: the source that names its bundled tool, else its own name (TOOL-CAT-001)
+    return specs.map((spec) => ({ ...spec, source: bundledSourceOf(pack, spec.name), rawName: spec.name }))
   }
 }

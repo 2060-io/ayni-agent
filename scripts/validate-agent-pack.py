@@ -43,18 +43,19 @@ def cross_field(doc):
             used |= set(a["approvers"])
             for ap in a["approvers"]:
                 assert ident.get("roles", {}).get(ap, {}).get("canApprove"), f"rule 3: approver role {ap} lacks canApprove"
-    access(doc.get("tools", {}).get("access", {}))
-    for s in doc.get("mcp", {}).get("servers", []): access(s.get("toolAccess", {}))
+    sources = doc.get("tools", {}).get("sources", {})  # one map of tool sources (ayni-spec D101)
+    for s in sources.values(): access(s.get("access", {}))
     for p in doc.get("purposes", []): used |= set(p.get("permittedRoles", []))
     for m in doc["persona"].get("menu", []): used |= set(m.get("roles", []))
     assert used <= roles, f"rule 2: undeclared roles {sorted(used - roles)}"
     pids = {p["id"] for p in doc.get("purposes", [])}
-    for s in doc.get("mcp", {}).get("servers", []):
-        for e in s.get("toolAccess", {}).get("elevation", []):
+    for s in sources.values():
+        for e in s.get("access", {}).get("elevation", []):
             assert set(e["purposes"]) <= pids, f"rule 4: unknown purposes {set(e['purposes']) - pids}"
-    for name, a in doc.get("actions", {}).items():
-        if a.get("authChallenge", {}).get("type") == "face-match":
-            assert "faceVerification" in doc.get("media", {}), f"rule 6: {name} needs media.faceVerification"
+    for sid, s in sources.items():
+        for name, t in s.get("tools", {}).items():
+            if t.get("stepUp", {}).get("authChallenge", {}).get("type") == "face-match":
+                assert "faceVerification" in doc.get("media", {}), f"rule 6: {sid}.{name} needs media.faceVerification"
     f = doc.get("features", {})
     assert not f.get("rag") or "rag" in doc, "rule 7: features.rag needs rag"
     assert not f.get("voiceNotes") or "speechToText" in doc.get("media", {}), "rule 7: voiceNotes needs media.speechToText"

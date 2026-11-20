@@ -68,7 +68,7 @@ export interface ToolResult {
 export interface ToolSpec {
   /** stable key: `http:name`, `bundled:name`, `mcp:<server>:name` */
   key: string
-  /** the source of the catalog the tool belongs to (TOOL-CAT-001): the server, the HTTP tool, the bundled key */
+  /** the source of the catalog the tool belongs to (TOOL-CAT-001): its id, the key of `tools.sources` (D101) */
   source: string
   /** the tool's own name at its source */
   rawName: string
@@ -78,7 +78,7 @@ export interface ToolSpec {
   name: string
   description: string
   parameters: Record<string, unknown>
-  /** the access policy that governs this tool (tools.access or the MCP server's toolAccess) */
+  /** the tier model that governs this tool: the `access` of its source (D101) */
   access: ToolAccess | undefined
   serverName?: string
   /** when given, the tool exists only for the Principals it accepts: absent from the model's list for the others */

@@ -8,7 +8,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
-import type { McpServerDef } from '../config/packTypes.js'
+import type { McpSource } from '../config/packTypes.js'
 import type { Logger } from '../util/logger.js'
 import type { ToolAnnotations } from './catalog.js'
 import type { CallAccountSecret, ToolContext, ToolResult, ToolSource, ToolSpec } from './types.js'
@@ -42,12 +42,17 @@ export class McpServerSource implements ToolSource {
   /** an offered name the server does not list is warned of once (TOOL-CAT-003) */
   private warnedMissing = false
 
+  /** the server's name: its source's id in `tools.sources` (D101) */
+  private readonly name: string
+
   public constructor(
-    private readonly def: McpServerDef,
+    name: string,
+    private readonly def: McpSource,
     private readonly logger: Logger,
     private readonly idleSeconds = DEFAULT_IDLE_SECONDS
   ) {
-    this.id = `mcp:${def.name}`
+    this.name = name
+    this.id = `mcp:${name}`
   }
 
   private get spaceAccount(): boolean {
@@ -67,11 +72,11 @@ export class McpServerSource implements ToolSource {
       const transport = this.createTransport()
       await client.connect(transport)
       client.onclose = () => {
-        this.logger.warn({ server: this.def.name }, 'mcp server connection closed')
+        this.logger.warn({ server: this.name }, 'mcp server connection closed')
         this.client = undefined
       }
       this.client = client
-      this.logger.info({ server: this.def.name, transport: this.def.transport }, 'mcp server connected')
+      this.logger.info({ server: this.name, transport: this.def.transport }, 'mcp server connected')
       return client
     })()
     try {
@@ -110,7 +115,7 @@ export class McpServerSource implements ToolSource {
       this.accounts.set(spaceId, connection)
       this.touch(spaceId, connection)
       // the space is named, never its token (TOOL-ACCESS-005)
-      this.logger.info({ server: this.def.name, spaceId }, 'mcp server connected with a space account')
+      this.logger.info({ server: this.name, spaceId }, 'mcp server connected with a space account')
       return connection
     })()
     this.opening.set(spaceId, opening)
@@ -124,7 +129,7 @@ export class McpServerSource implements ToolSource {
   private touch(spaceId: string, connection: AccountConnection): void {
     if (connection.timer) clearTimeout(connection.timer)
     connection.timer = setTimeout(() => {
-      this.logger.info({ server: this.def.name, spaceId }, 'mcp connection of a space account closed: idle')
+      this.logger.info({ server: this.name, spaceId }, 'mcp connection of a space account closed: idle')
       void this.closeAccount(spaceId)
     }, this.idleSeconds * 1000)
     connection.timer.unref?.()
@@ -141,14 +146,14 @@ export class McpServerSource implements ToolSource {
   private createTransport(extraHeaders: Record<string, string> = {}) {
     const { transport, url, command, args, env, headers } = this.def
     if (transport === 'stdio') {
-      if (!command) throw new Error(`mcp server ${this.def.name}: stdio transport needs a command`)
+      if (!command) throw new Error(`mcp server ${this.name}: stdio transport needs a command`)
       return new StdioClientTransport({
         command,
         args,
         env: { ...(process.env as Record<string, string>), ...(env ?? {}) },
       })
     }
-    if (!url) throw new Error(`mcp server ${this.def.name}: ${transport} transport needs a url`)
+    if (!url) throw new Error(`mcp server ${this.name}: ${transport} transport needs a url`)
     const all = { ...(headers ?? {}), ...extraHeaders }
     const requestInit = Object.keys(all).length ? { headers: all } : undefined
     if (transport === 'sse') return new SSEClientTransport(new URL(url), { requestInit })
@@ -163,7 +168,7 @@ export class McpServerSource implements ToolSource {
       if (missing.length) {
         this.warnedMissing = true
         this.logger.warn(
-          { server: this.def.name, missing },
+          { server: this.name, missing },
           'mcp server does not list tools its offer names: they are not given to the model (TOOL-CAT-003)'
         )
       }
@@ -171,14 +176,15 @@ export class McpServerSource implements ToolSource {
     return tools
       .filter((t) => !offer || offer.includes(t.name))
       .map((t) => ({
-        key: `mcp:${this.def.name}:${t.name}`,
+        key: `mcp:${this.name}:${t.name}`,
         name: t.name,
-        source: this.def.name,
+        source: this.name,
         rawName: t.name,
         description: t.description ?? this.def.tools?.[t.name]?.title ?? t.name,
         parameters: (t.inputSchema as Record<string, unknown>) ?? { type: 'object' },
-        access: this.def.toolAccess,
-        serverName: this.def.name,
+        // the tier model of its source (D101)
+        access: this.def.access,
+        serverName: this.name,
         ...(t.annotations || t.title
           ? {
               annotations: {
@@ -225,7 +231,7 @@ export class McpServerSource implements ToolSource {
       this.cachedTools = this.specsOf(tools as ListedTool[])
       return this.cachedTools
     } catch (error) {
-      this.logger.error({ server: this.def.name, err: error }, 'mcp server discovery failed')
+      this.logger.error({ server: this.name, err: error }, 'mcp server discovery failed')
       return []
     }
   }
@@ -239,7 +245,7 @@ export class McpServerSource implements ToolSource {
     } catch (error) {
       // the error may echo the request: the space is named, nothing of the account (TOOL-ACCESS-005)
       this.logger.error(
-        { server: this.def.name, spaceId: account.spaceId, err: scrub(error, account.token) },
+        { server: this.name, spaceId: account.spaceId, err: scrub(error, account.token) },
         'mcp server discovery failed'
       )
     }
@@ -258,10 +264,11 @@ export function scrub(error: unknown, token: string | undefined): string {
   return token ? message.split(token).join('[account]') : message
 }
 
+/** The MCP servers of `tools.sources`, each with its source's id (D101). */
 export function createMcpSources(
-  defs: McpServerDef[],
+  defs: [string, McpSource][],
   logger: Logger,
   idleSeconds = DEFAULT_IDLE_SECONDS
 ): McpServerSource[] {
-  return defs.map((d) => new McpServerSource(d, logger, idleSeconds))
+  return defs.map(([name, def]) => new McpServerSource(name, def, logger, idleSeconds))
 }

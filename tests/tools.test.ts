@@ -1295,8 +1295,10 @@ describe('the life of the tools of a space (TOOL-SPACE-007/011, TOOL-CALL-001)',
   })
 
   it('asks the card, then the step-up on the phone, then runs; a refused card asks nothing of the phone (TOOL-CALL-001)', async () => {
-    const actions = running.agent.pack.actions as Record<string, unknown>
-    actions['create-note'] = { authChallenge: { type: 'device', onChannelUnavailable: 'fail' } }
+    // the step-up of create-note of the CRM, in its own source (TOOL-CAT-010)
+    const note = running.agent.pack.tools?.sources?.relaticle?.tools?.['create-note']
+    if (!note) throw new Error('create-note is not declared')
+    note.stepUp = { authChallenge: { type: 'device', onChannelUnavailable: 'fail' } }
     const fresh = await open(ana, { spaceId: salesEu.id })
     const id = await conversationOf(fresh.sessionId)
     const confirms = ph.callsOf('sendConfirmRequest').length
@@ -1320,7 +1322,7 @@ describe('the life of the tools of a space (TOOL-SPACE-007/011, TOOL-CALL-001)',
     expect(crm.calls.at(-1)).toMatchObject({ name: 'create-note', args: { note: 'stepped up' } })
     const [record] = await running.agent.store.toolCalls.list({ conversationId: id, limit: 1 })
     expect(record).toMatchObject({ outcome: 'completed', stepUp: { type: 'device', outcome: 'completed' } })
-    actions['create-note'] = undefined
+    note.stepUp = undefined
   })
 })
 

@@ -332,7 +332,8 @@ export class ToolGate {
     approvalId?: string
   ): Promise<string> {
     const { principals, challenges, memory } = this.deps
-    const policy = this.deps.pack.actions?.[tool.spec.rawName]
+    // the step-up of this tool of this source, never of a tool of the same name elsewhere (TOOL-CAT-010)
+    const policy = this.deps.catalog.stepUpOf(tool.source, tool.spec.rawName)
     // 3. the credential's liveness (IDENT-LIVE-011, INTX-CRED-002)
     if (policy?.maxCredentialAge !== undefined) {
       const verdict = await principals.ensureLive(ctx.principal, policy.maxCredentialAge)

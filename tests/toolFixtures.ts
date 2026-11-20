@@ -208,10 +208,15 @@ export function toolsPack(options: ToolsPackOptions): string {
     sales: { description: 'Sales team.' },
     comms: { description: 'Communication team.' },
   }
-  pack.mcp = {
-    servers: [
-      {
-        name: 'websearch',
+  // the catalog of architecture §10.4, one map keyed by the source's id (D101), with the dev pack's bundled tools
+  const bundled = Object.fromEntries(
+    Object.entries(pack.tools.sources as Doc).filter(([, source]) => (source as Doc).type === 'bundled')
+  )
+  pack.tools = {
+    sources: {
+      ...bundled,
+      websearch: {
+        type: 'mcp',
         title: 'Web search',
         transport: 'streamable-http',
         url: options.searchUrl,
@@ -221,10 +226,10 @@ export function toolsPack(options: ToolsPackOptions): string {
         availability: 'agent',
         offer: ['search'],
         untrusted: true,
-        toolAccess: { roles: { employee: ['*'], guest: ['*'], sales: ['*'], comms: ['*'] } },
+        access: { roles: { employee: ['*'], guest: ['*'], sales: ['*'], comms: ['*'] } },
       },
-      {
-        name: 'relaticle',
+      relaticle: {
+        type: 'mcp',
         title: 'Relaticle CRM',
         description: "The sales team's accounts, contacts and notes",
         transport: 'streamable-http',
@@ -241,21 +246,16 @@ export function toolsPack(options: ToolsPackOptions): string {
           { name: 'workspace', label: 'Workspace', argument: 'workspace_id', pattern: '^[a-z0-9-]{1,64}$' },
           { name: 'region', label: 'Region', value: 'eu' },
         ],
+        access: { roles: { sales: ['*'] } },
         tools: {
           'list-companies': { effect: 'read', untrusted: false },
           'get-company': { effect: 'read', untrusted: false },
           'create-note': { title: 'Add a note', effect: 'write', untrusted: false },
           'echo-auth': { effect: 'read', untrusted: false },
         },
-        toolAccess: { roles: { sales: ['*'] } },
       },
-    ],
-  }
-  pack.tools = {
-    ...pack.tools,
-    http: [
-      {
-        name: 'post_to_x',
+      post_to_x: {
+        type: 'http',
         title: 'Post on X',
         description: 'Posts a message on the X account of the space',
         method: 'POST',
@@ -269,46 +269,39 @@ export function toolsPack(options: ToolsPackOptions): string {
         },
         availability: 'spaces',
         bindings: [{ name: 'handle', label: 'X account' }],
-        effect: 'external',
+        access: { roles: { comms: ['post_to_x'], operator: ['*'] } },
+        tools: { post_to_x: { effect: 'external' } },
       },
-      {
-        name: 'crm_status',
+      crm_status: {
+        type: 'http',
         title: 'CRM status',
         description: 'The status of the CRM.',
         method: 'GET',
         url: `${options.xUrl}/status`,
         parameters: { type: 'object', properties: {} },
         availability: 'spaces',
+        access: { roles: { sales: ['crm_status'], operator: ['*'] } },
       },
-      {
-        name: 'lookup',
+      lookup: {
+        type: 'http',
         title: 'Lookup',
         description: 'Looks a word up.',
         method: 'GET',
         url: `${options.xUrl}/lookup?q={q}`,
         parameters: { type: 'object', properties: { q: { type: 'string' } } },
+        access: { roles: { employee: ['lookup'], guest: ['lookup'], comms: ['lookup'], operator: ['*'] } },
       },
-      {
-        name: 'purge',
+      purge: {
+        type: 'http',
         title: 'Purge',
         description: 'Purges the cache.',
         method: 'DELETE',
         url: `${options.xUrl}/purge`,
         parameters: { type: 'object', properties: {} },
-      },
-    ],
-    access: {
-      default: 'none',
-      roles: {
-        employee: ['lookup', 'purge'],
-        guest: ['lookup', 'purge'],
-        sales: ['crm_status'],
-        comms: ['post_to_x', 'lookup'],
-        operator: ['*'],
+        access: { roles: { employee: ['purge'], guest: ['purge'], operator: ['*'] } },
       },
     },
   }
-  pack.actions = {}
   pack.approvals = { ...pack.approvals, approvers: ['manager'], confirmation: { timeoutSeconds: 300 } }
   pack.spaces.templates = [
     ...pack.spaces.templates.filter((t: { id: string }) => t.id === 'project'),

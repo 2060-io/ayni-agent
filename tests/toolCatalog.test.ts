@@ -61,64 +61,60 @@ describe('the catalog in the agent-pack (CORE-PACK-001, TOOL-CAT-001/002)', () =
     expect(catalog.templateTools('comms')).toEqual([{ source: 'post_to_x', add: 'owner', guests: false }])
   })
 
-  it('refuses an unknown value and a shared name, naming the source and the field', () => {
-    const everywhere = refusal(doc((p) => (p.mcp.servers[0].availability = 'everywhere')))
-    expect(everywhere).toContain('mcp.servers.websearch.availability')
+  it('refuses an unknown value, naming the source and the field', () => {
+    const everywhere = refusal(doc((p) => (p.tools.sources.websearch.availability = 'everywhere')))
+    expect(everywhere).toContain('tools.sources.websearch.availability')
     expect(everywhere).toContain('everywhere')
-    const twin = refusal(doc((p) => (p.tools.http[1].name = 'relaticle')))
-    expect(twin).toContain('tools.http.relaticle.name')
-    expect(twin).toContain('mcp.servers.relaticle')
-    expect(refusal(doc((p) => (p.mcp.servers[1].tools['create-note'].effect = 'erase')))).toContain(
-      'mcp.servers.relaticle.tools.create-note.effect'
+    expect(refusal(doc((p) => (p.tools.sources.relaticle.tools['create-note'].effect = 'erase')))).toContain(
+      'tools.sources.relaticle.tools.create-note.effect'
     )
+    expect(refusal(doc((p) => (p.tools.sources.lookup.type = 'ftp')))).toContain('tools.sources.lookup.type')
   })
 
   it('refuses the kinds of account of the later phases, saying they are not in this version', () => {
-    const personal = refusal(doc((p) => (p.mcp.servers[0].account = { kind: 'personal' })))
-    expect(personal).toContain('mcp.servers.websearch.account.kind: personal is not available in this version')
+    const personal = refusal(doc((p) => (p.tools.sources.websearch.account = { kind: 'personal' })))
+    expect(personal).toContain('tools.sources.websearch.account.kind: personal is not available in this version')
     expect(personal).toContain('phase 2')
-    const organization = refusal(
-      doc((p) => (p.tools.http.find((t: { name: string }) => t.name === 'lookup').account = { kind: 'organization' }))
-    )
-    expect(organization).toContain('tools.http.lookup.account.kind: organization is not available in this version')
+    const organization = refusal(doc((p) => (p.tools.sources.lookup.account = { kind: 'organization' })))
+    expect(organization).toContain('tools.sources.lookup.account.kind: organization is not available in this version')
     expect(organization).toContain('phase 3')
   })
 
   it('refuses an account on a bundled tool, and a space account without what it needs', () => {
-    expect(
-      refusal(doc((p) => (p.tools.bundled.workingMemory = { enabled: true, account: { kind: 'agent' } })))
-    ).toContain("tools.bundled.workingMemory.account: a bundled tool's account is none")
-    expect(refusal(doc((p) => (p.mcp.servers[1].account.apply = undefined)))).toContain(
-      'mcp.servers.relaticle.account.apply'
+    expect(refusal(doc((p) => (p.tools.sources.workingMemory.account = { kind: 'agent' })))).toContain(
+      "tools.sources.workingMemory.account: a bundled tool's account is none"
     )
-    expect(refusal(doc((p) => (p.mcp.servers[1].account.label = undefined)))).toContain(
-      'mcp.servers.relaticle.account.label'
+    expect(refusal(doc((p) => (p.tools.sources.relaticle.account.apply = undefined)))).toContain(
+      'tools.sources.relaticle.account.apply'
+    )
+    expect(refusal(doc((p) => (p.tools.sources.relaticle.account.label = undefined)))).toContain(
+      'tools.sources.relaticle.account.label'
     )
   })
 
   it('refuses a space account outside the spaces and on a stdio server (TOOL-AVAIL-003)', () => {
     const agentWide = refusal(
       doc((p) => {
-        p.tools.http[0].availability = 'agent'
+        p.tools.sources.post_to_x.availability = 'agent'
         p.spaces.templates.find((t: { id: string }) => t.id === 'comms').tools = []
       })
     )
-    expect(agentWide).toContain('tools.http.post_to_x.availability')
+    expect(agentWide).toContain('tools.sources.post_to_x.availability')
     const stdio = refusal(
       doc((p) => {
-        Object.assign(p.mcp.servers[1], { transport: 'stdio', command: 'crm-mcp' })
-        p.mcp.servers[1].url = undefined
+        Object.assign(p.tools.sources.relaticle, { transport: 'stdio', command: 'crm-mcp' })
+        p.tools.sources.relaticle.url = undefined
       })
     )
-    expect(stdio).toContain('mcp.servers.relaticle.transport')
+    expect(stdio).toContain('tools.sources.relaticle.transport')
   })
 
   it('refuses a binding of a source of the whole agent without a value (TOOL-CAT-005)', () => {
-    const unvalued = refusal(doc((p) => (p.mcp.servers[0].bindings = [{ name: 'region', label: 'Region' }])))
-    expect(unvalued).toContain('mcp.servers.websearch.bindings.region.value')
+    const unvalued = refusal(doc((p) => (p.tools.sources.websearch.bindings = [{ name: 'region', label: 'Region' }])))
+    expect(unvalued).toContain('tools.sources.websearch.bindings.region.value')
     expect(() =>
       validatePackDocument(
-        doc((p) => (p.mcp.servers[0].bindings = [{ name: 'region', label: 'Region', value: 'eu' }])),
+        doc((p) => (p.tools.sources.websearch.bindings = [{ name: 'region', label: 'Region', value: 'eu' }])),
         env
       )
     ).not.toThrow()
@@ -134,17 +130,15 @@ describe('the catalog in the agent-pack (CORE-PACK-001, TOOL-CAT-001/002)', () =
       env
     )
     expect(catalogWarnings(unnamed).join('\n')).toContain(
-      'tools.http.post_to_x: a source of availability spaces that no template'
+      'tools.sources.post_to_x: a source of availability spaces that no template'
     )
   })
 
   it('refuses an approval entry that names a tool of the spaces, and warns of a rule of approval nobody approves (TOOL-CAT-009)', () => {
     const entry = refusal(
-      doc((p) => (p.mcp.servers[1].toolAccess.approval = [{ tools: ['delete-note'], approvers: ['manager'] }]))
+      doc((p) => (p.tools.sources.relaticle.access.approval = [{ tools: ['delete-note'], approvers: ['manager'] }]))
     )
-    expect(entry).toContain(
-      'mcp.servers.relaticle.toolAccess.approval names [delete-note], tools of availability spaces'
-    )
+    expect(entry).toContain('tools.sources.relaticle.access.approval names [delete-note], tools of availability spaces')
     const noApprover = validatePackDocument(
       doc((p) => {
         p.approvals.approvers = undefined
@@ -152,7 +146,7 @@ describe('the catalog in the agent-pack (CORE-PACK-001, TOOL-CAT-001/002)', () =
       env
     )
     // the DELETE tool of the whole agent has the rule approval, from its method
-    expect(catalogWarnings(noApprover).join('\n')).toContain('tools.http.purge: the rule of purge is approval')
+    expect(catalogWarnings(noApprover).join('\n')).toContain('tools.sources.purge: the rule of purge is approval')
     expect(catalogWarnings(validatePackDocument(doc(), env)).join('\n')).not.toContain('no-approver')
   })
 
@@ -190,9 +184,9 @@ describe('effect, rule and trust (TOOL-CAT-006/007/008)', () => {
     const declared = new ToolCatalog(
       validatePackDocument(
         doc((p) => {
-          p.mcp.servers[1].tools['delete-note'] = { call: 'confirm' }
-          p.mcp.servers[0].toolAccess.approval = [{ tools: ['search'], approvers: ['manager'] }]
-          p.tools.bundled.workingMemory = { enabled: true, call: 'confirm' }
+          p.tools.sources.relaticle.tools['delete-note'] = { call: 'confirm' }
+          p.tools.sources.websearch.access.approval = [{ tools: ['search'], approvers: ['manager'] }]
+          p.tools.sources.workingMemory.tools = { working_memory: { call: 'confirm' } }
         }),
         env
       )
@@ -234,9 +228,9 @@ describe('effect, rule and trust (TOOL-CAT-006/007/008)', () => {
     const quiet = new ToolCatalog(
       validatePackDocument(
         doc((p) => {
-          p.mcp.servers = []
-          p.tools.http = p.tools.http.filter((t: { name: string }) => t.name === 'lookup')
-          p.tools.access.roles = { employee: ['lookup'] }
+          for (const id of ['websearch', 'relaticle', 'post_to_x', 'crm_status', 'purge'])
+            p.tools.sources[id] = undefined
+          p.tools.sources.lookup.access.roles = { employee: ['lookup'] }
           p.spaces.templates = p.spaces.templates.filter((t: { id: string }) => t.id === 'project')
         }),
         env
@@ -281,7 +275,8 @@ describe('the MCP client: the offer, one connection per space account (TOOL-CAT-
   it('gives the offered tools only, warns once of an offered name the server does not list', async () => {
     const { logger, warnings } = capture()
     const source = new McpServerSource(
-      { name: 'crm', transport: 'streamable-http', url: crm.url, offer: ['get-company', 'create-note', 'ghost'] },
+      'crm',
+      { type: 'mcp', transport: 'streamable-http', url: crm.url, offer: ['get-company', 'create-note', 'ghost'] },
       logger
     )
     const names = (await source.list()).map((s) => s.rawName)
@@ -296,8 +291,9 @@ describe('the MCP client: the offer, one connection per space account (TOOL-CAT-
   it('opens one connection per space account, sends each its own token, and closes them once idle', async () => {
     const { logger } = capture()
     const source = new McpServerSource(
+      'crm',
       {
-        name: 'crm',
+        type: 'mcp',
         transport: 'streamable-http',
         url: crm.url,
         account: { kind: 'space', label: 'API token', apply: { header: 'Authorization', prefix: 'Bearer ' } },

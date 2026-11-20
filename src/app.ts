@@ -29,6 +29,7 @@ import {
   challengeTypesOf,
   directoryReadsDocuments,
   featuresOf,
+  sourcesOfType,
 } from './config/packTypes.js'
 import { AyniAgent } from './core/agent.js'
 import { ChallengeService } from './core/challenges.js'
@@ -313,7 +314,7 @@ export async function buildAgent(
   const rag = features.rag && pack.rag ? new RagService(pack, packDir, store, embeddings, memory, logger) : undefined
 
   const registry = new ToolRegistry(logger)
-  registry.add(new HttpToolSource(pack.tools?.http ?? [], pack.tools?.access))
+  registry.add(new HttpToolSource(sourcesOfType(pack, 'http')))
   let orchestratorRef: Orchestrator | undefined
   let identityRequestsRef: IdentityRequests | undefined
   let issuanceRef: IssuanceService | undefined
@@ -336,7 +337,7 @@ export async function buildAgent(
     })
   )
   for (const source of createMcpSources(
-    pack.mcp?.servers ?? [],
+    sourcesOfType(pack, 'mcp'),
     logger,
     env.toolConnectionIdleSeconds ?? DEFAULT_IDLE_SECONDS
   ))

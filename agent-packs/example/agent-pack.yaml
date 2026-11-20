@@ -200,53 +200,60 @@ issuance:
 # evidence:
 #   email: { store: { attributes: [address], retention: { days: 30, onExpiry: erase } } }
 
+# the tool catalog (ayni-spec D101): one entry per source, keyed by its id, with everything said of it in one place
 tools:
-  http:
-    - name: track_shipment
+  sources:
+    track_shipment:                                  # an HTTP tool: one tool, named by its source's id
+      type: http
       description: Current status and ETA of a shipment by tracking number.
       method: GET
       url: https://api.northwind.example/shipments/{trackingNumber}
-      headers: { Authorization: "Bearer ${SHIPMENTS_API_TOKEN}" }
+      headers: { Authorization: "Bearer ${SHIPMENTS_API_TOKEN}" }   # the agent's account, from a Secret (TOOL-ACCESS-002)
       parameters:
         type: object
         required: [trackingNumber]
         properties:
           trackingNumber: { type: string, description: "Northwind tracking number" }
-  bundled:
-    statistics: { enabled: false }
-    principalCredentials: { enabled: true }
-    principalPreferences: { enabled: true }
-    workingMemory: { enabled: true }
-  access:
-    default: none
-    roles:
-      employee: [track_shipment]
-      partner: [track_shipment]
-      operator: ["*"]
+      access:
+        roles:
+          employee: [track_shipment]
+          partner: [track_shipment]
+          operator: ["*"]
 
-mcp:
-  servers:
-    - name: crm
+    crm:
+      type: mcp
       transport: streamable-http
       url: ${CRM_MCP_URL}
-      headers: { Authorization: "Bearer ${CRM_MCP_TOKEN}" }   # deployment-held, shared (TOOL-ACCESS-001)
+      headers: { Authorization: "Bearer ${CRM_MCP_TOKEN}" }   # the agent's account, deployment-held (TOOL-ACCESS-002)
       lazy: true
-      toolAccess:
-        default: none
+      access:
         roles:
           employee: [search_customer, search_invoices]
           finance:  [search_customer, search_invoices, read_invoice, issue_refund]
           operator: [search_customer, search_invoices, read_invoice]
-        approval:                                # APPROVAL tier: in-role, high stakes
+        approval:                                    # APPROVAL tier: in-role, high stakes
           - tools: [issue_refund]
             approvers: [finance-manager]
             timeoutMinutes: 60
             policy: { type: count, value: 1 }
-        elevation:                               # REQUESTABLE tier: out-of-role, declared purpose
+        elevation:                                   # REQUESTABLE tier: out-of-role, declared purpose
           - tools: [read_customer_record]
             purposes: [fraud-audit, legal-review]
             approvers: [security-officer]
             grantTtlMinutes: 480
+      tools:                                         # the step-up of a tool of this server, and of no other (TOOL-CAT-010)
+        issue_refund:
+          stepUp:
+            authChallenge: { type: face-match, onChannelUnavailable: fail, referenceImage: badge-photo }
+            maxCredentialAge: 0
+        read_customer_record:
+          stepUp:
+            authChallenge: { type: device, onChannelUnavailable: fail }
+
+    # the bundled tools that act on the person's own records (on by default; declared here to be explicit)
+    principalCredentials: { type: bundled, bundled: principalCredentials }
+    principalPreferences: { type: bundled, bundled: principalPreferences }
+    workingMemory: { type: bundled, bundled: workingMemory }
 
 purposes:
   - id: fraud-audit
@@ -260,13 +267,6 @@ approvals:
   policy: { type: count, value: 1 }
   selfApproval: true
   grantTtlMinutes: 480
-
-actions:
-  issue_refund:
-    authChallenge: { type: face-match, onChannelUnavailable: fail, referenceImage: badge-photo }
-    maxCredentialAge: 0
-  read_customer_record:
-    authChallenge: { type: device, onChannelUnavailable: fail }
 
 sessions:
   idleTimeoutSeconds: ${SESSION_IDLE_TIMEOUT_SECONDS:-1800}

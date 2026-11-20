@@ -72,9 +72,11 @@ rag:
       path: ./knowledge
       visibility: public
 
+# the tool catalog (ayni-spec D101): one entry per source, keyed by its id; an HTTP tool is one tool, named by its id
 tools:
-  http:
-    - name: echo
+  sources:
+    echo:
+      type: http
       description: Echoes the given text through a public HTTP echo service.
       method: POST
       url: https://httpbin.org/post
@@ -83,7 +85,13 @@ tools:
         required: [text]
         properties:
           text: { type: string }
-    - name: wire_money
+      access:
+        roles:
+          employee: [echo]
+          guest: [echo]
+          operator: ["*"]
+    wire_money:
+      type: http
       description: Transfers money (development stand-in for a sensitive action).
       method: POST
       url: https://httpbin.org/post
@@ -91,25 +99,27 @@ tools:
         type: object
         properties:
           amount: { type: number }
-  bundled:
-    principalCredentials: { enabled: true }
-    principalPreferences: { enabled: true }
-    workingMemory: { enabled: true }
-  access:
-    default: none
-    roles:
-      employee: [echo, wire_money]
-      guest: [echo]
-      operator: ["*"]
-    approval:
-      - tools: [wire_money]
-        approvers: [manager]
-        timeoutMinutes: 30
-    elevation:
-      - tools: [wire_money]
-        purposes: [support-case]
-        approvers: [manager]
-        grantTtlMinutes: 60
+      access:
+        roles:
+          employee: [wire_money]
+          operator: ["*"]
+        approval:
+          - tools: [wire_money]
+            approvers: [manager]
+            timeoutMinutes: 30
+        elevation:
+          - tools: [wire_money]
+            purposes: [support-case]
+            approvers: [manager]
+            grantTtlMinutes: 60
+      tools:
+        wire_money:
+          stepUp:
+            authChallenge: { type: device, onChannelUnavailable: "${DEV_CHALLENGE_FALLBACK:-degrade}" }
+            maxCredentialAge: 0
+    principalCredentials: { type: bundled, bundled: principalCredentials }
+    principalPreferences: { type: bundled, bundled: principalPreferences }
+    workingMemory: { type: bundled, bundled: workingMemory }
 
 purposes:
   - id: support-case
@@ -119,11 +129,6 @@ approvals:
   timeoutMinutes: 30
   policy: { type: count, value: 1 }
   selfApproval: true
-
-actions:
-  wire_money:
-    authChallenge: { type: device, onChannelUnavailable: "${DEV_CHALLENGE_FALLBACK:-degrade}" }
-    maxCredentialAge: 0
 
 sessions:
   idleTimeoutSeconds: ${SESSION_IDLE_TIMEOUT_SECONDS:-1800}
