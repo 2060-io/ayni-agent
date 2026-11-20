@@ -321,6 +321,8 @@ export interface CallAccount {
 /** What a tool result records of where it came from (TOOL-PROV-001, D100). */
 export interface ToolProvenance {
   sourceId: string
+  /** what the source is: a bundled tool acts on the agent's own records and is no source of a reply (TOOL-PROV-002) */
+  sourceKind?: 'mcp' | 'http' | 'bundled'
   toolName: string
   account: CallAccount
   untrusted: boolean
