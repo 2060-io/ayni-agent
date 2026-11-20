@@ -1148,14 +1148,19 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       start, ownership transfer.
     - **MCP:** `offer` filters what the model is given (warned once of a name the server lacks); a server of space
       accounts keeps one connection per space, opened on first need and closed after `TOOL_CONNECTION_IDLE_SECONDS`.
-    - **Provenance:** `sources` on every message of a turn that ran tools (`metadata.sources` in history, own and shared),
-      `GET {sessions}/conversations/{id}/sources`, `GET /admin/audit/tool-calls` for auditors (each read recorded).
+    - **Provenance:** `sources` on every message of a turn that ran tools of MCP servers or HTTP tools (`metadata.sources`
+      in history, own and shared), the same sources in `GET {sessions}/conversations/{id}/sources`; never a bundled tool
+      (memory, knowledge search, the email check, reactions), whose entries keep their provenance with `sourceKind:
+      bundled`. `GET /admin/audit/tool-calls` for auditors (each read recorded).
+    - **Settled with the spec after review (2026-11-20):** the requester of every card is `{ displayName, role }`; a
+      `PATCH` that only narrows applies at once even while a granting change waits for the phone, and `409
+      change-pending` answers only a request that grants something; the member's view of a space's tools lists only the
+      tools members can use, none set `off`; bundled tools are no sources of a reply or a conversation.
     - **Store (schema 3.9.0):** `space_tools`, `space_accounts` (the token only as ciphertext, its key in the row),
       `tool_allowances`, `tool_calls`.
     - **Choices of mine, to flag:**
       - A bundled tool that no key of `tools.bundled` enables (`knowledge_search`, `set_reaction_policy`, `email_check`) is
-        a source of its own name; bundled results count among a reply's sources, under the source's name unless the pack
-        gives a title.
+        a source of its own name, for its rule and its call record.
       - Step labels say `Using <source title>` when the pack gives the source a title, and `Working` otherwise: never a
         tool's name or description.
       - The code of a change is two groups of two digits ("48 21"); the summary reads "Add X to S", "Change X in S: …",
@@ -1167,7 +1172,6 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       - The rules and the list of a turn are its start's; the bindings and the account are read at the call.
       - An allowance carries a fingerprint (rule, bindings, when the account was set) checked at use, and ends when the
         owner changes the source.
-      - Cards carry `requester: { displayName, name }`.
       - `approval.decide` keeps its 3.3 answer for an approval decided by an approver; only a confirmation gets
         `noTurn: 'decision'`.
       - The arguments of every approval are now sealed in the store (they were in the clear in the approvals JSON).

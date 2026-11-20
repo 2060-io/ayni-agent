@@ -397,10 +397,26 @@ describe('the tools of a space (TOOL-SPACE-001..010, PROF-TOOL-001..006, TOOL-AC
       bindings: { workspace: 'other' },
     })
     expect(again).toMatchObject({ status: 409, body: { error: 'change-pending' } })
+    // a change that only narrows applies at once, whatever waits for the phone; the waiting change stays
+    const confirms = ph.callsOf('sendConfirmRequest').length
+    const narrower = await call(jonas, 'PATCH', `/spaces/${salesEu.id}/tools/relaticle`, {
+      calls: { 'get-company': 'confirm' },
+    })
+    expect(narrower.status).toBe(200)
+    expect(narrower.body.tool.tools.find((t: { name: string }) => t.name === 'get-company').rule).toBe('confirm')
+    expect(narrower.body.tool.pending).toMatchObject({ changeId: change.changeId, code: change.code })
+    expect(ph.callsOf('sendConfirmRequest').length).toBe(confirms)
+    // making it looser again grants something: it waits for the change in progress
+    const looser = await call(jonas, 'PATCH', `/spaces/${salesEu.id}/tools/relaticle`, {
+      calls: { 'get-company': 'none' },
+    })
+    expect(looser).toMatchObject({ status: 409, body: { error: 'change-pending' } })
     await ph.confirm(jonas.connectionId, true)
     const after = (await call(jonas, 'GET', `/spaces/${salesEu.id}/tools`)).body.tools[0]
     expect(after.bindings[0].value).toBe('sales-eu')
     expect(after.pending).toBeNull()
+    // both hold: the binding the phone confirmed, and the rule that applied while it waited
+    expect(after.tools.find((t: { name: string }) => t.name === 'get-company').rule).toBe('confirm')
     const changed = received(jonas.sessionId)
       .slice(stream)
       .filter((e) => e.type === 'CUSTOM' && e.name === CUSTOM_EVENT.spaceToolsChanged)
@@ -639,7 +655,7 @@ describe('the confirmation of a call (TOOL-CALL-003..008, PROF-TOOL-007/008/012,
       approvalId: pending.id,
       kind: 'confirmation',
       status: 'PENDING',
-      requester: { name: 'ana' },
+      requester: { displayName: 'ana' },
       tool: 'create-note',
       allowForConversation: true,
       action: {
@@ -941,6 +957,12 @@ describe('the rules of the owner, and the approval of a tool of a space (TOOL-SP
     await run(anaSales, 'hello')
     expect(toolNames()).not.toContain('get-company')
     expect(toolNames()).toContain('list-companies')
+    // a member reads only the tools members can use; the owner reads it, off (PROF-TOOL-001)
+    const memberTools = (await call(ana, 'GET', `/spaces/${salesEu.id}/tools`)).body.tools[0].tools
+    expect(memberTools.map((t: { title: string }) => t.title)).not.toContain('Get company')
+    expect(memberTools.map((t: { title: string }) => t.title)).toContain('List companies')
+    const ownerTools = (await call(jonas, 'GET', `/spaces/${salesEu.id}/tools`)).body.tools[0].tools
+    expect(ownerTools.find((t: { name: string }) => t.name === 'get-company')).toMatchObject({ rule: 'off' })
   })
 
   let comms: { id: string }
@@ -1085,8 +1107,28 @@ describe('provenance and the record of each call (TOOL-PROV-001..006, PROF-TOOL-
   it('records the sources of a reply, gives them in history, and the conversation lists them with their counts', async () => {
     anaSales = await open(ana, { spaceId: salesEu.id })
     conversationId = await conversationOf(anaSales.sessionId)
-    model.script = [{ calls: [{ name: 'list-companies', arguments: {} }] }, { text: 'listed' }]
+    // a turn that ran a bundled tool only: its reply has no sources (TOOL-PROV-002)
+    model.script = [{ calls: [{ name: 'knowledge_search', arguments: { query: 'acme' } }] }, { text: 'searched notes' }]
+    await run(anaSales, 'zero')
+    const bundledOnly = (await call(anaSales, 'GET', `/${anaSales.sessionId}/messages?limit=100`)).body.messages
+    const bundledReply = bundledOnly.filter((m: { role: string }) => m.role === 'assistant').at(-1)
+    expect(bundledReply.content).toBe('searched notes')
+    expect(bundledReply.metadata.sources).toBeUndefined()
+    // a bundled tool and the CRM in one turn: the CRM only
+    model.script = [
+      {
+        calls: [
+          { name: 'knowledge_search', arguments: { query: 'acme' } },
+          { name: 'list-companies', arguments: {} },
+        ],
+      },
+      { text: 'listed' },
+    ]
     await run(anaSales, 'first')
+    const firstReply = (await call(anaSales, 'GET', `/${anaSales.sessionId}/messages?limit=100`)).body.messages
+      .filter((m: { role: string }) => m.role === 'assistant')
+      .at(-1)
+    expect(firstReply.metadata.sources).toEqual([{ source: 'relaticle', title: 'Relaticle CRM', account: 'space' }])
     model.script = [{ calls: [{ name: 'list-companies', arguments: {} }] }, { text: 'listed' }]
     await run(anaSales, 'second')
     model.script = [
@@ -1118,6 +1160,8 @@ describe('provenance and the record of each call (TOOL-PROV-001..006, PROF-TOOL-
         expect.objectContaining({ source: 'websearch', title: 'Web search', account: { kind: 'agent' }, results: 1 }),
       ])
     )
+    // the knowledge search ran twice, and is no source of the conversation (TOOL-PROV-003)
+    expect(sources.body.sources).toHaveLength(2)
     expect((await call(jonas, 'GET', `/conversations/${conversationId}/sources`)).status).toBe(404)
     // the stored entry: the provenance in the clear, the arguments and result only in the ciphertext (TOOL-PROV-001)
     const rows = await running.agent.store.entries.listAll({ conversationId, limit: 1000 })
