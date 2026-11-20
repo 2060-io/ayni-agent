@@ -249,6 +249,8 @@ export class SpaceToolService {
       const packRule = this.catalog.packRuleOf(source, name, spec?.annotations).rule
       const ownerRule = record.calls[name]
       const rule: SpaceCallRule = ownerRule ? strictest<SpaceCallRule>(packRule, ownerRule) : packRule
+      // a member reads the tools members can use: one set `off` is not listed to them (PROF-TOOL-001)
+      if (!owner && rule === 'off') continue
       tools.push({
         ...(owner ? { name } : {}),
         title: this.catalog.toolTitle(source, name, spec?.annotations),
@@ -499,7 +501,6 @@ export class SpaceToolService {
     const { space, entry, source } = await this.owned(principal, spaceId, sourceId)
     const record = await this.recordOf(space, entry)
     if (!record.added) throw new SpaceError('add the source to the space first', 'not-added')
-    if (record.pendingChange) throw new SpaceError('a change of this source waits for the phone', 'change-pending')
     const bindings = this.checkBindings(source, body.bindings)
     const calls = await this.checkCalls(space, source, body.calls)
     const changedBindings = Object.fromEntries(Object.entries(bindings).filter(([k, v]) => record.bindings[k] !== v))
@@ -514,6 +515,8 @@ export class SpaceToolService {
     if (!Object.keys(changedBindings).length && !Object.keys(changedCalls).length)
       return { status: 200, tool: await this.ownerView(space, source.name) }
     if (grants) {
+      // one granting change at a time; one that only narrows applies whatever waits (TOOL-SPACE-009)
+      if (record.pendingChange) throw new SpaceError('a change of this source waits for the phone', 'change-pending')
       const summary = await this.summaryOf(`Change ${source.title} in ${space.title}`, space, source, {
         bindings: changedBindings,
         calls: changedCalls,
@@ -526,10 +529,11 @@ export class SpaceToolService {
       })
       return { status: 202, tool: await this.ownerView(space, source.name) }
     }
-    // only stricter: at once, with no challenge (TOOL-SPACE-008)
+    // only stricter: at once, with no challenge, a change that waits for the phone kept as it is (TOOL-SPACE-008)
+    const current = (await this.store.spaceTools.get(space.id, source.name)) ?? record
     await this.store.spaceTools.save({
-      ...record,
-      calls: { ...record.calls, ...changedCalls },
+      ...current,
+      calls: { ...current.calls, ...changedCalls },
       updatedAt: nowIso(),
       updatedBy: principal.id,
     })
