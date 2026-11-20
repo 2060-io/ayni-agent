@@ -998,11 +998,19 @@
                 "minimum": 1,
                 "default": 30
               },
-              "title": { "type": "string", "minLength": 1, "maxLength": 80, "description": "What people read on the cards, in the sources and in a space's settings; the source's name by default (TOOL-CAT-001)." },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "description": "What people read on the cards, in the sources and in a space's settings; the source's name by default (TOOL-CAT-001)."
+              },
               "account": { "$ref": "#/$defs/sourceAccount" },
               "availability": { "$ref": "#/$defs/availability" },
               "bindings": { "type": "array", "items": { "$ref": "#/$defs/sourceBinding" } },
-              "untrusted": { "type": "boolean", "description": "What the source returns was written outside the organization (TOOL-CAT-008)." },
+              "untrusted": {
+                "type": "boolean",
+                "description": "What the source returns was written outside the organization (TOOL-CAT-008)."
+              },
               "effect": { "$ref": "#/$defs/toolEffect" },
               "call": { "$ref": "#/$defs/callRule" }
             }
@@ -1187,11 +1195,19 @@
                 "$ref": "#/$defs/toolAccess"
               },
               "description": { "type": "string", "minLength": 1, "maxLength": 300 },
-              "title": { "type": "string", "minLength": 1, "maxLength": 80, "description": "What people read on the cards, in the sources and in a space's settings; the source's name by default (TOOL-CAT-001)." },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "description": "What people read on the cards, in the sources and in a space's settings; the source's name by default (TOOL-CAT-001)."
+              },
               "account": { "$ref": "#/$defs/sourceAccount" },
               "availability": { "$ref": "#/$defs/availability" },
               "bindings": { "type": "array", "items": { "$ref": "#/$defs/sourceBinding" } },
-              "untrusted": { "type": "boolean", "description": "What the source returns was written outside the organization (TOOL-CAT-008)." },
+              "untrusted": {
+                "type": "boolean",
+                "description": "What the source returns was written outside the organization (TOOL-CAT-008)."
+              },
               "offer": {
                 "type": "array",
                 "items": { "type": "string", "minLength": 1 },
@@ -1296,7 +1312,12 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "timeoutSeconds": { "type": "integer", "minimum": 10, "default": 300, "description": "How long a confirmation card waits (TOOL-CALL-004)." }
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 10,
+              "default": 300,
+              "description": "How long a confirmation card waits (TOOL-CALL-004)."
+            }
           }
         }
       }
