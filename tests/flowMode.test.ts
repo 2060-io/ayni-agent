@@ -91,7 +91,7 @@ describe('flow mode (D54)', () => {
         state: 'completed',
         theirDid: 'did:peer:flow',
         theirLabel: 'Ayni',
-        outOfBandId: null,
+        invitationId: null,
         metadata: {},
       })
     )
@@ -123,7 +123,7 @@ describe('flow mode (D54)', () => {
         state: 'completed',
         theirDid: 'did:peer:v3',
         theirLabel: 'Hologram',
-        outOfBandId: null,
+        invitationId: null,
       })
     )
     await settle()
@@ -140,7 +140,7 @@ describe('flow mode (D54)', () => {
         id: connectionId,
         state: 'completed',
         theirDid: 'did:peer:late',
-        outOfBandId: null,
+        invitationId: null,
         metadata: {},
       })
     )

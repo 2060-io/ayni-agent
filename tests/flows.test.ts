@@ -148,14 +148,15 @@ afterAll(async () => {
   await running.stop()
 })
 
-async function connectFlowCapable(connectionId: string, outOfBandId?: string) {
+/** A new connection, as VS Agent 2.x reports it: the invitation record that produced it as `invitationId` (CHAN-BIND-017). */
+async function connectFlowCapable(connectionId: string, invitationId?: string) {
   const completed = events.handle(
     envelope('didcomm.connections.state-updated', {
       id: connectionId,
       state: 'completed',
       theirDid: `did:peer:${connectionId}`,
       theirLabel: 'Ayni',
-      outOfBandId: outOfBandId ?? null,
+      invitationId: invitationId ?? null,
       metadata: {},
     })
   )
@@ -204,12 +205,14 @@ describe('link-session binding (CHAN-BIND-009, FLOW-LINK-001)', () => {
     expect(open.kind).toBe('link-session')
     expect(open.origin).toMatchObject({ channel: 'ag-ui', sessionId: session.id })
     const link =
-      last<[{ flowId: string; request: { invitationId: string; browser: { platform: string }; codes: null } }]>(
+      last<[{ flowId: string; request: { invitationId: string; browser: { platform: string }; codes: string[] } }]>(
         'sendLinkSessionRequest'
       )[0]
     expect(link.request.invitationId).toBe(session.binding?.nonce)
     expect(link.request.browser.platform).toBe('web')
-    expect(link.request.codes).toBeNull()
+    // the scan path carries the three codes too, one of them the browser's (D5 as amended on 2026-11-21)
+    expect(link.request.codes).toHaveLength(3)
+    expect(link.request.codes).toContain(session.binding?.bindingCode)
     expect(callsOf('sendQuestion')).toHaveLength(0) // no question-answer on a flow-capable wallet
     expect(callsOf('sendText')).toHaveLength(0) // no welcome on the connection
 
@@ -222,7 +225,7 @@ describe('link-session binding (CHAN-BIND-009, FLOW-LINK-001)', () => {
         flowId: link.flowId,
         connectionId,
         state: 'response-received',
-        response: { link: true, code: null },
+        response: { link: true, code: session.binding?.bindingCode },
       })
     )
     await settle()
@@ -275,7 +278,7 @@ describe('the greeting of a linked session (INTX-MENU-001, PROF-CONV-006)', () =
         flowId: link.flowId,
         connectionId,
         state: 'response-received',
-        response: { link: true, code: null },
+        response: { link: true, code: session.binding?.bindingCode },
       })
     )
     await settle()
@@ -320,7 +323,7 @@ describe('binding after a handshake reuse (decision 24, issue #27)', () => {
         state: 'completed',
         theirDid: `did:peer:${connectionId}`,
         theirLabel: 'Ayni',
-        outOfBandId: null,
+        invitationId: null,
       })
     )
     await settle()
@@ -382,9 +385,10 @@ describe('binding after a handshake reuse (decision 24, issue #27)', () => {
     await disclose(connectionId)
     await settle()
     expect(callsOf('sendLinkSessionRequest')).toHaveLength(links + 1)
-    const link = last<[{ flowId: string; request: { invitationId: string; codes: null } }]>('sendLinkSessionRequest')[0]
+    const link =
+      last<[{ flowId: string; request: { invitationId: string; codes: string[] } }]>('sendLinkSessionRequest')[0]
     expect(link.request.invitationId).toBe(session.binding?.nonce)
-    expect(link.request.codes).toBeNull()
+    expect(link.request.codes).toContain(session.binding?.bindingCode)
     const asked = (await running.agent.sessions.get(session.id))?.binding
     const threadId = (callsOf('sendLinkSessionRequest').at(-1)?.result as { threadId: string } | undefined)?.threadId
     expect(asked?.questionThreadId).toBe(threadId)
@@ -407,7 +411,7 @@ describe('binding after a handshake reuse (decision 24, issue #27)', () => {
         flowId: link.flowId,
         connectionId,
         state: 'response-received',
-        response: { link: true, code: null },
+        response: { link: true, code: session.binding?.bindingCode },
       })
     )
     await settle()
@@ -448,7 +452,7 @@ describe('device challenge as a confirm flow (INTX-AUTH-009, D55)', () => {
         flowId: link.flowId,
         connectionId,
         state: 'response-received',
-        response: { link: true },
+        response: { link: true, code: session.binding?.bindingCode },
       })
     )
     await settle()

@@ -1291,3 +1291,60 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       X-Account header built at the call; the echo scrubbed; a single-token account of 0.27.0 dropped at start; and the
       whole file run with a debug logger whose output holds no value of any account). `tests/postgres.test.ts` seals
       the four keys together.
+69. **A link over a new connection is asked as a reuse is, and the phone shows the code on every link** (2026-11-21,
+    found by Fabrice on devnet; ayni-spec PR #105, D5 amended, CHAN-BIND-009 amended, CHAN-BIND-017; supersedes the
+    `outOfBandId` of a new connection in entry 3).
+    - **As seen:** on the Welcome agent, the phone removed the service (DIDComm hangup), the web UI unlinked and showed
+      a new code, the phone scanned it. The VS Agent logged a DID Exchange `request` and `complete` (a new connection),
+      the agent resolved a guest, told it where it stood and gave it a session grant, and sent no `link-session`
+      request: the browser's code stayed on screen forever. The same hits anyone who links the web UI before their
+      phone ever connected to the service. A phone that reuses its connection links fine.
+    - **Cause:** since verana-labs/vs-agent#804 (2026-10-19) a VS Agent connection carries no `outOfBandId`; it names
+      its invitation as `invitationId`, and only when the invitation is an invitation record. The agent minted with
+      `POST /v2/didcomm/out-of-band` and read `record.outOfBandId`, which was always undefined, so `onConnection` never
+      called `onInvitationAccepted`, silently. The reuse event still names the Out-of-Band record (`outOfBandId`),
+      which is why that path worked. The phone does answer the QR's own invitation: the Ayni app accepts it with
+      `receiveInvitationFromUrl`, and Credo's DID Exchange request names the invitation `@id` as its parent thread.
+      The recipient key differs from the reuse's because a reuse travels on the existing connection and a new request
+      goes to the agent's public DID, which the invitation names in `services`. It is not an implicit invitation. The
+      VS Agent's description of `POST /v2/didcomm/out-of-band` still says its connections carry `outOfBandId`, which is
+      stale. That is not changed here.
+    - **Fix:**
+      - `DidcommAdapter.mint` now mints a standalone invitation record (`POST /v2/didcomm/invitations`, DIDComm v1,
+        single use, the binding goal code). The record id is the session's `outOfBandId`, and the invitation's `@id`
+        is its nonce, as before.
+      - That call answers the invitation and a short URL (`{base}/s?id=…`), which the Ayni app does not read. So
+        `invitationUrlOf` writes the `oob=` URL as Credo does, on the short URL's base, which is the VS Agent's public
+        URL. `oobUrl` and `walletLink` keep their form.
+      - A completed connection with `invitationId` goes to `onInvitationAccepted` as a reuse does.
+      - An invitation that names no provisional session is logged as a warning, with the state of any session that
+        holds it (`an accepted invitation names no provisional session`). A connection that names no invitation
+        logs nothing.
+      - `ConnectionRecord` reads `invitationId`, no longer `outOfBandId` (no fallback: the team is the only tester).
+    - **Three codes on every link** (Fabrice: so that the person can verify the code):
+      - `askLinkSession` always sets `codes`, the session's code and two decoys (`codesAround`, moved to the adapter),
+        and returns them. Its callers no longer pass codes.
+      - The answer to the binding question binds only on `link: true` with the session's code, whitespace and case
+        aside, as the known-device re-link did. Any other answer leaves the session provisional and closes the flow
+        `cancelled` with "Not linked."
+      - A wallet without flows keeps the question-answer message, which already names the code.
+      - The Ayni app already renders `codes` ("Tap the code the browser shows.") and answers with the code tapped, so
+        it needs no change.
+    - **Side effect, to flag:** a standalone invitation record carries no label and no image (the VS Agent ignores
+      both for one). The Ayni app names a service from its trust resolution, not from the label. A wallet that shows
+      the label of an invitation, such as the Hologram App, shows none.
+    - **Tests:** `tests/bindingInvitation.test.ts`, with the events exactly as VS Agent 2.x writes them:
+      - the mint call, and the `oob=` URL decoding to the invitation;
+      - a new connection naming its invitation record asked the link question with three codes, and the browser's
+        code binding it;
+      - the reuse path unchanged, with codes;
+      - an unknown invitation, and a reuse of a linked one, each logging the warning and asking nothing;
+      - a connection that names no invitation, logging nothing;
+      - a wrong code, and no code, leaving the session provisional;
+      - the right code with spaces and in lower case binding;
+      - `codesAround` giving three distinct codes, the real one among them.
+    - **Without the fix:** with `src/channels/didcomm/events.ts` of main, 5 of the 11 fail. The first is the
+      reproduction: no `link-session` request is sent ("expected [] to have a length of 1").
+    - **Other tests:** `tests/flows.test.ts` answers with the session's code and checks the codes on the scan path.
+      The connection events of the other tests and of `scripts/e2e/spaces-people.e2e.ts` take the 2.x shape
+      (`invitationId`), and the e2e stand-in answers `POST /v2/didcomm/invitations`.

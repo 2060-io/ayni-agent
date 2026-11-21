@@ -100,13 +100,13 @@ async function standIn() {
   app.get('/v2/vt/service-endpoints', async () => ({ items: [] }))
   app.post('/v2/vt/service-endpoints', async (request) => ({ ...(request.body as object) }))
   app.post('/v2/didcomm/peer-status/query', async (_request, reply) => reply.code(400).send({}))
-  app.post('/v2/didcomm/out-of-band', async () => {
+  // a binding invitation is a standalone invitation record (vs-agent#804, CHAN-BIND-017)
+  app.post('/v2/didcomm/invitations', async () => {
     n += 1
     return {
-      outOfBandId: `oob-${n}`,
-      invitationId: `inv-${n}`,
-      invitation: {},
-      url: `https://agent.example/oob?n=${n}`,
+      id: `oob-${n}`,
+      invitation: { '@id': `inv-${n}`, services: [AGENT_DID] },
+      shortUrl: `https://agent.example/s?id=${n}`,
     }
   })
   app.post('/v2/didcomm/basic-messages', async () => ({ id: `msg-${++n}` }))
@@ -163,7 +163,7 @@ async function standIn() {
   app.addHook('onSend', async (request, _reply, payload) => {
     if (typeof payload !== 'string' || !payload.startsWith('{')) return payload
     const body = JSON.parse(payload) as Record<string, string>
-    if (request.url === '/v2/didcomm/out-of-band') ids.oob.push(body.outOfBandId as string)
+    if (request.url === '/v2/didcomm/invitations') ids.oob.push(body.id as string)
     if (request.url === '/v2/didcomm/question-answer') ids.question.push(body.id as string)
     if (request.url === '/v2/didcomm/credential-offer') ids.exchange.push(body.credentialExchangeId as string)
     if (request.url === '/v2/didcomm/presentation-request') ids.proof.push(body.proofExchangeId as string)

@@ -102,8 +102,12 @@ docker run --rm -p 3010:3010 --env-file .env io2060/ayni-agent:local
 
 ## Dependencies on other components
 
-- VS Agent 2.x with `POST /v2/didcomm/out-of-band` and the `didcomm.out-of-band.handshake-reused`
-  event ([verana-labs/vs-agent#800](https://github.com/verana-labs/vs-agent/pull/800)), and a
+- VS Agent 2.x with `POST /v2/didcomm/invitations` (standalone invitation records,
+  [verana-labs/vs-agent#804](https://github.com/verana-labs/vs-agent/pull/804)), which the agent mints its binding
+  invitations with: a new connection names the record as `invitationId`, and the
+  `didcomm.out-of-band.handshake-reused` event ([verana-labs/vs-agent#800](https://github.com/verana-labs/vs-agent/pull/800))
+  names it as `outOfBandId` (ayni-spec CHAN-BIND-017). An invitation of `POST /v2/didcomm/out-of-band` would not do:
+  since #804 a connection carries no `outOfBandId`. The VS Agent also needs a
   `discovery.json` that queries peers' features: the disclosure arrives as a
   `didcomm.connections.state-updated` event in state `updated` whose `metadata` lists the disclosed
   protocols. A wallet that discloses `https://didcomm.org/ayni-flow/1.0` is served in **flow mode**

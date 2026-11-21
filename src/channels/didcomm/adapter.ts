@@ -36,6 +36,29 @@ import type { PeerProfiles } from './peerProfiles.js'
 import type { VsAgentClient } from './vsAgentClient.js'
 
 export const BINDING_GOAL_CODE = 'ayni.bind-session'
+const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+
+function decoyCode(): string {
+  const pick = () => CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)]
+  return `${pick()}${pick()}-${pick()}${pick()}`
+}
+
+/** The session's binding code and two decoys, shuffled: the person taps the one the browser shows (D5, FLOW-LINK-003). */
+export function codesAround(real: string): string[] {
+  const codes = new Set<string>([real])
+  while (codes.size < 3) codes.add(decoyCode())
+  return [...codes].sort(() => Math.random() - 0.5)
+}
+
+/**
+ * The `oob=` URL of an invitation, as Credo writes it, on the DIDComm agent's public base URL, which the invitation's
+ * short URL (`{base}/s?id=…`) is under (FLOW-CONN-001, PROF-BIND-001). The Ayni app reads `oob=`, not the short URL.
+ */
+export function invitationUrlOf(invitation: Record<string, unknown>, shortUrl: string): string {
+  const short = new URL(shortUrl)
+  const base = `${short.origin}${short.pathname.replace(/\/s\/?$/, '')}`
+  return `${base}?oob=${Buffer.from(JSON.stringify(invitation)).toString('base64url')}`
+}
 /** kv index of the open `authorize` flow per approval and phone: `<prefix><approvalId>:<connectionId>` → flow id */
 const AUTHORIZE_INDEX = 'authorize:'
 
@@ -98,15 +121,25 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
 
   // ---- InvitationMinter (CHAN-BIND-008) -----------------------------------------------------------
 
+  /**
+   * A binding invitation is a standalone invitation record of the DIDComm agent: a connection it produces names the
+   * record (`invitationId`), so a phone that connects for the first time is asked the binding question as one that
+   * reuses its connection (CHAN-BIND-017). The record id is the session's `outOfBandId`, the invitation's `@id` its
+   * nonce. DIDComm v1, single use (CC-VSA-008, PROF-BIND-002).
+   */
   public async mint(
     sessionId: string,
     client: ClientDescription
   ): Promise<{ invitationId: string; outOfBandId: string; url: string }> {
-    const result = await this.client.createOutOfBandInvitation({
+    const result = await this.client.createInvitation({
+      didcommVersion: 'v1',
+      reusable: false,
       goalCode: BINDING_GOAL_CODE,
       goal: `Link ${client.name} on ${client.platform} (session ${sessionId.slice(-6)})`,
     })
-    return { invitationId: result.invitationId, outOfBandId: result.outOfBandId, url: result.url }
+    const invitationId = String(result.invitation['@id'] ?? result.invitation.id ?? '')
+    if (!result.id || !invitationId) throw new Error('the DIDComm agent returned an invitation without its ids')
+    return { invitationId, outOfBandId: result.id, url: invitationUrlOf(result.invitation, result.shortUrl) }
   }
 
   // ---- CapabilityChannelOps -------------------------------------------------------------------------
@@ -171,16 +204,17 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
 
   /**
    * The binding question on a flow-capable wallet (CHAN-BIND-009/012, FLOW-LINK-001/003): a `link-session` flow
-   * naming the agent, the browser, the web origin, the start time and the invitation id; `codes` when the person
-   * must pick the code the screen shows. Returns the request id (the correlation thread) and the flow id.
+   * naming the agent, the browser, the web origin, the start time and the invitation id, with three `codes` on every
+   * link, the scan path as the known-device re-link: the person taps the one the browser shows (D5 as amended on
+   * 2026-11-21). Returns the request id (the correlation thread), the flow id and the codes sent.
    */
   public async askLinkSession(
     connectionId: string,
-    session: Session,
-    codes?: string[]
-  ): Promise<{ threadId: string; flowId: string }> {
+    session: Session
+  ): Promise<{ threadId: string; flowId: string; codes: string[] }> {
     if (!this.flows || !this.agent) throw new Error('flows are not available')
     if (!session.binding) throw new Error('session has no binding material')
+    const codes = codesAround(session.binding.bindingCode)
     const env = this.agent.env
     const flow = await this.flows.open({
       connectionId,
@@ -200,10 +234,10 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
           webOrigin: env.aguiAllowedOrigins.find((o) => o !== '*') ?? env.publicBaseUrl,
           startedAt: session.createdAt,
           invitationId: session.binding.nonce,
-          codes: codes ?? null,
+          codes,
         },
       })
-      return { threadId: exchange.threadId, flowId: flow.flowId }
+      return { threadId: exchange.threadId, flowId: flow.flowId, codes }
     } catch (error) {
       await this.flows.close(flow.flowId, 'failed', { reason: 'The link request could not be sent.' })
       throw error

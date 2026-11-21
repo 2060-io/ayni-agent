@@ -14,7 +14,7 @@ import type { TurnSink } from '../../core/orchestrator.js'
 import type { MessageAttachment, Principal, Session } from '../../core/types.js'
 import { nowIso } from '../../util/ids.js'
 import type { Logger } from '../../util/logger.js'
-import { clientOfConnection, DidcommAdapter } from './adapter.js'
+import { clientOfConnection, codesAround, DidcommAdapter } from './adapter.js'
 import { type IdentityFlow, isServicePeer } from './identity.js'
 import { AYNI_FLOW_PROTOCOL, type PeerProfiles } from './peerProfiles.js'
 import { AG_UI_ENDPOINT, PEER_STATUS_PROTOCOL, type PeerStatusRefusalCode } from './peerStatus.js'
@@ -37,17 +37,11 @@ interface Envelope {
 const CODE_PATTERN = /^\/?(?:link\s+)?([a-z0-9]{2})-?([a-z0-9]{2})$/i
 const LINK_ATTEMPTS = 5
 const LINK_WINDOW_MS = 10 * 60_000
-const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 /** How long the serving-mode decision waits for a disclosure the DIDComm agent announced (D54). */
 export const DISCLOSURE_WAIT_MS = 3_000
 
 /** The connection event as the DIDComm agent forwards it: state changes and, in state `updated`, disclosed features. */
 type ConnectionEvent = ConnectionRecord & { previousState?: string; metadata?: Record<string, string> }
-
-function decoyCode(): string {
-  const pick = () => CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)]
-  return `${pick()}${pick()}-${pick()}${pick()}`
-}
 
 export class DidcommEvents {
   private readonly identifying = new Set<string>()
@@ -232,8 +226,10 @@ export class DidcommEvents {
         void this.agent.identityRequests
           ?.onConnect(principal)
           .catch((err) => this.logger.warn({ err, connectionId: record.id }, 'presentations on connect failed'))
-        // a connection created from a binding invitation: ask the confirmation question (CHAN-BIND-009)
-        if (record.outOfBandId) await this.onInvitationAccepted(record.outOfBandId, '', record.id)
+        // a connection created from a binding invitation: ask the confirmation question as on a handshake reuse
+        // (CHAN-BIND-009, CHAN-BIND-017). The DIDComm agent names the invitation record that produced the connection
+        // as `invitationId`, the id the reuse event gives as `outOfBandId` (vs-agent#804)
+        if (record.invitationId) await this.onInvitationAccepted(record.invitationId, '', record.id)
       } finally {
         this.identifying.delete(record.id)
       }
@@ -295,8 +291,12 @@ export class DidcommEvents {
     if (!wasFlowCapable && (await this.peers.isFlowCapable(connectionId))) await this.reaskInFlowMode(connectionId)
   }
 
-  // ---- binding (CHAN-BIND-003/009, PROF-BIND-002/004/005) -------------------------------------------
+  // ---- binding (CHAN-BIND-003/009/017, PROF-BIND-002/004/005) ---------------------------------------
 
+  /**
+   * An invitation of this agent accepted on a connection: a new connection that names its invitation record, or a
+   * handshake reuse. Both find the provisional session the same way and ask the same question (CHAN-BIND-017).
+   */
   private async onInvitationAccepted(
     outOfBandId: string,
     invitationId: string,
@@ -307,7 +307,18 @@ export class DidcommEvents {
       (outOfBandId && (await this.agent.sessions.findProvisionalByOutOfBandId(outOfBandId))) ||
       (invitationId && (await this.agent.sessions.findProvisionalByNonce(invitationId))) ||
       undefined
-    if (!session) return
+    if (!session) {
+      // never silent: an expired or linked session, or an invitation that is not a binding one (CHAN-BIND-017)
+      const other =
+        (outOfBandId && (await this.agent.store.sessions.findByOutOfBandId(outOfBandId))) ||
+        (invitationId && (await this.agent.store.sessions.findByNonce(invitationId))) ||
+        undefined
+      this.logger.warn(
+        { connectionId, outOfBandId, invitationId, reused: options.reused === true, sessionState: other?.state },
+        'an accepted invitation names no provisional session: no binding question asked'
+      )
+      return
+    }
     const bound = await this.agent.didcommSession(connectionId)
     if (!bound) {
       // handshake reuse on a connection whose Principal is not established yet: wait for identity
@@ -353,8 +364,7 @@ export class DidcommEvents {
       if (session?.state !== 'provisional' || !session.binding || Date.parse(session.binding.expiresAt) < Date.now())
         continue
       try {
-        const codes = this.codesAround(session.binding.bindingCode)
-        const { threadId, flowId } = await this.adapter.askLinkSession(connectionId, session, codes)
+        const { threadId, flowId, codes } = await this.adapter.askLinkSession(connectionId, session)
         this.rebinds.set(`${connectionId}:${threadId}`, { sessionId: session.id, stage: 'code', codes })
         this.linkFlows.set(`${connectionId}:${threadId}`, flowId)
         this.logger.info({ connectionId, sessionId: session.id }, 're-link question asked again as a flow')
@@ -366,7 +376,8 @@ export class DidcommEvents {
 
   /**
    * The confirmation question names the agent, the code and the client (CHAN-BIND-009, PROF-BIND-004); on a
-   * flow-capable wallet it is a `link-session` flow correlated to the invitation id (FLOW-LINK-001).
+   * flow-capable wallet it is a `link-session` flow correlated to the invitation id, whose three codes hold the
+   * session's (FLOW-LINK-001/003).
    */
   private async askBindingConfirmation(session: Session, connectionId: string): Promise<void> {
     if (session.binding && Date.parse(session.binding.expiresAt) < Date.now()) {
@@ -398,8 +409,7 @@ export class DidcommEvents {
     const connectionId = capability.externalRef
     if (await this.adapter.flowMode(connectionId)) {
       // one request carrying the real code and two decoys (FLOW-LINK-003, CHAN-BIND-012)
-      const codes = this.codesAround(session.binding.bindingCode)
-      const { threadId, flowId } = await this.adapter.askLinkSession(connectionId, session, codes)
+      const { threadId, flowId, codes } = await this.adapter.askLinkSession(connectionId, session)
       this.rebinds.set(`${connectionId}:${threadId}`, { sessionId: session.id, stage: 'code', codes })
       this.linkFlows.set(`${connectionId}:${threadId}`, flowId)
       return true
@@ -427,7 +437,7 @@ export class DidcommEvents {
     if (pending.stage === 'ask') {
       if (!/^(yes|y)$/i.test(response.trim())) return true
       // the real code and two decoys, shuffled: picking the one on the screen is the nonce confirmation
-      const options = this.codesAround(session.binding.bindingCode)
+      const options = codesAround(session.binding.bindingCode)
       const next = await this.adapter.askQuestion(
         connectionId,
         'Which code is shown on the screen?',
@@ -535,12 +545,6 @@ export class DidcommEvents {
     }
     // an inline menu answered on DIDComm
     await this.turn(bound.session, response)
-  }
-
-  private codesAround(real: string): string[] {
-    const codes = new Set<string>([real])
-    while (codes.size < 3) codes.add(decoyCode())
-    return [...codes].sort(() => Math.random() - 0.5)
   }
 
   // ---- flows on a flow-capable wallet (D54, D55) --------------------------------------------------------
@@ -696,6 +700,8 @@ export class DidcommEvents {
     const key = `${connectionId}:${exchange.threadId}`
     const response = (exchange.response ?? {}) as { link?: boolean; code?: string | null }
     const linked = exchange.state === 'response-received' && response.link === true
+    // every request carries three codes: the person taps the one the browser shows (D5, FLOW-LINK-003)
+    const tapped = (response.code ?? '').replace(/\s+/g, '').toUpperCase()
     const settle = async (flowId: string | undefined, bound: boolean, sessionId?: string) => {
       if (!flowId) return
       await this.agent.flows.close(flowId, bound ? 'completed' : 'cancelled', {
@@ -711,7 +717,7 @@ export class DidcommEvents {
       this.linkFlows.delete(key)
       const session = await this.agent.sessions.get(rebind.sessionId)
       const bound = await this.agent.didcommSession(connectionId)
-      const codeOk = (response.code ?? '').replace(/\s+/g, '').toUpperCase() === session?.binding?.bindingCode
+      const codeOk = tapped === session?.binding?.bindingCode
       if (
         !linked ||
         !codeOk ||
@@ -734,11 +740,16 @@ export class DidcommEvents {
       }
       return
     }
-    // the binding question of a provisional session (CHAN-BIND-009)
+    // the binding question of a provisional session (CHAN-BIND-009): bound on the session's code only, as a re-link
     const binding = await this.agent.sessions.findByConfirmation(connectionId, exchange.threadId)
     if (!binding?.binding) return
     const flowId = binding.binding.flowId ?? exchange.flowId
-    if (binding.state !== 'provisional' || !linked) {
+    if (binding.state !== 'provisional' || !linked || tapped !== binding.binding.bindingCode) {
+      if (linked && binding.state === 'provisional')
+        this.logger.info(
+          { connectionId, sessionId: binding.id },
+          'link refused: the code tapped is not the session code'
+        )
       await settle(flowId, false)
       return
     }

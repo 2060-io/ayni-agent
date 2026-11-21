@@ -107,7 +107,7 @@ async function connectFlowCapable(connectionId: string) {
       state: 'completed',
       theirDid: `did:peer:${connectionId}`,
       theirLabel: 'Ayni',
-      outOfBandId: null,
+      invitationId: null,
       metadata: {},
     })
   )
