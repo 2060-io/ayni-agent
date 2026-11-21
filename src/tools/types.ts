@@ -22,21 +22,23 @@ export interface ToolContext {
   /** the tool ends the turn with a message of the code (INTX-AUTH-012): the model is called no more in it */
   turnEnded?: (message: EndTurnMessage) => void
   /**
-   * the account the call runs with (D97): a space's token is opened in memory for this call only, and sent only as the
-   * source's `account.apply` says (TOOL-ACCESS-005); never logged, never put in a result
+   * the account the call runs with (D97): a space's account is opened in memory for this call only, and sent only in the
+   * headers the source's `account.apply` builds from its fields (D102, TOOL-ACCESS-005); never logged, never put in a result
    */
   account?: CallAccountSecret
 }
 
-/** The account of one call: its kind, the space, and the space's token, opened for the call. */
+/** The account of one call: its kind, the space, and the headers of the space's account, built for the call. */
 export interface CallAccountSecret {
   kind: 'none' | 'agent' | 'space'
   spaceId?: string
-  /** the space's token, in memory for this call only */
-  token?: string
-  /** the header it is sent in, after its prefix */
-  header?: string
-  prefix?: string
+  /**
+   * the headers of the space's account, built for this call from the values of its fields as `account.apply` says
+   * (D102, TOOL-ACCESS-005); in memory for this call only, never logged; absent while the account is not set
+   */
+  headers?: Record<string, string>
+  /** every value of the account and every header built from them, longest first: what an echo is scrubbed of */
+  secrets?: string[]
 }
 
 /**

@@ -1241,3 +1241,53 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
         two sources share a tool name; bundled sources (another id, on and off, access, refusals).
       - `tests/toolCatalog.test.ts`, `tests/tools.test.ts` (the step-up now set in the CRM's source),
         `tests/directoryBadge.test.ts` and `tests/welcomeReissue.test.ts` follow the map.
+68. **A space's account in named fields, one masked field per key** (2026-11-20, Fabrice on devnet, setting X for a
+    space: "There should be one field per key/attribute."; ayni-spec PR #103, D102, D97 amended; TOOL-ACCESS-003..006,
+    TOOL-CAT-002/012, TOOL-SPACE-002/005/007..011; AG-UI profile 3.4 amended in place, PROF-TOOL-001/004).
+    - **The pack (`schemas/agent-pack.schema.json`, `src/config/packTypes.ts`):** a `space` account declares `fields`
+      (`$defs/accountField`: `name` `^[a-z][a-z0-9_]{0,31}$`, `label`, optional `pattern`) and `apply`
+      (`$defs/accountHeader`: `header`, `value`, no control character), each a list of one or more. `label`,
+      `pattern` and `apply` as one object are gone from the schema.
+    - **The loader (`src/config/pack.ts`):** `withdrawnAccountKeyErrors` refuses the former keys before the schema, one
+      line per key, each written with its replacement built from what the account declares (`fields: [{ name: token,
+      label: API token }]`, `apply: [{ header: Authorization, value: "Bearer {token}" }]`; TOOL-CAT-012). The cross-field
+      rules refuse a space account without `fields` or `apply`, two fields of one name, a field's pattern that is not a
+      regular expression, a header declared twice, a value that names a field the account lacks, a field no header names,
+      and `fields` or `apply` on an account that is not a space's.
+    - **The endpoint and the store (`src/core/spaceTools.ts`, `src/channels/agui/routes.ts`):** `PUT …/account` takes
+      `{ values }`. Every field and no other (`400 bad-request`, `field: account.<name>`, or `values`); each value trimmed
+      of the whitespace at its ends, then `422 bad-token` at its field when not a text, empty, longer than 4096, with
+      whitespace or a control character (`\p{Cc}`) inside, or off its pattern; the first refused in pack order is named,
+      and no message carries a value. The trimmed values are sealed together, `{ values }` under one key, in the
+      pending change (`sealedValues`, was `sealedToken`) and then in `space_accounts`. No table changes, so no schema
+      migration: the store stays 3.9.0.
+    - **What was sealed before:** at start (`align`), an account whose sealed values do not fit the fields its source
+      declares is destroyed and logged by space and source; this covers every single-token account of 0.27.0, and an
+      account set before the pack changed its fields. The owner sets it again; the source reads `setup`. A pending
+      account change whose values no longer fit when the phone confirms is dropped as `failed`.
+    - **The call (`src/tools/accountValues.ts`, `mcp.ts`, `http.ts`, `toolGate.ts`):** `openAccount` builds the headers of
+      `apply` from the values at the call (`buildAccountHeaders`) and hands the call `{ headers, secrets }`; nothing logs
+      either. An MCP server keeps one connection per space, told apart by a SHA-256 of its headers, not by the values. An
+      echo is scrubbed of every value and every built header, the longest first (`scrubAccount`, which replaces
+      `scrubToken`), so `Bearer <token>` now reads `[account]` whole.
+    - **Profile package 3.4.1:** `SpaceTool.account.fields` (`SpaceAccountField`), `SpaceAccountRequest.values`.
+    - **Choices of mine, to flag:**
+      - Whitespace inside a value is refused whatever the pattern, and so is a control character.
+      - Unknown names are checked first, then missing fields, then each value in pack order.
+      - Every `{...}` in a header's value is a placeholder, so a misspelt field is refused at start rather than sent
+        as text.
+      - The former form's refusal suggests one field named `token`, with the former label and pattern. For an account of
+        several keys, such as X's, the operator splits it by hand.
+    - **Packs migrated:** none of `agent-packs/` has a space account. The tests' fixture pack migrates the CRM and the
+      post to X to one field each, and adds `x_mentions`, an HTTP tool of the four keys of X in one header. The docs
+      carry the X example and a single-token one. The Dev Agent's devnet pack (ayni-deploy) is refused as it is, and
+      loads once its X source is given the four fields.
+    - **Tests:** `tests/toolCatalog.test.ts` (the former keys refused with their replacement; a header naming a field
+      the account lacks; a field no header names; two fields of one name; a header twice; a bad pattern; `fields` on an
+      agent account; the schema's name and line-break rules; four fields to one header; a single token to
+      `Authorization`; the scrub of the header and of each value). `tests/tools.test.ts` (the owner's view of the fields;
+      400 for a missing, unknown or former body; 422 at the field for off-pattern, CR/LF, space and control character;
+      a value with a space before it or a line break after it taken trimmed; the phone's confirmation as before; the
+      X-Account header built at the call; the echo scrubbed; a single-token account of 0.27.0 dropped at start; and the
+      whole file run with a debug logger whose output holds no value of any account). `tests/postgres.test.ts` seals
+      the four keys together.

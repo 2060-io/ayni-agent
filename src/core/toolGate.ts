@@ -22,6 +22,7 @@ import type { StatsSink } from '../platform/stats.js'
 import { type ApprovalService, displayName } from '../policy/approvals.js'
 import type { TierResolution } from '../policy/rbac.js'
 import type { Store } from '../store/types.js'
+import { scrubAccount } from '../tools/accountValues.js'
 import { type CatalogSource, type PackRule, strictest, type ToolCatalog } from '../tools/catalog.js'
 import type { ToolRegistry } from '../tools/registry.js'
 import type { CallAccountSecret, ToolContext, ToolSpec } from '../tools/types.js'
@@ -144,20 +145,6 @@ export function cardCapable(profileVersion: string | undefined): boolean {
   return major > 3 || (major === 3 && minor >= 4)
 }
 
-/** Replaces every echo of a space's token in a text by `[account]` (TOOL-ACCESS-005). */
-export function scrubToken<T>(value: T, token: string | undefined): T {
-  if (!token) return value
-  if (typeof value === 'string') return value.split(token).join('[account]') as T
-  if (Array.isArray(value)) return value.map((item) => scrubToken(item, token)) as T
-  if (value && typeof value === 'object') {
-    const out: Record<string, unknown> = {}
-    for (const [key, item] of Object.entries(value as Record<string, unknown>))
-      out[scrubToken(key, token)] = scrubToken(item, token)
-    return out as T
-  }
-  return value
-}
-
 const ajv = new Ajv2020({ allErrors: true, strict: false })
 addFormats.default(ajv)
 
@@ -195,7 +182,7 @@ export class ToolGate {
     for (const r of ready.values())
       if (r.source.kind === 'mcp' && r.source.account.kind === 'space') {
         const account = await spaceTools.openAccount(spaceId, r.source.name)
-        if (account?.token) await registry.discover(r.source.name, account)
+        if (account?.headers) await registry.discover(r.source.name, account)
       }
     const out: TurnTool[] = []
     for (const visible of await registry.visible(principal.roles, grants, principal)) {
@@ -391,12 +378,13 @@ export class ToolGate {
     try {
       // a tool call already executing completes even if the turn is cancelled (D47): no run signal here
       const result = await tool.spec.invoke(args, { ...ctx.toolCtx, account })
-      content = scrubToken(result.content, account.token)
-      data = scrubToken(result.data, account.token)
+      // an echo of any value of the space's account, or of a header built from them, reads [account] (TOOL-ACCESS-005)
+      content = scrubAccount(result.content, account.secrets)
+      data = scrubAccount(result.data, account.secrets)
       isError = result.isError === true
       if (result.endTurn) ctx.toolCtx.turnEnded?.(result.endTurn)
     } catch (error) {
-      content = scrubToken(`tool failed: ${error instanceof Error ? error.message : String(error)}`, account.token)
+      content = scrubAccount(`tool failed: ${error instanceof Error ? error.message : String(error)}`, account.secrets)
       isError = true
     }
     await ctx.sink.emit({ type: 'step-finished', label })

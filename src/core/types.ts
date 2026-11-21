@@ -792,11 +792,14 @@ export const TRUST_BOUND_KINDS: readonly string[] = [
 export interface PendingToolChange {
   id: string
   kind: 'add' | 'patch' | 'account'
-  /** what the change sets: bindings, rules; never the token, which is sealed apart */
+  /** what the change sets: bindings, rules; never a value of the account, which is sealed apart */
   bindings?: Record<string, string>
   calls?: Record<string, 'none' | 'confirm' | 'approval' | 'off'>
-  /** a token the change carries, sealed under a key of its own, destroyed when the change is dropped */
-  sealedToken?: { keyRef: string; cipher: string }
+  /**
+   * the values of the fields of the account the change sets, sealed together under a key of their own, destroyed when the
+   * change is dropped (D102)
+   */
+  sealedValues?: { keyRef: string; cipher: string }
   summary: string
   code: string
   expiresAt: string
@@ -828,7 +831,7 @@ export interface SpaceToolRecord {
 export interface SpaceAccountRecord {
   spaceId: string
   sourceId: string
-  /** the token, as ciphertext (base64); never in the clear */
+  /** the values of the fields of the account, sealed together as ciphertext (base64, D102); never in the clear */
   cipher: string
   /** its key, wrapped by the master key; destroyed with the record */
   encKeyRef: string

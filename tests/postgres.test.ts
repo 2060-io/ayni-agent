@@ -26,7 +26,7 @@ import { personalSpaceId, SpaceService, sealedMembers } from '../src/core/spaces
 import type { Principal, RagChunk, Session } from '../src/core/types.js'
 import { createEmbeddings } from '../src/llm/embeddings.js'
 import type { StubChatModel } from '../src/llm/stub.js'
-import { createEntryCrypto, sealJson } from '../src/memory/crypto.js'
+import { createEntryCrypto, openJson, sealJson } from '../src/memory/crypto.js'
 import { buildScope } from '../src/memory/scope.js'
 import { MemoryService } from '../src/memory/service.js'
 import type { MailMessage } from '../src/platform/mail.js'
@@ -1192,13 +1192,19 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
       await client.end()
     })
 
-    it('keeps a space account only as ciphertext, and its key goes with the row it replaces or clears (TOOL-ACCESS-004)', async () => {
-      const token = 'crm|canary-token-7781'
-      const seal = (value: string) => {
-        const keyRef = crypto.newWrappedKey()
-        return { keyRef, cipher: sealJson(crypto, keyRef, { token: value }).cipher.toString('base64') }
+    it('keeps a space account only as ciphertext, its fields sealed together, and its key goes with the row it replaces or clears (TOOL-ACCESS-004, D102)', async () => {
+      // the four keys of an X account, sealed together as one record under one key
+      const keys = {
+        api_key: 'canaryKey0001',
+        api_secret: 'canarySecret00000000000001',
+        access_token: '1234-canaryAccess01',
+        access_token_secret: 'canaryTokenSecret0000000001',
       }
-      const first = seal(token)
+      const seal = (values: Record<string, string>) => {
+        const keyRef = crypto.newWrappedKey()
+        return { keyRef, cipher: sealJson(crypto, keyRef, { values }).cipher.toString('base64') }
+      }
+      const first = seal(keys)
       await store.spaceAccounts.save({
         spaceId: 'spc_1',
         sourceId: 'relaticle',
@@ -1212,18 +1218,19 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
       const rows = async () =>
         (await raw.query("SELECT t::text AS row, encode(cipher, 'escape') AS bytes FROM space_accounts t")).rows
       for (const row of await rows()) {
-        expect(row.row).not.toContain('canary-token')
-        expect(row.bytes).not.toContain('canary-token')
+        expect(row.row).not.toContain('canary')
+        expect(row.bytes).not.toContain('canary')
       }
       const got = await store.spaceAccounts.get('spc_1', 'relaticle')
+      if (!got) throw new Error('no account')
+      expect(openJson(crypto, got.encKeyRef, Buffer.from(got.cipher, 'base64'))).toEqual({ values: keys })
       expect(got).toMatchObject({
         sourceId: 'relaticle',
         setByPrincipalId: 'p-jonas',
         setAt: '2026-11-20T10:00:00.000Z',
       })
       // replaced: the former key is nowhere any more
-      const second = seal('crm|another-token-0001')
-      if (!got) throw new Error('no account')
+      const second = seal({ ...keys, access_token: '1234-another0001' })
       await store.spaceAccounts.save({ ...got, cipher: second.cipher, encKeyRef: second.keyRef })
       expect(JSON.stringify(await rows())).not.toContain(first.keyRef)
       await store.spaceAccounts.delete('spc_1', 'relaticle')

@@ -1213,13 +1213,14 @@ export class AgUiRoutes {
         return reply.code(result.status).send({ tool: result.tool })
       })
     )
-    // PROF-TOOL-004: the space's account, typed by its owner here and nowhere else (TOOL-ACCESS-003)
+    // PROF-TOOL-004: the space's account, typed by its owner here and nowhere else (TOOL-ACCESS-003): one value for each
+    // field its source declares (D102)
     app.put(
       `${base}/spaces/:spaceId/tools/:source/account`,
       handle(async ({ session, principal }, request, reply) => {
         const { spaceId, source } = request.params as Params
-        const body = (request.body ?? {}) as { token?: unknown }
-        const tool = await tools().setAccount(principal, session, spaceId, source, body.token)
+        const body = (request.body ?? {}) as { values?: unknown }
+        const tool = await tools().setAccount(principal, session, spaceId, source, body.values)
         return reply.code(202).send({ tool })
       })
     )

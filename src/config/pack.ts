@@ -8,11 +8,13 @@ import { fileURLToPath } from 'node:url'
 import { Ajv2020 } from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
 import { parse as parseYaml } from 'yaml'
+import { fieldsNamedBy } from '../tools/accountValues.js'
 import type {
   AgentPack,
   AuthenticationEntry,
   BundledName,
   EvidencePolicy,
+  SourceAccount,
   SpaceTemplate,
   ToolAccess,
   ToolSourceDef,
@@ -460,6 +462,46 @@ export function emailChallengeStepUpErrors(doc: unknown): string[] {
   return errors
 }
 
+/** A text as the agent-pack would write it in a flow mapping: quoted when YAML would read it otherwise. */
+function yamlText(value: unknown): string {
+  const text = String(value)
+  return /^[A-Za-z0-9][A-Za-z0-9 ._-]*$/.test(text) ? text : JSON.stringify(text)
+}
+
+/**
+ * The keys of an account that named fields replaced (D102, TOOL-CAT-012): `label` and `pattern`, now each field's, and
+ * `apply` as one header with its `prefix`, now a list of headers built from the fields. Each is refused in words before
+ * the schema, which would only name the key, with the form that replaces it, written from what the account declares.
+ */
+export function withdrawnAccountKeyErrors(doc: unknown): string[] {
+  const errors: string[] = []
+  for (const { where, body } of docSources(doc)) {
+    if (!isObject(body.account)) continue
+    const account = body.account
+    const apply = isObject(account.apply) ? account.apply : undefined
+    if (account.label === undefined && account.pattern === undefined && !apply) continue
+    const label = account.label !== undefined ? yamlText(account.label) : 'API token'
+    const pattern = account.pattern !== undefined ? `, pattern: ${JSON.stringify(String(account.pattern))}` : ''
+    const fields = `fields: [{ name: token, label: ${label}${pattern} }]`
+    if (account.label !== undefined)
+      errors.push(
+        `${where}.account.label is withdrawn: a space account declares the fields its owner fills, each with its own label, as account.${fields} (D102, TOOL-CAT-012)`
+      )
+    if (account.pattern !== undefined)
+      errors.push(
+        `${where}.account.pattern is withdrawn: each field carries the pattern of its own value, as account.${fields} (D102, TOOL-CAT-012)`
+      )
+    if (apply) {
+      const header = typeof apply.header === 'string' ? apply.header : 'Authorization'
+      const prefix = typeof apply.prefix === 'string' ? apply.prefix : ''
+      errors.push(
+        `${where}.account.apply as one header with its prefix is withdrawn: account.apply is a list of headers, each a header and a value that names the fields as {name}, as apply: [{ header: ${header}, value: ${JSON.stringify(`${prefix}{token}`)} }] with ${fields} (D102, TOOL-CAT-012)`
+      )
+    }
+  }
+  return errors
+}
+
 /**
  * The kinds of account of the later phases (TOOL-CAT-002, O28, O29): a source that declares `personal` or `organization`
  * is refused in words, before the schema, which would only name the value.
@@ -569,16 +611,59 @@ function regexError(pattern: string | undefined): string | undefined {
   }
 }
 
+/**
+ * The fields of a space account and the headers built from them (D102, TOOL-CAT-002): a name unique in the account, a
+ * pattern that is a regular expression, a header declared once, a value that names declared fields only, and every field
+ * named by at least one value.
+ */
+function accountFieldErrors(where: string, account: SourceAccount): string[] {
+  const errors: string[] = []
+  const names = new Set<string>()
+  for (const field of account.fields ?? []) {
+    const at = `${where}.account.fields.${field.name}`
+    if (names.has(field.name)) errors.push(`${at}: a field's name is unique in its account (TOOL-CAT-002)`)
+    names.add(field.name)
+    const bad = regexError(field.pattern)
+    if (bad) errors.push(`${at}.pattern is not a regular expression: ${bad}`)
+  }
+  const used = new Set<string>()
+  const headers = new Set<string>()
+  for (const [i, entry] of (account.apply ?? []).entries()) {
+    const at = `${where}.account.apply[${i}]`
+    const header = entry.header.toLowerCase()
+    if (headers.has(header)) errors.push(`${at}.header: ${entry.header} is declared twice (TOOL-CAT-002)`)
+    headers.add(header)
+    for (const name of fieldsNamedBy(entry.value)) {
+      if (names.has(name)) used.add(name)
+      else
+        errors.push(
+          `${at}.value names {${name}}, which is not a field of the account: declare it in account.fields, or name one of ${[...names].join(', ') || 'its fields'} (TOOL-CAT-002)`
+        )
+    }
+  }
+  for (const name of names)
+    if (!used.has(name))
+      errors.push(
+        `${where}.account.fields.${name}: no header of account.apply names {${name}}: every field is sent (TOOL-CAT-002)`
+      )
+  return errors
+}
+
 /** The account, availability and bindings of one source (TOOL-CAT-002/004/005, TOOL-AVAIL-003). */
 function sourceErrors(where: string, source: ToolSourceDef): string[] {
   const errors: string[] = []
   const account = source.account
   const availability = source.availability ?? 'agent'
   if (account?.kind === 'space') {
-    if (!account.label)
-      errors.push(`${where}.account.label: a space account says what its owner is asked for (TOOL-CAT-002)`)
-    if (!account.apply?.header)
-      errors.push(`${where}.account.apply: a space account says the header its token is sent in (TOOL-CAT-002)`)
+    if (!account.fields?.length)
+      errors.push(
+        `${where}.account.fields: a space account declares the fields its owner fills, one or more (TOOL-CAT-002)`
+      )
+    if (!account.apply?.length)
+      errors.push(
+        `${where}.account.apply: a space account declares the headers its calls carry, built from its fields (TOOL-CAT-002)`
+      )
+    errors.push(...accountFieldErrors(where, account))
     if (availability !== 'spaces')
       errors.push(
         `${where}.availability: a source whose account is space is of availability spaces, not ${availability} (TOOL-AVAIL-003)`
@@ -587,10 +672,8 @@ function sourceErrors(where: string, source: ToolSourceDef): string[] {
       errors.push(
         `${where}.transport: a space account reaches a remote MCP server (sse or streamable-http), never a stdio one (TOOL-AVAIL-003)`
       )
-  } else if (account && (account.label || account.pattern || account.apply))
-    errors.push(`${where}.account: label, pattern and apply belong to a space account only (TOOL-CAT-002)`)
-  const bad = regexError(account?.pattern)
-  if (bad) errors.push(`${where}.account.pattern is not a regular expression: ${bad}`)
+  } else if (account && (account.fields || account.apply))
+    errors.push(`${where}.account: fields and apply belong to a space account only (TOOL-CAT-002)`)
   const names = new Set<string>()
   for (const binding of source.type === 'bundled' ? [] : (source.bindings ?? [])) {
     const at = `${where}.bindings.${binding.name}`
@@ -994,6 +1077,10 @@ export function validatePackDocument(doc: unknown, env: Record<string, string | 
   const withdrawn = withdrawnToolKeyErrors(coerced)
   if (withdrawn.length)
     throw new PackError('agent-pack declares tools under keys that tools.sources replaced (D101)', withdrawn)
+  // TOOL-CAT-012: the keys of an account that named fields replaced are refused in words, with their new form (D102)
+  const accountKeys = withdrawnAccountKeyErrors(coerced)
+  if (accountKeys.length)
+    throw new PackError('agent-pack declares a space account in the form that its fields replaced (D102)', accountKeys)
   // INTX-AUTH-011: a step-up that declares the email code is refused in words, before the schema names the value
   const email = emailChallengeStepUpErrors(coerced)
   if (email.length)

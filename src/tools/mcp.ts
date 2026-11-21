@@ -4,12 +4,14 @@
  * per space account, opened on the first call that needs it and closed once idle, so that no call of a space travels on
  * another's connection (TOOL-ACCESS-007); a server of the agent's account, or of none, keeps one connection.
  */
+import { createHash } from 'node:crypto'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import type { McpSource } from '../config/packTypes.js'
 import type { Logger } from '../util/logger.js'
+import { scrubAccount } from './accountValues.js'
 import type { ToolAnnotations } from './catalog.js'
 import type { CallAccountSecret, ToolContext, ToolResult, ToolSource, ToolSpec } from './types.js'
 
@@ -18,9 +20,15 @@ export const DEFAULT_IDLE_SECONDS = 600
 
 interface AccountConnection {
   client: Client
-  /** the token it was opened with: another token is another connection */
-  token: string
+  /** a digest of the headers it was opened with: another account is another connection; never the values themselves */
+  key: string
   timer?: NodeJS.Timeout
+}
+
+/** A digest of the headers of an account, to tell one account's connection from another's without keeping them twice. */
+function accountKey(headers: Record<string, string>): string {
+  const entries = Object.entries(headers).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+  return createHash('sha256').update(JSON.stringify(entries)).digest('hex')
 }
 
 interface ListedTool {
@@ -86,35 +94,37 @@ export class McpServerSource implements ToolSource {
     }
   }
 
-  /** The connection of a space's account: opened on first need, kept while used, closed once idle. */
+  /**
+   * The connection of a space's account: opened on first need with the headers built from its fields (D102), kept while
+   * used, closed once idle.
+   */
   private async connectAccount(account: CallAccountSecret): Promise<Client> {
     const spaceId = account.spaceId
-    const token = account.token
-    if (!spaceId || !token) throw new Error('the account of this space is not set')
+    const headers = account.headers
+    if (!spaceId || !headers) throw new Error('the account of this space is not set')
+    const key = accountKey(headers)
     const open = this.accounts.get(spaceId)
-    if (open && open.token === token) {
+    if (open && open.key === key) {
       this.touch(spaceId, open)
       return open.client
     }
-    // a token replaced: the connection of the former one closes, and nothing of it is reused
+    // an account replaced: the connection of the former one closes, and nothing of it is reused
     if (open) await this.closeAccount(spaceId)
     const pending = this.opening.get(spaceId)
     if (pending) {
       const connection = await pending
-      if (connection.token === token) return connection.client
+      if (connection.key === key) return connection.client
     }
     const opening = (async () => {
       const client = new Client({ name: 'ayni-agent', version: '3.0.0' })
-      const header = this.def.account?.apply?.header ?? 'Authorization'
-      const value = `${this.def.account?.apply?.prefix ?? ''}${token}`
-      await client.connect(this.createTransport({ [header]: value }))
-      const connection: AccountConnection = { client, token }
+      await client.connect(this.createTransport(headers))
+      const connection: AccountConnection = { client, key }
       client.onclose = () => {
         if (this.accounts.get(spaceId) === connection) this.accounts.delete(spaceId)
       }
       this.accounts.set(spaceId, connection)
       this.touch(spaceId, connection)
-      // the space is named, never its token (TOOL-ACCESS-005)
+      // the space is named, never a value of its account (TOOL-ACCESS-005)
       this.logger.info({ server: this.name, spaceId }, 'mcp server connected with a space account')
       return connection
     })()
@@ -200,8 +210,8 @@ export class McpServerSource implements ToolSource {
   }
 
   private async call(name: string, args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-    // a call of a space travels on that space's connection, with its own token, and on no other (TOOL-ACCESS-007)
-    if (this.spaceAccount && !ctx.account?.token)
+    // a call of a space travels on that space's connection, with its own account, and on no other (TOOL-ACCESS-007)
+    if (this.spaceAccount && !ctx.account?.headers)
       return { content: 'The account of this space is not set.', isError: true }
     const c = this.spaceAccount ? await this.connectAccount(ctx.account as CallAccountSecret) : await this.connect()
     const result = await c.callTool({ name, arguments: args }, undefined, { signal: ctx.signal })
@@ -245,7 +255,7 @@ export class McpServerSource implements ToolSource {
     } catch (error) {
       // the error may echo the request: the space is named, nothing of the account (TOOL-ACCESS-005)
       this.logger.error(
-        { server: this.name, spaceId: account.spaceId, err: scrub(error, account.token) },
+        { server: this.name, spaceId: account.spaceId, err: scrub(error, account.secrets) },
         'mcp server discovery failed'
       )
     }
@@ -258,10 +268,9 @@ export class McpServerSource implements ToolSource {
   }
 }
 
-/** An error with a token in its message, the token replaced (TOOL-ACCESS-005). */
-export function scrub(error: unknown, token: string | undefined): string {
-  const message = error instanceof Error ? error.message : String(error)
-  return token ? message.split(token).join('[account]') : message
+/** The message of an error with every value of the account, and every header built from them, replaced (TOOL-ACCESS-005). */
+export function scrub(error: unknown, secrets: readonly string[] | undefined): string {
+  return scrubAccount(error instanceof Error ? error.message : String(error), secrets)
 }
 
 /** The MCP servers of `tools.sources`, each with its source's id (D101). */

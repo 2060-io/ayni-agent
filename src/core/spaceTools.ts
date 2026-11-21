@@ -5,15 +5,18 @@
  * its rules within the agent-pack's, and removes it. A change that grants something waits for the owner's device (a
  * `confirm` flow, attested, whose code is the screen's); a change that only narrows applies at once.
  *
- * The space's account is a token the owner types in the space's settings and nowhere else. It is sealed as it arrives,
- * under a key of its own wrapped by the deployment's master key; it is opened in memory for a call and for nothing else,
- * and clearing it, replacing it or removing its source destroys its key. No answer, event, activity or log carries it.
+ * The space's account is what the owner types in the space's settings and nowhere else: one value for each field its
+ * source declares (D102). The values are trimmed and checked, then sealed together as they arrive, as one record under a
+ * key of its own wrapped by the deployment's master key; they are opened in memory for a call and for nothing else, the
+ * headers of `account.apply` built from them then, and clearing the account, replacing it or removing its source destroys
+ * its key. No answer, event, activity or log carries a value of it.
  */
 import { randomInt } from 'node:crypto'
-import type { AgentPack, CallRule, SpaceCallRule, TemplateTool } from '../config/packTypes.js'
+import type { AccountField, AgentPack, CallRule, SpaceCallRule, TemplateTool } from '../config/packTypes.js'
 import { SPACE_CALL_RULES } from '../config/packTypes.js'
 import { type EntryCrypto, openJson, sealJson } from '../memory/crypto.js'
 import type { Store } from '../store/types.js'
+import { accountSecrets, buildAccountHeaders, fitsFields } from '../tools/accountValues.js'
 import { type CatalogSource, looser, strictest, type ToolCatalog } from '../tools/catalog.js'
 import type { ToolRegistry } from '../tools/registry.js'
 import type { CallAccountSecret, ToolSpec } from '../tools/types.js'
@@ -34,8 +37,14 @@ import type {
 export type SpaceToolState = 'available' | 'setup' | 'ready' | 'off'
 export type ChangeOutcome = 'applied' | 'declined' | 'expired' | 'failed' | 'cancelled'
 
-/** The longest token the owner may send (TOOL-SPACE-005). */
-export const MAX_TOKEN_LENGTH = 4096
+/** The longest value of a field of an account the owner may send, once trimmed (TOOL-SPACE-005). */
+export const MAX_VALUE_LENGTH = 4096
+
+/** What a value of an account may not hold inside it, once trimmed: whitespace or a control character (TOOL-SPACE-005). */
+const INNER_WHITESPACE_OR_CONTROL = /[\s\p{Cc}]/u
+
+/** The values an owner sends for the fields of an account, before they are sealed (D102). */
+type AccountValues = Record<string, string>
 
 /** `ayni.space.tools.changed` (PROF-TOOL-006). */
 export interface SpaceToolsChanged {
@@ -56,8 +65,8 @@ export interface SpaceToolView {
   guests: boolean
   account: {
     kind: 'none' | 'agent' | 'space'
-    label?: string
-    pattern?: string
+    /** the owner's, for a `space` account: the fields to fill, in the agent-pack's order (D102) */
+    fields?: { name: string; label: string; pattern?: string }[]
     set?: boolean
     setAt?: string | null
     setBy?: { name: string } | null
@@ -202,23 +211,29 @@ export class SpaceToolService {
     return out
   }
 
+  /** The values of an account, opened from what is sealed; none when they do not fit the fields its source declares. */
+  private openValues(fields: readonly AccountField[], sealed: { encKeyRef: string; cipher: string }) {
+    try {
+      const opened = openJson<{ values?: unknown }>(this.crypto, sealed.encKeyRef, Buffer.from(sealed.cipher, 'base64'))
+      return fitsFields(fields, opened.values) ? opened.values : undefined
+    } catch {
+      return undefined
+    }
+  }
+
   /**
-   * The space's account of a source, opened in memory for one call (TOOL-ACCESS-005): never logged, never returned to a
+   * The space's account of a source, opened in memory for one call (TOOL-ACCESS-005): the headers of `account.apply`
+   * built from the values of its fields (D102), with what an echo is scrubbed of; never logged, never returned to a
    * client, never given to the model.
    */
   public async openAccount(spaceId: string, sourceId: string): Promise<CallAccountSecret | undefined> {
     const source = this.catalog.source(sourceId)
     if (source?.account.kind !== 'space') return undefined
     const record = await this.store.spaceAccounts.get(spaceId, sourceId)
-    if (!record) return { kind: 'space', spaceId }
-    const { token } = openJson<{ token: string }>(this.crypto, record.encKeyRef, Buffer.from(record.cipher, 'base64'))
-    return {
-      kind: 'space',
-      spaceId,
-      token,
-      header: source.account.apply?.header,
-      prefix: source.account.apply?.prefix,
-    }
+    const values = record ? this.openValues(source.account.fields ?? [], record) : undefined
+    if (!values) return { kind: 'space', spaceId }
+    const headers = buildAccountHeaders(source.account, values)
+    return { kind: 'space', spaceId, headers, secrets: accountSecrets(values, headers) }
   }
 
   // ---- what the settings show (PROF-TOOL-001) ---------------------------------------------------------------------
@@ -228,7 +243,7 @@ export class SpaceToolService {
     let specs = (await this.registry.all()).filter((s) => s.source === source.name)
     if (!specs.length && source.kind === 'mcp' && source.account.kind === 'space' && spaceId) {
       const account = await this.openAccount(spaceId, source.name)
-      if (account?.token) {
+      if (account?.headers) {
         await this.registry.discover(source.name, account)
         specs = (await this.registry.all()).filter((s) => s.source === source.name)
       }
@@ -274,8 +289,12 @@ export class SpaceToolService {
     )
     const accountView: SpaceToolView['account'] = { kind: source.account.kind }
     if (owner && source.account.kind === 'space') {
-      accountView.label = source.account.label
-      if (source.account.pattern) accountView.pattern = source.account.pattern
+      // the fields the owner fills, in the agent-pack's order, and never a value (PROF-TOOL-001)
+      accountView.fields = (source.account.fields ?? []).map((f) => ({
+        name: f.name,
+        label: f.label,
+        ...(f.pattern ? { pattern: f.pattern } : {}),
+      }))
       accountView.set = !!account
       accountView.setAt = account?.setAt ?? null
       accountView.setBy = account ? { name: (await this.hooks.nameOf?.(account.setByPrincipalId)) ?? '' } : null
@@ -389,7 +408,7 @@ export class SpaceToolService {
     return owner ? strictest<SpaceCallRule>(packRule, owner) : packRule
   }
 
-  /** The words of a change: the space, the source and every value but the token (TOOL-SPACE-008). */
+  /** The words of a change: the space, the source and every value but the account's (TOOL-SPACE-008). */
   private async summaryOf(
     head: string,
     space: Space,
@@ -545,15 +564,50 @@ export class SpaceToolService {
   }
 
   /**
-   * `PUT {sessions}/spaces/{id}/tools/{source}/account` (TOOL-SPACE-005): the token is checked, sealed as it arrives, and
-   * used only once the phone confirms; a refused token is kept nowhere.
+   * The values the owner sent for the fields of an account (TOOL-SPACE-005, D102): every declared field and no other
+   * (`400 bad-request`, `field: account.<name>`), each trimmed of the whitespace around it, then refused (`422 bad-token`,
+   * at its field) when empty, longer than 4096 characters, with whitespace or a control character inside, or not matching
+   * its pattern. No message names a value.
+   */
+  private checkValues(fields: readonly AccountField[], values: unknown): AccountValues {
+    if (!values || typeof values !== 'object' || Array.isArray(values))
+      throw new SpaceError('values is an object of the values of the fields of the account', 'bad-request', 'values')
+    const given = values as Record<string, unknown>
+    for (const name of Object.keys(given))
+      if (!fields.some((f) => f.name === name))
+        throw new SpaceError(`the account declares no field ${name}`, 'bad-request', `account.${name}`)
+    for (const field of fields)
+      if (!Object.hasOwn(given, field.name))
+        throw new SpaceError(`the ${field.label} is missing`, 'bad-request', `account.${field.name}`)
+    const out: AccountValues = {}
+    for (const field of fields) {
+      const at = `account.${field.name}`
+      const raw = given[field.name]
+      if (typeof raw !== 'string') throw new SpaceError(`the ${field.label} is not a text`, 'bad-token', at)
+      // a paste often brings a space or a line break with it: the value is what lies between (D102)
+      const value = raw.trim()
+      if (!value) throw new SpaceError(`the ${field.label} is empty`, 'bad-token', at)
+      if (value.length > MAX_VALUE_LENGTH)
+        throw new SpaceError(`the ${field.label} is longer than ${MAX_VALUE_LENGTH} characters`, 'bad-token', at)
+      if (INNER_WHITESPACE_OR_CONTROL.test(value))
+        throw new SpaceError(`the ${field.label} has whitespace or a control character inside it`, 'bad-token', at)
+      if (field.pattern !== undefined && !new RegExp(field.pattern).test(value))
+        throw new SpaceError(`the ${field.label} is not in the form this source takes`, 'bad-token', at)
+      out[field.name] = value
+    }
+    return out
+  }
+
+  /**
+   * `PUT {sessions}/spaces/{id}/tools/{source}/account` (TOOL-SPACE-005): the values of its fields are checked, sealed
+   * together as they arrive, and used only once the phone confirms; refused values are kept nowhere.
    */
   public async setAccount(
     principal: Principal,
     session: Session,
     spaceId: string,
     sourceId: string,
-    token: unknown
+    values: unknown
   ): Promise<SpaceToolView> {
     const { space, entry, source } = await this.owned(principal, spaceId, sourceId)
     if (source.account.kind !== 'space')
@@ -561,21 +615,15 @@ export class SpaceToolService {
     const record = await this.recordOf(space, entry)
     if (!record.added) throw new SpaceError('add the source to the space first', 'not-added')
     if (record.pendingChange) throw new SpaceError('a change of this source waits for the phone', 'change-pending')
-    const pattern = source.account.pattern
-    if (
-      typeof token !== 'string' ||
-      !token ||
-      token.length > MAX_TOKEN_LENGTH ||
-      (pattern !== undefined && !new RegExp(pattern).test(token))
-    )
-      throw new SpaceError(`the ${source.account.label ?? 'token'} is not one this source takes`, 'bad-token')
+    const checked = this.checkValues(source.account.fields ?? [], values)
+    // the values of every field together, as one record under one key (TOOL-ACCESS-004)
     const keyRef = this.crypto.newWrappedKey()
-    const { cipher } = sealJson(this.crypto, keyRef, { token })
+    const { cipher } = sealJson(this.crypto, keyRef, { values: checked })
     const set = !!(await this.store.spaceAccounts.get(space.id, source.name))
     const head = `${set ? 'Replace' : 'Set'} the account of ${source.title} in ${space.title}`
     await this.hold(principal, session, space, record, {
       kind: 'account',
-      sealedToken: { keyRef, cipher: cipher.toString('base64') },
+      sealedValues: { keyRef, cipher: cipher.toString('base64') },
       summary: head,
     })
     return this.ownerView(space, source.name)
@@ -658,6 +706,23 @@ export class SpaceToolService {
     const change = record.pendingChange as PendingToolChange
     const source = this.catalog.source(record.sourceId)
     if (!source) return
+    // an account whose values no longer fit its source's fields (the agent-pack changed while it waited) is not set
+    if (
+      change.kind === 'account' &&
+      !(
+        change.sealedValues &&
+        this.openValues(source.account.fields ?? [], {
+          encKeyRef: change.sealedValues.keyRef,
+          cipher: change.sealedValues.cipher,
+        })
+      )
+    ) {
+      this.logger.warn(
+        { spaceId: space.id, source: record.sourceId, changeId: change.id },
+        'a confirmed account does not fit the fields of its source: it is not set'
+      )
+      return this.drop(space, record, 'failed', false)
+    }
     const { pendingChange: _applied, removed, ...rest } = record
     const next: SpaceToolRecord = {
       ...rest,
@@ -674,14 +739,14 @@ export class SpaceToolService {
       next.bindings = { ...record.bindings, ...(change.bindings ?? {}) }
       next.calls = { ...record.calls, ...(change.calls ?? {}) }
     }
-    if (change.kind === 'account' && change.sealedToken) {
-      // the former account's key is destroyed with its row: the new token under a key of its own (TOOL-ACCESS-004)
+    if (change.kind === 'account' && change.sealedValues) {
+      // the former account's key is destroyed with its row: the new values under a key of their own (TOOL-ACCESS-004)
       await this.destroyAccount(space.id, record.sourceId)
       await this.store.spaceAccounts.save({
         spaceId: space.id,
         sourceId: record.sourceId,
-        cipher: change.sealedToken.cipher,
-        encKeyRef: change.sealedToken.keyRef,
+        cipher: change.sealedValues.cipher,
+        encKeyRef: change.sealedValues.keyRef,
         setAt: nowIso(),
         setByPrincipalId: change.requestedBy,
       })
@@ -708,7 +773,7 @@ export class SpaceToolService {
     })
   }
 
-  /** A change dropped (declined, expired, failed, withdrawn): the token it carried is destroyed with it. */
+  /** A change dropped (declined, expired, failed, withdrawn): the account's values it carried are destroyed with it. */
   private async drop(space: Space, record: SpaceToolRecord, outcome: ChangeOutcome, withdraw: boolean): Promise<void> {
     const change = record.pendingChange
     if (!change) return
@@ -770,8 +835,20 @@ export class SpaceToolService {
     }
     for (const account of await this.store.spaceAccounts.listAll()) {
       const space = await this.spaces.find(account.spaceId)
-      if (!space || !this.entriesOf(space).some((e) => e.source === account.sourceId))
+      if (!space || !this.entriesOf(space).some((e) => e.source === account.sourceId)) {
         await this.destroyAccount(account.spaceId, account.sourceId)
+        continue
+      }
+      // an account whose sealed values do not fit the fields its source declares, such as a single token sealed before
+      // the fields (D102) or one set before the agent-pack changed them, is dropped: its owner sets it again
+      const source = this.catalog.source(account.sourceId)
+      if (source?.account.kind !== 'space' || !this.openValues(source.account.fields ?? [], account)) {
+        await this.destroyAccount(account.spaceId, account.sourceId)
+        this.logger.warn(
+          { spaceId: account.spaceId, source: account.sourceId },
+          'a space account that does not fit the fields of its source was dropped: its owner sets it again (D102)'
+        )
+      }
     }
     for (const space of await this.spaces.all()) await this.onCreated(space)
     await this.expirePending()

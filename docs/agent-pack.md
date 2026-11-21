@@ -578,7 +578,7 @@ space, then the person) can only narrow the answers:
 | Question | Key | Answers |
 |---|---|---|
 | Where is it available | `availability` | `agent`, `personal`, `spaces` |
-| Whose account its calls run with | `account.kind` | `none`, `agent` (credentials held by the deployment), `space` (a token the owner of each space sets) |
+| Whose account its calls run with | `account.kind` | `none`, `agent` (credentials held by the deployment), `space` (what the owner of each space sets, one field per key: `account.fields`, `account.apply`) |
 | Who may use it | `access` | roles, as the tiers below; the members of the space; guests only where the template says `guests: true` |
 | What a call needs | `tools.<name>.effect`, `.call`, `.stepUp` | `none`, `confirm` (the person's card), `approval` (another person), and a step-up on top |
 
@@ -620,7 +620,7 @@ tools:
       untrusted: true                   # what it returns was written outside the organization
       access: { roles: { employee: ["*"] } }
 
-    # An MCP server on a space's account: each Sales space binds its workspace and sets its own token.
+    # An MCP server on a space's account of a single token: each Sales space binds its workspace and sets its own token.
     relaticle:
       type: mcp
       title: Relaticle CRM
@@ -629,9 +629,10 @@ tools:
       url: https://crm.dev.ayni.org/mcp
       account:
         kind: space                     # set by the owner of each space, in the space's settings
-        label: API token                # what the owner is asked for
-        pattern: "^[A-Za-z0-9|]{20,200}$"
-        apply: { header: Authorization, prefix: "Bearer " }
+        fields:                         # a single token is one field
+          - { name: token, label: API token, pattern: "^[A-Za-z0-9|]{20,200}$" }
+        apply:                          # sent after Bearer, in the header Authorization
+          - { header: Authorization, value: "Bearer {token}" }
       availability: spaces              # in the spaces whose template names it
       offer: [list-companies, get-company, create-note, delete-note]
       bindings:
@@ -645,7 +646,7 @@ tools:
         delete-note:                    # no annotations: its effect is delete, its rule approval, by the space's owner
           stepUp: { authChallenge: { type: device } }           # then the phone of the person who asked
 
-    # An MCP server on a space's account: one X account per space, named by a binding the agent pins.
+    # An MCP server on a space's account of four keys: one X account per space, named by a binding the agent pins.
     x:
       type: mcp
       title: X
@@ -654,8 +655,13 @@ tools:
       url: https://x-mcp.dev.ayni.org/mcp
       account:
         kind: space
-        label: Key of the X account
-        apply: { header: X-Account }    # the token, as it is, in the header X-Account
+        fields:                         # one or more; the order is the order shown
+          - { name: api_key, label: API key, pattern: "^[A-Za-z0-9]{10,64}$" }
+          - { name: api_secret, label: API secret, pattern: "^[A-Za-z0-9]{20,128}$" }
+          - { name: access_token, label: Access token, pattern: "^[0-9]{1,20}-[A-Za-z0-9]{10,64}$" }
+          - { name: access_token_secret, label: Access token secret, pattern: "^[A-Za-z0-9]{20,128}$" }
+        apply:                          # one or more headers; {name} is replaced by that field's value
+          - { header: X-Account, value: "{api_key}:{api_secret}:{access_token}:{access_token_secret}" }
       availability: spaces
       offer: [post_tweet, reply_to_tweet, get_mentions]
       bindings:
@@ -690,7 +696,7 @@ spaces:
       creators: [comms]
       membership: { mode: list }
       tools:
-        - { source: x, add: owner, guests: false } # offered; the owner adds it, binds the X account, sets its key
+        - { source: x, add: owner, guests: false } # offered; the owner adds it, binds the X account, sets its keys
 ```
 
 Two sources may each have a tool of one name, a `delete` for instance: their `tools.delete` are two declarations, each
@@ -798,10 +804,34 @@ tool). The pinned argument is out of the input schema the model receives, and th
 of anything the model gives. A source of availability `agent` or `personal` gives every binding its `value`; in a source
 of `spaces`, a binding the pack gives a value keeps it in every space, the others take theirs from each space's owner.
 
-A `space` account is a token the owner types in the space's settings (`PUT {sessions}/spaces/{id}/tools/{source}/account`)
-and nowhere else; it is sealed as it arrives under a key of its own, opened in memory for a call only, sent as
-`account.apply` says (the header, after its `prefix`), never logged, never given to the model or to a client; a result
-that echoes it reads `[account]`. One connection per space account of an MCP server, closed after
+A `space` account is what the owner types in the space's settings and nowhere else, one masked field for each of its
+`fields` (ayni-spec D102):
+
+| Key | What it says |
+|---|---|
+| `account.fields` | the fields the owner fills, one or more, in the order the settings show them: `name` (a lower-case letter, then lower-case letters, digits or `_`, 32 at most, unique in the account), `label` (what the owner is asked for) and an optional `pattern` its value must match; every field is a secret |
+| `account.apply` | the headers each call carries, one or more: `header` and `value`, in which `{name}` stands for the value of that field. A value names declared fields only, and every field is named at least once |
+
+A single token is one field:
+
+```yaml
+account:
+  kind: space
+  fields: [{ name: token, label: API token }]
+  apply: [{ header: Authorization, value: "Bearer {token}" }]
+```
+
+and an API that takes several keys of one account in one header, as the X server takes the four keys of an X account,
+asks for each in a field of its own and joins them in `apply`, as the `x` source above does. The owner sends them
+together (`PUT {sessions}/spaces/{id}/tools/{source}/account` with `{ "values": { "<name>": "<value>", … } }`): every
+field, and no other (`400 bad-request`, `field: "account.<name>"`); each value is trimmed of the whitespace at its ends,
+as a paste often adds a line break, then refused with `422 bad-token` at its field when it is empty, longer than 4096
+characters, has whitespace or a control character inside it, or does not match its pattern. The values are sealed
+together as they arrive, as one record under a key of its own, opened in memory for a call only; the headers are built
+from them then, never logged, never given to the model or to a client; a result that echoes a value, or a built header,
+reads `[account]`. An account sealed before the fields (a single token of 0.27.0), or whose values no longer fit the
+fields the pack declares, is dropped at start, and its owner sets it again. One connection per space account of an MCP
+server, closed after
 `TOOL_CONNECTION_IDLE_SECONDS` (600) unused. A change of a space's tools that grants something waits for the owner's
 phone for `TOOL_CHANGE_CONFIRMATION_SECONDS` (300).
 
@@ -815,8 +845,12 @@ phone for `TOOL_CHANGE_CONFIRMATION_SECONDS` (300).
   `transport`), named by the schema; `account.kind: personal` or `organization` (TOOL-CAT-002);
 - an HTTP tool whose `tools` names another tool than its own; a bundled tool named by two sources, or whose `tools` names
   a tool it does not give, or declares an `effect` or `untrusted`;
-- an `account` on a bundled tool; a `space` account without `label` or `apply`; label, pattern or apply on an account that
-  is not a space's (TOOL-CAT-002);
+- `account.label`, `account.pattern` and `account.apply` as one object (`header`, `prefix`), in words and before the
+  schema, each with the form that replaces it, `account.fields` and `account.apply: [{ header, value }]`, written from
+  what the account declares (TOOL-CAT-012, D102);
+- an `account` on a bundled tool; a `space` account without `fields` or `apply`; `fields` or `apply` on an account that
+  is not a space's; two fields of one name, a field's pattern that is not a regular expression, a header declared twice,
+  a header's value that names a field the account does not declare, and a field no header names (TOOL-CAT-002, D102);
 - a `space` account of an availability other than `spaces`, or on a `stdio` server (TOOL-AVAIL-003);
 - a binding of a source of availability `agent` or `personal` without a `value`; a value that does not match its
   pattern; a pattern that is not a regular expression (TOOL-CAT-004/005);
@@ -992,12 +1026,13 @@ enables crypto-erasure with its lineage cascade.
 13. A badge from the user directory: see `issuance`, "Refused by the loader" (IDENT-DIR-002/003, INTX-AUTH-011/012/015,
     INTX-ISSUE-020). A profile that takes nothing from the directory declares at most one challenge, never `email`.
 
-14. The tool catalog: see `tools: the catalog of tool sources`, "Refused by the loader" (TOOL-CAT-001..011,
+14. The tool catalog: see `tools: the catalog of tool sources`, "Refused by the loader" (TOOL-CAT-001..012,
     TOOL-AVAIL-002/003).
 
 Before the schema, a role that declares `crossSession` is refused in words (RBAC-XSESS-005), and so are the keys
-`tools.sources` replaced (`mcp.servers`, `tools.http`, `tools.bundled`, `tools.access`, `actions`, TOOL-CAT-011), a
-step-up that declares the email code (INTX-AUTH-011), a kind of account of a later phase (`personal`, `organization`,
+`tools.sources` replaced (`mcp.servers`, `tools.http`, `tools.bundled`, `tools.access`, `actions`, TOOL-CAT-011), the
+keys of an account its fields replaced (`account.label`, `account.pattern`, `account.apply` as one header, TOOL-CAT-012),
+a step-up that declares the email code (INTX-AUTH-011), a kind of account of a later phase (`personal`, `organization`,
 TOOL-CAT-002), and a source of the catalog with no type or an unknown value (TOOL-CAT-001).
 
 ## Differences from the previous generation of packs
