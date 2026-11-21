@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.0](https://github.com/2060-io/ayni-agent/compare/v0.28.3...v0.29.0) (2026-11-21)
+
+
+### Features
+
+* **tools:** each person's own accounts, OAuth as MCP defines it, a key per person (tools phase 2) ([#110](https://github.com/2060-io/ayni-agent/issues/110)) ([2c1473e](https://github.com/2060-io/ayni-agent/commit/2c1473e5713360df9776d18b6b1c8aff66cd7924))
+
 ## [0.28.3](https://github.com/2060-io/ayni-agent/compare/v0.28.2...v0.28.3) (2026-11-21)
 
 
