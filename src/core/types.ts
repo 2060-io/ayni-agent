@@ -778,6 +778,13 @@ export type CapabilityEvent =
   /** a flow card, new or updated in place (D55, PROF-MAP-007) */
   | { kind: 'flow'; entry: MessageEntry; card: FlowCard }
 
+/**
+ * The kind of a `state-update` entry that tells what became of a card shown earlier (a flow, a confirmation): the card's
+ * own record, which the model read, stays as it was written, and this record follows it when the card's state changes
+ * (LLM-CACHE-004, MEM-RET-006). Never shown to the devices, which read the card itself.
+ */
+export const CARD_STATE = 'card-state'
+
 export const TRUST_BOUND_KINDS: readonly string[] = [
   'authentication',
   'credential-exchange',
@@ -995,6 +1002,8 @@ export type ToolCallOutcome =
   | 'unavailable'
   | 'no-approver'
   | 'not-available'
+  /** a tool the Principal's roles reach only through an elevation grant, called while none is held (RBAC-TOOL-004) */
+  | 'not-granted'
   /** waiting for another person's approval: the record is updated when the call runs or is not approved */
   | 'pending'
   /** the person's own account of the source was not connected when the call was to run (TOOL-CALL-011) */

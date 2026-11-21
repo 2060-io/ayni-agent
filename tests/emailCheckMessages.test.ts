@@ -155,7 +155,9 @@ async function waited(person: Person): Promise<void> {
 
 beforeAll(async () => {
   services = await mockServices()
-  const fixture = directoryPack([ANA], { badge: 'email' })
+  // the last test reads the check's messages in the window: a budget that keeps the whole check in it, with the tool
+  // reachable through an elevation and the record of the person that every request now carries (D112)
+  const fixture = directoryPack([ANA], { badge: 'email', contextWindowTokens: 6000 })
   root = fixture.root
   running = await buildAgent(
     testEnv({

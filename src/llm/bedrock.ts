@@ -1,5 +1,11 @@
 /** AWS Bedrock special-protocol adapter over the Converse API (LLM-PROV-003). */
-import { BedrockRuntimeClient, ConverseStreamCommand, type Message, type Tool } from '@aws-sdk/client-bedrock-runtime'
+import {
+  BedrockRuntimeClient,
+  ConverseStreamCommand,
+  type Message,
+  type TokenUsage,
+  type Tool,
+} from '@aws-sdk/client-bedrock-runtime'
 import type { LlmConfig } from '../config/packTypes.js'
 import {
   type ChatDelta,
@@ -115,13 +121,23 @@ export class BedrockChatModel implements ChatModel {
           yield { type: 'tool_call', call: { id: slot.id, name: slot.name, arguments: parseArguments(slot.args) } }
           pending.delete(event.contentBlockStop.contentBlockIndex ?? 0)
         }
-      } else if (event.metadata?.usage) {
-        yield {
-          type: 'usage',
-          inputTokens: event.metadata.usage.inputTokens ?? 0,
-          outputTokens: event.metadata.usage.outputTokens ?? 0,
-        }
-      }
+      } else if (event.metadata?.usage) yield bedrockUsage(event.metadata.usage)
     }
   }
+}
+
+/**
+ * The usage of a Converse call, from the `metadata` event (LLM-USAGE-005). Its `inputTokens` leaves out what was read from
+ * the cache and written to it, which `totalTokens` holds: the input of the call is the total less the output, and the
+ * cache parts are parts of it, as every adapter reports them (LLM-USAGE-001). Without a total, the three are added.
+ */
+export function bedrockUsage(usage: TokenUsage): Extract<ChatDelta, { type: 'usage' }> {
+  const output = usage.outputTokens ?? 0
+  const cachedTokens = usage.cacheReadInputTokens ?? 0
+  const cacheWriteTokens = usage.cacheWriteInputTokens ?? 0
+  const inputTokens =
+    typeof usage.totalTokens === 'number'
+      ? Math.max(0, usage.totalTokens - output)
+      : (usage.inputTokens ?? 0) + cachedTokens + cacheWriteTokens
+  return { type: 'usage', inputTokens, cachedTokens, cacheWriteTokens, outputTokens: output }
 }

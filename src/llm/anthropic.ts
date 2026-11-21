@@ -100,6 +100,9 @@ export class AnthropicChatModel implements ChatModel {
           messages,
           tools,
           temperature: req.temperature,
+          // the prefix is cached up to the last block, and read back by the next call that repeats it (LLM-CACHE-001,
+          // LLM-CACHE-006); without it the Messages API caches nothing
+          ...(req.cacheKey ? { cache_control: { type: 'ephemeral' as const, ttl: req.cacheTtl ?? '5m' } } : {}),
           ...(this.reasoningEffort && this.reasoningEffort !== 'minimal'
             ? {
                 thinking: {
@@ -117,6 +120,9 @@ export class AnthropicChatModel implements ChatModel {
     }
     const pending = new Map<number, { id: string; name: string; args: string }>()
     let started = false
+    // what the provider counted (LLM-USAGE-001, LLM-USAGE-005): `message_start` gives the input, `message_delta` the
+    // output and, cumulative, any count it updates; reported once, at the end of the stream
+    const counts = new AnthropicCounts()
     for await (const event of stream) {
       // the first block of the answer, of text, of thinking or of a tool call (LLM-USAGE-004)
       if (!started && event.type === 'content_block_start') {
@@ -137,10 +143,55 @@ export class AnthropicChatModel implements ChatModel {
           yield { type: 'tool_call', call: { id: slot.id, name: slot.name, arguments: parseArguments(slot.args) } }
           pending.delete(event.index)
         }
-      } else if (event.type === 'message_delta') {
+      } else if (event.type === 'message_start') counts.add(event.message?.usage)
+      else if (event.type === 'message_delta') {
         if (event.delta.stop_reason) yield { type: 'stop', reason: event.delta.stop_reason }
-        if (event.usage) yield { type: 'usage', inputTokens: 0, outputTokens: event.usage.output_tokens ?? 0 }
+        counts.add(event.usage)
       }
+    }
+    const usage = counts.usage()
+    if (usage) yield usage
+  }
+}
+
+/** The counts of the Messages API, as `message_start` and `message_delta` carry them (each field may be absent or null). */
+interface AnthropicUsageFields {
+  input_tokens?: number | null
+  cache_creation_input_tokens?: number | null
+  cache_read_input_tokens?: number | null
+  output_tokens?: number | null
+}
+
+/**
+ * The usage of a call of the Messages API (LLM-USAGE-005). Its `input_tokens` counts only what was neither read from the
+ * cache nor written to it: the input of the call is the sum of the three, and the cache parts are parts of it, as
+ * every adapter reports them (LLM-USAGE-001). A later event's count replaces an earlier one: `message_delta`'s are
+ * cumulative.
+ */
+export class AnthropicCounts {
+  private seen = false
+  private input = 0
+  private cacheRead = 0
+  private cacheWrite = 0
+  private output = 0
+
+  public add(fields: AnthropicUsageFields | null | undefined): void {
+    if (!fields) return
+    this.seen = true
+    if (typeof fields.input_tokens === 'number') this.input = fields.input_tokens
+    if (typeof fields.cache_read_input_tokens === 'number') this.cacheRead = fields.cache_read_input_tokens
+    if (typeof fields.cache_creation_input_tokens === 'number') this.cacheWrite = fields.cache_creation_input_tokens
+    if (typeof fields.output_tokens === 'number') this.output = fields.output_tokens
+  }
+
+  public usage(): Extract<ChatDelta, { type: 'usage' }> | undefined {
+    if (!this.seen) return undefined
+    return {
+      type: 'usage',
+      inputTokens: this.input + this.cacheRead + this.cacheWrite,
+      cachedTokens: this.cacheRead,
+      cacheWriteTokens: this.cacheWrite,
+      outputTokens: this.output,
     }
   }
 }

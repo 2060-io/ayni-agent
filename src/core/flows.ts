@@ -13,7 +13,15 @@ import { Deferred } from '../util/async.js'
 import { nowIso } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import type { CapabilityRouter } from './channel.js'
-import type { FlowCard, FlowOutcome, FlowReference, FlowState, MessageEntry, Session } from './types.js'
+import {
+  CARD_STATE,
+  type FlowCard,
+  type FlowOutcome,
+  type FlowReference,
+  type FlowState,
+  type MessageEntry,
+  type Session,
+} from './types.js'
 
 /** What the service needs from the DIDComm agent's flow routes (a subset of VsAgentClient). */
 export interface FlowClient {
@@ -56,17 +64,21 @@ export interface FlowRecordLike {
   createdAt: string
 }
 
-/** What the service needs from memory: the flow entry's creation and in-place update. */
+/**
+ * What the service needs from memory: the flow entry's creation and in-place update, and the record that tells the model
+ * the flow is over (LLM-CACHE-004).
+ */
 export interface FlowMemory {
   append(input: {
     sessionId: string
+    conversationId?: string
     principalId: string | null
     role: 'system'
-    sourceType: 'flow'
+    sourceType: 'flow' | 'state-update'
     text: string
     backingIdentity: MessageEntry['backingIdentity']
     payload: Record<string, unknown>
-    externalId: string
+    externalId?: string
   }): Promise<MessageEntry>
   get(id: string): Promise<MessageEntry | undefined>
   rewrite(entry: MessageEntry): Promise<void>
@@ -113,6 +125,19 @@ export interface FlowClosed {
   errorCode?: string
   references?: FlowReference[]
   closedBy: 'me' | 'peer' | 'expiry'
+}
+
+/** A flow that is over: nothing of it is on the person's device any more (INTX-FLOW-008). */
+export function flowIsOver(state: FlowState | undefined): boolean {
+  return !!state && state !== 'pending' && state !== 'active'
+}
+
+/**
+ * What the model reads when a flow shown in a conversation ends (INTX-FLOW-008, LLM-CACHE-004): a record of its own, at the
+ * end of the conversation, so that the card's own record, which the model read while it was open, stays as it was.
+ */
+export function flowStateText(card: Pick<FlowCard, 'title' | 'kind' | 'state' | 'outcome'>): string {
+  return `the request "${card.title}" (${card.kind}) shown on the phone of the person is ${card.outcome ?? card.state} and over: nothing is on their phone now`
 }
 
 const KEY_PREFIX = 'flow:'
@@ -340,15 +365,30 @@ export class FlowService {
     return result
   }
 
-  /** The flow entry is updated in place; the UIs receive the card again with the same id (PROF-MAP-007). */
+  /**
+   * The flow entry is updated in place; the UIs receive the card again with the same id (PROF-MAP-007). The model reads the
+   * entry as it was opened, never its state: the end of the flow is a record of its own, added when it ends (LLM-CACHE-004).
+   */
   private async updateCard(handle: FlowHandle, patch: Partial<FlowCard>): Promise<void> {
     if (!handle.entryId) return
     const entry = await this.memory.get(handle.entryId)
     if (!entry) return
+    const before = (entry.payload as unknown as FlowCard | undefined)?.state
     const card = { ...(entry.payload as unknown as FlowCard), ...patch }
     for (const key of Object.keys(card) as (keyof FlowCard)[]) if (card[key] === undefined) delete card[key]
     entry.payload = card as unknown as Record<string, unknown>
     await this.memory.rewrite(entry)
+    if (flowIsOver(card.state) && !flowIsOver(before))
+      await this.memory.append({
+        sessionId: entry.sessionId,
+        conversationId: entry.conversationId,
+        principalId: entry.principalId,
+        role: 'system',
+        sourceType: 'state-update',
+        text: flowStateText(card),
+        backingIdentity: entry.backingIdentity,
+        payload: { kind: CARD_STATE, entryId: entry.id, flowId: card.flowId, state: card.state },
+      })
     const session = await this.router.session(entry.sessionId)
     if (session) await this.router.deliver(session, { kind: 'flow', entry, card })
   }

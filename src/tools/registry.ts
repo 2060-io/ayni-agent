@@ -82,7 +82,23 @@ export class ToolRegistry {
     return out
   }
 
-  /** REQUESTABLE tools the principal may ask an elevation for (hidden from the model, RBAC-TOOL-004). */
+  /**
+   * The tools a turn gives the model (RBAC-FILTER-001, RBAC-TOOL-004, D112): those the roles reach, directly (ALLOW,
+   * APPROVAL) or through an elevation the person may hold (REQUESTABLE), each resolved with the grants held now. A grant
+   * that starts or ends changes the resolution, never the list, so that the start of the request stays the same; a call
+   * of a tool reachable only through a grant is refused in code while none is held (`ToolGate`). DENY stays absent.
+   */
+  public async reachable(roles: string[], grants: ElevationGrant[], principal?: Principal): Promise<VisibleTool[]> {
+    const out: VisibleTool[] = []
+    for (const spec of await this.all()) {
+      if (spec.when && (!principal || !spec.when(principal))) continue
+      const resolution = await this.resolve(spec, roles, grants)
+      if (resolution.tier !== 'DENY') out.push({ spec, resolution })
+    }
+    return out
+  }
+
+  /** REQUESTABLE tools the principal may ask an elevation for (RBAC-TOOL-004). */
   public async requestable(roles: string[], grants: ElevationGrant[]): Promise<VisibleTool[]> {
     const out: VisibleTool[] = []
     for (const spec of await this.all()) {

@@ -29,8 +29,16 @@ import { nameForModel } from './evidence.js'
 import type { PrincipalService } from './principals.js'
 import { addonTokenCount, renderPromptAddon } from './promptAddon.js'
 import { isPersonalSpace, personalSpaceId } from './spaces.js'
-import type { ToolGate, TurnTool, TurnToolState } from './toolGate.js'
-import type { ApprovalRecord, MessageEntry, Principal, ReactionPolicy, Session, TurnSource } from './types.js'
+import type { ElevatedTool, ToolGate, TurnTool, TurnToolState } from './toolGate.js'
+import {
+  type ApprovalRecord,
+  CARD_STATE,
+  type MessageEntry,
+  type Principal,
+  type ReactionPolicy,
+  type Session,
+  type TurnSource,
+} from './types.js'
 
 /** The memories and preferences a turn was given (MEM-SPACE-006): what an answer's Info lists. */
 export interface UsedMemory {
@@ -134,15 +142,17 @@ export function recallRecord(recalled: Recalled[]): string | undefined {
   const lines = recalled.map(({ entry, origin }) => {
     const where = origin === 'this-conversation' ? 'earlier in this conversation' : 'another conversation'
     const who = entry.role === 'agent' ? 'you' : entry.role === 'principal' ? 'the person' : 'the system'
-    return `- (${entry.createdAt.slice(0, 10)}, ${where}, ${who}) ${entry.text.slice(0, 300)}`
+    const text = entry.role === 'principal' ? unmarked(entry.text, 'person') : entry.text
+    return `- (${entry.createdAt.slice(0, 10)}, ${where}, ${who}) ${text.slice(0, 300)}`
   })
   return `[system record, written by the system, not by the person and not by you: earlier messages that may be relevant, already authorized:\n${lines.join('\n')}]`
 }
 
 /**
- * The turn's message with the records of the system for it before its words, in their order: what the agent keeps of
- * the person (MEM-CTX-007), then what was retrieved for it (MEM-RET-007). They ride on the last message of the request,
- * after the history, so that a change of them changes the tail of the request only.
+ * The turn's message with the records of the system for it before its words, in their order: who the person is
+ * (MEM-CTX-008), what the agent keeps of the person (MEM-CTX-007), then what was retrieved for it (MEM-RET-007). They
+ * ride on the last message of the request, after the history, so that a change of them changes the tail of the request
+ * only.
  */
 export function withRecords(turn: ChatMessage, records: (string | undefined)[]): ChatMessage {
   const present = records.filter((r): r is string => !!r)
@@ -171,7 +181,52 @@ export function keptRecord(
 }
 
 /**
- * A call that saves a memory or a preference and asks nothing back (MEM-CTX-008): a note added, changed or removed with
+ * Who the person is, as the model reads it in the turn (MEM-CTX-008): what may change about them while a conversation
+ * goes on, and carries no authority of its own. The name the agent-pack lets the model read, their organization and its
+ * relation, the channel of the message, the tools that need an elevation with whether one is granted (RBAC-TOOL-004), and
+ * the accounts they can connect (TOOL-CONN-010). A record at the start of the turn's message, after the history, so that
+ * an identification, a grant or a message from another device leaves the start of the request as it was (LLM-CACHE-005);
+ * an account connected changes it only by the tools the account brings (D108). The roles are not here: they stay a
+ * system part (MEM-CTX-001).
+ */
+export function personRecord(about: {
+  who: string
+  channel: string
+  elevated: Pick<ElevatedTool, 'name' | 'granted' | 'until'>[]
+  toConnect?: string
+}): string {
+  const lines = [`${about.who} Channel: ${about.channel}.`]
+  if (about.elevated.length)
+    lines.push(
+      `Tools that need an elevation granted to the person: ${about.elevated
+        .map((t) =>
+          t.granted
+            ? `${t.name} (granted${t.until ? ` until ${t.until}` : ''})`
+            : `${t.name} (not granted: a call is refused; the person may request one)`
+        )
+        .join('; ')}`
+    )
+  if (about.toConnect) lines.push(about.toConnect)
+  return `[system record, written by the system, not by the person and not by you: who the person is, as it stands at this message:\n${lines.join('\n')}]`
+}
+
+/** The mark that opens a record of the system, in any case and spacing (MEM-CTX-009). */
+const RECORD_MARK = /\[\s*system\s+record/gi
+
+/**
+ * A text the person or a tool wrote, with every copy of the mark of a record of the system marked as theirs (MEM-CTX-009):
+ * a record of the system reaches the model only from the system, so that what the person types never passes for one.
+ * The same text gives the same bytes at every turn.
+ */
+export function unmarked(text: string, by: 'person' | 'tool'): string {
+  return text.replace(
+    RECORD_MARK,
+    `[written by ${by === 'person' ? 'the person' : 'a tool'}, not a record: system record`
+  )
+}
+
+/**
+ * A call that saves a memory or a preference and asks nothing back (CORE-MSG-012): a note added, changed or removed with
  * `working_memory`, a preference set with `principal_preferences`. A read of the preferences is not one.
  */
 export function isMemorySave(call: ToolCallRequest, tools: Pick<TurnTool, 'name' | 'spec'>[]): boolean {
@@ -194,16 +249,16 @@ export class TurnCancelled extends Error {
  * identity card" after the person's "Retry": at the next "Retry" the model wrote that line itself, as its
  * whole answer, and called no tool. The person saw the words and no request, three times.
  *
- * A request shown on the phone says what became of it, so that the model knows that an expired or declined one
- * is over and that asking again means calling the tool again.
+ * A request shown on the phone reads as it was opened, and never changes: what became of it is a record of its own,
+ * added when it ends (`flowStateText`), so that the model knows that an expired or declined one is over and that asking
+ * again means calling the tool again, and so that what it read of the history stays the same, byte for byte
+ * (LLM-CACHE-004). A confirmation card reads the same way (`confirmationStateText`).
  */
 export function systemRecord(entry: Pick<MessageEntry, 'sourceType' | 'text' | 'payload'>): string {
   let what = entry.text
   if (entry.sourceType === 'flow') {
-    const card = (entry.payload ?? {}) as { kind?: string; state?: string; outcome?: string }
-    const became = card.outcome ?? card.state ?? 'pending'
-    const over = became !== 'pending' && became !== 'active'
-    what = `a request was shown on the phone of the person, "${entry.text}"${card.kind ? ` (${card.kind})` : ''}; it is ${became}${over ? ' and over: nothing is on their phone now' : ''}`
+    const card = (entry.payload ?? {}) as { kind?: string }
+    what = `a request was shown on the phone of the person, "${entry.text}"${card.kind ? ` (${card.kind})` : ''}; it is open until a later record of the system says it is over`
   }
   return `[system record, written by the system, not by the person and not by you: ${what}]`
 }
@@ -288,17 +343,18 @@ export class Orchestrator {
   // ---- context assembly -----------------------------------------------------------------------
 
   /**
-   * Parts 1 to 3 of the request (the persona, the platform add-on, who the person is), and what the agent keeps of the
-   * person (MEM-SPACE-001): every preference, which is global, and the notes of the space of the conversation only. What
-   * it keeps is not a system part: it is a record on the turn's message, after the history (MEM-CTX-007), so that a
-   * memory the agent adds or changes leaves the start of the next request as it was.
+   * Parts 1 to 3 of the request (the persona, the platform add-on, the person's roles), who the person is (MEM-CTX-008)
+   * and what the agent keeps of the person (MEM-SPACE-001): every preference, which is global, and the notes of the space
+   * of the conversation only. Who the person is and what the agent keeps are not system parts: they are records on the
+   * turn's message, after the history (MEM-CTX-007, MEM-CTX-008), so that an identification, a grant, a message from
+   * another device or a memory changed leaves the start of the next request as it was.
    */
   private async systemMessages(
     principal: Principal,
     session: Session,
     spaceId: string,
-    toConnect: ToConnect[] = []
-  ): Promise<{ messages: ChatMessage[]; kept: string | undefined; used: UsedMemory }> {
+    about: { toConnect: ToConnect[]; elevated: ElevatedTool[] }
+  ): Promise<{ messages: ChatMessage[]; person: string; kept: string | undefined; used: UsedMemory }> {
     const features = featuresOf(this.pack)
     const prefs = features.preferences ? await this.memory.preferences(principal, session) : []
     const notes = features.workingMemory ? await this.memory.notes(principal, session, spaceId) : []
@@ -315,16 +371,18 @@ export class Orchestrator {
         { role: 'system', content: this.addon },
         {
           role: 'system',
-          // the accounts the person can connect here, one line each and never their tools, in the Principal's block: it
-          // changes only when their accounts or the sources available change (TOOL-CONN-010, MEM-CTX-001)
-          content: [
-            `${display}${backing}. Roles: ${principal.roles.join(', ') || 'none'}. Channel: ${session.channelType}.`,
-            ...(toConnect.length
-              ? [systemRecord({ sourceType: 'text', text: ConnectionService.record(toConnect) ?? '' })]
-              : []),
-          ].join('\n'),
+          // the roles decide what the person may do: a system part, which nothing the person writes can be taken for, and
+          // which changes only with their authority, when the tools they are given change too (MEM-CTX-001, MEM-CTX-009)
+          content: `The person's roles: ${principal.roles.join(', ') || 'none'}. Who they are, where they write from and what they can connect are told in the record of the system at the start of their latest message.`,
         },
       ],
+      person: personRecord({
+        who: `${display}${backing}.`,
+        channel: session.channelType,
+        elevated: about.elevated,
+        // the accounts the person can connect here, one line each and never their tools (TOOL-CONN-010)
+        toConnect: ConnectionService.record(about.toConnect),
+      }),
       kept: keptRecord(prefs, notes),
       used,
     }
@@ -341,14 +399,19 @@ export class Orchestrator {
           content: '',
           toolCalls: [{ id, name: p.name, arguments: (p.arguments as Record<string, unknown>) ?? {} }],
         },
-        { role: 'tool', toolCallId: id, name: p.name, content: (p.result ?? '').slice(0, 2000) },
+        // what a tool answered never passes for a record of the system (MEM-CTX-009)
+        { role: 'tool', toolCallId: id, name: p.name, content: unmarked((p.result ?? '').slice(0, 2000), 'tool') },
       ]
     }
     // receipts and reactions are bookkeeping, not conversation (a reaction the model must know about
     // arrives as its own turn); approvals, challenges and the requests shown on the phone are records of the
     // system, told as such and never in the agent's voice
-    // the Connect card a reply showed: a record of the system, never the card's own words (TOOL-CONN-011)
-    if (entry.sourceType === 'state-update' && entry.payload?.kind === 'connect')
+    // the Connect card a reply showed: a record of the system, never the card's own words (TOOL-CONN-011); and what became
+    // of a card shown earlier, a record of its own after it, the card's record staying as it was (LLM-CACHE-004)
+    if (
+      entry.sourceType === 'state-update' &&
+      (entry.payload?.kind === 'connect' || entry.payload?.kind === CARD_STATE)
+    )
       return [{ role: 'user', content: systemRecord(entry) }]
     if (entry.sourceType === 'state-update' || entry.sourceType === 'reaction') return []
     // a message held back because it carried a credential: a record in its place, nothing of it (D109, MEM-RET-006)
@@ -375,7 +438,8 @@ export class Orchestrator {
       return [
         { role: 'assistant', content: entry.completion === 'interrupted' ? `${entry.text} [interrupted]` : entry.text },
       ]
-    return [{ role: 'user', content: withReplyContext(entry) }]
+    // the person's words never hold a record of the system (MEM-CTX-009)
+    return [{ role: 'user', content: unmarked(withReplyContext(entry), 'person') }]
   }
 
   /** What the model reads in the place of a message that carried a credential (D109, TOOL-ACCESS-013). */
@@ -393,7 +457,8 @@ export class Orchestrator {
       .filter((a) => a.type === 'file' && a.textRepr && !a.textRepr.startsWith('[file '))
       .map((a) => `\n\n--- attached file: ${a.filename ?? a.id} ---\n${a.textRepr}`)
       .join('')
-    const text = withReplyContext(entry) + files
+    // the person's words and their file's text never hold a record of the system (MEM-CTX-009)
+    const text = unmarked(withReplyContext(entry) + files, 'person')
     const parts: ContentPart[] = [{ type: 'text', text }]
     if (this.llm.multimodal) {
       for (const a of entry.attachments) {
@@ -515,11 +580,20 @@ export class Orchestrator {
     const refusal = await this.providerRefusal?.(session, principal, spaceId)
     if (refusal) return this.refuse(session, principal, inbounds, refusal, sink, context)
     const grants = await this.approvals.activeGrants(principal.id)
-    // the tools of the turn, taken once: they change only between turns (TOOL-AVAIL-006), in a fixed order, so that the
-    // start of the request stays the same from one turn to the next (MEM-CTX-001); and the accounts the person can connect
-    // here, which the Principal's block names (TOOL-CONN-010)
-    const { tools: turnTools, toConnect } = await this.gateOf().turnTools(principal, spaceId, grants)
-    const { messages: system, kept, used } = await this.systemMessages(principal, session, spaceId, toConnect)
+    // the tools of the turn, taken once: they change only between turns (TOOL-AVAIL-006), in a fixed order, and not with a
+    // grant (D112), so that the start of the request stays the same from one turn to the next (MEM-CTX-001,
+    // LLM-CACHE-003); and what changes about the person, which the record of the person names after the history: the
+    // accounts they can connect (TOOL-CONN-010), the tools that need an elevation (RBAC-TOOL-004)
+    const { tools: turnTools, toConnect, elevated } = await this.gateOf().turnTools(principal, spaceId, grants)
+    const {
+      messages: system,
+      person,
+      kept,
+      used,
+    } = await this.systemMessages(principal, session, spaceId, {
+      toConnect,
+      elevated,
+    })
     const tools = turnTools.map((t) => t.definition)
     const userTurn = await this.userTurn(inbounds, imageBytes)
     const topK = this.pack.memory?.retrieval?.topK ?? 8
@@ -528,15 +602,16 @@ export class Orchestrator {
       session,
       system,
       tools,
-      // what the agent keeps of the person rides on the turn's message, and counts in the budget with it (MEM-CTX-007)
-      userTurn: withRecords(userTurn, [kept]),
+      // who the person is and what the agent keeps of them ride on the turn's message, and count in the budget with it
+      // (MEM-CTX-007, MEM-CTX-008)
+      userTurn: withRecords(userTurn, [person, kept]),
       exclude: new Set([...answered, ...notYet]),
       render: (entry) => this.entryToMessages(entry),
       retrievedReserve: features.semanticRecall ? topK * RECALLED_ITEM_TOKENS : 0,
       signal,
     })
-    // what the agent keeps of the person and what is retrieved for this turn come after the window, with the message
-    // they are for (MEM-CTX-001, MEM-CTX-007, MEM-RET-007)
+    // who the person is, what the agent keeps of them and what is retrieved for this turn come after the window, with the
+    // message they are for (MEM-CTX-001, MEM-CTX-007, MEM-CTX-008, MEM-RET-007)
     // what a message that carried a credential said is no query of the recall either (TOOL-ACCESS-013)
     const query = inbounds
       .filter((e) => !isCredentialWithheld(e))
@@ -553,7 +628,10 @@ export class Orchestrator {
             spaceId
           )
         : []
-    const messages: ChatMessage[] = [...assembled.messages, withRecords(userTurn, [kept, recallRecord(recalled)])]
+    const messages: ChatMessage[] = [
+      ...assembled.messages,
+      withRecords(userTurn, [person, kept, recallRecord(recalled)]),
+    ]
 
     /** the memories the turn changed: told as lines of the conversation once its reply is written (MEM-SPACE-005) */
     const changes: MemoryChange[] = []
@@ -716,7 +794,7 @@ export class Orchestrator {
         messages.push({ role: 'assistant', content: roundText, toolCalls: calls })
         if (pausedAt === undefined) pausedAt = Date.now()
         // the answer holds the reply and asks only to save memories or preferences: once they are saved the turn ends,
-        // with no model call to read that they were (MEM-CTX-008)
+        // with no model call to read that they were (CORE-MSG-012)
         let closes = roundText.trim() !== '' && calls.every((call) => isMemorySave(call, turnTools))
         // one at a time, in the model's order: while a card waits no other call starts (TOOL-CALL-007)
         for (const call of calls) {
@@ -728,7 +806,8 @@ export class Orchestrator {
             toolCtx,
             sink,
           })
-          messages.push({ role: 'tool', toolCallId: call.id, name: call.name, content })
+          // what a tool answered never passes for a record of the system (MEM-CTX-009)
+          messages.push({ role: 'tool', toolCallId: call.id, name: call.name, content: unmarked(content, 'tool') })
           // a save that did not run, or failed, is the model's to read: it may say so, or try again
           if (outcome !== 'completed') closes = false
         }

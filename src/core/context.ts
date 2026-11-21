@@ -36,10 +36,13 @@ interface SummaryContent {
 export interface ContextInput {
   principal: Principal
   session: Session
-  /** persona, platform add-on, who the person is (MEM-CTX-001, parts 1 to 3) */
+  /** persona, platform add-on, the person's roles (MEM-CTX-001, parts 1 to 3) */
   system: ChatMessage[]
   tools: ToolDefinition[]
-  /** what the turn answers, with what the agent keeps of the person and without what is retrieved for it (MEM-CTX-007) */
+  /**
+   * what the turn answers, with who the person is and what the agent keeps of them, and without what is retrieved for it
+   * (MEM-CTX-007, MEM-CTX-008)
+   */
   userTurn: ChatMessage
   /** entries that are not the window's: the messages the turn answers, the ones that wait their turn */
   exclude: ReadonlySet<string>

@@ -944,15 +944,26 @@ describe('runs, tools and history (PROF-RUN-002..005, PROF-MAP-005, PROF-HIST-00
     expect(noJust.status).toBe(400)
   })
 
-  it('denies a tool outside the role and keeps it out of the model tool list (RBAC-FILTER-001)', async () => {
+  it('refuses in code a tool the role reaches only through an elevation, with no grant, before it runs (RBAC-FILTER-001, RBAC-TOOL-004)', async () => {
     const { body } = await createSession()
-    await bindViaPhone(body.sessionId, 'did:peer:erin')
+    const erin = await bindViaPhone(body.sessionId, 'did:peer:erin')
+    // a guest reaches wire_money only through an elevation: it is in the list (D112), and its call is refused in code
     const r = await run(body.sessionId, body.sessionToken, '/call wire_money {"amount":5}')
     const text = r.events
       .filter((e) => e.type === 'TEXT_MESSAGE_CONTENT')
       .map((e) => e.delta)
       .join('')
-    expect(text).toContain('cannot use')
+    expect(text).toContain('did not run: it needs an elevation granted to the person, and they hold none now')
+    const [record] = await running.agent.store.toolCalls.list({ principalId: erin.id, limit: 1 })
+    expect(record?.outcome).toBe('not-granted')
+    // a tool of no tier for the role stays out of the list: the model cannot even name it
+    const absent = await run(body.sessionId, body.sessionToken, '/call no_such_tool {}')
+    expect(
+      absent.events
+        .filter((e) => e.type === 'TEXT_MESSAGE_CONTENT')
+        .map((e) => e.delta)
+        .join('')
+    ).toContain('cannot use')
   })
 
   it('cancels a run: RunError cancelled and a partial entry marked interrupted (PROF-RUN-007)', async () => {

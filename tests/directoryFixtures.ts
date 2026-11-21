@@ -158,6 +158,8 @@ export interface DirectoryPackOptions {
   partners?: string[]
   /** the agent's default language (`language.agent`, `en` in the dev pack) */
   language?: string
+  /** the window budget (`memory.contextWindowTokens`, 4000 in the dev pack) */
+  contextWindowTokens?: number
 }
 
 export function directoryPack(
@@ -207,6 +209,7 @@ export function directoryPack(
     },
   ]
   if (options.language) doc.language = { ...doc.language, agent: options.language }
+  if (options.contextWindowTokens) doc.memory = { ...doc.memory, contextWindowTokens: options.contextWindowTokens }
   if (options.partners?.length)
     doc.identity.organizations = [{ match: { countryCode: options.partners }, relation: 'partner' }]
   if (options.badge) {
