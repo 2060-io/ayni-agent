@@ -1419,3 +1419,50 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       - flow and confirmation cards rewritten in place change their record in the history;
       - the identity part changes when the person is identified or their roles change;
       - the previous turn's message, which carried the records, is read again uncached once.
+71. **No answer of the profile is stored: `Cache-Control: no-store`** (2026-11-21, found by Fabrice on devnet;
+    ayni-spec PROF-ERR-003, UI-SESS-020; ayni-ui decision 43).
+    - **As seen:** in Chrome on his Mac, the web UI linked to the Dev Agent never showed his spaces and showed one of
+      his two conversations, for hours, after clearing cookies and site data and after linking again. A fresh
+      Incognito window worked at first, then broke the same way. The phone was not affected.
+    - **Cause:** the web UI reads the list with `GET {sessions}/conversations`, the same URL for every session; the
+      token travels in `Authorization`, which is no part of the browser's cache key. The routes sent no
+      `Cache-Control` (only `vary: origin`), and Chromium holds a `410` with no freshness of its own as fresh for ever
+      (`HttpResponseHeaders::GetFreshnessLifetimes` treats `300`, `301`, `308` and `410` so). Once the browser got
+      one `410 closed` for the list (a session a supersede closed), it answered every later list from its cache with
+      that `410`, whatever the token, without asking the agent; only the CORS preflight went out. The UI reads the
+      spaces after the list succeeds, so they never showed. The devnet ingress logs show `OPTIONS
+      /agui/v3/sessions/conversations` and no `GET` from 16:15 to 18:39 UTC, but one, at 18:37:38, answered `410`.
+    - **Fix:** one `onSend` hook in `AgUiRoutes.register` sets `Cache-Control` on every answer whose path is the
+      descriptor, the sessions base or a path under it (`isProfilePath`, the query aside), routes and not-found
+      alike, errors included (`401`, `403`, `404`, `409`, `410`, any `4xx` or `5xx`, the error handler's too). The
+      value is `cacheControlOf(status, routeValue)`: `no-store`, except a `200` whose route set
+      `private, max-age=N`, which the two attachment routes do and keep. An error of those routes is `no-store`, even
+      after the header was set.
+    - **The descriptor** is `no-store` too: nothing says it may be cached, and the UI reads it again for features and
+      limits that change with the agent (`refreshDescriptor`). It is public, so the reason is freshness, not privacy.
+    - **The two streams** (the session stream and a run's response) write their head on the raw response, which no
+      hook sees. They move from `no-cache, no-transform` to `no-store, no-transform`: `no-cache` lets a cache store
+      the stream and only asks it to check before using it, and the stream is authenticated content.
+    - **Not changed:** the DIDComm callbacks (`/media/:token`, `/vision/*`), A2A, `/health/*`, `/stats` and
+      `/integrity/anchors` are not of the profile and keep their headers; the CORS preflight answered under the
+      sessions base gets `no-store` as well, which changes nothing (a preflight is cached by
+      `Access-Control-Max-Age`). A client that adds a cache-busting query parameter (React Native's `fetch` adds
+      `_=<time>` to a `GET` in `no-store`) is answered as before: no route reads parameters it does not know.
+    - **Headless Chrome 158** (`gone-nostore.cjs`, a local API that answers `410` for one token and `200` otherwise):
+      with the headers of main, the calls with two other tokens get the cached `410` and never reach the API. With
+      `Cache-Control: no-store` on the answers they reach it and get `200`, and so they do with `cache: 'no-store'` on
+      the calls. A browser that cached the `410` before the agent sent `no-store` keeps serving it to default-mode
+      calls; the UI's `no-store` calls (ayni-ui decision 43) reach the agent then.
+    - **Tests:** `tests/noStore.test.ts`:
+      - a `410 closed` for the list of a session a supersede closed, a `200` list and the spaces, each `no-store`;
+      - `401` (no token, a wrong one), `403 not-bound`, `404` (another session's id, a path no route takes) and `409`
+        (a binding refresh too early), each `no-store`;
+      - an attachment's `200` keeps `private, max-age=300`; its `404`, `401` and `410`, and the `404` of a shared
+        conversation's attachment, are `no-store`; the upload's `201` too;
+      - the descriptor, a run's stream (`no-store, no-transform`) and a refused run (`400`), and the session stream
+        read over a real connection (`no-store, no-transform`);
+      - `/health/live` keeps no `Cache-Control`;
+      - `cacheControlOf` for every status and value, `isProfilePath` for the paths in and out.
+    - **Without the change:** with the hook removed and the streams back to `no-cache` (the two helpers kept), 6 of
+      the 9 fail, each on its first `Cache-Control` ("expected undefined to be 'no-store'"); the `/health/live` test
+      and the two tests of the helpers pass.
