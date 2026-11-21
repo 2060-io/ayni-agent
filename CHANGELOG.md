@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.28.2](https://github.com/2060-io/ayni-agent/compare/v0.28.1...v0.28.2) (2026-11-21)
+
+
+### Performance Improvements
+
+* **turn:** no model call to close a turn after memory saves, memories after the history, every model call timed ([#106](https://github.com/2060-io/ayni-agent/issues/106)) ([576560f](https://github.com/2060-io/ayni-agent/commit/576560f6b2dc5a1af905004634607f4f04569c20))
+
 ## [0.28.1](https://github.com/2060-io/ayni-agent/compare/v0.28.0...v0.28.1) (2026-11-21)
 
 
