@@ -1559,3 +1559,67 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       `tests/postgres.test.ts` (3 more: the migration 3.10.0, the ciphertext and its keys, the single-use claim). Without
       the lock, three fail; without the single-use claim, three; the master key alone opening an account fails the
       erasure test.
+73. **The start of a request stays the same: grants, cards and who the person is change only its end** (2026-11-21,
+    Fabrice's choice of the remaining cache breakers; ayni-spec D112, LLM-CACHE-003 to 006, LLM-USAGE-005, MEM-CTX-008
+    and 009 new; RBAC-TOOL-004, RBAC-FILTER-001/002, TOOL-AVAIL-006, TOOL-CONN-010, TOOL-PROV-004, MEM-CTX-001/007,
+    MEM-RET-006, INTX-FLOW-008, LLM-USAGE-001 and LLM-CACHE-002 amended).
+    - **As found** (entry 70, "still breaking the cache"): the provider reads a request from its start and serves from its
+      cache only what repeats the previous one byte for byte. Things changed an early part of the request:
+      - a grant that starts or ends added or removed a tool, and the tools come first: the whole request was read again;
+      - a flow card or a confirmation card, rewritten in place when it was answered, changed its record in the history,
+        and everything after it was read again;
+      - being identified changed the third system part ("The person is authenticated" became their name, with their
+        organization), and so did a message from a session of another channel in the same conversation;
+      - the line of an account to connect (TOOL-CONN-010) was in the third system part too.
+      - The Anthropic adapter reported `inputTokens: 0` and no cache counts; Bedrock no cache counts.
+    - **The tool list (`toolGate.ts` `allTools`, `registry.reachable`):** a grant no longer changes it. A tool the roles
+      reach only through an elevation (REQUESTABLE) is in the list whatever the grants. Its call is refused in code, before
+      any card, approval or call, unless a grant is held at the call: `decide` reads the grants again and resolves the tier
+      (`needsGrant`, `runsNow`), outcome `not-granted`. A DENY tool stays absent.
+    - **Cards (`flows.ts` `updateCard`, `toolGate.ts` `writeCard`):** the entry the devices read is still updated in place
+      (PROF-MAP-007, PROF-HIST-006); the model reads it as it was written. A flow reads "it is open until a later record of
+      the system says it is over". A confirmation's text stays "The person was asked to confirm X (apr) on a card". When a
+      flow ends, or a confirmation is decided, expires or is cancelled, a `state-update` entry of kind `card-state` is
+      added at that time, which the model reads as a record ("the request ... is completed and over", "The person allowed
+      X (apr)"), and no device is given. It names no message of a turn, so it stays with its card when a message is
+      deleted.
+    - **Who the person is (`orchestrator.ts` `systemMessages`, `personRecord`):** the third system part holds the roles
+      only. The name, the organization and its relation, the channel, the tools that need an elevation with whether one
+      is granted, and the accounts to connect are one record at the start of the turn's message, before what the agent
+      keeps (D103) and the recall.
+      - The roles stay a system part: they decide what the person may do, and a change of them changes the tools too.
+      - Nothing the person writes can pass for a record: `unmarked` rewrites `[system record` (any case and spacing) in
+        the person's words, a quoted message, a file's text, a recalled message of the person and a tool's answer to
+        `[written by the person, not a record: system record` (or `a tool`). The same text gives the same bytes at every
+        turn.
+    - **Counts (`llm/anthropic.ts`, `llm/bedrock.ts`):** Anthropic adds `input_tokens`, `cache_read_input_tokens` and
+      `cache_creation_input_tokens` from `message_start`, then from `message_delta` (cumulative), and reports once at the
+      end; it sends a top-level `cache_control` with the pack's lifetime when caching is on. Bedrock takes
+      `metadata.usage`: the input is `totalTokens - outputTokens` (its `inputTokens` leaves the cache parts out), with
+      `cacheReadInputTokens` and `cacheWriteInputTokens`. Bedrock gets no cache point: whether a model takes one depends
+      on the model.
+    - **Add-on 3.7.0:** the elevation line says a tool may be listed and refused without a grant; the records line says the
+      latest message opens with who the person is, and that the person's words and the tools' answers hold no record.
+    - **Tests:** `tests/cacheBreakers.test.ts` (11): the same tools, system parts and history across a grant that starts
+      and ends, a flow card closed after the turn that read it, and an identification; the call refused without a grant,
+      run with one, refused again when it ends, and refused when it ends while the turn runs; a DENY tool absent; the mark
+      in the person's words; the counts of Anthropic and Bedrock from fixtures in `tests/fixtures/llm/` and Anthropic's
+      `cache_control`. `tests/connections.test.ts`: the line of an account in the record of the person and in no system
+      part; across a connection the system parts and the history stay as they were. `tests/tools.test.ts`: the
+      confirmation's text and its record. `tests/systemRecord.test.ts`: the texts.
+    - **Without the change:** with `registry.visible`, five grant tests fail; with the grant read at the turn's start
+      only, the call-time test; with the card rewritten in place, the card tests; with the name in the system part, the
+      identification test; with main's adapters, the three count tests; without the mark, the two mark tests; with the
+      lines of the accounts in the system part, three connection tests.
+    - **Other tests:** `tests/agui.test.ts` (RBAC-FILTER-001) now expects the guest's `wire_money` refused as `not-granted`;
+      `tests/emailCheckMessages.test.ts` sets a 6000-token window, its last test reading the whole check, which the larger
+      fixed part of a request (the elevation tool, the record of the person, the add-on) pushed out of 4000.
+    - **Not changed:**
+      - Connecting, reconnecting or disconnecting an account still changes the tool list, and so the whole request is
+        read again once: a personal source gives its tools only while its account is connected, and `offer_connection`
+        only while one is to connect (D108, Fabrice's TA4: one short line per source not connected). Listing them
+        whatever the account's state would keep the start, at the cost of their definitions in every request: a choice
+        for Fabrice (O41).
+      - A step of the window changes the summary and its start (D75). The previous turn's message, which carried the
+        records, is read again once uncached (D103). A roles change re-reads the request (the tools change with it).
+      - The Anthropic adapter's `thinking.budget_tokens`, which current models refuse, is a separate fix.

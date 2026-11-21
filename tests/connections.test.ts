@@ -17,6 +17,7 @@ import { buildAgent, type RunningAgent } from '../src/app.js'
 import { sharedEntryToMessages } from '../src/channels/agui/mapping.js'
 import type { ConnectionService } from '../src/core/connections.js'
 import type { ApprovalRecord, MessageEntry, PersonalAccountRecord, Principal } from '../src/core/types.js'
+import type { ChatRequest } from '../src/llm/types.js'
 import { createEntryCrypto, openUnder } from '../src/memory/crypto.js'
 import {
   callbackQuery,
@@ -232,6 +233,13 @@ const systemOf = (index = -1) =>
     .filter((m) => m.role === 'system')
     .map((m) => String(m.content))
     .join('\n')
+/** The record of the person, at the start of the request's last message (MEM-CTX-008). */
+const personOf = (index = -1) => {
+  const text = String(model.requests.at(index)?.messages.at(-1)?.content ?? '')
+  return /^\[system record, written by the system, not by the person and not by you: who the person is[\s\S]*?\]\n\n/.exec(
+    text
+  )?.[0]
+}
 
 const connections = () => running.agent.connections as ConnectionService
 
@@ -1048,7 +1056,10 @@ describe('the life of a connection (TOOL-OAUTH-008, TOOL-OAUTH-010, TOOL-CONN-00
     model.script = [{ text: 'ok' }]
     await run(ana, 'hello')
     expect(toolNames()).not.toContain('get_me')
-    expect(systemOf()).toContain('- github: GitHub, Code, issues and pull requests in GitHub (to reconnect)')
+    // the line of the account is in the record of the person, after the history, and in no system part (TOOL-CONN-010,
+    // MEM-CTX-008)
+    expect(personOf()).toContain('- github: GitHub, Code, issues and pull requests in GitHub (to reconnect)')
+    expect(systemOf()).not.toContain('github')
   })
 
   it('reconnects: the new account replaces the former one once it succeeds (TOOL-CONN-002)', async () => {
@@ -1136,22 +1147,24 @@ describe('an account of fields (TOOL-CONN-005, PROF-TOOL-016)', () => {
 describe('what the model knows, and the Connect card (TOOL-CONN-010..012, PROF-TOOL-020, D108)', () => {
   let personal: Device
 
-  it('reads one line per account to connect, in the Principal block, and none of its tools; the same line each turn', async () => {
+  it('reads one line per account to connect, in the record of the person, never its tools; the same line each turn', async () => {
     // GitHub must be reconnected: its source named another authorization server for a while
     personal = await open(ana, {})
     model.script = [{ text: 'ok' }]
     await run(personal, 'hello')
     const record =
       'Accounts this person can connect, with the tool offer_connection:\n- github: GitHub, Code, issues and pull requests in GitHub (to reconnect)'
-    expect(systemOf()).toContain(record)
+    // after the history, on the person's latest message, and in no system part (MEM-CTX-008, TOOL-CONN-010)
+    expect(personOf()).toContain(record)
+    expect(systemOf()).not.toContain('Accounts this person can connect')
     expect(toolNames()).toContain('offer_connection')
     expect(toolNames()).not.toContain('get_me')
-    const first = systemOf()
+    const first = personOf()
     model.script = [{ text: 'ok' }]
     await run(personal, 'again')
-    expect(systemOf()).toBe(first)
+    expect(personOf()).toBe(first)
     // the platform rules: never a credential in a conversation, the Connect card instead (TOOL-CONN-012)
-    expect(first).toContain('never ask for a password, a token or a key in a conversation')
+    expect(systemOf()).toContain('never ask for a password, a token or a key in a conversation')
   })
 
   it('shows the Connect card in the run and in history, and answers shown; not-available for another source', async () => {
@@ -1192,13 +1205,22 @@ describe('what the model knows, and the Connect card (TOOL-CONN-010..012, PROF-T
     expect(result.events.some((e) => e.activityType === ACTIVITY.connect)).toBe(false)
   })
 
-  it('answers connected once the person connected meanwhile, and the next turn has the tools and no line', async () => {
+  it('answers connected once the person connected meanwhile; the next turn has the tools and no line, its system parts and history as they were (LLM-CACHE-005)', async () => {
+    model.script = [{ text: 'ok' }]
+    await run(personal, 'before connecting')
+    const before = model.requests.at(-1) as ChatRequest
+    expect(personOf()).toContain('Accounts this person can connect')
     await signIn(ana, 'github', { email: 'ana@2060.io', login: 'ana-rios' })
     model.script = [{ text: 'ok' }]
     await run(personal, 'connected')
     expect(toolNames()).toContain('get_me')
     expect(toolNames()).not.toContain('offer_connection')
-    expect(systemOf()).not.toContain('Accounts this person can connect')
+    // the source's tools come with the account (D108); the system parts and the history the model read stay as they were:
+    // the line of the account goes from the record of the person, on the last message (MEM-CTX-008)
+    const after = model.requests.at(-1) as ChatRequest
+    const history = before.messages.length - 1
+    expect(JSON.stringify(after.messages.slice(0, history))).toBe(JSON.stringify(before.messages.slice(0, history)))
+    expect(personOf()).not.toContain('Accounts this person can connect')
   })
 })
 

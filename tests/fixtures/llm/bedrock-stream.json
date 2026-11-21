@@ -1,0 +1,21 @@
+{
+  "comment": "The events of one ConverseStream call (ConverseStreamOutput, @aws-sdk/client-bedrock-runtime 3.1150.0), in the order and shape Bedrock sends them: a call that read 5600 tokens from the cache, wrote 2048 to it and sent 12 others. metadata.usage.inputTokens leaves the cache parts out; totalTokens holds them.",
+  "events": [
+    { "messageStart": { "role": "assistant" } },
+    { "contentBlockDelta": { "contentBlockIndex": 0, "delta": { "text": "Hello" } } },
+    { "contentBlockStop": { "contentBlockIndex": 0 } },
+    { "messageStop": { "stopReason": "end_turn" } },
+    {
+      "metadata": {
+        "usage": {
+          "inputTokens": 12,
+          "outputTokens": 42,
+          "totalTokens": 7702,
+          "cacheReadInputTokens": 5600,
+          "cacheWriteInputTokens": 2048
+        },
+        "metrics": { "latencyMs": 812 }
+      }
+    }
+  ]
+}

@@ -18,6 +18,19 @@ function inRoleSet(access: ToolAccess | undefined, roles: string[], tool: string
   return access.default === 'all'
 }
 
+/**
+ * A tool the roles reach only through an elevation grant (RBAC-TOOL-004, D112): it is in the turn's tool list, and runs
+ * only while a grant is held when it is called. A tool of the role's own set is not one, even with an elevation rule.
+ */
+export function needsGrant(resolution: TierResolution): boolean {
+  return !!resolution.elevationRule
+}
+
+/** Whether a resolution lets a call run now: ALLOW or APPROVAL, by role or by a grant held (RBAC-TOOL-002..004). */
+export function runsNow(resolution: TierResolution): boolean {
+  return resolution.tier === 'ALLOW' || resolution.tier === 'APPROVAL'
+}
+
 /** Every (role set, tool) pair resolves to exactly one tier (RBAC-TOOL-001). */
 export function resolveTier(
   access: ToolAccess | undefined,

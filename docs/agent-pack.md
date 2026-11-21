@@ -715,7 +715,7 @@ space, its owner's rules and the membership only narrow what the roles give (TOO
 |------|----------------------|----------|
 | ALLOW | the tool in `roles[role]` (or `"*"`, or `default: all`) | the model sees the tool |
 | APPROVAL | the tool in an `approval[]` entry and in the role's set | the model sees the tool; its rule is `approval`, by that entry's approvers |
-| REQUESTABLE | the tool in an `elevation[]` entry and not in the role's set | hidden until an elevation grant is active |
+| REQUESTABLE | the tool in an `elevation[]` entry and not in the role's set | the model sees the tool, whatever the grants, so that a grant leaves the start of the request as it was (D112); a call runs only while an elevation grant is active, checked in code at the call, and is refused (`not-granted`) otherwise |
 | DENY | otherwise | never available |
 
 `access` has the same shape in every source and names that source's tools only: an HTTP tool's own name, a bundled
@@ -967,8 +967,9 @@ How it works:
   refresh at a time per account, the rotated refresh token kept. A refused refresh puts the account to reconnect; a `403
   insufficient_scope` marks it as asking for more access. At start, an account whose source the pack no longer offers as
   it did (its URL, registration, client id, issuer or binding changed) ends; one whose `scopes` changed must reconnect.
-- **What the model knows:** one line per personal source the person can use there and has not connected, in the block
-  of the person, and `offer_connection` to show its Connect card. Its tools come once the account is connected.
+- **What the model knows:** one line per personal source the person can use there and has not connected, in the record
+  of the person at the start of their latest message (D112), and `offer_connection` to show its Connect card. Its tools
+  come once the account is connected.
 - **In a space** a source of `personal` is added and bound by the owner, who sets no account (`PUT …/account` answers
   `409 no-space-account`); the value of the binding the account is for comes from an account of the owner's own, never
   typed by hand (`422 not-your-account` otherwise), and is confirmed on the owner's phone as any binding is.

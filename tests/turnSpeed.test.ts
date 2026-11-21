@@ -304,8 +304,9 @@ describe('what the agent keeps of the person rides on the turn, after the histor
     const turn = third.messages.at(-1)
     expect(turn?.role).toBe('user')
     const said = String(turn?.content)
+    // after the record of who the person is (MEM-CTX-008), which opens the message
     expect(said).toMatch(
-      /^\[system record, written by the system, not by the person and not by you: what you keep about the person, as it stands at this message:\nPreferences of the person: tone=brief\nWorking memory notes:\n- \[\S+\] ships to Lyon every week\]\n\n/
+      /^\[system record, written by the system, not by the person and not by you: who the person is, as it stands at this message:\n[^\]]*\]\n\n\[system record, written by the system, not by the person and not by you: what you keep about the person, as it stands at this message:\nPreferences of the person: tone=brief\nWorking memory notes:\n- \[\S+\] ships to Lyon every week\]\n\n/
     )
     expect(said.endsWith('\n\nAnd a third question.')).toBe(true)
     const system = JSON.stringify(third.messages.filter((m) => m.role === 'system'))

@@ -20,7 +20,7 @@ import type { ToolCallRequest, ToolDefinition } from '../llm/types.js'
 import type { MemoryService } from '../memory/service.js'
 import type { StatsSink } from '../platform/stats.js'
 import { type ApprovalService, displayName } from '../policy/approvals.js'
-import type { TierResolution } from '../policy/rbac.js'
+import { needsGrant, runsNow, type TierResolution } from '../policy/rbac.js'
 import type { Store } from '../store/types.js'
 import { scrubAccount } from '../tools/accountValues.js'
 import { type CatalogSource, type PackRule, strictest, type ToolCatalog } from '../tools/catalog.js'
@@ -34,20 +34,21 @@ import type { TurnSink } from './orchestrator.js'
 import type { PrincipalService } from './principals.js'
 import { isPersonalSpace, type SpaceService } from './spaces.js'
 import type { ReadySource, SpaceToolService } from './spaceTools.js'
-import type {
-  ApprovalRecord,
-  ApprovalStatus,
-  CallAccount,
-  ElevationGrant,
-  MessageEntry,
-  Principal,
-  Session,
-  Space,
-  ToolAction,
-  ToolAllowance,
-  ToolCallOutcome,
-  ToolCallRecord,
-  TurnSource,
+import {
+  type ApprovalRecord,
+  type ApprovalStatus,
+  CARD_STATE,
+  type CallAccount,
+  type ElevationGrant,
+  type MessageEntry,
+  type Principal,
+  type Session,
+  type Space,
+  type ToolAction,
+  type ToolAllowance,
+  type ToolCallOutcome,
+  type ToolCallRecord,
+  type TurnSource,
 } from './types.js'
 
 /** A tool as a turn gives it to the model, with what its calls need. */
@@ -136,6 +137,39 @@ export interface ToolGateDeps {
 /** The tool that shows the Connect card (D108, TOOL-CONN-011): given only while an account is to connect. */
 export const OFFER_CONNECTION = 'offer_connection'
 
+/** A tool of a turn that needs an elevation (RBAC-TOOL-004): whether a grant is held, and until when. */
+export interface ElevatedTool {
+  name: string
+  granted: boolean
+  until?: string
+}
+
+/** The grant a tool runs under, when one is held: matched as the registry resolves it. */
+function grantOf(tool: Pick<TurnTool, 'spec'>, grants: ElevationGrant[]): ElevationGrant | undefined {
+  const rawName = tool.spec.key.split(':').pop() ?? tool.spec.name
+  return grants.find((g) => g.toolName === rawName && (!g.serverName || g.serverName === tool.spec.serverName))
+}
+
+/** What became of a confirmation, as the model reads it in a record of its own (LLM-CACHE-004). */
+export function confirmationStateText(title: string, record: Pick<ApprovalRecord, 'id' | 'status' | 'scope'>): string {
+  const what = `${title} (${record.id})`
+  switch (record.status) {
+    case 'APPROVED':
+      return `The person allowed ${what}${record.scope === 'conversation' ? ', for this conversation' : ''}`
+    case 'REJECTED':
+      return `The person refused ${what}`
+    case 'EXPIRED':
+      return `The person did not answer the confirmation of ${what} in time`
+    default:
+      return `The confirmation of ${what} was cancelled`
+  }
+}
+
+/** What the model reads when a call needs an elevation the person does not hold (RBAC-TOOL-004, D112). */
+export function notGrantedForModel(title: string): string {
+  return `${title} did not run: it needs an elevation granted to the person, and they hold none now. They may request one, with a purpose and a justification of their own.`
+}
+
 /** What the model reads when a call needs a person's account that is not connected (TOOL-CALL-011). */
 export function notConnectedForModel(title: string, sourceTitle: string, reconnect: boolean): string {
   return `${title} did not run: the person's own account of ${sourceTitle} is ${reconnect ? 'to be reconnected' : 'not connected'}. You may offer its Connect card with ${OFFER_CONNECTION}; never ask for a password, a token or a key.`
@@ -199,21 +233,30 @@ export class ToolGate {
   }
 
   /**
-   * The tools of a turn and the accounts the person has to connect there (RBAC-FILTER-004, TOOL-CONN-010): a source of a
-   * person's own account gives its tools only while the account the conversation uses is connected; `offer_connection` is
-   * given only while one is to connect.
+   * The tools of a turn, the accounts the person has to connect there (RBAC-FILTER-004, TOOL-CONN-010) and the tools
+   * that need an elevation, with whether one is granted (RBAC-TOOL-004). A grant never changes the list (D112): a tool
+   * the roles reach only through one is in it whatever the grants, and its calls are refused in code while none is held.
+   * A source of a person's own account gives its tools only while the account the conversation uses is connected, and
+   * `offer_connection` is given only while one is to connect (D108). What changes about the person reaches the model in
+   * the record of the person, after the history (MEM-CTX-008).
    */
   public async turnTools(
     principal: Principal,
     spaceId: string,
     grants: ElevationGrant[]
-  ): Promise<{ tools: TurnTool[]; toConnect: ToConnect[] }> {
+  ): Promise<{ tools: TurnTool[]; toConnect: ToConnect[]; elevated: ElevatedTool[] }> {
     const connections = this.deps.connections
     const toConnect = connections ? await connections.toConnect(principal, spaceId, grants) : []
     const tools = (await this.allTools(principal, spaceId, grants)).filter(
       (t) => t.spec.rawName !== OFFER_CONNECTION || t.source.kind !== 'bundled' || toConnect.length > 0
     )
-    return { tools, toConnect }
+    const elevated = tools
+      .filter((t) => needsGrant(t.resolution))
+      .map((t) => {
+        const grant = runsNow(t.resolution) ? grantOf(t, grants) : undefined
+        return { name: t.name, granted: runsNow(t.resolution), ...(grant ? { until: grant.expiresAt } : {}) }
+      })
+    return { tools, toConnect, elevated }
   }
 
   private async allTools(principal: Principal, spaceId: string, grants: ElevationGrant[]): Promise<TurnTool[]> {
@@ -245,7 +288,8 @@ export class ToolGate {
       }
     }
     const out: TurnTool[] = []
-    for (const visible of await registry.visible(principal.roles, grants, principal)) {
+    // every tool the roles reach, by role or through a grant they may hold (RBAC-TOOL-004, D112)
+    for (const visible of await registry.reachable(principal.roles, grants, principal)) {
       const spec = visible.spec
       const source = catalog.sourceOf(spec.source, spec.rawName)
       let bindings: Record<string, string> = {}
@@ -339,6 +383,15 @@ export class ToolGate {
       return `Tool ${call.name} is not available to this person.`
     }
     const title = this.deps.catalog.toolTitle(tool.source, tool.spec.rawName, tool.spec.annotations)
+    // a tool the roles reach only through an elevation runs only while a grant is held, read at the call, whatever the
+    // turn's start said (RBAC-TOOL-004, D112); nothing else of the call is asked or run before
+    if (needsGrant(tool.resolution)) {
+      const grants = await this.deps.approvals.activeGrants(ctx.principal.id)
+      if (!runsNow(await this.deps.registry.resolve(tool.spec, ctx.principal.roles, grants))) {
+        await this.finish(record, 'not-granted')
+        return notGrantedForModel(title)
+      }
+    }
     const args = this.pinned(tool, call.arguments ?? {}, tool.bindings)
     // a call that is not a read, in a turn that read untrusted content, asks the person (TOOL-CALL-008)
     const raised = !!tool.effect && tool.effect !== 'read' && state.untrustedRead.size > 0
@@ -704,7 +757,8 @@ export class ToolGate {
       principalId: ctx.principal.id,
       role: 'system',
       sourceType: 'approval',
-      text: `The person was asked to confirm ${title} (${approval.id}): PENDING`,
+      // what the model reads of the card, written once: what became of it is a later record (LLM-CACHE-004)
+      text: `The person was asked to confirm ${title} (${approval.id}) on a card`,
       backingIdentity: ctx.principal.backingIdentity,
       payload: { approvalId: approval.id, kind: 'confirmation', toolName: approval.toolName, status: 'PENDING' },
     })
@@ -772,13 +826,28 @@ export class ToolGate {
     return `The confirmation of ${title} was cancelled: it did not run.`
   }
 
-  /** The card's entry: what the model reads of it, and what history gives the devices (PROF-HIST-006). */
+  /**
+   * The card's entry, as history gives it to the devices, in its current status (PROF-HIST-006). Its text, which the model
+   * reads, stays as the card was asked: a decision, an expiry or a cancellation is a record of its own, added at the end
+   * of the conversation when it happens, so that what the model read of the history never changes (LLM-CACHE-004).
+   */
   private async writeCard(entry: MessageEntry, record: ApprovalRecord, title: string): Promise<void> {
     const current = await this.deps.memory.get(entry.id)
     if (!current) return
+    const before = current.payload?.status
+    if (record.status !== 'PENDING' && before !== record.status)
+      await this.deps.memory.append({
+        sessionId: current.sessionId,
+        conversationId: current.conversationId,
+        principalId: current.principalId,
+        role: 'system',
+        sourceType: 'state-update',
+        text: confirmationStateText(title, record),
+        backingIdentity: current.backingIdentity,
+        payload: { kind: CARD_STATE, entryId: current.id, approvalId: record.id, status: record.status },
+      })
     await this.deps.memory.rewrite({
       ...current,
-      text: `The person was asked to confirm ${title} (${record.id}): ${record.status}${record.scope === 'conversation' ? ', for this conversation' : ''}`,
       payload: {
         ...(current.payload ?? {}),
         approvalId: record.id,

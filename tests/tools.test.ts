@@ -711,6 +711,16 @@ describe('the confirmation of a call (TOOL-CALL-003..008, PROF-TOOL-007/008/012,
     const history = (await call(web1, 'GET', `/${web1.sessionId}/messages?limit=100`)).body.messages
     const inHistory = history.find((m: { activityType?: string }) => m.activityType === ACTIVITY.approval)
     expect(inHistory.content).toMatchObject({ kind: 'confirmation', status: 'APPROVED', scope: 'once' })
+    // the model reads the card as it was asked, and the decision as a record of its own after it, once: what it read of
+    // the history never changes (LLM-CACHE-004)
+    const recorded = await entries(conversationId)
+    const asked = recorded.find((e) => e.sourceType === 'approval' && e.payload?.approvalId === pending.id)
+    expect(asked?.text).toBe(`The person was asked to confirm Add a note (${pending.id}) on a card`)
+    const decided = recorded.filter(
+      (e) => e.sourceType === 'state-update' && e.payload?.kind === 'card-state' && e.payload.approvalId === pending.id
+    )
+    expect(decided.map((e) => e.text)).toEqual([`The person allowed Add a note (${pending.id})`])
+    expect(history.some((m: { content?: unknown }) => String(m.content).includes('The person allowed'))).toBe(false)
   })
 
   it('tells the model the person refused, and not to try again; leaves a record (TOOL-CALL-004, TOOL-PROV-004)', async () => {
