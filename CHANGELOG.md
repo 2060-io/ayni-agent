@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.28.0](https://github.com/2060-io/ayni-agent/compare/v0.27.0...v0.28.0) (2026-11-21)
+
+
+### Features
+
+* **tools:** a space's account in named fields, one masked field per key, its headers built at the call (D102) ([#102](https://github.com/2060-io/ayni-agent/issues/102)) ([d2f2a99](https://github.com/2060-io/ayni-agent/commit/d2f2a99c837fb9cdb167d70234bb91d7e7378da8))
+
 ## [0.27.0](https://github.com/2060-io/ayni-agent/compare/v0.26.0...v0.27.0) (2026-11-20)
 
 
