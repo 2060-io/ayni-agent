@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.28.1](https://github.com/2060-io/ayni-agent/compare/v0.28.0...v0.28.1) (2026-11-21)
+
+
+### Bug Fixes
+
+* **binding:** a link over a new connection is asked as a reuse is, and every link-session request carries three codes ([#104](https://github.com/2060-io/ayni-agent/issues/104)) ([0da331d](https://github.com/2060-io/ayni-agent/commit/0da331dca946a695df09e32bdb16222615223877))
+
 ## [0.28.0](https://github.com/2060-io/ayni-agent/compare/v0.27.0...v0.28.0) (2026-11-21)
 
 
