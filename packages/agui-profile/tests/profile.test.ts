@@ -10,12 +10,17 @@ import {
   APP_LINK_DOMAIN,
   buildAppLink,
   CLIENT_PLATFORMS,
+  CONNECTION_STATES,
+  type ConnectActivity,
+  type Connection,
+  type ConnectionsChangedValue,
   CUSTOM_EVENT,
   ERROR_CODES,
   ERROR_STATUS,
   INVITATION_GOAL_CODE,
   isAppLink,
   isClientPlatform,
+  type MessagesWithheldValue,
   noTurnOf,
   PROFILE_MAJOR,
   PROFILE_MINOR,
@@ -33,10 +38,14 @@ const schema = (name: string) => JSON.parse(readFileSync(join(schemasDir, name),
 const ajv = new Ajv2020({ strict: false })
 addFormats(ajv)
 
-describe('profile 3.4 constants', () => {
+describe('profile 3.5 constants', () => {
   it('names the revision', () => {
     expect(PROFILE_VERSION).toBe(`${PROFILE_MAJOR}.${PROFILE_MINOR}`)
-    expect(PROFILE_VERSION).toBe('3.4')
+    expect(PROFILE_VERSION).toBe('3.5')
+    // 3.5: each person's own accounts, the Connect card (PROF-TOOL-019, PROF-TOOL-020)
+    expect(CUSTOM_EVENT.connectionsChanged).toBe('ayni.connections.changed')
+    expect(ACTIVITY.connect).toBe('ayni.connect')
+    expect(CONNECTION_STATES).toEqual(['not-connected', 'connected', 'reconnect'])
     // 3.4: a change of a space's tools applied or dropped, and the decision run of a confirmation
     expect(CUSTOM_EVENT.spaceToolsChanged).toBe('ayni.space.tools.changed')
     expect(noTurnOf({ type: 'RUN_STARTED', noTurn: 'decision' })).toBe('decision')
@@ -57,6 +66,13 @@ describe('profile 3.4 constants', () => {
 describe('errors (§9, PROF-ERR-001)', () => {
   it('gives each code its status, as profile.md does', () => {
     expect(ERROR_STATUS['has-messages']).toBe(409)
+    // 3.5: the refusals of Your accounts (§3.11) and of a binding set from the owner's account (§3.10)
+    expect(ERROR_STATUS['not-oauth']).toBe(409)
+    expect(ERROR_STATUS['not-fields']).toBe(409)
+    expect(ERROR_STATUS['wrong-binding']).toBe(422)
+    expect(ERROR_STATUS['wrong-person']).toBe(422)
+    expect(ERROR_STATUS['not-your-account']).toBe(422)
+    expect(ERROR_STATUS['source-unavailable']).toBe(502)
     // 3.4: the refusals of the tools of a space (§3.10)
     expect(ERROR_STATUS['change-pending']).toBe(409)
     expect(ERROR_STATUS['confirmation-unavailable']).toBe(409)
@@ -130,6 +146,11 @@ describe('schemas', () => {
     // 3.4: the tools, a boolean (PROF-DESC-009)
     expect(validate({ ...base, profileVersion: '3.4', features: { ...base.features, tools: true } })).toBe(true)
     expect(validate({ ...base, features: { ...base.features, tools: 'yes' } })).toBe(false)
+    // 3.5: each person's own accounts, a boolean (PROF-DESC-010)
+    expect(
+      validate({ ...base, profileVersion: '3.5', features: { ...base.features, tools: true, connections: true } })
+    ).toBe(true)
+    expect(validate({ ...base, features: { ...base.features, connections: 'yes' } })).toBe(false)
     expect(validate({ ...base, features: { ...base.features, erasure: {} } })).toBe(false)
     expect(
       validate({ ...base, binding: { modes: ['cross-device'], walletLinkTemplate: 'didcomm://x?oob={oob}' } })
@@ -213,5 +234,57 @@ describe('app links (section 10)', () => {
     expect(parseAppLink('https://app.dev.ayni.org/app/unknown', APP_LINK_DOMAIN.devnet)).toBeNull()
     expect(parseAppLink('didcomm://x', APP_LINK_DOMAIN.devnet)).toBeNull()
     expect(isAppLink('https://app.dev.ayni.org/app/scan', APP_LINK_DOMAIN.devnet)).toBe(true)
+  })
+})
+
+describe("each person's own accounts (§3.11, PROF-TOOL-014..021, agent D104 to D110)", () => {
+  it('lists an account by its state, its binding and where it serves, with no token', () => {
+    const relaticle: Connection = {
+      source: 'relaticle',
+      title: 'Relaticle CRM',
+      method: 'oauth',
+      binding: { name: 'workspace', label: 'Workspace', value: '01JD8', valueLabel: 'ayni-dev-agent' },
+      usedIn: [{ kind: 'space', id: 'spc_1', title: 'Sales EU' }],
+      state: 'connected',
+      reason: null,
+      moreAccess: false,
+      account: {
+        id: 'acc_1',
+        label: 'ana@2060.io · ayni-dev-agent',
+        connectedAt: '2026-11-21T10:02:00Z',
+        lastUsedAt: null,
+      },
+      attempt: null,
+      revokesAtSource: false,
+    }
+    expect(JSON.stringify(relaticle)).not.toMatch(/token/i)
+    const changed: ConnectionsChangedValue = {
+      source: 'relaticle',
+      state: 'not-connected',
+      attemptId: 'att_1',
+      outcome: 'wrong-binding',
+      expected: 'ayni-dev-agent',
+      chosen: 'Partners',
+    }
+    expect(changed.outcome).toBe('wrong-binding')
+    const card: ConnectActivity = { source: 'github', title: 'GitHub', method: 'oauth', why: 'connect' }
+    expect(card.why).toBe('connect')
+    const withheld: MessagesWithheldValue = {
+      conversationId: 'conv_1',
+      messageIds: ['msg_1'],
+      reason: 'credential',
+      texts: { msg_1: 'my token is ghp_… please' },
+    }
+    expect(withheld.texts?.msg_1).toContain('ghp_…')
+  })
+
+  it('links to Your accounts of an agent (PROF-LINK-004)', () => {
+    const link = buildAppLink(APP_LINK_DOMAIN.devnet, 'service', ['did:webvh:abc', 'accounts'])
+    expect(link).toBe('https://app.dev.ayni.org/app/service/did%3Awebvh%3Aabc/accounts')
+    expect(parseAppLink(link, APP_LINK_DOMAIN.devnet)).toEqual({
+      route: 'service',
+      segments: ['did:webvh:abc', 'accounts'],
+      params: {},
+    })
   })
 })

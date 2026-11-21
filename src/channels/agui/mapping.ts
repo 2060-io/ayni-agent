@@ -1,5 +1,6 @@
 /** Canonical entries to AG-UI messages (profile sections 6 to 8, PROF-MAP-002/006, PROF-HIST-001). */
 import { ACTIVITY, type AttachmentActivity } from '@ayni.org/ayni-agui-profile'
+import { isCredentialWithheld } from '../../core/credentials.js'
 import { isWithheldMessage } from '../../core/emailCheck.js'
 import type { ApprovalRecord, MessageAttachment, MessageEntry } from '../../core/types.js'
 
@@ -127,6 +128,8 @@ export function entryToMessages(
     ...(usedMemories ? { usedMemories } : {}),
     ...(usedPreferences ? { usedPreferences } : {}),
     ...(sources ? { sources } : {}),
+    // a message held back because it carried a credential, as the agent kept it (TOOL-ACCESS-014, PROF-HIST-013)
+    ...(isCredentialWithheld(entry) ? { modelVisible: false as const, withheld: 'credential' as const } : {}),
   }
   switch (entry.sourceType) {
     case 'text':
@@ -253,6 +256,22 @@ export function entryToMessages(
     case 'tool-call':
       return [] // progress is signalled with steps; tool names, arguments and results never reach the wire (PROF-MAP-005)
     case 'state-update': {
+      // the Connect card a reply showed (PROF-TOOL-020): its state comes from the person's accounts, never from the card
+      if (entry.payload?.kind === 'connect' && entry.payload.card && typeof entry.payload.card === 'object')
+        return [
+          {
+            id: entry.id,
+            role: 'activity',
+            activityType: ACTIVITY.connect,
+            content: entry.payload.card,
+            metadata: {
+              entryId: entry.id,
+              createdAt: entry.createdAt,
+              initiatedAt: entry.initiatedAt,
+              sourceType: entry.sourceType,
+            },
+          },
+        ]
       // a memory the agent changed is a line of the transcript, never its content (PROF-HIST-012); other bookkeeping is not
       const p = entry.payload as { kind?: string; memoryId?: string; spaceId?: string; action?: string } | undefined
       if (p?.kind !== 'memory' || !p.memoryId) return []

@@ -25,10 +25,11 @@ import type { Store } from '../store/types.js'
 import { scrubAccount } from '../tools/accountValues.js'
 import { type CatalogSource, type PackRule, strictest, type ToolCatalog } from '../tools/catalog.js'
 import type { ToolRegistry } from '../tools/registry.js'
-import type { CallAccountSecret, ToolContext, ToolSpec } from '../tools/types.js'
+import type { CallAccountSecret, ToolContext, ToolResult, ToolSpec } from '../tools/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import type { ChallengeService } from './challenges.js'
+import type { ConnectionService, ToConnect } from './connections.js'
 import type { TurnSink } from './orchestrator.js'
 import type { PrincipalService } from './principals.js'
 import { isPersonalSpace, type SpaceService } from './spaces.js'
@@ -66,8 +67,10 @@ export interface TurnTool {
   spaceTool: boolean
   /** the binding values in force at the turn's start */
   bindings: Record<string, string>
-  /** when the space's account was set, for an allowance's fingerprint */
+  /** when the space's account was set, or which person's account the call uses, for an allowance's fingerprint */
   accountSetAt?: string
+  /** a source of a person's own account (D104): the source that declares the account */
+  personal?: boolean
   /** what the model receives: the input schema without the pinned arguments (TOOL-CAT-004) */
   definition: ToolDefinition
 }
@@ -126,6 +129,16 @@ export interface ToolGateDeps {
   challenges: ChallengeService
   stats: StatsSink
   logger: Logger
+  /** each person's own accounts (D104 to D110) */
+  connections?: ConnectionService
+}
+
+/** The tool that shows the Connect card (D108, TOOL-CONN-011): given only while an account is to connect. */
+export const OFFER_CONNECTION = 'offer_connection'
+
+/** What the model reads when a call needs a person's account that is not connected (TOOL-CALL-011). */
+export function notConnectedForModel(title: string, sourceTitle: string, reconnect: boolean): string {
+  return `${title} did not run: the person's own account of ${sourceTitle} is ${reconnect ? 'to be reconnected' : 'not connected'}. You may offer its Connect card with ${OFFER_CONNECTION}; never ask for a password, a token or a key.`
 }
 
 /** The value of a field on a card: a string as it is, a number or a boolean as written, the rest as indented JSON. */
@@ -136,13 +149,24 @@ export function fieldValue(value: unknown): string {
   return JSON.stringify(value, null, 2)
 }
 
+/** Whether a profile version is a given one or later (PROF-SESS-016): `3.5` is at least `3.4`. */
+export function profileAtLeast(profileVersion: string | undefined, least: string): boolean {
+  const m = /^(\d+)\.(\d+)/.exec(profileVersion ?? '')
+  const l = /^(\d+)\.(\d+)/.exec(least)
+  if (!m || !l) return false
+  const [major, minor] = [Number(m[1]), Number(m[2])]
+  const [lMajor, lMinor] = [Number(l[1]), Number(l[2])]
+  return major > lMajor || (major === lMajor && minor >= lMinor)
+}
+
 /** A profile version is 3.4 or later (PROF-SESS-016). */
 export function cardCapable(profileVersion: string | undefined): boolean {
-  const m = /^(\d+)\.(\d+)/.exec(profileVersion ?? '')
-  if (!m) return false
-  const major = Number(m[1])
-  const minor = Number(m[2])
-  return major > 3 || (major === 3 && minor >= 4)
+  return profileAtLeast(profileVersion, '3.4')
+}
+
+/** A profile version is 3.5 or later: its sessions show a Connect card (PROF-SESS-016, TOOL-CONN-011). */
+export function connectCapable(profileVersion: string | undefined): boolean {
+  return profileAtLeast(profileVersion, '3.5')
 }
 
 const ajv = new Ajv2020({ allErrors: true, strict: false })
@@ -171,7 +195,29 @@ export class ToolGate {
 
   /** The tools a turn gives the model, in a fixed order: the same tools, byte for byte, while nothing changed. */
   public async toolsFor(principal: Principal, spaceId: string, grants: ElevationGrant[]): Promise<TurnTool[]> {
-    const { catalog, spaceTools, registry } = this.deps
+    return (await this.turnTools(principal, spaceId, grants)).tools
+  }
+
+  /**
+   * The tools of a turn and the accounts the person has to connect there (RBAC-FILTER-004, TOOL-CONN-010): a source of a
+   * person's own account gives its tools only while the account the conversation uses is connected; `offer_connection` is
+   * given only while one is to connect.
+   */
+  public async turnTools(
+    principal: Principal,
+    spaceId: string,
+    grants: ElevationGrant[]
+  ): Promise<{ tools: TurnTool[]; toConnect: ToConnect[] }> {
+    const connections = this.deps.connections
+    const toConnect = connections ? await connections.toConnect(principal, spaceId, grants) : []
+    const tools = (await this.allTools(principal, spaceId, grants)).filter(
+      (t) => t.spec.rawName !== OFFER_CONNECTION || t.source.kind !== 'bundled' || toConnect.length > 0
+    )
+    return { tools, toConnect }
+  }
+
+  private async allTools(principal: Principal, spaceId: string, grants: ElevationGrant[]): Promise<TurnTool[]> {
+    const { catalog, spaceTools, registry, connections } = this.deps
     const personal = isPersonalSpace(spaceId)
     const access = personal ? undefined : await this.deps.spaces.access(principal, spaceId)
     const space = access && !access.left ? access.space : undefined
@@ -184,6 +230,20 @@ export class ToolGate {
         const account = await spaceTools.openAccount(spaceId, r.source.name)
         if (account?.headers) await registry.discover(r.source.name, account)
       }
+    // a person's own accounts: the sources whose account the conversation uses is connected, discovered on it (D104)
+    const personalReady = new Map<string, string>()
+    for (const source of connections?.personalSources() ?? []) {
+      if (source.availability === 'personal' && !personal) continue
+      if (source.availability === 'spaces' && !ready.has(source.name)) continue
+      const record = (await connections?.accountIn(principal, source, spaceId))?.record
+      if (record?.state !== 'connected') continue
+      personalReady.set(source.name, `${record.id}@${record.connectedAt}`)
+      // a server of people's own accounts lists its tools once someone's account connects to it
+      if (source.kind === 'mcp' && !(await registry.all()).some((s) => s.source === source.name)) {
+        const opened = await connections?.open(principal, source, spaceId, false)
+        if (opened?.status === 'connected') await registry.discover(source.name, opened.account)
+      }
+    }
     const out: TurnTool[] = []
     for (const visible of await registry.visible(principal.roles, grants, principal)) {
       const spec = visible.spec
@@ -192,6 +252,8 @@ export class ToolGate {
       let ownerRule: SpaceCallRule | undefined
       let accountSetAt: string | undefined
       if (source.availability === 'personal' && !personal) continue
+      // a source of a person's own account gives its tools only while that account is connected (TOOL-CONN-003)
+      if (source.account.kind === 'personal' && !personalReady.has(source.name)) continue
       if (source.availability === 'spaces') {
         const r = ready.get(source.name)
         if (!r) continue
@@ -202,6 +264,7 @@ export class ToolGate {
         bindings = r.bindings
         accountSetAt = r.accountSetAt
       } else bindings = spaceTools.bindingValues(source, undefined)
+      if (source.account.kind === 'personal') accountSetAt = personalReady.get(source.name)
       const packRule = catalog.packRuleOf(source, spec.rawName, spec.annotations)
       const rule = (ownerRule ? strictest<SpaceCallRule>(packRule.rule, ownerRule) : packRule.rule) as CallRule
       // a rule of approval the annotations give, with nobody to approve it: warned at discovery (TOOL-CAT-009)
@@ -229,6 +292,7 @@ export class ToolGate {
         spaceTool: source.availability === 'spaces',
         bindings,
         ...(accountSetAt ? { accountSetAt } : {}),
+        ...(source.account.kind === 'personal' ? { personal: true } : {}),
         definition: {
           name: spec.name,
           description: spec.description,
@@ -381,32 +445,58 @@ export class ToolGate {
         return `${title} did not run: the identity check ${outcome === 'failed' ? 'failed' : outcome === 'expired' ? 'timed out' : 'was not possible'}.`
       }
     }
-    // 5. the call: the pinned arguments set in code, the account opened for it (TOOL-ACCESS-005)
-    const account: CallAccountSecret =
-      tool.source.account.kind === 'space'
-        ? ((await this.deps.spaceTools.openAccount(state.spaceId, tool.source.name)) ?? {
-            kind: 'space',
-            spaceId: state.spaceId,
-          })
-        : { kind: tool.source.account.kind }
+    // 5. the call: the pinned arguments set in code, the account opened for it (TOOL-ACCESS-005); a person's own account,
+    // the one of the person whose call it is, and only while it is connected (TOOL-CALL-011)
+    let account: CallAccountSecret
+    if (tool.source.account.kind === 'personal') {
+      const opened = await this.deps.connections?.open(ctx.principal, tool.source, state.spaceId)
+      if (opened?.status !== 'connected') {
+        await this.finish(record, 'not-connected')
+        const declaring = this.deps.connections?.declaringOf(tool.source) ?? tool.source
+        return notConnectedForModel(title, declaring.title, opened?.status === 'reconnect')
+      }
+      account = opened.account
+    } else
+      account =
+        tool.source.account.kind === 'space'
+          ? ((await this.deps.spaceTools.openAccount(state.spaceId, tool.source.name)) ?? {
+              kind: 'space',
+              spaceId: state.spaceId,
+            })
+          : { kind: tool.source.account.kind }
     const label = tool.spec.stepLabel ?? 'Working'
     await ctx.sink.emit({ type: 'step-started', label })
     let content: string
     let data: unknown
     let isError = false
+    let accountOutcome: ToolResult['accountOutcome']
+    // every value of the account, and every token the call held: an echo of one reads [account] (TOOL-ACCESS-005/010)
+    const secrets = () =>
+      [...new Set([...(account.secrets ?? []), ...(account.oauth?.secrets() ?? [])])].sort(
+        (a, b) => b.length - a.length
+      )
     try {
       // a tool call already executing completes even if the turn is cancelled (D47): no run signal here
       const result = await tool.spec.invoke(args, { ...ctx.toolCtx, account })
       // an echo of any value of the space's account, or of a header built from them, reads [account] (TOOL-ACCESS-005)
-      content = scrubAccount(result.content, account.secrets)
-      data = scrubAccount(result.data, account.secrets)
+      content = scrubAccount(result.content, secrets())
+      data = scrubAccount(result.data, secrets())
       isError = result.isError === true
+      accountOutcome = result.accountOutcome
       if (result.endTurn) ctx.toolCtx.turnEnded?.(result.endTurn)
     } catch (error) {
-      content = scrubAccount(`tool failed: ${error instanceof Error ? error.message : String(error)}`, account.secrets)
+      content = scrubAccount(`tool failed: ${error instanceof Error ? error.message : String(error)}`, secrets())
       isError = true
     }
     await ctx.sink.emit({ type: 'step-finished', label })
+    // the person's account was not connected, or asked for more access, when the call was to run (TOOL-CALL-011)
+    if (accountOutcome) {
+      await this.finish(record, accountOutcome)
+      const declaring = this.deps.connections?.declaringOf(tool.source) ?? tool.source
+      return accountOutcome === 'more-access-needed'
+        ? `${title} did not run: the person's own account of ${declaring.title} needs more access. You may offer its Connect card with ${OFFER_CONNECTION}, whose Reconnect asks for it.`
+        : notConnectedForModel(title, declaring.title, true)
+    }
     this.deps.stats.emit('tool-call', 1, { tool: tool.spec.rawName, error: String(isError) })
     const callAccount: CallAccount =
       account.kind === 'space' ? { kind: 'space', spaceId: state.spaceId } : { kind: account.kind }
@@ -575,6 +665,11 @@ export class ToolGate {
       return `${title} needs the person's confirmation, which could not be asked here: it did not run.`
     }
     const action = await this.actionOf(tool, title, args, state.spaceId)
+    // the person's own card names their account at its service: a confirmation is theirs alone (PROF-TOOL-021)
+    if (tool.source.account.kind === 'personal') {
+      const label = await this.deps.connections?.labelIn(ctx.principal, tool.source, state.spaceId)
+      if (label) action.account = { ...action.account, label }
+    }
     const timeout = confirmationTimeoutSeconds(this.deps.pack) * 1000
     const approval: ApprovalRecord = {
       id: prefixedId('apr'),
@@ -860,6 +955,16 @@ export class ToolGate {
       await this.endAllowance(allowance)
   }
 
+  /**
+   * A person's own account of a source was disconnected, replaced or ended: the allowances of the tools of the sources that
+   * use it end in every conversation of the person (TOOL-CALL-006, TOOL-CONN-006).
+   */
+  public async endPersonalAllowances(principalId: string, sourceIds: string[]): Promise<void> {
+    for (const conversation of await this.store.conversations.listByPrincipal(principalId))
+      for (const allowance of await this.store.toolAllowances.listByConversation(conversation.id))
+        if (!allowance.endedAt && sourceIds.includes(allowance.sourceId)) await this.endAllowance(allowance)
+  }
+
   /** A conversation archived or closed for good: its allowances end (TOOL-CALL-006). */
   public async endConversationAllowances(conversationId: string): Promise<void> {
     for (const allowance of await this.store.toolAllowances.listByConversation(conversationId))
@@ -924,8 +1029,15 @@ export class ToolGate {
         kind: approval.kind,
         toolName: approval.toolName,
         status: approval.status,
-        // the requester's card shows the action the approver decides on (PROF-TOOL-009)
-        card: await this.requesterCard(approval, state),
+        // the requester's card shows the action the approver decides on (PROF-TOOL-009), with the name of the
+        // requester's own account, which no approver's card carries (PROF-TOOL-021)
+        card: await this.requesterCard(
+          approval,
+          state,
+          tool.source.account.kind === 'personal'
+            ? await this.deps.connections?.labelIn(ctx.principal, tool.source, state.spaceId)
+            : undefined
+        ),
       },
     })
     // the approvers' cards were recorded meanwhile: the record is read again before it names its own card
@@ -943,7 +1055,11 @@ export class ToolGate {
   }
 
   /** The requester's card of an approval of a call: the action, and the space whose owner approves it. */
-  private async requesterCard(record: ApprovalRecord, state: TurnToolState): Promise<Record<string, unknown>> {
+  private async requesterCard(
+    record: ApprovalRecord,
+    state: TurnToolState,
+    label?: string
+  ): Promise<Record<string, unknown>> {
     return {
       approvalId: record.id,
       kind: record.kind,
@@ -954,7 +1070,9 @@ export class ToolGate {
       status: record.status,
       own: true,
       canDecide: false,
-      ...(record.action ? { action: record.action } : {}),
+      ...(record.action
+        ? { action: label ? { ...record.action, account: { ...record.action.account, label } } : record.action }
+        : {}),
       ...(record.ownerApproval && state.space ? { space: { id: state.space.id, title: state.space.title } } : {}),
     }
   }
@@ -1021,6 +1139,8 @@ export class ToolGate {
       bindings = ready.bindings
       accountSetAt = ready.accountSetAt
     }
+    if (source.account.kind === 'personal')
+      accountSetAt = await this.deps.connections?.fingerprintIn(principal, source, spaceId)
     const packRule = this.deps.catalog.packRuleOf(source, spec.rawName, spec.annotations)
     const tool: TurnTool = {
       name: spec.name,
@@ -1034,6 +1154,7 @@ export class ToolGate {
       spaceTool: source.availability === 'spaces',
       bindings,
       ...(accountSetAt ? { accountSetAt } : {}),
+      ...(source.account.kind === 'personal' ? { personal: true } : {}),
       definition: { name: spec.name, description: spec.description, parameters: spec.parameters },
     }
     const title = record.action?.title ?? this.deps.catalog.toolTitle(source, spec.rawName, spec.annotations)
@@ -1063,7 +1184,9 @@ export class ToolGate {
       principal,
       outcome === 'completed'
         ? `The approved action ${title} ran.`
-        : `The approved action ${title} did not run: ${outcome === 'failed' ? 'it failed' : 'a check did not pass'}.`,
+        : outcome === 'not-connected' || outcome === 'more-access-needed'
+          ? `The approved action ${title} did not run: your own account of ${(this.deps.connections?.declaringOf(source) ?? source).title} is ${outcome === 'not-connected' ? 'not connected' : 'asking for more access'}. Connect it in Your accounts, then ask again.`
+          : `The approved action ${title} did not run: ${outcome === 'failed' ? 'it failed' : 'a check did not pass'}.`,
       [...state.sources.values()],
       record.inboundId
     )

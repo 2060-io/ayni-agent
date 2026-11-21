@@ -15,6 +15,10 @@ import type {
   LifecycleState,
   MemoryAccessLog,
   MessageEntry,
+  OAuthAttemptRecord,
+  OAuthClientRecord,
+  PersonalAccountRecord,
+  PersonKeyRecord,
   Principal,
   PrincipalPreference,
   RagChunk,
@@ -281,7 +285,15 @@ export interface AdminAuditRecord {
    * a call to the admin interface; what a reload of the user directory changed, entry by entry (IDENT-DIR-009); a
    * credential revoked because its entry left the directory (IDENT-ROLE-013)
    */
-  action: 'erasure' | 'legal-hold' | 'legal-hold-release' | 'audit-read' | 'directory-change' | 'credential-revocation'
+  action:
+    | 'erasure'
+    | 'legal-hold'
+    | 'legal-hold-release'
+    | 'audit-read'
+    | 'directory-change'
+    | 'credential-revocation'
+    /** one of a person's own accounts connected, replaced, to reconnect, disconnected or ended, or an attempt ended (TOOL-CONN-007) */
+    | 'personal-account'
   actor: string
   reason: string
   /** what it named and what came of it: entry ids, a conversation, a Principal, an evidence record, counts */
@@ -338,6 +350,56 @@ export interface SpaceAccountRepo {
   /** destroys the account and its key: nothing can open the token again */
   delete(spaceId: string, sourceId: string): Promise<void>
   listAll(): Promise<SpaceAccountRecord[]>
+}
+
+/** The key of each person who connects an account (D106, PRIV-ERASE-013): deleting it makes every account of theirs unreadable. */
+export interface PersonKeyRepo {
+  get(principalId: string): Promise<PersonKeyRecord | undefined>
+  /** keeps the first key of a person: a second save of the same person changes nothing, and gives back the one kept */
+  saveIfAbsent(record: PersonKeyRecord): Promise<PersonKeyRecord>
+  delete(principalId: string): Promise<void>
+}
+
+/** Each person's own accounts (D104, TOOL-ACCESS-009): their tokens and values only as ciphertext, their key with the row. */
+export interface PersonalAccountRepo {
+  get(id: string): Promise<PersonalAccountRecord | undefined>
+  /** the account of a Principal for a source and a value of its binding (none: the account of a source with no binding) */
+  find(principalId: string, sourceId: string, bindingValue?: string): Promise<PersonalAccountRecord | undefined>
+  listByPrincipal(principalId: string): Promise<PersonalAccountRecord[]>
+  listAll(): Promise<PersonalAccountRecord[]>
+  /** a new account, one per (principal, source, binding value): it replaces the one there, and its key with it */
+  save(record: PersonalAccountRecord): Promise<void>
+  /**
+   * Changes an account that is still there, and nothing else: a refresh, a state, a mark; false when it is gone (replaced,
+   * disconnected or ended meanwhile), so that a late write never brings back an account or a key that was destroyed
+   */
+  update(record: PersonalAccountRecord): Promise<boolean>
+  /** when it was last used, alone: what a call writes, never over a refresh made at the same time */
+  touch(id: string, lastUsedAt: string): Promise<void>
+  /** destroys the account and its key */
+  delete(id: string): Promise<void>
+}
+
+/** The sign-ins in the browser (D105, TOOL-OAUTH-005): single use, found by a digest of their state. */
+export interface OAuthAttemptRepo {
+  get(id: string): Promise<OAuthAttemptRecord | undefined>
+  findByStateHash(stateHash: string): Promise<OAuthAttemptRecord | undefined>
+  /** the attempts that wait: no outcome yet */
+  listWaiting(): Promise<OAuthAttemptRecord[]>
+  save(record: OAuthAttemptRecord): Promise<void>
+  /**
+   * Takes an attempt that waits for its one use: true for the first caller only, after which it waits no more (its
+   * `outcome` is set to the one given), so that a callback loaded twice acts once (TOOL-OAUTH-006)
+   */
+  claim(id: string, outcome: OAuthAttemptRecord['outcome'], endedAt: string): Promise<boolean>
+  delete(id: string): Promise<void>
+}
+
+/** The agent's clients at the authorization servers (TOOL-OAUTH-003): a registration kept for its issuer. */
+export interface OAuthClientRepo {
+  get(ref: string): Promise<OAuthClientRecord | undefined>
+  save(record: OAuthClientRecord): Promise<void>
+  delete(ref: string): Promise<void>
 }
 
 /** "Allow for this conversation" (TOOL-CALL-006). */
@@ -403,6 +465,10 @@ export interface Store {
   spaceAccounts: SpaceAccountRepo
   toolAllowances: ToolAllowanceRepo
   toolCalls: ToolCallRepo
+  personKeys: PersonKeyRepo
+  personalAccounts: PersonalAccountRepo
+  oauthAttempts: OAuthAttemptRepo
+  oauthClients: OAuthClientRepo
 }
 
 export function cosine(a: number[], b: number[]): number {

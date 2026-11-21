@@ -8,6 +8,10 @@ import type {
   ElevationGrant,
   LifecycleState,
   MemoryAccessLog,
+  OAuthAttemptRecord,
+  OAuthClientRecord,
+  PersonalAccountRecord,
+  PersonKeyRecord,
   Principal,
   PrincipalPreference,
   RagChunk,
@@ -966,6 +970,191 @@ export class PostgresStore implements Store {
         'SELECT data FROM space_activity WHERE space_id = $1 ORDER BY at DESC, seq DESC LIMIT $2',
         [spaceId, limit]
       ),
+  }
+
+  public personKeys = {
+    get: async (principalId: string) => {
+      const [row] = await this.rows('SELECT * FROM person_keys WHERE principal_id = $1', [principalId])
+      return row
+        ? {
+            principalId: String(row.principal_id),
+            wrappedKey: String(row.wrapped_key),
+            createdAt: new Date(row.created_at as string).toISOString(),
+          }
+        : undefined
+    },
+    // the first key of a person is kept: two connections at once give them one key (D106)
+    saveIfAbsent: async (r: PersonKeyRecord) => {
+      await this.pool.query(
+        'INSERT INTO person_keys (principal_id, wrapped_key, created_at) VALUES ($1,$2,$3) ON CONFLICT (principal_id) DO NOTHING',
+        [r.principalId, r.wrappedKey, r.createdAt]
+      )
+      return (await this.personKeys.get(r.principalId)) ?? r
+    },
+    delete: async (principalId: string) => {
+      await this.pool.query('DELETE FROM person_keys WHERE principal_id = $1', [principalId])
+    },
+  }
+
+  /** the tokens or values only as ciphertext, the account's key, wrapped by the person's, beside it (TOOL-ACCESS-009) */
+  private personalAccountFromRow(r: Row): PersonalAccountRecord {
+    const iso = (v: unknown) => (v ? new Date(v as string).toISOString() : undefined)
+    return {
+      id: String(r.id),
+      principalId: String(r.principal_id),
+      sourceId: String(r.source_id),
+      ...(r.binding_value ? { bindingValue: String(r.binding_value) } : {}),
+      ...(r.binding_label ? { bindingLabel: String(r.binding_label) } : {}),
+      method: r.method as PersonalAccountRecord['method'],
+      state: r.state as PersonalAccountRecord['state'],
+      ...(r.reason ? { reason: r.reason as PersonalAccountRecord['reason'] } : {}),
+      ...(r.more_access ? { moreAccess: true } : {}),
+      cipher: (r.cipher as Buffer).toString('base64'),
+      ...(r.label_cipher ? { labelCipher: (r.label_cipher as Buffer).toString('base64') } : {}),
+      encKeyRef: String(r.enc_key_ref),
+      packDigest: String(r.pack_digest),
+      scopesDigest: String(r.scopes_digest),
+      connectedAt: iso(r.connected_at) as string,
+      ...(r.refreshed_at ? { refreshedAt: iso(r.refreshed_at) } : {}),
+      ...(r.last_used_at ? { lastUsedAt: iso(r.last_used_at) } : {}),
+    }
+  }
+
+  public personalAccounts = {
+    get: async (id: string) => {
+      const [row] = await this.rows('SELECT * FROM personal_accounts WHERE id = $1', [id])
+      return row ? this.personalAccountFromRow(row) : undefined
+    },
+    find: async (principalId: string, sourceId: string, bindingValue?: string) => {
+      const [row] = await this.rows(
+        'SELECT * FROM personal_accounts WHERE principal_id = $1 AND source_id = $2 AND binding_value = $3',
+        [principalId, sourceId, bindingValue ?? '']
+      )
+      return row ? this.personalAccountFromRow(row) : undefined
+    },
+    listByPrincipal: async (principalId: string) =>
+      (
+        await this.rows('SELECT * FROM personal_accounts WHERE principal_id = $1 ORDER BY connected_at, id', [
+          principalId,
+        ])
+      ).map((r) => this.personalAccountFromRow(r)),
+    listAll: async () =>
+      (await this.rows('SELECT * FROM personal_accounts ORDER BY connected_at, id', [])).map((r) =>
+        this.personalAccountFromRow(r)
+      ),
+    // one account per (principal, source, binding value): a new one replaces the row, and the key in it (TOOL-CONN-002)
+    save: async (r: PersonalAccountRecord) => {
+      const client = await this.pool.connect()
+      try {
+        await client.query('BEGIN')
+        await client.query(
+          'DELETE FROM personal_accounts WHERE principal_id = $1 AND source_id = $2 AND binding_value = $3 AND id <> $4',
+          [r.principalId, r.sourceId, r.bindingValue ?? '', r.id]
+        )
+        await client.query(
+          `INSERT INTO personal_accounts (id, principal_id, source_id, binding_value, binding_label, method, state, reason,
+             more_access, enc_key_ref, cipher, label_cipher, pack_digest, scopes_digest, connected_at, refreshed_at,
+             last_used_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$17,$12,$13,$14,$15,$16)
+           ON CONFLICT (id) DO UPDATE SET binding_label=$5, method=$6, state=$7, reason=$8, more_access=$9,
+             enc_key_ref=$10, cipher=$11, label_cipher=$17, pack_digest=$12, scopes_digest=$13, connected_at=$14,
+             refreshed_at=$15, last_used_at=$16`,
+          [
+            r.id,
+            r.principalId,
+            r.sourceId,
+            r.bindingValue ?? '',
+            r.bindingLabel ?? null,
+            r.method,
+            r.state,
+            r.reason ?? null,
+            r.moreAccess === true,
+            r.encKeyRef,
+            Buffer.from(r.cipher, 'base64'),
+            r.packDigest,
+            r.scopesDigest,
+            r.connectedAt,
+            r.refreshedAt ?? null,
+            r.lastUsedAt ?? null,
+            r.labelCipher ? Buffer.from(r.labelCipher, 'base64') : null,
+          ]
+        )
+        await client.query('COMMIT')
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => undefined)
+        throw error
+      } finally {
+        client.release()
+      }
+    },
+    update: async (r: PersonalAccountRecord) => {
+      const result = await this.pool.query(
+        `UPDATE personal_accounts SET binding_label=$2, state=$3, reason=$4, more_access=$5, enc_key_ref=$6, cipher=$7,
+           label_cipher=$8, pack_digest=$9, scopes_digest=$10, refreshed_at=$11, last_used_at=$12
+         WHERE id = $1`,
+        [
+          r.id,
+          r.bindingLabel ?? null,
+          r.state,
+          r.reason ?? null,
+          r.moreAccess === true,
+          r.encKeyRef,
+          Buffer.from(r.cipher, 'base64'),
+          r.labelCipher ? Buffer.from(r.labelCipher, 'base64') : null,
+          r.packDigest,
+          r.scopesDigest,
+          r.refreshedAt ?? null,
+          r.lastUsedAt ?? null,
+        ]
+      )
+      return (result.rowCount ?? 0) > 0
+    },
+    touch: async (id: string, lastUsedAt: string) => {
+      await this.pool.query('UPDATE personal_accounts SET last_used_at = $2 WHERE id = $1', [id, lastUsedAt])
+    },
+    delete: async (id: string) => {
+      await this.pool.query('DELETE FROM personal_accounts WHERE id = $1', [id])
+    },
+  }
+
+  public oauthAttempts = {
+    get: (id: string) => this.one<OAuthAttemptRecord>('SELECT data FROM oauth_attempts WHERE id = $1', [id]),
+    findByStateHash: (stateHash: string) =>
+      this.one<OAuthAttemptRecord>('SELECT data FROM oauth_attempts WHERE state_hash = $1', [stateHash]),
+    listWaiting: () =>
+      this.many<OAuthAttemptRecord>("SELECT data FROM oauth_attempts WHERE NOT (data ? 'outcome') ORDER BY id", []),
+    save: async (r: OAuthAttemptRecord) => {
+      await this.pool.query(
+        `INSERT INTO oauth_attempts (id, principal_id, state_hash, data) VALUES ($1,$2,$3,$4)
+         ON CONFLICT (id) DO UPDATE SET data=$4`,
+        [r.id, r.principalId, r.stateHash, r]
+      )
+    },
+    // one use: only the request that finds it waiting takes it (TOOL-OAUTH-006)
+    claim: async (id: string, outcome: OAuthAttemptRecord['outcome'], endedAt: string) => {
+      const result = await this.pool.query(
+        `UPDATE oauth_attempts SET data = data || jsonb_build_object('outcome', $2::text, 'endedAt', $3::text)
+         WHERE id = $1 AND NOT (data ? 'outcome')`,
+        [id, outcome, endedAt]
+      )
+      return (result.rowCount ?? 0) > 0
+    },
+    delete: async (id: string) => {
+      await this.pool.query('DELETE FROM oauth_attempts WHERE id = $1', [id])
+    },
+  }
+
+  public oauthClients = {
+    get: (ref: string) => this.one<OAuthClientRecord>('SELECT data FROM oauth_clients WHERE ref = $1', [ref]),
+    save: async (r: OAuthClientRecord) => {
+      await this.pool.query(
+        'INSERT INTO oauth_clients (ref, data) VALUES ($1,$2) ON CONFLICT (ref) DO UPDATE SET data=$2',
+        [r.ref, r]
+      )
+    },
+    delete: async (ref: string) => {
+      await this.pool.query('DELETE FROM oauth_clients WHERE ref = $1', [ref])
+    },
   }
 }
 

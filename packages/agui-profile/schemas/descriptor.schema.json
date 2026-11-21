@@ -104,6 +104,10 @@
           "type": "boolean",
           "description": "the agent serves the tools of a space (section 3.10), the confirmation card of a tool call and the sources of replies and conversations (3.4, PROF-DESC-009)"
         },
+        "connections": {
+          "type": "boolean",
+          "description": "the agent serves each person's own accounts: Your accounts (section 3.11), ayni.connections.changed, the Connect card and the kind of account personal (3.5, PROF-DESC-010)"
+        },
         "erasure": {
           "type": "object",
           "required": ["windowSeconds"],

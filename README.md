@@ -55,6 +55,13 @@ Behavior lives in the agent-pack (`AGENT_PACK_PATH`, see `docs/agent-pack.md`); 
 secrets are environment variables, listed in `.env.example` and in the specification's reference
 implementation profile. Any pack value may be overridden with `${VAR}` placeholders.
 
+Each person's own tool accounts (`account.kind: personal`, ayni-spec D104 to D110) are connected by the person in Your
+accounts, through OAuth as MCP defines it or by typing the fields of a personal token; see "Each person's own accounts"
+in `docs/agent-pack.md` for the keys and the Relaticle and GitHub examples. They need `PUBLIC_BASE_URL` reachable from
+the internet at `/tools/oauth/callback` and `/tools/oauth/client-metadata.json`, `APP_LINK_BASE` (where the browser goes
+after a sign-in), the secrets of a pre-registered client as `${VAR}` placeholders (`TOOLS_GITHUB_CLIENT_ID`,
+`TOOLS_GITHUB_CLIENT_SECRET` on devnet), and optionally `TOOL_OAUTH_ATTEMPT_SECONDS` (600), how long a sign-in may take.
+
 Development switches, refused in production (`NODE_ENV=production`):
 
 - `DEV_ALLOW_UNIDENTIFIED_PRINCIPALS=true`: a DIDComm peer that presents no ECS-Badge becomes a
@@ -73,6 +80,7 @@ Development switches, refused in production (`NODE_ENV=production`):
 | `/webrtc/call-event`, `/vision/…` | face-match callbacks (WebRTC server, vision service) |
 | `/media/{token}` | short-lived media links for the wallet |
 | `/.well-known/agent.json`, `/a2a` | A2A (when `channels.a2a.enabled`) |
+| `/tools/oauth/callback`, `/tools/oauth/client-metadata.json` | each person's own accounts: the callback of a sign-in, the agent's client ID metadata document (public, routed by the ingress when the pack declares a source of `account.kind: personal` with `oauth`) |
 | `/health/live`, `/health/ready`, `/stats`, `/integrity/anchors` | operations |
 
 ## Docker

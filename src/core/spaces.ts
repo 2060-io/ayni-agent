@@ -75,6 +75,13 @@ export type SpaceErrorCode =
   | 'pinned-by-pack'
   | 'looser-than-pack'
   | 'bad-token'
+  // each person's own accounts (profile 3.5 §3.10, §3.11)
+  | 'not-your-account'
+  | 'not-oauth'
+  | 'not-fields'
+  | 'wrong-binding'
+  | 'wrong-person'
+  | 'source-unavailable'
 
 /** The status of each refusal (profile 3.3 §9); `ERROR_STATUS` of the profile package lists the same. */
 export const SPACE_ERROR_STATUS: Record<SpaceErrorCode, number> = {
@@ -106,6 +113,12 @@ export const SPACE_ERROR_STATUS: Record<SpaceErrorCode, number> = {
   'pinned-by-pack': 422,
   'looser-than-pack': 422,
   'bad-token': 422,
+  'not-your-account': 422,
+  'not-oauth': 409,
+  'not-fields': 409,
+  'wrong-binding': 422,
+  'wrong-person': 422,
+  'source-unavailable': 502,
 }
 
 export class SpaceError extends Error {
@@ -114,7 +127,9 @@ export class SpaceError extends Error {
     message: string,
     public readonly code: SpaceErrorCode,
     /** the field a refusal names: the rule outside the bounds of the template */
-    public readonly field?: string
+    public readonly field?: string,
+    /** what else the body carries: `expected` and `chosen` of a `wrong-binding` (profile 3.5 §3.11) */
+    public readonly extra?: Record<string, string>
   ) {
     super(message)
     this.name = 'SpaceError'

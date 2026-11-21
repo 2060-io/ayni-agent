@@ -1,5 +1,5 @@
 /** Memory schema versions (CORE-VER-001/002). Each migration is applied once, in order. */
-export const MEMORY_SCHEMA_VERSION = '3.9.0'
+export const MEMORY_SCHEMA_VERSION = '3.10.0'
 
 export const MIGRATIONS: { version: string; sql: string }[] = [
   {
@@ -395,6 +395,56 @@ CREATE INDEX IF NOT EXISTS tool_calls_principal ON tool_calls (principal_id, at 
 CREATE INDEX IF NOT EXISTS tool_calls_space ON tool_calls (space_id, at DESC);
 CREATE INDEX IF NOT EXISTS tool_calls_conversation ON tool_calls (conversation_id, at DESC);
 CREATE INDEX IF NOT EXISTS tool_calls_source ON tool_calls (source_id, at DESC);
+`,
+  },
+  {
+    // tools, phase 2 (ayni-spec D104 to D110): the key of each person who connects an account, wrapped by the master key,
+    // whose deletion makes every account of theirs unreadable (D106, PRIV-ERASE-013); each person's own accounts, their
+    // tokens or values and their label only as ciphertext under a key of the row wrapped by the person's key, one per
+    // (person, source, value of its binding) (TOOL-ACCESS-009, TOOL-CONN-002); the sign-ins in the browser, found by a
+    // digest of their state, single use (TOOL-OAUTH-005); the agent's clients at the authorization servers (TOOL-OAUTH-003)
+    version: '3.10.0',
+    sql: `
+CREATE TABLE IF NOT EXISTS person_keys (
+  principal_id TEXT PRIMARY KEY,
+  wrapped_key TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS personal_accounts (
+  id TEXT PRIMARY KEY,
+  principal_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  binding_value TEXT NOT NULL DEFAULT '',
+  binding_label TEXT,
+  method TEXT NOT NULL,
+  state TEXT NOT NULL,
+  reason TEXT,
+  more_access BOOLEAN NOT NULL DEFAULT false,
+  enc_key_ref TEXT NOT NULL,
+  cipher BYTEA NOT NULL,
+  label_cipher BYTEA,
+  pack_digest TEXT NOT NULL,
+  scopes_digest TEXT NOT NULL,
+  connected_at TIMESTAMPTZ NOT NULL,
+  refreshed_at TIMESTAMPTZ,
+  last_used_at TIMESTAMPTZ,
+  UNIQUE (principal_id, source_id, binding_value)
+);
+CREATE INDEX IF NOT EXISTS personal_accounts_principal ON personal_accounts (principal_id);
+
+CREATE TABLE IF NOT EXISTS oauth_attempts (
+  id TEXT PRIMARY KEY,
+  principal_id TEXT NOT NULL,
+  state_hash TEXT NOT NULL UNIQUE,
+  data JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS oauth_attempts_principal ON oauth_attempts (principal_id);
+
+CREATE TABLE IF NOT EXISTS oauth_clients (
+  ref TEXT PRIMARY KEY,
+  data JSONB NOT NULL
+);
 `,
   },
 ]

@@ -23,10 +23,10 @@ import { loadPack } from '../src/config/pack.js'
 import { sealedConversations } from '../src/core/conversationSeal.js'
 import { TRANSLATION_INSTRUCTION_HEAD } from '../src/core/serviceLanguage.js'
 import { personalSpaceId, SpaceService, sealedMembers } from '../src/core/spaces.js'
-import type { Principal, RagChunk, Session } from '../src/core/types.js'
+import type { PersonalAccountRecord, Principal, RagChunk, Session } from '../src/core/types.js'
 import { createEmbeddings } from '../src/llm/embeddings.js'
 import type { StubChatModel } from '../src/llm/stub.js'
-import { createEntryCrypto, openJson, sealJson } from '../src/memory/crypto.js'
+import { createEntryCrypto, newKeyUnder, openJson, openUnder, sealJson, sealUnder } from '../src/memory/crypto.js'
 import { buildScope } from '../src/memory/scope.js'
 import { MemoryService } from '../src/memory/service.js'
 import type { MailMessage } from '../src/platform/mail.js'
@@ -50,6 +50,15 @@ const serverUrl = process.env.PG_TEST_URL
 const logger = createLogger('silent')
 const crypto = createEntryCrypto(Buffer.alloc(32, 5))
 const databases: string[] = []
+
+/** Whether a schema version comes before another, by its numbers: 3.9.0 before 3.10.0. */
+function olderThan(version: string, than: string): boolean {
+  const a = version.split('.').map(Number)
+  const b = than.split('.').map(Number)
+  for (let i = 0; i < Math.max(a.length, b.length); i++)
+    if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) < (b[i] ?? 0)
+  return false
+}
 
 /** A fresh database on the test server, dropped after the run. */
 async function freshDatabase(): Promise<string> {
@@ -112,7 +121,7 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
       await client.query(
         'CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())'
       )
-      for (const m of MIGRATIONS.filter((m) => m.version < '3.4.0')) {
+      for (const m of MIGRATIONS.filter((m) => olderThan(m.version, '3.4.0'))) {
         await client.query(m.sql)
         await client.query('INSERT INTO schema_migrations (version) VALUES ($1)', [m.version])
       }
@@ -486,7 +495,7 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
       await client.query(
         'CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())'
       )
-      for (const m of MIGRATIONS.filter((m) => m.version < '3.6.0')) {
+      for (const m of MIGRATIONS.filter((m) => olderThan(m.version, '3.6.0'))) {
         await client.query(m.sql)
         await client.query('INSERT INTO schema_migrations (version) VALUES ($1)', [m.version])
       }
@@ -777,7 +786,7 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
       await client.query(
         'CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())'
       )
-      for (const m of MIGRATIONS.filter((m) => m.version < '3.7.0')) {
+      for (const m of MIGRATIONS.filter((m) => olderThan(m.version, '3.7.0'))) {
         await client.query(m.sql)
         await client.query('INSERT INTO schema_migrations (version) VALUES ($1)', [m.version])
       }
@@ -1166,7 +1175,7 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
       await client.query(
         'CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())'
       )
-      for (const m of MIGRATIONS.filter((m) => m.version < '3.9.0')) {
+      for (const m of MIGRATIONS.filter((m) => olderThan(m.version, '3.9.0'))) {
         await client.query(m.sql)
         await client.query('INSERT INTO schema_migrations (version) VALUES ($1)', [m.version])
       }
@@ -1187,8 +1196,8 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
         )
       ).rows.map((r) => r.table_name)
       expect(tables).toEqual(['space_accounts', 'space_tools', 'tool_allowances', 'tool_calls'])
-      const version = (await client.query('SELECT max(version) AS v FROM schema_migrations')).rows[0]?.v
-      expect(version).toBe('3.9.0')
+      const versions = (await client.query('SELECT version FROM schema_migrations')).rows.map((r) => r.version)
+      expect(versions).toContain('3.9.0')
       await client.end()
     })
 
@@ -1332,6 +1341,163 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
       await raw.end()
       expect((await approvals.get('apr_tool'))?.action?.fields[0]?.value).toBe('canary post 5521')
       expect((await approvals.list({ requesterId: 'p-ana' }))[0]?.actionArgs).toEqual({ text: 'canary post 5521' })
+    })
+  })
+
+  describe('tools, phase 2, in the store (ayni-spec D104 to D110, schema 3.10.0)', () => {
+    let url: string
+    let store: PostgresStore
+    beforeAll(async () => {
+      url = await freshDatabase()
+      // a store of the previous version, then this one
+      const client = new pg.Client({ connectionString: url })
+      await client.connect()
+      await client.query(
+        'CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())'
+      )
+      for (const m of MIGRATIONS.filter((m) => olderThan(m.version, '3.10.0'))) {
+        await client.query(m.sql)
+        await client.query('INSERT INTO schema_migrations (version) VALUES ($1)', [m.version])
+      }
+      await client.end()
+      store = new PostgresStore(url)
+      await store.init()
+    })
+    afterAll(async () => {
+      await store?.close()
+    })
+
+    const account = (over: Partial<PersonalAccountRecord> = {}): PersonalAccountRecord => ({
+      id: 'acc_1',
+      principalId: 'p-ana',
+      sourceId: 'relaticle',
+      bindingValue: 'ws-1',
+      bindingLabel: 'ayni-dev-agent',
+      method: 'oauth',
+      state: 'connected',
+      cipher: '',
+      encKeyRef: '',
+      packDigest: 'pack',
+      scopesDigest: 'scopes',
+      connectedAt: '2026-11-21T10:00:00.000Z',
+      ...over,
+    })
+
+    it('adds the tables of the person keys, the accounts, the attempts and the clients', async () => {
+      const client = new pg.Client({ connectionString: url })
+      await client.connect()
+      const tables = (
+        await client.query(
+          "SELECT table_name FROM information_schema.tables WHERE table_name IN ('person_keys', 'personal_accounts', 'oauth_attempts', 'oauth_clients') ORDER BY 1"
+        )
+      ).rows.map((r) => r.table_name)
+      expect(tables).toEqual(['oauth_attempts', 'oauth_clients', 'person_keys', 'personal_accounts'])
+      const versions = (await client.query('SELECT version FROM schema_migrations')).rows.map((r) => r.version)
+      expect(versions).toContain('3.10.0')
+      await client.end()
+    })
+
+    it("keeps a person's account only as ciphertext under a key wrapped by the person's, which its deletion destroys", async () => {
+      const person = await store.personKeys.saveIfAbsent({
+        principalId: 'p-ana',
+        wrappedKey: crypto.newWrappedKey(),
+        createdAt: '2026-11-21T10:00:00.000Z',
+      })
+      // a second key of the same person keeps the first (D106)
+      expect(
+        (
+          await store.personKeys.saveIfAbsent({
+            principalId: 'p-ana',
+            wrappedKey: 'other',
+            createdAt: '2026-11-21T10:00:00.000Z',
+          })
+        ).wrappedKey
+      ).toBe(person.wrappedKey)
+      const keyRef = newKeyUnder(crypto, person.wrappedKey)
+      const secret = { tokens: { accessToken: 'canaryAccess0001', refreshToken: 'canaryRefresh0001' } }
+      await store.personalAccounts.save(
+        account({
+          cipher: sealUnder(crypto, person.wrappedKey, keyRef, secret).toString('base64'),
+          labelCipher: sealUnder(crypto, person.wrappedKey, keyRef, { label: 'canary label' }).toString('base64'),
+          encKeyRef: keyRef,
+        })
+      )
+      const raw = new pg.Client({ connectionString: url })
+      await raw.connect()
+      const rows = async () =>
+        (
+          await raw.query(
+            "SELECT t::text AS row, encode(cipher, 'escape') AS bytes, encode(label_cipher, 'escape') AS label FROM personal_accounts t"
+          )
+        ).rows
+      for (const row of await rows()) for (const v of Object.values(row)) expect(String(v)).not.toContain('canary')
+      const got = await store.personalAccounts.find('p-ana', 'relaticle', 'ws-1')
+      expect(got).toMatchObject({ bindingValue: 'ws-1', bindingLabel: 'ayni-dev-agent', state: 'connected' })
+      expect(
+        openUnder(crypto, person.wrappedKey, got?.encKeyRef as string, Buffer.from(got?.cipher as string, 'base64'))
+      ).toEqual(secret)
+      // the master key alone opens nothing of it
+      expect(() => crypto.decrypt(got?.encKeyRef as string, Buffer.from(got?.cipher as string, 'base64'))).toThrow()
+      // a new account for the same value replaces the row, and its key with it (TOOL-CONN-002)
+      await store.personalAccounts.save(account({ id: 'acc_2', cipher: 'AA==', encKeyRef: 'second' }))
+      expect((await rows()).map((r) => r.row).join()).not.toContain(keyRef)
+      expect(await store.personalAccounts.get('acc_1')).toBeUndefined()
+      // a write of an account that is gone brings nothing back; a use is written alone
+      expect(await store.personalAccounts.update(account({ id: 'acc_1' }))).toBe(false)
+      expect(
+        await store.personalAccounts.update(
+          account({ id: 'acc_2', state: 'reconnect', reason: 'revoked', cipher: '', encKeyRef: '' })
+        )
+      ).toBe(true)
+      await store.personalAccounts.touch('acc_2', '2026-11-21T11:00:00.000Z')
+      expect(await store.personalAccounts.get('acc_2')).toMatchObject({
+        state: 'reconnect',
+        reason: 'revoked',
+        lastUsedAt: '2026-11-21T11:00:00.000Z',
+      })
+      expect((await store.personalAccounts.listByPrincipal('p-ana')).map((a) => a.id)).toEqual(['acc_2'])
+      await store.personKeys.delete('p-ana')
+      expect(await store.personKeys.get('p-ana')).toBeUndefined()
+      await store.personalAccounts.delete('acc_2')
+      expect(await rows()).toEqual([])
+      await raw.end()
+    })
+
+    it('finds an attempt by the digest of its state, for one use only (TOOL-OAUTH-006)', async () => {
+      await store.oauthAttempts.save({
+        id: 'att_1',
+        principalId: 'p-ana',
+        originSessionId: 'ses_1',
+        sourceId: 'github',
+        stateHash: 'hash-1',
+        issuer: 'https://github.com/login/oauth',
+        issParameterSupported: false,
+        resource: 'https://api.githubcopilot.com/mcp/',
+        scopes: [],
+        clientRef: 'pre-registered|https://github.com/login/oauth|Iv1',
+        verifierCipher: 'AA==',
+        encKeyRef: 'k',
+        createdAt: '2026-11-21T10:00:00.000Z',
+        expiresAt: '2026-11-21T10:10:00.000Z',
+      })
+      expect((await store.oauthAttempts.findByStateHash('hash-1'))?.id).toBe('att_1')
+      expect((await store.oauthAttempts.listWaiting()).map((a) => a.id)).toEqual(['att_1'])
+      const [first, second] = await Promise.all([
+        store.oauthAttempts.claim('att_1', 'failed', '2026-11-21T10:01:00.000Z'),
+        store.oauthAttempts.claim('att_1', 'failed', '2026-11-21T10:01:00.000Z'),
+      ])
+      expect([first, second].sort()).toEqual([false, true])
+      expect(await store.oauthAttempts.listWaiting()).toEqual([])
+      expect((await store.oauthAttempts.get('att_1'))?.outcome).toBe('failed')
+      await store.oauthClients.save({
+        ref: 'dynamic|https://crm.2060.io',
+        issuer: 'https://crm.2060.io',
+        registration: 'dynamic',
+        clientId: 'client_1',
+        redirectUri: 'https://dev-agent.dev.ayni.org/tools/oauth/callback',
+        registeredAt: '2026-11-21T10:00:00.000Z',
+      })
+      expect((await store.oauthClients.get('dynamic|https://crm.2060.io'))?.clientId).toBe('client_1')
     })
   })
 })

@@ -5,7 +5,7 @@
  * sent in the headers `account.apply` builds from the fields' values at the call (D102, TOOL-ACCESS-005).
  */
 import type { HttpSource } from '../config/packTypes.js'
-import type { ToolSource, ToolSpec } from './types.js'
+import type { ToolContext, ToolSource, ToolSpec } from './types.js'
 
 export function fillTemplate(template: string, args: Record<string, unknown>, encode: (v: string) => string): string {
   return template.replace(/\{([A-Za-z0-9_.-]+)\}/g, (_m, key: string) => {
@@ -39,6 +39,13 @@ export function httpToolSpec(id: string, def: HttpSource): ToolSpec {
       const account = ctx.account
       if (def.account?.kind === 'space' && !account?.headers)
         return { content: 'The account of this space is not set.', isError: true }
+      // a person's own account of fields: its headers, built for the call (D104, TOOL-ACCESS-010)
+      if (def.account?.kind === 'personal' && !account?.headers)
+        return {
+          content: 'The person has not connected their account.',
+          isError: true,
+          accountOutcome: 'not-connected',
+        }
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), (def.timeoutSeconds ?? 30) * 1000)
       const onAbort = () => controller.abort()
@@ -50,11 +57,14 @@ export function httpToolSpec(id: string, def: HttpSource): ToolSpec {
             accept: 'application/json',
             ...(hasBody ? { 'content-type': 'application/json' } : {}),
             ...(def.headers ?? {}),
-            // the space's account, in the headers `account.apply` builds, and nowhere else (TOOL-ACCESS-005)
-            ...(def.account?.kind === 'space' ? (account?.headers ?? {}) : {}),
+            // the space's or the person's account, in the headers `account.apply` builds, and nowhere else
+            // (TOOL-ACCESS-005, TOOL-ACCESS-010)
+            ...(def.account?.kind === 'space' || def.account?.kind === 'personal' ? (account?.headers ?? {}) : {}),
           },
           body,
           signal: controller.signal,
+          // a person's account follows no redirect to another server
+          ...(def.account?.kind === 'personal' ? { redirect: 'error' as const } : {}),
         })
         const text = await response.text()
         return { content: text.slice(0, 20000), isError: !response.ok, data: { status: response.status } }
@@ -74,5 +84,15 @@ export class HttpToolSource implements ToolSource {
   public constructor(private readonly defs: [string, HttpSource][]) {}
   public async list(): Promise<ToolSpec[]> {
     return this.defs.map(([id, def]) => httpToolSpec(id, def))
+  }
+
+  /** The check of a person's account of an HTTP tool (TOOL-CONN-013): its one tool, with the account's headers. */
+  public async checkReadOf(id: string, headers: Record<string, string>): Promise<{ text: string } | undefined> {
+    const def = this.defs.find(([name]) => name === id)?.[1]
+    if (!def) return undefined
+    const result = await httpToolSpec(id, def).invoke({}, {
+      account: { kind: 'personal', accountId: 'check', headers },
+    } as unknown as ToolContext)
+    return result.isError ? undefined : { text: result.content }
   }
 }

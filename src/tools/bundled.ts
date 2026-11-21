@@ -6,9 +6,10 @@ import {
   type PresentationRequestOutcome,
   presentationOutcomeForModel,
 } from '../channels/didcomm/identityRequests.js'
-import { AUTHENTICATION_ENTRY } from '../config/pack.js'
+import { AUTHENTICATION_ENTRY, hasPersonalSource } from '../config/pack.js'
 import type { AgentPack, BundledName, ToolAccess } from '../config/packTypes.js'
 import { bundledEnabled, bundledSource, challengeTypesOf, connectionTypeOf, featuresOf } from '../config/packTypes.js'
+import type { ConnectionService } from '../core/connections.js'
 import { conversationOf } from '../core/conversationOf.js'
 import {
   EMAIL_CHECK_KIND,
@@ -48,6 +49,22 @@ export interface BundledDeps {
   setReactionPolicy: (sessionId: string, policy: 'notify' | 'historize' | { notifyOn: string[] }) => void
   /** the email checks the code runs, which the model follows, renews or cancels (INTX-AUTH-016..018) */
   emailChecks?: () => Pick<EmailChecks, 'status' | 'resend' | 'cancel'> | undefined
+  /** each person's own accounts: the Connect card the model offers (D108, TOOL-CONN-011) */
+  connections?: () => Pick<ConnectionService, 'offer'> | undefined
+}
+
+/** What the model reads of its `offer_connection` (TOOL-CONN-011): never a word of an account. */
+export function offerForModel(outcome: 'shown' | 'connected' | 'not-available' | 'unavailable'): string {
+  switch (outcome) {
+    case 'shown':
+      return 'shown: the Connect card is in your reply. The person connects the account from it and writes again once connected; do not wait for it, and never ask for a password, a token or a key.'
+    case 'connected':
+      return 'connected: the person has connected this account; its tools come with their next message.'
+    case 'not-available':
+      return 'not-available: this is not an account the person can connect in this conversation.'
+    case 'unavailable':
+      return "unavailable: no device of this conversation can show a Connect card. Tell the person to connect the account in this agent's Your accounts."
+  }
 }
 
 /** Tools every bound Principal may use regardless of role (their effect is scoped to the Principal). */
@@ -426,6 +443,33 @@ export class BundledToolSource implements ToolSource {
           if ('error' in result) return { content: result.error, isError: true }
           this.deps.stats.emit('image-generation', 1)
           return { content: `generation started (entry ${result.entryId}); tell the person the image is on its way` }
+        },
+      })
+    }
+    // the Connect card of a person's own account (D108, TOOL-CONN-011): a free `source`, checked in code, so that the
+    // tool's definition stays the same from one turn to the next; the gate gives it only while one is to connect
+    if (on('connections') && hasPersonalSource(pack)) {
+      specs.push({
+        key: 'bundled:offer_connection',
+        name: 'offer_connection',
+        description:
+          'Shows the person a Connect card in your reply for one of the accounts the system record "Accounts this person can connect" lists, by its source id. The person connects from the card, never in the conversation. Answers shown, connected, not-available or unavailable.',
+        parameters: {
+          type: 'object',
+          required: ['source'],
+          additionalProperties: false,
+          properties: { source: { type: 'string', description: 'the id of the source, as the record lists it' } },
+        },
+        access: accessOf('connections', ALWAYS_ALLOWED),
+        stepLabel: 'Preparing a card',
+        invoke: async (args, ctx) => {
+          const service = this.deps.connections?.()
+          const sourceId = typeof args.source === 'string' ? args.source : ''
+          if (!service || !ctx.spaceId || !sourceId) return { content: offerForModel('not-available') }
+          const outcome = await service.offer(ctx.principal, ctx.session, ctx.spaceId, sourceId, async (card) => {
+            await ctx.connectCard?.(card)
+          })
+          return { content: offerForModel(outcome), data: { outcome } }
         },
       })
     }

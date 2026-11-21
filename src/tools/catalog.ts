@@ -56,6 +56,8 @@ export interface CatalogSource {
   access?: ToolAccess
   transport?: McpSource['transport']
   method?: string
+  /** an MCP server's or an HTTP tool's URL: a person's account is used at the same URL only (TOOL-CAT-015) */
+  url?: string
 }
 
 /**
@@ -142,6 +144,7 @@ export class ToolCatalog {
         tools: def.type === 'http' ? { [id]: def.tools?.[id] ?? {} } : (def.tools ?? {}),
         access: def.access,
         ...(def.type === 'mcp' ? { transport: def.transport } : { method: def.method }),
+        ...(def.url ? { url: def.url } : {}),
       })
     }
     // every bundled tool is a source: the one that names it, else one of its own name with its defaults

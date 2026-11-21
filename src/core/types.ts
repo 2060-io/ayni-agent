@@ -314,7 +314,8 @@ export interface MessageEntry {
 
 /** Whose account a call ran with (D97): none, the agent's, or the space's, with the space. */
 export interface CallAccount {
-  kind: 'none' | 'agent' | 'space'
+  /** `personal`: the Principal's own account (D104) */
+  kind: 'none' | 'agent' | 'space' | 'personal'
   spaceId?: string
 }
 
@@ -572,7 +573,8 @@ export type ApprovalKind = 'sensitivity' | 'elevation' | 'confirmation'
 export interface ToolAction {
   title: string
   source: { id: string; title: string }
-  account: { kind: CallAccount['kind']; space?: { id: string; title: string } }
+  /** a `personal` account carries no label here: the requester's own card adds it, and no other (PROF-TOOL-021) */
+  account: { kind: CallAccount['kind']; space?: { id: string; title: string }; label?: string }
   fields: { label: string; value: string; pinned?: boolean }[]
   /** the arguments were erased with the message whose turn asked for it (INTX-APPR-015) */
   erased?: boolean
@@ -800,6 +802,8 @@ export interface PendingToolChange {
    * change is dropped (D102)
    */
   sealedValues?: { keyRef: string; cipher: string }
+  /** the names of the values of the bindings a personal account is for, read from the owner's own account (D110) */
+  bindingLabels?: Record<string, string>
   summary: string
   code: string
   expiresAt: string
@@ -820,6 +824,11 @@ export interface SpaceToolRecord {
   removed?: boolean
   /** the owner's values of the bindings the agent-pack leaves to them */
   bindings: Record<string, string>
+  /**
+   * the names of the values of the bindings a personal account is for (D110), read from the owner's own account when the
+   * owner chose it: "ayni-dev-agent" for a workspace's id
+   */
+  bindingLabels?: Record<string, string>
   /** the owner's rules, never looser than the pack's (TOOL-SPACE-006) */
   calls: Record<string, 'none' | 'confirm' | 'approval' | 'off'>
   pendingChange?: PendingToolChange
@@ -837,6 +846,128 @@ export interface SpaceAccountRecord {
   encKeyRef: string
   setAt: string
   setByPrincipalId: string
+}
+
+/** The key of a person (D106, PRIV-ERASE-013): wrapped by the master key; it wraps the key of each of their accounts. */
+export interface PersonKeyRecord {
+  principalId: string
+  /** a key of 32 bytes, wrapped by the deployment's master key; destroyed when the person's access ends */
+  wrappedKey: string
+  createdAt: string
+}
+
+export type PersonalAccountState = 'connected' | 'reconnect'
+export type ReconnectReason = 'expired' | 'revoked' | 'changed'
+
+/**
+ * A person's own account of a source (D104, D107, TOOL-ACCESS-009): in the clear only the Principal, the source, the value
+ * of its binding and that value's name, the method, the state and its reason, and the times; the tokens or the values of
+ * the fields, and the label, sealed together under a key of its own wrapped by the person's key.
+ */
+export interface PersonalAccountRecord {
+  id: string
+  principalId: string
+  /** the source that declares the account; a source with `account.from` uses it */
+  sourceId: string
+  /** for a source with `account.binding`: the value the check read, and its name (D110) */
+  bindingValue?: string
+  bindingLabel?: string
+  method: 'oauth' | 'fields'
+  state: PersonalAccountState
+  reason?: ReconnectReason
+  moreAccess?: boolean
+  /** the sealed tokens or values (base64); empty once its tokens are destroyed (`reconnect`) */
+  cipher: string
+  /** the label, sealed apart under the same key (base64): Your accounts reads it without opening the tokens */
+  labelCipher?: string
+  /** the account's key, wrapped by the person's key; destroyed with the record */
+  encKeyRef: string
+  /**
+   * a digest of how the agent-pack connected the source when the account was made (its URL, registration, client id,
+   * issuer, binding), and one of its scopes: an account whose source connects otherwise at a start ends, or goes to
+   * reconnect (TOOL-CONN-009); a digest of the agent-pack's settings, nothing of the account
+   */
+  packDigest: string
+  scopesDigest: string
+  connectedAt: string
+  refreshedAt?: string
+  lastUsedAt?: string
+}
+
+/** What is sealed in a personal account (D106): never in the clear, never logged, never sent to a client. */
+export interface PersonalAccountSecret {
+  /** an OAuth account */
+  tokens?: {
+    accessToken: string
+    refreshToken?: string
+    /** when the access token expires, if the server said */
+    expiresAt?: string
+    scopes: string[]
+    /** the scopes to ask at the next attempt of this account: those asked and those of a challenge (TOOL-OAUTH-009) */
+    wantedScopes?: string[]
+    issuer: string
+    /** the key of the agent's client at the issuer */
+    clientRef: string
+    /** the server's URL the token is for, and the only one it is sent to */
+    resource: string
+  }
+  /** an account of fields: one value per field (D102) */
+  values?: Record<string, string>
+  /** the name the account has at its service (D110) */
+  label?: string
+}
+
+/** What became of a sign-in (PROF-TOOL-019). */
+export type OAuthAttemptOutcome =
+  | 'connected'
+  | 'denied'
+  | 'failed'
+  | 'expired'
+  | 'cancelled'
+  | 'wrong-binding'
+  | 'wrong-person'
+
+/** One sign-in in the browser (D105, TOOL-OAUTH-005): single use, ten minutes by default. */
+export interface OAuthAttemptRecord {
+  id: string
+  principalId: string
+  originSessionId: string
+  /** the source that declares the account */
+  sourceId: string
+  /** the space the attempt was started for, for a source of availability spaces */
+  spaceId?: string
+  /** a digest of its `state`: the callback finds it by it; the state itself is kept nowhere */
+  stateHash: string
+  /** the value the check must read, and its name (D110); none when the owner connects to choose it */
+  expectedBinding?: { value: string; label?: string }
+  issuer: string
+  /** whether the authorization server says it sends `iss` (RFC 9207) */
+  issParameterSupported: boolean
+  resource: string
+  scopes: string[]
+  /** the key of the agent's client at the issuer */
+  clientRef: string
+  /** the PKCE verifier, sealed under a key of the attempt's own (base64), and that key wrapped by the master key */
+  verifierCipher: string
+  encKeyRef: string
+  createdAt: string
+  expiresAt: string
+  outcome?: OAuthAttemptOutcome
+  endedAt?: string
+}
+
+/** The agent's client at one authorization server (D105, TOOL-OAUTH-003): never used at another issuer. */
+export interface OAuthClientRecord {
+  /** the key of the client: the issuer, and the registration */
+  ref: string
+  issuer: string
+  registration: 'metadata-document' | 'pre-registered' | 'dynamic'
+  clientId: string
+  /** a secret the registration answered, sealed (base64) under the key below, wrapped by the master key */
+  secretCipher?: string
+  encKeyRef?: string
+  redirectUri: string
+  registeredAt: string
 }
 
 /** "Allow for this conversation" (TOOL-CALL-006). */
@@ -866,6 +997,10 @@ export type ToolCallOutcome =
   | 'not-available'
   /** waiting for another person's approval: the record is updated when the call runs or is not approved */
   | 'pending'
+  /** the person's own account of the source was not connected when the call was to run (TOOL-CALL-011) */
+  | 'not-connected'
+  /** the server asked the person's own account for more scopes (TOOL-OAUTH-009) */
+  | 'more-access-needed'
 
 /** One call the model asked for (TOOL-PROV-004, D100): no argument, no result, no account value. */
 export interface ToolCallRecord {

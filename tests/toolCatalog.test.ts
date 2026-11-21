@@ -89,10 +89,13 @@ describe('the catalog in the agent-pack (CORE-PACK-001, TOOL-CAT-001/002)', () =
     expect(refusal(doc((p) => (p.tools.sources.lookup.type = 'ftp')))).toContain('tools.sources.lookup.type')
   })
 
-  it('refuses the kinds of account of the later phases, saying they are not in this version', () => {
+  it('refuses the kind of account of the later phase, saying it is not in this version, and takes personal (D104)', () => {
+    // personal is the kind of phase 2: one that declares neither oauth, fields nor from is refused naming the account
     const personal = refusal(doc((p) => (p.tools.sources.websearch.account = { kind: 'personal' })))
-    expect(personal).toContain('tools.sources.websearch.account.kind: personal is not available in this version')
-    expect(personal).toContain('phase 2')
+    expect(personal).toContain(
+      "tools.sources.websearch.account: a person's own account declares exactly one of oauth, fields and apply, or from"
+    )
+    expect(personal).not.toContain('not available in this version')
     const organization = refusal(doc((p) => (p.tools.sources.lookup.account = { kind: 'organization' })))
     expect(organization).toContain('tools.sources.lookup.account.kind: organization is not available in this version')
     expect(organization).toContain('phase 3')
@@ -347,7 +350,9 @@ describe("a space's account in named fields (D102, TOOL-CAT-002/012, TOOL-ACCESS
         }
       })
     )
-    expect(agent).toContain('tools.sources.lookup.account: fields and apply belong to a space account only')
+    expect(agent).toContain(
+      "tools.sources.lookup.account: fields and apply belong to a space's or a person's account only"
+    )
     expect(refusal(x({ kind: 'space', apply: X_ACCOUNT_APPLY }))).toContain('tools.sources.x_mentions.account.fields')
     expect(refusal(x({ kind: 'space', fields: X_ACCOUNT_FIELDS }))).toContain('tools.sources.x_mentions.account.apply')
     // a name of lower-case letters, digits and _, starting with a letter

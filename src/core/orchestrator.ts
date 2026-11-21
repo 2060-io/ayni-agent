@@ -3,6 +3,8 @@
  * memory, preferences and semantic recall; RBAC-filtered tools; approvals, liveness and auth
  * challenges around tool calls; cancellation that persists the partial reply as interrupted (D47).
  */
+import { ACTIVITY, CUSTOM_EVENT } from '@ayni.org/ayni-agui-profile'
+import { hasPersonalSource } from '../config/pack.js'
 import type { AgentPack } from '../config/packTypes.js'
 import { challengeTypesOf, featuresOf } from '../config/packTypes.js'
 import { type CallMeasure, callLogFields, measured } from '../llm/timing.js'
@@ -18,8 +20,10 @@ import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import { estimateRequestTokens } from '../util/tokens.js'
 import type { ChallengeService } from './challenges.js'
+import { ConnectionService, type ToConnect } from './connections.js'
 import type { ContextAssembler } from './context.js'
 import { conversationOf } from './conversationOf.js'
+import { credentialRecordText, isCredentialWithheld } from './credentials.js'
 import { isEmailCheckMessage, withheldRecordText } from './emailCheck.js'
 import { nameForModel } from './evidence.js'
 import type { PrincipalService } from './principals.js'
@@ -40,7 +44,14 @@ export type TurnEvent =
   | { type: 'text-end'; messageId: string }
   | { type: 'step-started'; label: string }
   | { type: 'step-finished'; label: string }
-  | { type: 'activity'; messageId: string; activityType: string; content: Record<string, unknown> }
+  | {
+      type: 'activity'
+      messageId: string
+      activityType: string
+      content: Record<string, unknown>
+      /** shown only to the sessions of a client of this profile version or later: the Connect card, 3.5 (PROF-TOOL-020) */
+      minProfile?: string
+    }
   | { type: 'inbound'; entry: MessageEntry }
   /** the turn starts: until then it may have waited for another to end (D63) */
   | { type: 'turn-start' }
@@ -258,6 +269,8 @@ export class Orchestrator {
       emailChecks: Object.values(pack.issuance ?? {}).some((p) => challengeTypesOf(p).includes('email')),
       // the person or an approver may be asked before an action runs (TOOL-CALL-010)
       toolsMayAsk: new ToolCatalog(pack).mayAsk(),
+      // each person's own accounts: never a credential in a conversation, the Connect card instead (TOOL-CONN-012)
+      personalAccounts: hasPersonalSource(pack),
     })
     const tokens = addonTokenCount(this.addon)
     if (tokens > 500) logger.warn({ tokens }, 'system-prompt add-on exceeds its 500-token target (CORE-PROMPT-004)')
@@ -283,7 +296,8 @@ export class Orchestrator {
   private async systemMessages(
     principal: Principal,
     session: Session,
-    spaceId: string
+    spaceId: string,
+    toConnect: ToConnect[] = []
   ): Promise<{ messages: ChatMessage[]; kept: string | undefined; used: UsedMemory }> {
     const features = featuresOf(this.pack)
     const prefs = features.preferences ? await this.memory.preferences(principal, session) : []
@@ -301,7 +315,14 @@ export class Orchestrator {
         { role: 'system', content: this.addon },
         {
           role: 'system',
-          content: `${display}${backing}. Roles: ${principal.roles.join(', ') || 'none'}. Channel: ${session.channelType}.`,
+          // the accounts the person can connect here, one line each and never their tools, in the Principal's block: it
+          // changes only when their accounts or the sources available change (TOOL-CONN-010, MEM-CTX-001)
+          content: [
+            `${display}${backing}. Roles: ${principal.roles.join(', ') || 'none'}. Channel: ${session.channelType}.`,
+            ...(toConnect.length
+              ? [systemRecord({ sourceType: 'text', text: ConnectionService.record(toConnect) ?? '' })]
+              : []),
+          ].join('\n'),
         },
       ],
       kept: keptRecord(prefs, notes),
@@ -326,7 +347,12 @@ export class Orchestrator {
     // receipts and reactions are bookkeeping, not conversation (a reaction the model must know about
     // arrives as its own turn); approvals, challenges and the requests shown on the phone are records of the
     // system, told as such and never in the agent's voice
+    // the Connect card a reply showed: a record of the system, never the card's own words (TOOL-CONN-011)
+    if (entry.sourceType === 'state-update' && entry.payload?.kind === 'connect')
+      return [{ role: 'user', content: systemRecord(entry) }]
     if (entry.sourceType === 'state-update' || entry.sourceType === 'reaction') return []
+    // a message held back because it carried a credential: a record in its place, nothing of it (D109, MEM-RET-006)
+    if (isCredentialWithheld(entry)) return [{ role: 'user', content: this.credentialRecord(entry) }]
     // an email check (decision 65, INTX-AUTH-013, MEM-RET-006): the code's messages are the agent's, in the language
     // they were shown in; what the person typed for it never reaches the model, a record of the system stands in its
     // place, so that the model reads the order of what happened
@@ -352,7 +378,16 @@ export class Orchestrator {
     return [{ role: 'user', content: withReplyContext(entry) }]
   }
 
+  /** What the model reads in the place of a message that carried a credential (D109, TOOL-ACCESS-013). */
+  private credentialRecord(entry: Pick<MessageEntry, 'payload'>): string {
+    const id = typeof entry.payload?.credentialSource === 'string' ? entry.payload.credentialSource : undefined
+    const title = id ? (this.pack.tools?.sources?.[id]?.title ?? id) : undefined
+    return systemRecord({ sourceType: 'text', text: credentialRecordText(title) })
+  }
+
   private async userMessage(entry: MessageEntry, imageBytes?: Map<string, Buffer>): Promise<ChatMessage> {
+    // nothing of a message that carried a credential reaches the model, not even its attachments (TOOL-ACCESS-013)
+    if (isCredentialWithheld(entry)) return { role: 'user', content: this.credentialRecord(entry) }
     // extracted file content (a PDF's text) travels with the message; images go as parts when the model can see
     const files = entry.attachments
       .filter((a) => a.type === 'file' && a.textRepr && !a.textRepr.startsWith('[file '))
@@ -459,7 +494,13 @@ export class Orchestrator {
     context: TurnContext,
     imageBytes?: Map<string, Buffer>
   ): Promise<TurnResult> {
-    for (const entry of inbounds) await sink.emit({ type: 'inbound', entry })
+    for (const entry of inbounds) {
+      await sink.emit({ type: 'inbound', entry })
+      // a message that carried a credential is drawn by every device as one the model never received, with the text the
+      // agent kept of it (TOOL-ACCESS-014, PROF-STREAM-011)
+      if (isCredentialWithheld(entry))
+        await sink.emit({ type: 'custom', name: CUSTOM_EVENT.messagesWithheld, value: withheldValue(entry) })
+    }
     // tools, the reply's language and what is recalled follow the latest message
     const inbound = inbounds[inbounds.length - 1] as MessageEntry
     const answered = new Set(inbounds.map((e) => e.id))
@@ -473,11 +514,12 @@ export class Orchestrator {
     // a space that does not allow this agent's model: no model call, no reply, no summary, no memory (SPACE-CONV-004)
     const refusal = await this.providerRefusal?.(session, principal, spaceId)
     if (refusal) return this.refuse(session, principal, inbounds, refusal, sink, context)
-    const { messages: system, kept, used } = await this.systemMessages(principal, session, spaceId)
     const grants = await this.approvals.activeGrants(principal.id)
     // the tools of the turn, taken once: they change only between turns (TOOL-AVAIL-006), in a fixed order, so that the
-    // start of the request stays the same from one turn to the next (MEM-CTX-001)
-    const turnTools = await this.toolsOf(principal, spaceId, grants)
+    // start of the request stays the same from one turn to the next (MEM-CTX-001); and the accounts the person can connect
+    // here, which the Principal's block names (TOOL-CONN-010)
+    const { tools: turnTools, toConnect } = await this.gateOf().turnTools(principal, spaceId, grants)
+    const { messages: system, kept, used } = await this.systemMessages(principal, session, spaceId, toConnect)
     const tools = turnTools.map((t) => t.definition)
     const userTurn = await this.userTurn(inbounds, imageBytes)
     const topK = this.pack.memory?.retrieval?.topK ?? 8
@@ -495,16 +537,22 @@ export class Orchestrator {
     })
     // what the agent keeps of the person and what is retrieved for this turn come after the window, with the message
     // they are for (MEM-CTX-001, MEM-CTX-007, MEM-RET-007)
-    const recalled = features.semanticRecall
-      ? await this.memory.recall(
-          principal,
-          session,
-          inbounds.map((e) => e.text).join('\n'),
-          topK,
-          [...assembled.window.map((e) => e.id), ...answered],
-          spaceId
-        )
-      : []
+    // what a message that carried a credential said is no query of the recall either (TOOL-ACCESS-013)
+    const query = inbounds
+      .filter((e) => !isCredentialWithheld(e))
+      .map((e) => e.text)
+      .join('\n')
+    const recalled =
+      features.semanticRecall && query.trim()
+        ? await this.memory.recall(
+            principal,
+            session,
+            query,
+            topK,
+            [...assembled.window.map((e) => e.id), ...answered],
+            spaceId
+          )
+        : []
     const messages: ChatMessage[] = [...assembled.messages, withRecords(userTurn, [kept, recallRecord(recalled)])]
 
     /** the memories the turn changed: told as lines of the conversation once its reply is written (MEM-SPACE-005) */
@@ -536,6 +584,26 @@ export class Orchestrator {
       },
       turnEnded: (message) => {
         ended ??= message
+      },
+      // the Connect card the model offers: recorded in the conversation, shown in the reply to the sessions of profile 3.5
+      // or later (TOOL-CONN-011, PROF-TOOL-020)
+      connectCard: async (card) => {
+        const entry = await this.memory.append({
+          sessionId: session.id,
+          principalId: principal.id,
+          role: 'system',
+          sourceType: 'state-update',
+          text: `The Connect card of ${card.title} was shown to the person in the reply: they connect the account from it, and write again once connected`,
+          backingIdentity: principal.backingIdentity,
+          payload: { kind: 'connect', card, inboundId: inbound.id, inboundIds },
+        })
+        await sink.emit({
+          type: 'activity',
+          messageId: entry.id,
+          activityType: ACTIVITY.connect,
+          content: { ...card },
+          minProfile: '3.5',
+        })
       },
     }
 
@@ -958,4 +1026,18 @@ function withReplyContext(entry: MessageEntry): string {
   const what = r?.media ? { image: 'picture', voice: 'voice note', video: 'video', file: 'file' }[r.media] : 'message'
   const who = r?.role === 'assistant' ? `your ${what}` : `my earlier ${what}`
   return `[replying to ${who}: "${quoted}"]\n${entry.text}`
+}
+
+/**
+ * `ayni.messages.withheld` of a message held back because it carried a credential (TOOL-ACCESS-014, PROF-STREAM-011): its
+ * ids, and the text the agent kept of it.
+ */
+export function withheldValue(entry: MessageEntry): Record<string, unknown> {
+  return {
+    conversationId: entry.conversationId,
+    messageIds: [entry.id],
+    ...(entry.externalId ? { clientIds: [entry.externalId] } : {}),
+    reason: 'credential',
+    texts: { [entry.id]: entry.text },
+  }
 }

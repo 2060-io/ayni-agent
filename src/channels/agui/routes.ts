@@ -20,11 +20,14 @@ import addFormats from 'ajv-formats'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { messageDeletionWindowSeconds } from '../../config/packTypes.js'
 import type { AyniAgent, QueuedRun } from '../../core/agent.js'
+import { CLIENT_METADATA_PATH, type ConnectionsChanged, OAUTH_CALLBACK_PATH } from '../../core/connections.js'
 import { conversationOf } from '../../core/conversationOf.js'
-import { conversationKey, type TurnEvent, type TurnSink } from '../../core/orchestrator.js'
+import { isCredentialWithheld } from '../../core/credentials.js'
+import { conversationKey, type TurnEvent, type TurnSink, withheldValue } from '../../core/orchestrator.js'
 import { normalizeClient, SessionError } from '../../core/sessions.js'
 import { type SpaceAccess, SpaceError, spaceIdOf } from '../../core/spaces.js'
 import type { SpaceToolsChanged } from '../../core/spaceTools.js'
+import { profileAtLeast } from '../../core/toolGate.js'
 import {
   type ClientDescription,
   type Conversation,
@@ -51,12 +54,13 @@ import { uploadMeasures } from './uploadMeasures.js'
 import { uploadName } from './uploadName.js'
 
 /**
- * The profile revision this agent implements: 3.4 (the tools of a space, the confirmation card of a tool call, the sources
- * of replies and conversations; ayni-spec D96 to D100), over 3.3 (spaces, the person's memories and preferences, the
- * deletion window of a message; decision 60) and 3.1 (session grant, flows and `ayni.flow`, `flowId` on routed
- * capabilities, client platform and description).
+ * The profile revision this agent implements: 3.5 (each person's own accounts, Your accounts, the Connect card, a message
+ * held back because it carried a credential; ayni-spec D104 to D110), over 3.4 (the tools of a space, the confirmation
+ * card of a tool call, the sources of replies and conversations; ayni-spec D96 to D100), 3.3 (spaces, the person's
+ * memories and preferences, the deletion window of a message; decision 60) and 3.1 (session grant, flows and
+ * `ayni.flow`, `flowId` on routed capabilities, client platform and description).
  */
-const AGENT_PROFILE_VERSION = '3.4'
+const AGENT_PROFILE_VERSION = '3.5'
 /** A run's response gets a comment this often: it stays open while the run waits or a tool takes its time. */
 const RUN_HEARTBEAT_MS = 15_000
 
@@ -203,6 +207,9 @@ export class AgUiRoutes {
         // the tools of a space, the confirmation card of a call, the sources of replies (ayni-spec D96 to D100,
         // PROF-DESC-009)
         tools: true,
+        // each person's own accounts, while the agent-pack declares a source of them (ayni-spec D104 to D110,
+        // PROF-DESC-010): an agent with none shows no Your accounts
+        ...(this.agent.connections?.personalSources().length ? { connections: true } : {}),
       },
       locales: [this.agent.pack.language.agent],
     }
@@ -246,9 +253,12 @@ export class AgUiRoutes {
 
   private sendError(reply: FastifyReply, error: unknown): void {
     if (error instanceof SpaceError) {
-      reply
-        .code(error.status)
-        .send({ error: error.code, message: error.message, ...(error.field ? { field: error.field } : {}) })
+      reply.code(error.status).send({
+        error: error.code,
+        message: error.message,
+        ...(error.field ? { field: error.field } : {}),
+        ...(error.extra ?? {}),
+      })
       return
     }
     if (error instanceof SessionError) {
@@ -1297,6 +1307,83 @@ export class AgUiRoutes {
         return stopped ? reply.code(204).send() : reply.code(404).send({ error: 'not-found' })
       })
     )
+
+    // ---- Your accounts (profile 3.5 §3.11): each person's own, read and changed by that person alone -----------------
+    const connections = () => {
+      if (!this.agent.connections) throw new SpaceError('no account is served here', 'not-found')
+      return this.agent.connections
+    }
+    // PROF-TOOL-014: one item per account the person can connect or holds, with no token and no value
+    app.get(
+      `${base}/connections`,
+      handle(async ({ principal }) => ({
+        connections: this.agent.connections ? await this.agent.connections.list(principal) : [],
+      }))
+    )
+    // PROF-TOOL-015: a sign-in in the browser; no confirmation on the phone (D104)
+    app.post(
+      `${base}/connections/:source/authorize`,
+      handle(async ({ session, principal }, request, reply) => {
+        const { source } = request.params as { source: string }
+        const body = (request.body ?? {}) as { spaceId?: unknown }
+        const attempt = await connections().startAuthorize(principal, session, source, body.spaceId)
+        return reply.code(202).send(attempt)
+      })
+    )
+    app.delete(
+      `${base}/connections/attempts/:attemptId`,
+      handle(async ({ principal }, request, reply) => {
+        const { attemptId } = request.params as { attemptId: string }
+        const ended = await connections().cancelAttempt(principal, attemptId)
+        return ended ? reply.code(204).send() : reply.code(404).send({ error: 'not-found' })
+      })
+    )
+    // PROF-TOOL-016: an account of fields, taken at once
+    app.put(
+      `${base}/connections/:source/account`,
+      handle(async ({ principal }, request) => {
+        const { source } = request.params as { source: string }
+        const body = (request.body ?? {}) as { values?: unknown; spaceId?: unknown }
+        return { connection: await connections().setFields(principal, source, body.values, body.spaceId) }
+      })
+    )
+    // PROF-TOOL-017: disconnected at once
+    app.delete(
+      `${base}/connections/accounts/:accountId`,
+      handle(async ({ principal }, request) => {
+        const { accountId } = request.params as { accountId: string }
+        return { connection: await connections().disconnect(principal, accountId) }
+      })
+    )
+  }
+
+  /**
+   * The public paths of people's own accounts (D105): the callback of every sign-in (TOOL-OAUTH-006) and the agent's client
+   * ID metadata document (TOOL-OAUTH-004). Neither takes a session token: the callback finds its attempt by its `state`.
+   */
+  public registerOAuth(app: FastifyInstance): void {
+    app.get(OAUTH_CALLBACK_PATH, async (request, reply) => {
+      // the answer carries nothing of the sign-in, is stored nowhere and tells no other site where it came from
+      reply.header('cache-control', 'no-store').header('referrer-policy', 'no-referrer')
+      if (!this.agent.connections) return reply.code(404).type('text/plain').send('not found')
+      const answer = await this.agent.connections.callback((request.query ?? {}) as Record<string, unknown>)
+      if (answer.status === 303 && answer.location) return reply.code(303).header('location', answer.location).send()
+      return reply
+        .code(answer.status)
+        .type('text/html; charset=utf-8')
+        .send(answer.page ?? '')
+    })
+    app.get(CLIENT_METADATA_PATH, async (_request, reply) => {
+      if (!this.agent.connections) return reply.code(404).send({ error: 'not-found' })
+      return reply.header('cache-control', 'public, max-age=3600').send(this.agent.connections.clientMetadata())
+    })
+  }
+
+  /** One of a person's own accounts, or an attempt, changed: every bound session of theirs hears it (PROF-TOOL-019). */
+  public async announceConnections(principalId: string, value: ConnectionsChanged): Promise<void> {
+    for (const session of await this.agent.store.sessions.listByPrincipal(principalId, ['bound']))
+      if (session.channelType === 'ag-ui')
+        await this.streams.publish(session.id, ev.custom(CUSTOM_EVENT.connectionsChanged, { ...value }))
   }
 
   /** A change of a space's tools applied or was dropped: every bound session of its owners hears it (PROF-TOOL-006). */
@@ -1402,8 +1489,20 @@ export class AgUiRoutes {
             return emit(ev.stepStarted(event.label))
           case 'step-finished':
             return emit(ev.stepFinished(event.label))
-          case 'activity':
-            return emit(ev.activitySnapshot(event.messageId, event.activityType, event.content))
+          case 'activity': {
+            const activity = ev.activitySnapshot(event.messageId, event.activityType, event.content)
+            // a Connect card, only to the sessions of a client of profile 3.5 or later (PROF-TOOL-020)
+            if (event.minProfile) {
+              const least = event.minProfile
+              if (profileAtLeast(session.client.profileVersion, least)) write(activity)
+              mirror.only(
+                activity,
+                new Set(peers.filter((p) => profileAtLeast(p.client.profileVersion, least)).map((p) => p.id))
+              )
+              return
+            }
+            return emit(activity)
+          }
           case 'inbound':
             // the other devices get the person's message whole; the device that sent it already shows it
             mirror.inbound(event.entry)
@@ -1469,6 +1568,13 @@ export class AgUiRoutes {
       if (result && 'waiting' in result && result.waiting) {
         // no turn for this run: the message is recorded and waits, the agent answers it next (PROF-RUN-011)
         start('waiting')
+        // a message that waits and carried a credential: every device of the conversation draws it with the text kept
+        // (TOOL-ACCESS-014, PROF-STREAM-011)
+        if (result.inbound && isCredentialWithheld(result.inbound)) {
+          const withheld = ev.custom(CUSTOM_EVENT.messagesWithheld, withheldValue(result.inbound))
+          write(withheld)
+          for (const peer of peers) await this.streams.publish(peer.id, withheld).catch(() => undefined)
+        }
         write(ev.runFinished(session.id, runId, { type: 'waiting', messageId: result.inbound?.id }))
       } else if (result && 'cancelled' in result && result.cancelled) {
         // stopped; or given up while an action waited for its turn, which ran nothing
@@ -1580,8 +1686,18 @@ export class AgUiRoutes {
             return mirror.event(ev.stepStarted(event.label))
           case 'step-finished':
             return mirror.event(ev.stepFinished(event.label))
-          case 'activity':
-            return mirror.event(ev.activitySnapshot(event.messageId, event.activityType, event.content))
+          case 'activity': {
+            const activity = ev.activitySnapshot(event.messageId, event.activityType, event.content)
+            // a Connect card, only to the sessions of a client of profile 3.5 or later (PROF-TOOL-020)
+            if (event.minProfile) {
+              const least = event.minProfile
+              return mirror.only(
+                activity,
+                new Set(targets.filter((t) => profileAtLeast(t.client.profileVersion, least)).map((t) => t.id))
+              )
+            }
+            return mirror.event(activity)
+          }
           case 'inbound':
             // every device but the one that sent it, which shows it already and gets its echo
             mirror.inbound(event.entry)
@@ -1640,8 +1756,11 @@ export class AgUiRoutes {
     clientIds: string[] = []
   ): Promise<void> {
     if (!messageIds.length) return
-    // a client holds a message it sent under its own id until it reads the history again: it is named both ways
-    const value = { conversationId, messageIds, ...(clientIds.length ? { clientIds } : {}) }
+    // a client holds a message it sent under its own id until it reads the history again: it is named both ways, the
+    // client's ids in the order of the agent's, the empty string for an entry no client sent, and none when no client sent
+    // any (PROF-STREAM-008)
+    const aligned = messageIds.map((_id, i) => clientIds[i] ?? '')
+    const value = { conversationId, messageIds, ...(aligned.some(Boolean) ? { clientIds: aligned } : {}) }
     const sessions = await this.agent.store.sessions.listByPrincipal(principalId, ['bound'])
     for (const session of sessions) {
       if (session.channelType !== 'ag-ui' || conversationOf(session) !== conversationId) continue

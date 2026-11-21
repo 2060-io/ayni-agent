@@ -564,7 +564,7 @@ starts with a letter or a digit, then letters, digits, `_` and `-`, 64 at most.
 | `description`, `method`, `url`, `headers`, `parameters`, `bodyTemplate`, `timeoutSeconds` | `http` | the request: `description` is what the model reads of the tool (required), `parameters` the JSON Schema of its arguments, `{param}` placeholders in `url` and `bodyTemplate` | `timeoutSeconds: 30` |
 | `bundled`, `enabled` | `bundled` | the bundled tool it names (below), and `enabled: false` to turn off one that is on by default; `endpoint` and `defaultStatClass` for `statistics`, `provider` for `generateImage` | `enabled: true` |
 | `title`, `description` | all | what people read on the cards, in the sources and in a space's settings | the id; none |
-| `account` | `mcp`, `http` | whose account its calls run with: `none`, `agent`, `space` (below) | `agent` |
+| `account` | `mcp`, `http` | whose account its calls run with: `none`, `agent`, `space`, `personal` (below) | `agent` |
 | `availability` | all | `agent` (every conversation, Personal included), `personal` (Personal only), `spaces` (the spaces whose template names it) | `agent` |
 | `offer` | `mcp` | the tools of the server the model is given | every tool it lists |
 | `bindings` | `mcp`, `http` | the parameters the agent pins (below) | none |
@@ -578,13 +578,14 @@ space, then the person) can only narrow the answers:
 | Question | Key | Answers |
 |---|---|---|
 | Where is it available | `availability` | `agent`, `personal`, `spaces` |
-| Whose account its calls run with | `account.kind` | `none`, `agent` (credentials held by the deployment), `space` (what the owner of each space sets, one field per key: `account.fields`, `account.apply`) |
+| Whose account its calls run with | `account.kind` | `none`, `agent` (credentials held by the deployment), `space` (what the owner of each space sets, one field per key: `account.fields`, `account.apply`), `personal` (each person's own, which the person connects: `account.oauth`, or `account.fields` and `account.apply`, or `account.from`) |
 | Who may use it | `access` | roles, as the tiers below; the members of the space; guests only where the template says `guests: true` |
 | What a call needs | `tools.<name>.effect`, `.call`, `.stepUp` | `none`, `confirm` (the person's card), `approval` (another person), and a step-up on top |
 
-`account.kind: personal` and `organization` are reserved for phases 2 and 3 (each person's own accounts, the accounts
-the organization opens): a pack that names either is refused at start, in words. A key `preset`, which would take a
-source's type, connection and tool declarations from a connector the agent ships, is planned and not in this version.
+`account.kind: organization` is reserved for phase 3 (the accounts the organization opens): a pack that names it is
+refused at start, in words. `personal`, each person's own account, is phase 2 (ayni-spec D104 to D110), below. A key
+`preset`, which would take a source's type, connection and tool declarations from a connector the agent ships, is
+planned and not in this version.
 
 ### A full example
 
@@ -700,7 +701,10 @@ spaces:
 ```
 
 Two sources may each have a tool of one name, a `delete` for instance: their `tools.delete` are two declarations, each
-with its own rule and step-up, and when two MCP servers list one name the model is given `<id>__<name>` for each.
+with its own rule and step-up. When two MCP servers whose tools can be in one turn list or `offer` one name, the model
+is given `<id>__<name>` for each, from the start and whether the other server is discovered yet or not; two sources
+never in one turn (one of availability `personal` and one of `spaces`, as `github` and `github-project` below) keep
+their names.
 
 ### Who may use a tool: `access` and the tiers
 
@@ -789,6 +793,7 @@ tools:
 | `workingMemory` | `working_memory` | yes |
 | `statistics` | `statistics` (`endpoint`, `defaultStatClass`) | no |
 | `generateImage` | `generate_image` (`provider`, a `media.imageGeneration` provider; needs `features.imageGeneration`) | no |
+| `connections` | `offer_connection`, the Connect card of a person's own account (D108), given to the model only while the person has one to connect there | yes, while the pack declares a `personal` source |
 
 A source names a bundled tool by `bundled`, and its id may differ (`notes: { type: bundled, bundled: workingMemory }`);
 one source per bundled tool. Declaring it turns it on (`enabled: false` turns it off) and gives it a `title`, an
@@ -835,6 +840,156 @@ server, closed after
 `TOOL_CONNECTION_IDLE_SECONDS` (600) unused. A change of a space's tools that grants something waits for the owner's
 phone for `TOOL_CHANGE_CONFIRMATION_SECONDS` (300).
 
+### Each person's own accounts
+
+A source of `account.kind: personal` runs each call with the account of the person who asks, at the external service,
+with that person's rights there (ayni-spec D104 to D110): the service, and not Ayni, decides what each person may read
+and change. The person connects it, in **Your accounts** (a page of each agent, on the phone and on the web) or from a
+**Connect card** the model shows in a reply; never in a conversation, never through the model, never from the pack.
+Connecting asks nothing of the phone; disconnecting applies at once.
+
+| Key | What it says |
+|---|---|
+| `account.oauth.client.registration` | how the agent obtains its client at the service's authorization server: `metadata-document` (its client ID metadata document at `{PUBLIC_BASE_URL}/tools/oauth/client-metadata.json` is the `client_id`; the server must say `client_id_metadata_document_supported`), `pre-registered` (a client the operator registered; `issuer`, `id` and `secret` from the deployment's secrets, used at that issuer only), `dynamic` (Dynamic Client Registration at the server's `registration_endpoint`, once, kept for the issuer). No fallback from one to another |
+| `account.oauth.scopes` | the scopes asked; `[]` asks none. Absent: those of the server's `401` challenge, else of its Protected Resource Metadata, with `offline_access` when the authorization server lists it |
+| `account.oauth.bindingRequest` | how the sign-in asks the service for the value of the account's binding (layer a of D110): `{ parameter: <name> }`, a parameter of the authorization request that carries the value, or `{ resource: <URL with {value}> }`, sent as the `resource` and used as the server's URL for that account |
+| `account.fields`, `account.apply` | instead of OAuth, the fields of a personal API token, as a space's account declares them; the person types them in Your accounts |
+| `account.from` | instead of either, the id of another source whose personal account this one uses, of the same type and at the same URL: one sign-in serves both |
+| `account.binding` | the binding of the source whose value each account is for, such as Relaticle's workspace: a person holds one account per value, and a conversation uses the one for the value in force there |
+| `account.check` | the read the agent makes once right after each connection, in code and outside the model: `tool` (a tool the source offers, of effect `read`, called with no argument), JSON pointers into its result (`binding.value`, `binding.label`, `email`) and a `label` in which `{/pointer}` stands for a value. A value of the binding other than the one expected, or an email other than the person's in the user directory, discards the tokens (revoked where the service allows it) |
+| `account.tokenPatterns` | regular expressions that find a credential of the source in a message (a `space` or `personal` account): a message with a match of 16 characters or more is held back from the model whole (D109) |
+
+The two demonstrations of phase 2, Relaticle CRM in the spaces of a Sales template and GitHub in Personal and in a
+Project space:
+
+```yaml
+identity:
+  directory: { file: /secrets/directory/directory.yaml }   # check.email compares with the person's entry
+
+tools:
+  sources:
+    relaticle:                          # each member's own Relaticle account, for the space's workspace
+      type: mcp
+      title: Relaticle CRM
+      description: The companies, people, notes and tasks of the space's workspace
+      transport: streamable-http        # a personal account reaches a remote server, never stdio
+      url: https://crm.2060.io/mcp
+      account:
+        kind: personal
+        oauth:
+          client: { registration: dynamic }          # Relaticle registers clients at /oauth/register
+          bindingRequest: { parameter: workspace }   # the consent offers the space's workspace only, once Relaticle can
+        binding: workspace              # each account is for one workspace: the space's
+        check:                          # read once after the sign-in, before any call
+          tool: who-ami-tool
+          binding: { value: /workspace/id, label: /workspace/name }
+          email: /user/email            # the account must carry the person's email of the directory
+          label: "{/user/email} · {/workspace/name}"
+      availability: spaces
+      bindings:
+        - { name: workspace, label: Workspace }      # no argument: the token reaches its workspace only
+      offer: [who-ami-tool, list-companies-tool, get-company-tool, list-people-tool, create-note-tool]
+      access: { roles: { employee: ["*"] } }
+      tools:
+        who-ami-tool:        { effect: read, untrusted: false }
+        list-companies-tool: { effect: read, untrusted: false }
+        get-company-tool:    { effect: read, untrusted: false }
+        list-people-tool:    { effect: read, untrusted: false }
+        create-note-tool:    { title: Add a note, effect: write, untrusted: false }   # confirm, by default
+
+    github:                             # GitHub's remote MCP server, in Personal, with each person's GitHub
+      type: mcp
+      title: GitHub
+      description: Code, issues and pull requests in GitHub
+      transport: streamable-http
+      url: https://api.githubcopilot.com/mcp/
+      account:
+        kind: personal
+        oauth:
+          client:
+            registration: pre-registered            # github.com offers no registration endpoint and no documents
+            issuer: https://github.com/login/oauth
+            id: ${TOOLS_GITHUB_CLIENT_ID}           # the GitHub App of the organization
+            secret: ${TOOLS_GITHUB_CLIENT_SECRET}
+          scopes: []                                # a GitHub App's permissions decide
+        check: { tool: get_me, label: "{/login}" }
+        tokenPatterns: ["gh[pousr]_[A-Za-z0-9]{36,251}", "github_pat_[A-Za-z0-9_]{22,255}"]
+      availability: personal
+      offer: [get_me, search_repositories, get_file_contents, list_issues, issue_read, issue_write, add_issue_comment]
+      untrusted: true                   # issues and files are written by anyone
+      access: { roles: { employee: ["*"] } }
+      tools:
+        get_me:            { effect: read }
+        issue_write:       { title: Open or change an issue, effect: write }
+        add_issue_comment: { title: Comment on an issue, effect: write }
+
+    github-project:                     # the same server, bound to the repository of a Project space
+      type: mcp
+      title: GitHub repository
+      description: The issues of the project's repository
+      transport: streamable-http
+      url: https://api.githubcopilot.com/mcp/
+      account: { kind: personal, from: github }     # the person's GitHub account: one sign-in serves both
+      availability: spaces
+      offer: [list_issues, issue_read, issue_write, add_issue_comment]
+      bindings:
+        - { name: owner, label: Organization, argument: owner, pattern: "^[A-Za-z0-9-]{1,39}$" }
+        - { name: repo, label: Repository, argument: repo, pattern: "^[A-Za-z0-9._-]{1,100}$" }
+      untrusted: true
+      access: { roles: { employee: ["*"] } }
+      tools:
+        issue_write:       { title: Open or change an issue, effect: write }
+        add_issue_comment: { title: Comment on an issue, effect: write }
+
+spaces:
+  templates:
+    - { id: sales, title: Sales, kind: team, creators: [manager], membership: { mode: list },
+        tools: [{ source: relaticle, add: auto }] }       # its owner binds the workspace from an account of their own
+    - { id: project, title: Project, kind: team, creators: [manager], membership: { mode: list },
+        tools: [{ source: github-project, add: auto }] }  # its owner binds the repository
+```
+
+How it works:
+
+- **The sign-in** (OAuth as MCP defines it, revision 2026-07-28): `POST {sessions}/connections/{source}/authorize` finds
+  the server's authorization server through its Protected Resource Metadata, reads that server's metadata (its issuer
+  checked, `S256` required), obtains the client the source declares, and answers the URL of the sign-in, which carries
+  PKCE `S256`, the `state` of a single-use attempt of `TOOL_OAUTH_ATTEMPT_SECONDS` (600), the server's `resource` and the
+  scopes. The service sends the browser back to `{PUBLIC_BASE_URL}/tools/oauth/callback`, where the agent checks the
+  `iss` of the answer, exchanges the code with the verifier and the `resource`, makes the `check`, seals the account,
+  and sends the browser on to `{APP_LINK_BASE}service/{did}/accounts`, with nothing of the outcome; the person's sessions
+  hear it as `ayni.connections.changed`. Both paths must reach the agent from the internet (its ingress).
+- **Keeping it:** each person's key, wrapped by `ENTRY_ENCRYPTION_KEY`, wraps the key of each of their accounts, under
+  which the tokens or the values and the label are sealed. Ending a person's access (their entry leaves the directory)
+  destroys their key, and every account with it. A token is opened only for a call of its person or a refresh, sent only
+  in `Authorization` to the source's own server, never logged; an echo of it in a result reads `[account]`.
+- **Its life:** a token that expires within a minute is refreshed before the call, and once more after a `401`, one
+  refresh at a time per account, the rotated refresh token kept. A refused refresh puts the account to reconnect; a `403
+  insufficient_scope` marks it as asking for more access. At start, an account whose source the pack no longer offers as
+  it did (its URL, registration, client id, issuer or binding changed) ends; one whose `scopes` changed must reconnect.
+- **What the model knows:** one line per personal source the person can use there and has not connected, in the block
+  of the person, and `offer_connection` to show its Connect card. Its tools come once the account is connected.
+- **In a space** a source of `personal` is added and bound by the owner, who sets no account (`PUT …/account` answers
+  `409 no-space-account`); the value of the binding the account is for comes from an account of the owner's own, never
+  typed by hand (`422 not-your-account` otherwise), and is confirmed on the owner's phone as any binding is.
+
+### Refused by the loader, for each person's own accounts
+
+- a `personal` account that declares none, or more than one, of `oauth`, `fields` and `apply`, and `from`, naming the
+  account; `oauth` on an HTTP tool; a personal account on a `stdio` server; `headers.Authorization` beside `oauth`
+  (TOOL-CAT-013, TOOL-AVAIL-007);
+- a `registration` other than the three; a `pre-registered` client whose `issuer` or `id` is missing or empty once its
+  placeholders are resolved; `issuer`, `id` or `secret` with another registration; a `bindingRequest` without a
+  `binding`, or a `resource` without `{value}` (TOOL-CAT-014);
+- a `from` that names an unknown source, a source of another kind of account, one that itself declares `from` or
+  `binding`, or one of another type or at another URL; a `binding` or a `check` on a source of `from` (TOOL-CAT-015);
+- a token pattern that does not compile (TOOL-CAT-016);
+- a `check.tool` the source does not offer or whose declared effect is not `read`; a pointer that is not one; a
+  `binding` that names no binding of the source, or comes without `check.binding`; `check.email` in an agent with no
+  user directory (TOOL-CAT-017);
+- `oauth`, `from`, `binding` or `check` on an account that is not `personal`; `tokenPatterns` on one that is neither a
+  space's nor a person's.
+
 ### Refused by the loader
 
 - `mcp.servers`, `tools.http`, `tools.bundled`, `tools.access` and `actions`, in words and before the schema, each with
@@ -842,14 +997,14 @@ phone for `TOOL_CHANGE_CONFIRMATION_SECONDS` (300).
   `tools.sources.<id>.tools.<tool>.stepUp` (TOOL-CAT-011);
 - a source with no `type` or an unknown one; an unknown `availability`, `account.kind`, `effect`, `call`, `bundled` or
   template `add`, naming the source and the field (TOOL-CAT-001); a key of another type's connection (an HTTP tool with
-  `transport`), named by the schema; `account.kind: personal` or `organization` (TOOL-CAT-002);
+  `transport`), named by the schema; `account.kind: organization` (TOOL-CAT-002);
 - an HTTP tool whose `tools` names another tool than its own; a bundled tool named by two sources, or whose `tools` names
   a tool it does not give, or declares an `effect` or `untrusted`;
 - `account.label`, `account.pattern` and `account.apply` as one object (`header`, `prefix`), in words and before the
   schema, each with the form that replaces it, `account.fields` and `account.apply: [{ header, value }]`, written from
   what the account declares (TOOL-CAT-012, D102);
 - an `account` on a bundled tool; a `space` account without `fields` or `apply`; `fields` or `apply` on an account that
-  is not a space's; two fields of one name, a field's pattern that is not a regular expression, a header declared twice,
+  is neither a space's nor a person's; two fields of one name, a field's pattern that is not a regular expression, a header declared twice,
   a header's value that names a field the account does not declare, and a field no header names (TOOL-CAT-002, D102);
 - a `space` account of an availability other than `spaces`, or on a `stdio` server (TOOL-AVAIL-003);
 - a binding of a source of availability `agent` or `personal` without a `value`; a value that does not match its
