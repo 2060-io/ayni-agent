@@ -11,7 +11,11 @@ import {
   parseArguments,
 } from './types.js'
 
-function toAnthropic(messages: ChatMessage[], multimodal: boolean): { system: string; messages: MessageParam[] } {
+/** The Messages API request of a request: the system parts joined, a tool's result in the user turn after the call. */
+export function toAnthropic(
+  messages: ChatMessage[],
+  multimodal: boolean
+): { system: string; messages: MessageParam[] } {
   const system = messages
     .filter((m): m is Extract<ChatMessage, { role: 'system' }> => m.role === 'system')
     .map((m) => m.content)
@@ -112,7 +116,13 @@ export class AnthropicChatModel implements ChatModel {
       throw new LlmError(error instanceof Error ? error.message : String(error), 'anthropic')
     }
     const pending = new Map<number, { id: string; name: string; args: string }>()
+    let started = false
     for await (const event of stream) {
+      // the first block of the answer, of text, of thinking or of a tool call (LLM-USAGE-004)
+      if (!started && event.type === 'content_block_start') {
+        started = true
+        yield { type: 'started' }
+      }
       if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
         pending.set(event.index, { id: event.content_block.id, name: event.content_block.name, args: '' })
       } else if (event.type === 'content_block_delta') {
@@ -127,8 +137,9 @@ export class AnthropicChatModel implements ChatModel {
           yield { type: 'tool_call', call: { id: slot.id, name: slot.name, arguments: parseArguments(slot.args) } }
           pending.delete(event.index)
         }
-      } else if (event.type === 'message_delta' && event.usage) {
-        yield { type: 'usage', inputTokens: 0, outputTokens: event.usage.output_tokens ?? 0 }
+      } else if (event.type === 'message_delta') {
+        if (event.delta.stop_reason) yield { type: 'stop', reason: event.delta.stop_reason }
+        if (event.usage) yield { type: 'usage', inputTokens: 0, outputTokens: event.usage.output_tokens ?? 0 }
       }
     }
   }

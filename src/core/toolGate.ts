@@ -241,15 +241,34 @@ export class ToolGate {
 
   // ---- one call (TOOL-CALL-001) --------------------------------------------------------------------------------------
 
-  /** One call the model asked for, through every step its rule asks; returns what the model reads of it. */
+  /**
+   * One call the model asked for, through every step its rule asks: what the model reads of it, and what became of the
+   * call (`completed` when its tool ran and succeeded).
+   */
   public async execute(
     call: ToolCallRequest,
     tools: TurnTool[],
     state: TurnToolState,
     ctx: CallContext
+  ): Promise<{ content: string; outcome?: ToolCallOutcome }> {
+    const record = this.newRecord(
+      ctx.principal,
+      state,
+      tools.find((t) => t.name === call.name),
+      call.name
+    )
+    const content = await this.decide(call, tools, state, ctx, record)
+    return { content, outcome: record.outcome }
+  }
+
+  private async decide(
+    call: ToolCallRequest,
+    tools: TurnTool[],
+    state: TurnToolState,
+    ctx: CallContext,
+    record: ToolCallRecord
   ): Promise<string> {
     const tool = tools.find((t) => t.name === call.name)
-    const record = this.newRecord(ctx.principal, state, tool, call.name)
     if (!tool) {
       // not offered, not available here, or not the Principal's: unknown (TOOL-CAT-003, TOOL-AVAIL-001)
       await this.finish(record, 'not-available')

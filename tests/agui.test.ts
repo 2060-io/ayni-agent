@@ -1548,7 +1548,8 @@ describe('what the sender measured of a voice note (PROF-HIST-009)', () => {
 })
 
 describe('a reply that resumes after its tools (CORE-MSG-011)', () => {
-  const PREFERENCE = '/call principal_preferences {"action":"set","key":"language","value":"es"}'
+  // a tool whose result the model reads: a reply that only saves a memory or a preference ends with its saves (MEM-CTX-008)
+  const PREFERENCE = '/call principal_credentials {}'
   type Sent = { type: string; messageId?: string; delta?: string }
   const textOf = (events: Sent[], messageId: string | undefined) =>
     events

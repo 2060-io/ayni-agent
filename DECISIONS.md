@@ -1348,3 +1348,74 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     - **Other tests:** `tests/flows.test.ts` answers with the session's code and checks the codes on the scan path.
       The connection events of the other tests and of `scripts/e2e/spaces-people.e2e.ts` take the 2.x shape
       (`invitationId`), and the e2e stand-in answers `POST /v2/didcomm/invitations`.
+70. **A turn's speed: no call to close a turn, what the agent keeps after the history, every call timed** (2026-11-21,
+    Fabrice's "go" on fixes 1 to 3; ayni-spec PR #106, D103, D75 amended, CORE-MSG-012, MEM-CTX-007, LLM-USAGE-004,
+    MEM-CTX-001/004, LLM-USAGE-002 and LLM-CACHE-002 amended).
+    - **As seen:** on devnet (Kimi) the Dev Agent's last three replies took 8, 9 and 17 seconds, in 2, 3 and 4 model
+      calls of 3 to 7 seconds each. The model called 1, 2, then 3 tools, and every turn also saved a memory. Only about
+      1,792 of the 6,000 to 6,500 input tokens of each turn's first call were cached; the later calls of a turn were
+      (5,600 to 6,600). The logs held token counts, not durations.
+    - **Causes:** an answer holding the reply and only memory or preference saves still got one more model call, to
+      close the turn. The preferences and the notes were the third system part, before the history, so each memory
+      saved changed the request from there on, and the provider read the whole history again.
+    - **No call to close a turn (`src/core/orchestrator.ts`):**
+      - `isMemorySave` names a save by the tool's key: `bundled:working_memory` (any action), or
+        `bundled:principal_preferences` with `action: set`. A read of the preferences is not one.
+      - When the round's text is not empty and every call of the round is a save, the loop ends after the calls, once
+        each of them came back `completed`.
+      - A save that failed, was declined on a card, or waits for an approval keeps the loop, so the model reads why.
+        So do an answer with no text and a call of any other tool.
+      - `ToolGate.execute` now returns `{ content, outcome }`, the outcome of the call's record.
+      - Nothing else changes: the `tool-call` entries, the reply and the memory lines (`ayni.memory.updated`) are
+        recorded as before. The next turn's history holds each call and its result, then the reply, which every
+        adapter takes.
+    - **What the agent keeps, after the history:**
+      - `systemMessages` keeps three system parts: the persona, the add-on, and who the person is (name, roles,
+        channel).
+      - `keptRecord` writes the preferences and the notes of the space as one `[system record ...]`.
+        `withRecords` puts it at the start of the turn's message, before the recall record and the words.
+      - It is read once per turn, as the tools are, and counted in the budget with the message.
+      - It sits there, not as a trailing system message, because `toOpenAiMessages` merges every system message into
+        one at the top (several compatible endpoints honour only the first), Anthropic takes one top-level system
+        prompt, and Bedrock Converse refuses two user messages in a row. Roles stay in a system part, out of reach of
+        a person who types a fake record.
+      - The stub strips every leading record before it echoes.
+    - **Every call timed (`src/llm/timing.ts`):**
+      - `measured()` wraps a call's stream. It takes the time to the first `started`, `text` or `tool_call` delta,
+        the duration, the stop reason, the usage, the number of tool calls, and the outcome (`completed`, `failed`,
+        `cancelled`).
+      - `callLogFields` gives the line's fields: numbers, the provider and the model, and never content or tool names.
+      - Two new deltas: `started` (first token of text, reasoning or a tool call) and `stop` (the provider's own
+        reason). The adapters send them:
+        - OpenAI-compatible: `content`, `reasoning_content` or `tool_calls`, and `finish_reason`;
+        - Anthropic: the first `content_block_start`, and `stop_reason`;
+        - Bedrock: the first block, and `messageStop.stopReason`;
+        - Ollama: `content`, `thinking` or `tool_calls`, and `done_reason`.
+      - The turn's line (`model call`) adds `provider`, `firstTokenMs`, `durationMs`, `stopReason`, `toolCalls` and
+        `outcome`. `model` is now the model's own name, not `provider/model`.
+      - The summary and translation calls log the same line per call. The summary's old aggregated line is now
+        `conversation summary made`.
+      - The image describer still logs nothing (it never did).
+    - **Tests:** `tests/turnSpeed.test.ts`:
+      - a reply plus a note saved makes one call, keeps the note and shows the memory line;
+      - a note and a preference saved together make one call;
+      - a read of the preferences, a save with no reply, a failed save, and a save beside another tool make two;
+      - the next turn's request, written by each of the four adapters, answers every call right after it, and for
+        Anthropic and Bedrock alternates user and assistant;
+      - after a turn that saved a note and a preference, the next request repeats the system parts and the history
+        byte for byte, with the record only on its last message;
+      - the stub's cache serves the next turn through the history;
+      - the log line's fields hold none of the person's words, the reply, the note or the tool's name;
+      - `measured` tells a failed and a cancelled call once each, and each adapter sends `started` and `stop`.
+    - **Without the change:** with the loop of main, the three one-call tests fail ("expected ... to have a length of
+      1 but got 2"). With the block back in the third system part, the prefix, cache and spaces tests fail. With
+      main's log line, the log test fails (no `provider`). The history test passes on main too: it guards the shape
+      the early end leaves.
+    - **Other tests:** `tests/agui.test.ts` (CORE-MSG-011) and `tests/turns.test.ts` (two calls of a turn) now use a
+      read tool, since a preference set or a note added with text now ends the turn. `tests/spaces.test.ts` reads the
+      notes from the turn's message, and checks that no system part holds them.
+    - **Still breaking the cache, not changed here:**
+      - the tool list changes with elevation grants;
+      - flow and confirmation cards rewritten in place change their record in the history;
+      - the identity part changes when the person is identified or their roles change;
+      - the previous turn's message, which carried the records, is read again uncached once.

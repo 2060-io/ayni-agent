@@ -18,6 +18,7 @@
  */
 import { createHash } from 'node:crypto'
 import type { AgentPack } from '../config/packTypes.js'
+import { callLogFields, measured } from '../llm/timing.js'
 import type { ChatModel } from '../llm/types.js'
 import type { StatsSink } from '../platform/stats.js'
 import type { Store } from '../store/types.js'
@@ -191,15 +192,19 @@ export class ServiceLanguage {
     let usage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0, cacheWriteTokens: 0 }
     try {
       const call = (async () => {
-        for await (const delta of this.deps.llm.stream({
+        const request = {
           messages: [
-            { role: 'system', content: translationInstruction(target, keep) },
-            { role: 'user', content: sentence.text },
+            { role: 'system' as const, content: translationInstruction(target, keep) },
+            { role: 'user' as const, content: sentence.text },
           ],
           temperature: 0,
           maxOutputTokens: 400,
           signal: controller.signal,
-        })) {
+        }
+        // one log line per call, whether it completes, fails or is cut by the time limit (LLM-USAGE-004)
+        const logCall = (measure: Parameters<typeof callLogFields>[0]) =>
+          this.deps.logger.info({ purpose: 'translation', language: target, ...callLogFields(measure) }, 'model call')
+        for await (const delta of measured(this.deps.llm, request, logCall)) {
           if (controller.signal.aborted) break
           if (delta.type === 'text') text += delta.text
           else if (delta.type === 'usage')
@@ -245,7 +250,7 @@ export class ServiceLanguage {
     return translated
   }
 
-  /** The call's usage, logged and counted with its own purpose: it is no part of a conversation (LLM-USAGE-001). */
+  /** The call's usage, counted with its own purpose: it is no part of a conversation (LLM-USAGE-001). */
   private account(
     language: string,
     usage: { inputTokens: number; outputTokens: number; cachedTokens: number; cacheWriteTokens: number }
@@ -255,7 +260,6 @@ export class ServiceLanguage {
     this.deps.stats.emit('llm-cached', usage.cachedTokens, dims)
     this.deps.stats.emit('llm-cache-write', usage.cacheWriteTokens, dims)
     this.deps.stats.emit('llm-output', usage.outputTokens, dims)
-    this.deps.logger.info({ model: this.deps.llm.id, purpose: 'translation', language, ...usage }, 'model call')
   }
 }
 

@@ -148,6 +148,11 @@ const lastSystem = () => {
     .map((m) => String(m.content))
     .join('\n')
 }
+/** What the last turn's message carried: what the agent keeps of the person rides on it, after the history (MEM-CTX-007). */
+const lastTurn = () => {
+  const turn = stub().requests[stub().requests.length - 1]?.messages.at(-1)
+  return turn?.role === 'user' ? JSON.stringify(turn.content) : ''
+}
 
 beforeAll(async () => {
   running = await startTestAgent()
@@ -450,12 +455,15 @@ describe('memories per space, preferences global (MEM-SPACE-001..007, PROF-MEM-0
     expect(JSON.stringify(line)).not.toContain('Weber')
 
     await run(work, 'what do you know?')
-    expect(lastSystem()).toContain('garage is Weber Motors')
-    expect(lastSystem()).toContain('tone=brief')
+    expect(lastTurn()).toContain('garage is Weber Motors')
+    expect(lastTurn()).toContain('tone=brief')
+    // never in the system parts, which stay as they were when a memory changes (MEM-CTX-007)
+    expect(lastSystem()).not.toContain('Weber Motors')
+    expect(lastSystem()).not.toContain('tone=brief')
     // the Personal conversation does not see the note of the space; the preference is global
     await run(ana, 'and here?')
-    expect(lastSystem()).not.toContain('Weber Motors')
-    expect(lastSystem()).toContain('tone=brief')
+    expect(lastTurn()).not.toContain('Weber Motors')
+    expect(lastTurn()).toContain('tone=brief')
 
     // the reply carries what it was given, in the person's own history only, with no live field (PROF-HIST-011)
     const answered = await run(work, 'once more')

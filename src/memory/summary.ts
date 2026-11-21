@@ -2,6 +2,7 @@
  * The conversation summary (D10, D75, MEM-CTX-004): what a step of the window drops, compressed with the previous
  * summary by the configured model. Derived, never an entry; sealed where it is kept (MEM-TIER-004).
  */
+import { type CallMeasure, measured } from '../llm/timing.js'
 import type { ChatModel } from '../llm/types.js'
 import { estimateTokens } from '../util/tokens.js'
 
@@ -26,7 +27,13 @@ export async function summarize(
   llm: ChatModel,
   previous: string | undefined,
   lines: string[],
-  opts: { maxOutputTokens: number; chunkTokens: number; signal?: AbortSignal }
+  opts: {
+    maxOutputTokens: number
+    chunkTokens: number
+    signal?: AbortSignal
+    /** told of each call, for its log line (LLM-USAGE-004) */
+    onCall?: (measure: CallMeasure) => void
+  }
 ): Promise<{ text: string; usage: SummaryUsage }> {
   const usage: SummaryUsage = { calls: 0, inputTokens: 0, cachedTokens: 0, cacheWriteTokens: 0, outputTokens: 0 }
   let summary = previous
@@ -46,17 +53,18 @@ export async function summarize(
   for (const chunk of chunks) {
     if (!chunk.length) continue
     let text = ''
-    for await (const delta of llm.stream({
+    const request = {
       messages: [
-        { role: 'system', content: SUMMARY_INSTRUCTION },
+        { role: 'system' as const, content: SUMMARY_INSTRUCTION },
         {
-          role: 'user',
+          role: 'user' as const,
           content: `Previous summary:\n${summary?.trim() || '(none)'}\n\nMessages to add, oldest first:\n${chunk.join('\n')}`,
         },
       ],
       maxOutputTokens: opts.maxOutputTokens,
       signal: opts.signal,
-    })) {
+    }
+    for await (const delta of measured(llm, request, (measure) => opts.onCall?.(measure))) {
       if (delta.type === 'text') text += delta.text
       else if (delta.type === 'usage') {
         usage.inputTokens += delta.inputTokens

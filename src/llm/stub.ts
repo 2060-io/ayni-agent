@@ -79,6 +79,7 @@ export class StubChatModel implements ChatModel {
         if (req.signal?.aborted) return
         yield { type: 'text', text: `${word} ` }
       }
+      yield { type: 'stop', reason: 'stop' }
       yield this.usage(req, summary)
       return
     }
@@ -86,8 +87,9 @@ export class StubChatModel implements ChatModel {
       typeof last.content === 'string'
         ? last.content
         : last.content.map((p) => (p.type === 'text' ? p.text : '[image]')).join(' ')
-    // what retrieval added before the person's words is not part of what they said
-    const said = text.replace(/^\[system record[\s\S]*?\]\n\n/, '')
+    // what the system added before the person's words (what it keeps of them, what retrieval found) is not part of
+    // what they said
+    const said = text.replace(/^(\[system record[\s\S]*?\]\n\n)+/, '')
     const asked = /^(.*?)\/call\s+(\S+)\s*(\{.*\})?\s*$/s.exec(said.trim())
     const call = asked ? [asked[0], asked[2], asked[3]] : null
     if (asked && call && req.tools?.some((t) => t.name === call[1])) {
@@ -99,6 +101,7 @@ export class StubChatModel implements ChatModel {
       }
       if (asked[1]?.trim()) yield { type: 'text', text: asked[1].trim() }
       yield { type: 'tool_call', call: { id: `call_${Date.now()}`, name: call[1] as string, arguments: args } }
+      yield { type: 'stop', reason: 'tool_calls' }
       yield this.usage(req, asked[1] ?? '')
       return
     }
@@ -114,6 +117,7 @@ export class StubChatModel implements ChatModel {
       await new Promise((r) => setTimeout(r, 15))
       yield { type: 'text', text: `${word} ` }
     }
+    yield { type: 'stop', reason: 'stop' }
     yield this.usage(req, reply)
   }
 }

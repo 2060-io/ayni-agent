@@ -40,6 +40,14 @@ export type ChatDelta =
    * the provider's cache, the part written to it, and the output; the cache parts are parts of the input
    */
   | { type: 'usage'; inputTokens: number; outputTokens: number; cachedTokens?: number; cacheWriteTokens?: number }
+  /**
+   * the provider began its answer (LLM-USAGE-004): its first token of text, of reasoning or of a tool call. Sent once,
+   * by an adapter that receives a tool call in pieces or reasoning it does not pass on, so that the time to the first
+   * token is not the time to the whole call.
+   */
+  | { type: 'started' }
+  /** why the provider ended the call, in its own words (`stop`, `tool_calls`, `end_turn`, `length`...) (LLM-USAGE-004) */
+  | { type: 'stop'; reason: string }
 
 export interface ChatModel {
   readonly id: string
