@@ -167,17 +167,36 @@ export function searchTools(): FakeTool[] {
 
 export interface FakeHttp {
   url: string
-  requests: { method?: string; url?: string; authorization?: string; body: unknown }[]
+  requests: {
+    method?: string
+    url?: string
+    authorization?: string
+    /** every header the request carried, by its lower-case name */
+    headers: Record<string, string | string[] | undefined>
+    body: unknown
+  }[]
   close(): Promise<void>
 }
 
+/**
+ * A fake HTTP tool: it answers each request with its id and the `Authorization` it carried, and, on `/echo`, every header
+ * it carried, as a server that echoes its request would (TOOL-ACCESS-005).
+ */
 export async function fakeHttpTool(): Promise<FakeHttp> {
   const requests: FakeHttp['requests'] = []
   const http = createServer(async (req, res) => {
     const parsed = await body(req).catch(() => undefined)
-    requests.push({ method: req.method, url: req.url, authorization: req.headers.authorization, body: parsed })
+    requests.push({
+      method: req.method,
+      url: req.url,
+      authorization: req.headers.authorization,
+      headers: { ...req.headers },
+      body: parsed,
+    })
     res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ id: `post-${requests.length}`, auth: req.headers.authorization }))
+    const account = String(req.headers['x-account'] ?? '')
+    const echo = req.url?.startsWith('/echo') ? { headers: req.headers, parts: account.split(':') } : {}
+    res.end(JSON.stringify({ id: `post-${requests.length}`, auth: req.headers.authorization, ...echo }))
   })
   await new Promise<void>((resolve) => http.listen(0, '127.0.0.1', resolve))
   const { port } = http.address() as AddressInfo
@@ -189,6 +208,19 @@ export async function fakeHttpTool(): Promise<FakeHttp> {
 }
 
 // ---- the pack ----------------------------------------------------------------------------------------------------------------
+
+/** The four keys of an X account, one field each, in the order the owner's settings show them (D102). */
+export const X_ACCOUNT_FIELDS = [
+  { name: 'api_key', label: 'API key', pattern: '^[A-Za-z0-9]{10,64}$' },
+  { name: 'api_secret', label: 'API secret', pattern: '^[A-Za-z0-9]{20,128}$' },
+  { name: 'access_token', label: 'Access token', pattern: '^[0-9]{1,20}-[A-Za-z0-9]{10,64}$' },
+  { name: 'access_token_secret', label: 'Access token secret', pattern: '^[A-Za-z0-9]{20,128}$' },
+]
+
+/** The one header the X server takes them in, joined by colons (D102). */
+export const X_ACCOUNT_APPLY = [
+  { header: 'X-Account', value: '{api_key}:{api_secret}:{access_token}:{access_token_secret}' },
+]
 
 export interface ToolsPackOptions {
   crmUrl: string
@@ -234,11 +266,11 @@ export function toolsPack(options: ToolsPackOptions): string {
         description: "The sales team's accounts, contacts and notes",
         transport: 'streamable-http',
         url: options.crmUrl,
+        // a single token: one field, sent after Bearer (D102)
         account: {
           kind: 'space',
-          label: 'API token',
-          pattern: '^[A-Za-z0-9|]{20,200}$',
-          apply: { header: 'Authorization', prefix: 'Bearer ' },
+          fields: [{ name: 'token', label: 'API token', pattern: '^[A-Za-z0-9|]{20,200}$' }],
+          apply: [{ header: 'Authorization', value: 'Bearer {token}' }],
         },
         availability: 'spaces',
         offer: ['list-companies', 'get-company', 'create-note', 'delete-note', 'echo-auth', 'ghost-tool'],
@@ -264,13 +296,27 @@ export function toolsPack(options: ToolsPackOptions): string {
         parameters: { type: 'object', required: ['text'], properties: { text: { type: 'string', title: 'Post' } } },
         account: {
           kind: 'space',
-          label: 'Access token of the X account',
-          apply: { header: 'Authorization', prefix: 'Bearer ' },
+          fields: [{ name: 'token', label: 'Access token of the X account' }],
+          apply: [{ header: 'Authorization', value: 'Bearer {token}' }],
         },
         availability: 'spaces',
         bindings: [{ name: 'handle', label: 'X account' }],
         access: { roles: { comms: ['post_to_x'], operator: ['*'] } },
         tools: { post_to_x: { effect: 'external' } },
+      },
+      // the mentions of the X account of a space: an account of four fields sent in one header (D102); the test server
+      // echoes the header, whole and split at its colons
+      x_mentions: {
+        type: 'http',
+        title: 'X mentions',
+        description: 'Reads the mentions of the X account of the space',
+        method: 'GET',
+        url: `${options.xUrl}/echo/mentions`,
+        parameters: { type: 'object', properties: {} },
+        account: { kind: 'space', fields: X_ACCOUNT_FIELDS, apply: X_ACCOUNT_APPLY },
+        availability: 'spaces',
+        access: { roles: { comms: ['x_mentions'], operator: ['*'] } },
+        tools: { x_mentions: { effect: 'read' } },
       },
       crm_status: {
         type: 'http',
@@ -321,7 +367,10 @@ export function toolsPack(options: ToolsPackOptions): string {
       creators: ['comms'],
       membership: { mode: 'list' },
       rules: { allowedProviders: { default: ['stub'] } },
-      tools: [{ source: 'post_to_x', add: 'owner', guests: false }],
+      tools: [
+        { source: 'post_to_x', add: 'owner', guests: false },
+        { source: 'x_mentions', add: 'owner' },
+      ],
     },
   ]
   options.edit?.(pack)

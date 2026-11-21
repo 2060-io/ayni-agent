@@ -388,15 +388,35 @@ export const BUNDLED_ON_BY_DEFAULT: readonly BundledName[] = [
   'workingMemory',
 ]
 
-/** The account of a source (TOOL-CAT-002). A `space` account declares what its owner is asked for and how it is sent. */
+/** The name of a field of a space's account (D102): a lower-case letter, then lower-case letters, digits or `_`. */
+export const ACCOUNT_FIELD_NAME = /^[a-z][a-z0-9_]{0,31}$/
+
+/** One field of a space's account (D102, TOOL-CAT-002): what its owner types, in a masked field of its own. */
+export interface AccountField {
+  /** unique in the account; `{name}` in a header of `apply` stands for its value */
+  name: string
+  /** what the owner of a space is asked for ("API key") */
+  label: string
+  /** a regular expression its value must match */
+  pattern?: string
+}
+
+/** A header each call with a space's account carries (D102): every `{name}` of `value` is that field's value. */
+export interface AccountHeader {
+  header: string
+  value: string
+}
+
+/**
+ * The account of a source (TOOL-CAT-002). A `space` account declares the fields its owner fills, in the order the
+ * settings show them, and the headers each call carries, built from their values at the call (D102).
+ */
 export interface SourceAccount {
   kind: AccountKind
-  /** what the owner of a space is asked for ("API token") */
-  label?: string
-  /** a regular expression a token must match */
-  pattern?: string
-  /** the header the token is sent in, after its prefix (`Bearer `) */
-  apply?: { header: string; prefix?: string }
+  /** a `space` account: the fields its owner fills, one or more; every field is a secret */
+  fields?: AccountField[]
+  /** a `space` account: the headers of each call, one or more; each field is named by at least one */
+  apply?: AccountHeader[]
 }
 
 /**
