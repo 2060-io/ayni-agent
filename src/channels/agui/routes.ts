@@ -104,6 +104,30 @@ export const SESSION_ERROR_STATUS: Record<SessionError['code'], number> = {
   forbidden: 403,
 }
 
+/** The base of the session endpoints and of the Principal's (profile §3.1). */
+const SESSIONS_BASE = '/agui/v3/sessions'
+
+/** A path of the profile: the descriptor (§2), the sessions base, or a path under it, a route taking it or not. */
+export function isProfilePath(url: string): boolean {
+  const path = url.split('?')[0] ?? ''
+  return path === DESCRIPTOR_PATH || path === SESSIONS_BASE || path.startsWith(`${SESSIONS_BASE}/`)
+}
+
+/** The private lifetime an attachment's success may keep (PROF-HIST-003); nothing else of the profile keeps one. */
+const ATTACHMENT_LIFETIME = /^private, max-age=\d+$/
+
+/**
+ * The `Cache-Control` of an answer of the profile (PROF-ERR-003, decision 71): `no-store`, except the private lifetime
+ * of an attachment's `200`. A browser kept a `410` that carried none and answered every later `GET /conversations`
+ * with it, whatever the token, without asking the agent: Chromium holds a `410` with no freshness of its own as fresh
+ * for ever, and the token travels in a header its cache does not key on.
+ */
+export function cacheControlOf(status: number, routeValue: unknown): string {
+  return status === 200 && typeof routeValue === 'string' && ATTACHMENT_LIFETIME.test(routeValue)
+    ? routeValue
+    : 'no-store'
+}
+
 /** The attachments of a message as its sender gets them back: a voice note with its transcription (PROF-MAP-006). */
 function attachmentEcho(entry: MessageEntry): AgUiEvent[] {
   return entry.attachments.map((a) =>
@@ -241,8 +265,15 @@ export class AgUiRoutes {
   }
 
   public register(app: FastifyInstance, did: string): void {
+    // every answer of the profile, its errors and the not-found of a path no route takes included, is stored by no
+    // browser and no proxy (PROF-ERR-003, decision 71); the two streams write their own: `no-store, no-transform`
+    app.addHook('onSend', async (request, reply, payload) => {
+      if (isProfilePath(request.url))
+        reply.header('cache-control', cacheControlOf(reply.statusCode, reply.getHeader('cache-control')))
+      return payload
+    })
     app.get(DESCRIPTOR_PATH, async () => this.descriptor(did))
-    const base = '/agui/v3/sessions'
+    const base = SESSIONS_BASE
 
     // PROF-SESS-001 create, PROF-SESS-007 sibling
     app.post(base, async (request, reply) => {
@@ -521,7 +552,7 @@ export class AgUiRoutes {
       const lastEventId = typeof lastHeader === 'string' && lastHeader !== '' ? Number(lastHeader) : undefined
       reply.raw.writeHead(200, {
         'content-type': 'text/event-stream',
-        'cache-control': 'no-cache, no-transform',
+        'cache-control': 'no-store, no-transform',
         connection: 'keep-alive',
         'x-accel-buffering': 'no',
         ...this.corsHeaders(request),
@@ -1314,7 +1345,7 @@ export class AgUiRoutes {
     this.answering++
     reply.raw.writeHead(200, {
       'content-type': 'text/event-stream',
-      'cache-control': 'no-cache, no-transform',
+      'cache-control': 'no-store, no-transform',
       connection: 'keep-alive',
       'x-accel-buffering': 'no',
       ...this.corsHeaders(request),
