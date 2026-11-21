@@ -1466,3 +1466,96 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     - **Without the change:** with the hook removed and the streams back to `no-cache` (the two helpers kept), 6 of
       the 9 fail, each on its first `Cache-Control` ("expected undefined to be 'no-store'"); the `/health/live` test
       and the two tests of the helpers pass.
+72. **Tools, phase 2: each person's own accounts** (2026-11-21, Fabrice's decisions TA1 to TA11 of 2026-11-20, "start the
+    phase 2 spec" and the Relaticle workspace of 2026-11-21, ayni-spec PR #107 merged; D104 to D110, profile 3.5).
+    - **The kind `personal`** (`account.kind`, TOOL-CAT-002/013): `oauth` for a remote MCP server, `fields` and `apply`
+      for a personal API token (an MCP server or an HTTP tool), or `from`, another source's account at the same URL;
+      `check`, `binding` and `tokenPatterns` beside them. Only `organization` stays refused. Any availability; never
+      `stdio`. Refusals name the source and the field (`pack.ts`, `personalSourceErrors`, `personalAccountErrors`).
+    - **OAuth as MCP defines it** (`tools/oauth.ts`, revision 2026-07-28): the Protected Resource Metadata from the
+      `resource_metadata` of a `401` to an MCP `initialize` without a token, else its well-known URIs; its `resource`
+      must be the source's URL (scheme and host in lower case, one trailing slash aside); the authorization server's
+      metadata at the RFC 8414 then OpenID URIs, its `issuer` exact, `S256` required; HTTPS everywhere but the loopback.
+      The client is the one the source declares, with no fallback: `metadata-document` (the agent's document at
+      `/tools/oauth/client-metadata.json`, a public client), `pre-registered` (its secret sent `client_secret_post` when
+      the server lists it or lists nothing, `client_secret_basic` when it lists only that), `dynamic` (RFC 7591, kept
+      by `dynamic|<issuer>` and made again when the callback changes). A token answer with an `error` is a refusal
+      whatever its status (GitHub answers `200` with one); the agent sends `accept: application/json`.
+    - **The attempt** (`core/connections.ts`): a `state` of 256 bits kept only as its SHA-256, a verifier of 64
+      characters sealed under a key of the attempt, ten minutes, single use by an atomic `claim` (an `UPDATE … WHERE NOT
+      (data ? 'outcome')` on PostgreSQL). The callback checks `iss` before it reads `error`, exchanges the code with the
+      verifier, the callback and the `resource`, makes the check, seals the account, and answers `303` to
+      `{APP_LINK_BASE}service/{did}/accounts` (the DID raw, as the invitations' links have it), or a page when the agent
+      has no app-link base; `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. A new start of the same
+      source for the same value cancels the attempt that waits. No event is sent at a start: only an attempt's end.
+    - **The check** (D110): the tool called once on a connection of its own, outside any conversation, with no call
+      record; its structured content, else its first text as JSON; a tool the pack declares no effect for must be read
+      by its annotations. A value other than the one expected ends the attempt `wrong-binding` with the two names, an
+      email other than the directory entry's (lower case) `wrong-person`; the tokens are revoked where the server
+      allows it and kept nowhere. `bindingRequest: { parameter }` adds the expected value to the authorization URL;
+      `{ resource }` sends the URL built with `{value}` as the `resource` and calls that URL with the account.
+    - **A key per person** (D106, PRIV-ERASE-013, `memory/crypto.ts` `newKeyUnder`, `sealUnder`, `openUnder`): the
+      person's key is 32 bytes wrapped by `ENTRY_ENCRYPTION_KEY` (table `person_keys`); each account's key is 32 bytes
+      sealed under the person's key, which seals the tokens and, apart, the label, so that Your accounts reads a label
+      without opening a token. The master key alone opens no account. Ending a person's access deletes their key, then
+      their accounts; the revocations at the services are asked in the background, from the tokens opened first.
+    - **One account per (person, source, binding value)** (table `personal_accounts`, unique on the three): a
+      Reconnect saves a new row, which deletes the former in the same transaction. A refresh, a mark or a state is an
+      `update` of a row still there (`false` when it is gone), and a use is `touch`, alone: a late write never brings
+      back an account, a key or a refresh token that was replaced. In the clear beside the ciphertext: the Principal,
+      the source, the value and its name, the method, the state and reason, `moreAccess`, the times, and two digests of
+      the pack's settings (its URL, registration, client id, issuer, binding and fields; its scopes), which say at
+      start which accounts end and which must reconnect (TOOL-CONN-009). They are digests of the pack, nothing of the
+      account.
+    - **The life of a connection** (D107): a token expiring within 60 s is refreshed before the call; a `401` to a
+      token that had not expired gives one refresh and one more try; refreshes of one account run one at a time, the
+      rotated refresh token written before the new access token is used; a second call waiting on the lock takes the
+      fresh token. A refused refresh (an OAuth error) or no refresh token puts the account to `reconnect` (`revoked`
+      after a `401`, else `expired`), its key and tokens gone; a refresh that cannot reach the server fails the call and
+      keeps the account. A `403 insufficient_scope` keeps the tokens, marks `moreAccess`, and the next attempt asks the
+      former scopes and the challenge's. A server whose metadata (cached ten minutes, read again on a `401`) names
+      another issuer than the account's, or for a pre-registered client not its issuer, gets no token: `changed`.
+    - **One connection per account** (`tools/mcp.ts` `PersonalConnections`): one pool of the agent, keyed by the
+      account, shared by the sources of `from`; its fetch (`personalFetch`) sends the token of the call in progress in
+      `Authorization`, only to the account's server (its origin, at or under its path), never following a redirect,
+      and handles the `401` and `403` above. A call whose account turns out not connected waits for the refresh in
+      flight, then answers `not-connected` (or `more-access-needed`), its record saying so (TOOL-CALL-011).
+    - **In a turn** (`toolGate.ts` `turnTools`): a personal source gives its tools only while the account the
+      conversation uses is connected (its space's value of the binding, or the pack's); its server is discovered on the
+      first connected account. The accounts to connect are one line each in the Principal's block (the source that
+      declares the account, `(not connected)` or `(to reconnect)`), and `offer_connection` (bundled `connections`, on
+      while a personal source is declared) is given only while one is listed. The card is a `state-update` entry of
+      kind `connect`: a record of the system for the model, `ayni.connect` in history, never in a shared history; live,
+      it goes to the run's session and its peers of profile 3.5 only (`TurnEvent.minProfile`, `RunMirror.only`).
+    - **Tool names**: two sources' tools of one name are prefixed `<source>__<name>` only when they can be in one turn
+      (one of them of availability `agent`, or both `personal`, or both `spaces`), counting the `offer` of servers not
+      discovered yet, so that a name never changes when another server is discovered. `github` (Personal) and
+      `github-project` (spaces) keep `list_issues`. Phase 1 prefixed on any clash among discovered tools.
+    - **Cards** (PROF-TOOL-021): a confirmation's action carries the account's label (it is the person's alone); the
+      approval of someone else carries `{ kind: 'personal' }`, and the requester's own card adds the label.
+    - **Spaces** (TOOL-SPACE-012/013): a personal source is `ready` once bound, `PUT …/account` answers `409
+      no-space-account`; the view gives `{ kind: 'personal', connected }` for the reader, with `source` for a source of
+      `from`; the binding a personal account is for gives `valueLabel`, and to the owner `fromAccount` and `choices`
+      (the owner's own connected accounts); a value that is not one of them is `422 not-your-account`. The name comes
+      with a pending change (`bindingLabels`) and is shown on the phone ("Workspace: ayni-dev-agent").
+    - **A credential pasted** (D109, `core/credentials.ts`): the typed text of a message (a text, a media message's
+      caption; not a voice transcription) is scanned in `AyniAgent.turn` before anything else, with the pack's
+      `tokenPatterns` first (a match names its source), then the formats the agent knows and private keys in PEM;
+      matches under 16 characters are not taken, overlapping ones are one. The message is kept with each credential as
+      its first four characters and `…` (`----…` for a PEM key) and `payload.withheld: 'credential'`; it is never
+      embedded and never a query of the recall; the model reads a record in its place. `ayni.messages.withheld` with
+      `reason: 'credential'` and `texts` goes in the run (also for a message that waits), history gives
+      `modelVisible: false` and `withheld: 'credential'`.
+    - **`clientIds`** of `ayni.messages.erased` (and of `withheld`) are now of the length and order of `messageIds`, the
+      empty string for an entry no client sent (the wire clarification of the clients, 2026-11-21).
+    - **The descriptor** says 3.5 always and `features.connections` only while the pack declares a personal source,
+      so that an agent with none shows no empty Your accounts.
+    - **Not done:** `private_key_jwt` (O33); going on with the turn after a Connect card (O34); credentials in
+      attachments or tool results (O35); two accounts for one value (O36); the trust of a tool server and an admin list
+      of connections (O37); no Principal erasure nor end of an unidentified Principal exists in the agent yet, so the
+      key of a person is destroyed when their entry leaves the directory only (`ConnectionService.endPerson` is the hook).
+    - **Tests:** `tests/connections.test.ts` (42, the real agent against a fake authorization server and fake MCP
+      servers on the loopback, at debug), `tests/personalAccounts.test.ts` (19, the pack, the scanner, the client),
+      `tests/postgres.test.ts` (3 more: the migration 3.10.0, the ciphertext and its keys, the single-use claim). Without
+      the lock, three fail; without the single-use claim, three; the master key alone opening an account fails the
+      erasure test.

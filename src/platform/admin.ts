@@ -112,7 +112,8 @@ export function buildAdmin(deps: AdminDeps): FastifyInstance {
         erased.push(row.id, ...result.cascaded)
         const group = byConversation.get(row.conversationId) ?? { principalId: row.principalId, ids: [], clientIds: [] }
         group.ids.push(row.id)
-        if (row.externalId) group.clientIds.push(row.externalId)
+        // in the order of the ids, the empty string for an entry no client sent (PROF-STREAM-008)
+        group.clientIds.push(row.externalId ?? '')
         byConversation.set(row.conversationId, group)
       } else if (result.reason === 'legal-hold') held.push(row.id)
     }

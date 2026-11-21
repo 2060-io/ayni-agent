@@ -5,7 +5,7 @@
 import type { Features } from '../config/packTypes.js'
 import { estimateTokens } from '../util/tokens.js'
 
-export const PROMPT_ADDON_VERSION = '3.5.0'
+export const PROMPT_ADDON_VERSION = '3.6.0'
 export const PROMPT_ADDON_TOKEN_BUDGET = 500
 
 export interface AddonContext {
@@ -28,6 +28,8 @@ export interface AddonContext {
    * action runs (TOOL-CALL-010)
    */
   toolsMayAsk?: boolean
+  /** the agent-pack declares a source of each person's own account (TOOL-CONN-012) */
+  personalAccounts?: boolean
 }
 
 /** The destinations of the AG-UI profile §10 the model may link to (relative to the app-link base). */
@@ -84,6 +86,10 @@ export function renderPromptAddon(ctx: AddonContext): string {
       'Tools: only the tools listed are available to this person. Some tools require a human approval or an identity check that the system performs before the tool runs; you are only told the outcome. Never promise an action before its tool succeeded.'
     )
   }
+  if (ctx.personalAccounts)
+    lines.push(
+      "Accounts: never ask for a password, a token or a key in a conversation; a credential the person pastes is held back from you. When a tool needs the person's own account and it is not connected, offer its Connect card with offer_connection."
+    )
   if (ctx.hasRequestableTools && ctx.features.elevation) {
     lines.push(
       'If a task needs an access the person does not have, say so and tell them they may request an elevation with a purpose and a justification of their own; never choose the purpose or write the justification for them.'

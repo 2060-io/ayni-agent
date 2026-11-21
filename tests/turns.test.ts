@@ -300,7 +300,8 @@ describe('a person deletes a message of theirs within its window (PRIV-ERASE-007
     expect(left.some((m) => m.id === own.id || m.id === reply.id)).toBe(false)
     const told = erasedEvents(phone.sessionId, seen)
     expect(told).toHaveLength(1)
-    expect(told[0]?.value).toEqual({ conversationId, messageIds: [own.id, reply.id], clientIds: ['u-door'] })
+    // the client's ids in the order of the agent's, the empty string for the reply, which no client sent (PROF-STREAM-008)
+    expect(told[0]?.value).toEqual({ conversationId, messageIds: [own.id, reply.id], clientIds: ['u-door', ''] })
     // a second deletion, from another device, finds it deleted already and tells nobody again
     expect((await erase(phone, own.id)).statusCode).toBe(204)
     expect(erasedEvents(phone.sessionId, seen)).toHaveLength(1)

@@ -6,18 +6,37 @@ import type { ElevationGrant, Principal } from '../core/types.js'
 import type { ToolDefinition } from '../llm/types.js'
 import { resolveTier, type TierResolution } from '../policy/rbac.js'
 import type { Logger } from '../util/logger.js'
-import type { CallAccountSecret, ToolSource, ToolSpec } from './types.js'
+import type { HttpToolSource } from './http.js'
+import type { CallAccountSecret, CheckRead, CheckResult, ToolSource, ToolSpec } from './types.js'
 
 export interface VisibleTool {
   spec: ToolSpec
   resolution: TierResolution
 }
 
+/** Where a source is available, as far as the names of its tools go: two sources never in one turn share names freely. */
+export type SourcePlace = 'agent' | 'personal' | 'spaces'
+
+/** Whether the tools of two sources can be in one turn (D96): the whole agent's with any, Personal's or a space's alike. */
+function together(a: SourcePlace, b: SourcePlace): boolean {
+  return a === 'agent' || b === 'agent' || a === b
+}
+
 export class ToolRegistry {
   private readonly sources: ToolSource[] = []
   private lazyLoaded = new Set<string>()
+  /** what the catalog says of each source before any discovery: where it is available, and the tools it offers */
+  private catalog?: { place(source: string): SourcePlace; offers(): [string, string[]][] }
 
   public constructor(private readonly logger: Logger) {}
+
+  /**
+   * The catalog's answers, so that the name of a tool does not change once another server is discovered: a name two
+   * sources offer is prefixed with the server's only where their tools can be in one turn (D96, D101).
+   */
+  public useCatalog(catalog: { place(source: string): SourcePlace; offers(): [string, string[]][] }): void {
+    this.catalog = catalog
+  }
 
   public add(source: ToolSource, eager = true): void {
     this.sources.push(source)
@@ -27,12 +46,18 @@ export class ToolRegistry {
   /** Every known tool; lazy MCP servers are discovered on the first call that needs the list (TOOL-MCP-003). */
   public async all(): Promise<ToolSpec[]> {
     const specs = (await Promise.all(this.sources.map((s) => s.list()))).flat()
-    // model-facing names must be unique: prefix with the server when two servers share a name
-    const counts = new Map<string, number>()
-    for (const s of specs) counts.set(s.name, (counts.get(s.name) ?? 0) + 1)
-    return specs.map((s) =>
-      (counts.get(s.name) ?? 0) > 1 && s.serverName ? { ...s, name: `${s.serverName}__${s.name}` } : s
-    )
+    // model-facing names must be unique in a turn: prefix with the server when two servers whose tools can be in one turn
+    // share a name, whether the other is discovered yet or only offers it, so that a name never changes later
+    const holders = new Map<string, Set<string>>()
+    const hold = (name: string, source: string) => holders.set(name, (holders.get(name) ?? new Set()).add(source))
+    for (const s of specs) hold(s.name, s.source)
+    for (const [source, names] of this.catalog?.offers() ?? []) for (const name of names) hold(name, source)
+    const place = (source: string) => this.catalog?.place(source) ?? 'agent'
+    const clashes = (spec: ToolSpec) =>
+      [...(holders.get(spec.name) ?? [])].some(
+        (other) => other !== spec.source && together(place(other), place(spec.source))
+      )
+    return specs.map((s) => (s.serverName && clashes(s) ? { ...s, name: `${s.serverName}__${s.name}` } : s))
   }
 
   public async find(name: string): Promise<ToolSpec | undefined> {
@@ -75,6 +100,25 @@ export class ToolRegistry {
   /** Closes the connection a space's account opened to a server: the account ended or changed (TOOL-ACCESS-007). */
   public async closeAccount(sourceName: string, spaceId: string): Promise<void> {
     await this.sources.find((s) => s.id === `mcp:${sourceName}`)?.closeAccount?.(spaceId)
+  }
+
+  /** Closes the connection of a person's account, wherever a source opened it (TOOL-ACCESS-012). */
+  public async closePersonal(accountId: string): Promise<void> {
+    for (const s of this.sources) {
+      const personal = s as { closePersonal?: (id: string) => Promise<void> }
+      if (personal.closePersonal) {
+        await personal.closePersonal(accountId)
+        return
+      }
+    }
+  }
+
+  /** The check of a person's new account, on its source (TOOL-CONN-013). */
+  public async checkRead(sourceName: string, read: CheckRead): Promise<CheckResult | undefined> {
+    const mcp = this.sources.find((s) => s.id === `mcp:${sourceName}`)
+    if (mcp?.checkRead) return mcp.checkRead(read)
+    const http = this.sources.find((s) => s.id === 'http') as HttpToolSource | undefined
+    return http?.checkReadOf(sourceName, read.headers)
   }
 
   /** A tool source by its id (`mcp:<server>`, `http`, `bundled`), for the tests. */

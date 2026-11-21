@@ -7,6 +7,10 @@ import type {
   ElevationGrant,
   LifecycleState,
   MemoryAccessLog,
+  OAuthAttemptRecord,
+  OAuthClientRecord,
+  PersonalAccountRecord,
+  PersonKeyRecord,
   Principal,
   PrincipalPreference,
   RagChunk,
@@ -633,5 +637,93 @@ export class MemoryStore implements Store {
           .sort((a, b) => b.at.localeCompare(a.at))
           .slice(0, q.limit)
       ),
+  }
+
+  private readonly personKeyRows = new Map<string, PersonKeyRecord>()
+  public personKeys = {
+    get: async (principalId: string) => clone(this.personKeyRows.get(principalId)),
+    saveIfAbsent: async (r: PersonKeyRecord) => {
+      const kept = this.personKeyRows.get(r.principalId)
+      if (kept) return clone(kept)
+      this.personKeyRows.set(r.principalId, clone(r))
+      return clone(r)
+    },
+    delete: async (principalId: string) => {
+      this.personKeyRows.delete(principalId)
+    },
+  }
+
+  private readonly personalAccountRows = new Map<string, PersonalAccountRecord>()
+  public personalAccounts = {
+    get: async (id: string) => clone(this.personalAccountRows.get(id)),
+    find: async (principalId: string, sourceId: string, bindingValue?: string) =>
+      clone(
+        [...this.personalAccountRows.values()].find(
+          (r) =>
+            r.principalId === principalId && r.sourceId === sourceId && (r.bindingValue ?? '') === (bindingValue ?? '')
+        )
+      ),
+    listByPrincipal: async (principalId: string) =>
+      clone(
+        [...this.personalAccountRows.values()]
+          .filter((r) => r.principalId === principalId)
+          .sort((a, b) => a.connectedAt.localeCompare(b.connectedAt))
+      ),
+    listAll: async () => clone([...this.personalAccountRows.values()]),
+    save: async (r: PersonalAccountRecord) => {
+      // one account per (principal, source, binding value): the one there goes, with its key
+      for (const [id, row] of this.personalAccountRows)
+        if (
+          id !== r.id &&
+          row.principalId === r.principalId &&
+          row.sourceId === r.sourceId &&
+          (row.bindingValue ?? '') === (r.bindingValue ?? '')
+        )
+          this.personalAccountRows.delete(id)
+      this.personalAccountRows.set(r.id, clone(r))
+    },
+    update: async (r: PersonalAccountRecord) => {
+      if (!this.personalAccountRows.has(r.id)) return false
+      this.personalAccountRows.set(r.id, clone(r))
+      return true
+    },
+    touch: async (id: string, lastUsedAt: string) => {
+      const row = this.personalAccountRows.get(id)
+      if (row) this.personalAccountRows.set(id, { ...row, lastUsedAt })
+    },
+    delete: async (id: string) => {
+      this.personalAccountRows.delete(id)
+    },
+  }
+
+  private readonly oauthAttemptRows = new Map<string, OAuthAttemptRecord>()
+  public oauthAttempts = {
+    get: async (id: string) => clone(this.oauthAttemptRows.get(id)),
+    findByStateHash: async (stateHash: string) =>
+      clone([...this.oauthAttemptRows.values()].find((r) => r.stateHash === stateHash)),
+    listWaiting: async () => clone([...this.oauthAttemptRows.values()].filter((r) => !r.outcome)),
+    save: async (r: OAuthAttemptRecord) => {
+      this.oauthAttemptRows.set(r.id, clone(r))
+    },
+    claim: async (id: string, outcome: OAuthAttemptRecord['outcome'], endedAt: string) => {
+      const row = this.oauthAttemptRows.get(id)
+      if (!row || row.outcome) return false
+      this.oauthAttemptRows.set(id, { ...row, outcome, endedAt })
+      return true
+    },
+    delete: async (id: string) => {
+      this.oauthAttemptRows.delete(id)
+    },
+  }
+
+  private readonly oauthClientRows = new Map<string, OAuthClientRecord>()
+  public oauthClients = {
+    get: async (ref: string) => clone(this.oauthClientRows.get(ref)),
+    save: async (r: OAuthClientRecord) => {
+      this.oauthClientRows.set(r.ref, clone(r))
+    },
+    delete: async (ref: string) => {
+      this.oauthClientRows.delete(ref)
+    },
   }
 }

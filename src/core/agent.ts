@@ -23,8 +23,10 @@ import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import type { ChallengeService } from './challenges.js'
 import type { CapabilityRouter } from './channel.js'
+import type { ConnectionService } from './connections.js'
 import type { ContextAssembler } from './context.js'
 import { conversationOf } from './conversationOf.js'
+import { CREDENTIAL_WITHHELD, CredentialScanner } from './credentials.js'
 import { EMAIL_CHECK_KIND, type EmailChecks } from './emailCheck.js'
 import type { EvidenceService } from './evidence.js'
 import type { FlowService } from './flows.js'
@@ -56,6 +58,7 @@ import type {
   MessageEntry,
   Principal,
   Session,
+  ToolAction,
 } from './types.js'
 import { ProcessEnding, TooManyWaiting, type WaitingItem, WaitingList } from './waiting.js'
 
@@ -156,6 +159,10 @@ export class AyniAgent {
   public catalog?: ToolCatalog
   /** the tools of each space (ayni-spec D98); set by the composition root */
   public spaceTools?: SpaceToolService
+  /** each person's own accounts (ayni-spec D104 to D110); set by the composition root */
+  public connections?: ConnectionService
+  /** the credentials a message of the person may carry, found as it arrives (D109, TOOL-ACCESS-013) */
+  public readonly credentials: CredentialScanner
   /** the agent's own DID, read from the DIDComm agent at start (IDENT-SELF-001) */
   public did = 'did:unknown'
   public readonly challenges: ChallengeService
@@ -187,6 +194,39 @@ export class AyniAgent {
     this.stats = parts.stats
     this.logger = parts.logger
     this.features = featuresOf(parts.pack)
+    this.credentials = new CredentialScanner(parts.pack)
+  }
+
+  /**
+   * A message of the person that carries a credential, found as it arrives and before anything records, mirrors or queues
+   * it (D109, TOOL-ACCESS-013/014): kept with each credential masked and marked as held back from the model, which reads
+   * a record of the system in its place. Only the text the person typed is looked at (O35).
+   */
+  public withoutCredentials(input: TurnInput): TurnInput {
+    const entry = input.entry
+    if (entry.role !== 'principal') return input
+    const typed =
+      entry.sourceType === 'text' ||
+      (entry.sourceType === 'media' && entry.text !== (entry.attachments ?? []).map((a) => a.textRepr).join('\n'))
+    if (!typed || !entry.text) return input
+    const held = this.credentials.scan(entry.text)
+    if (!held) return input
+    this.logger.info(
+      { sessionId: entry.sessionId, credentials: held.count, source: held.source },
+      'a message carried a credential: held back from the model, the credential kept nowhere (D109)'
+    )
+    return {
+      ...input,
+      entry: {
+        ...entry,
+        text: held.text,
+        payload: {
+          ...(entry.payload ?? {}),
+          withheld: CREDENTIAL_WITHHELD,
+          ...(held.source ? { credentialSource: held.source } : {}),
+        },
+      },
+    }
   }
 
   // ---- display ----------------------------------------------------------------------------------
@@ -414,7 +454,8 @@ export class AyniAgent {
       outcome: 'erased',
       conversationId,
       messageIds: result.erased.map((e) => e.id),
-      clientIds: result.erased.flatMap((e) => (e.externalId ? [e.externalId] : [])),
+      // in the order of messageIds, the empty string for an entry the client did not send (PROF-STREAM-008)
+      clientIds: result.erased.map((e) => e.externalId ?? ''),
       memoryIds: result.memoryIds,
     }
   }
@@ -690,8 +731,10 @@ export class AyniAgent {
    * and arrives during one is recorded, listed as waiting and answered when it ends (`waiting` in the result);
    * any other caller waits for its turn.
    */
-  public async turn(session: Session, input: TurnInput, sink: TurnSink, caller: AbortSignal): Promise<TurnResult> {
+  public async turn(session: Session, given: TurnInput, sink: TurnSink, caller: AbortSignal): Promise<TurnResult> {
     this.sessions.requireBound(session)
+    // a credential is masked before the message is recorded, mirrored, queued or taken by an email check (D109)
+    const input = this.withoutCredentials(given)
     const principal = await this.principalOf(session)
     if (!principal) throw new Error('principal missing')
     await this.sessions.touch(session)
@@ -1292,9 +1335,23 @@ export class AyniAgent {
       own: record.requesterId === viewer?.id,
       canDecide,
       decidedBy: record.decisions.map((d) => d.approverName).join(', ') || undefined,
-      ...(record.action ? { action: record.action } : {}),
+      ...(record.action ? { action: await this.actionFor(record, viewer) } : {}),
       ...(space ? { space: { id: space.id, title: space.title } } : {}),
     }
+  }
+
+  /**
+   * The action of an approval as a viewer reads it: a call made with a person's own account names that account at its
+   * service on the requester's own card, and on no other (PROF-TOOL-021).
+   */
+  private async actionFor(record: ApprovalRecord, viewer: Principal | null): Promise<ToolAction | undefined> {
+    const action = record.action
+    if (action?.account.kind !== 'personal' || !viewer || viewer.id !== record.requesterId) return action
+    const source = this.catalog?.source(action.source.id)
+    const call = record.callId ? await this.store.toolCalls.get(record.callId) : undefined
+    if (!source || !call || !this.connections) return action
+    const label = await this.connections.labelIn(viewer, source, call.spaceId)
+    return label ? { ...action, account: { ...action.account, label } } : action
   }
 
   public async onApprovalChange(

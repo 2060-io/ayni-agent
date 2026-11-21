@@ -1,6 +1,14 @@
 /**
- * Ayni AG-UI Profile 3.4 (2060-io/ayni-spec, v4/ayni-agui-profile/profile.md).
+ * Ayni AG-UI Profile 3.5 (2060-io/ayni-spec, v4/ayni-agui-profile/profile.md).
  * Every name below cites the section or the PROF-* requirement it implements.
+ *
+ * 3.5 over 3.4 (ayni-spec agent D104 to D110, tools, phase 2): each person's own accounts, listed and managed in Your
+ * accounts (§3.11, PROF-TOOL-014..018); the sign-in in the browser, sent back to the agent and from it to the app link
+ * `/app/service/{did}/accounts` (§10, PROF-LINK-004); `ayni.connections.changed` (§5, PROF-TOOL-019); the Connect card,
+ * the activity `ayni.connect` (§6, PROF-TOOL-020); the kind of account `personal` in the shapes of 3.4, and the binding of
+ * a space set from an account of its owner (`valueLabel`, `fromAccount`, `choices`, PROF-TOOL-021); a message held back
+ * because it carried a credential (`reason: 'credential'`, `texts`, `metadata.withheld`, PROF-STREAM-011, PROF-HIST-013);
+ * `features.connections` (PROF-DESC-010); the errors of §3.11. Additive: a 3.4 client keeps working against a 3.5 agent.
  *
  * 3.4 over 3.3 (ayni-spec agent D96 to D100, tools, phase 1): the tools of a space, read by its members and managed by
  * its owner, a change that grants something confirmed on the owner's phone (§3.10, PROF-TOOL-001..006,
@@ -27,9 +35,9 @@
  * `grant-expired` errors (§9), app links (§10, PROF-LINK-*). A 3.0 UI keeps working against a 3.1 agent.
  */
 
-export const PROFILE_VERSION = '3.4'
+export const PROFILE_VERSION = '3.5'
 export const PROFILE_MAJOR = 3
-export const PROFILE_MINOR = 4
+export const PROFILE_MINOR = 5
 
 /** DID Document service type that references the descriptor (PROF-DESC-001). */
 export const DID_SERVICE_TYPE = 'AyniAgUI'
@@ -96,6 +104,12 @@ export interface DescriptorFeatures {
    * segment and asks for no sources of an agent that does not declare it.
    */
   tools?: boolean
+  /**
+   * the agent serves each person's own accounts (3.5, PROF-DESC-010): Your accounts (§3.11), `ayni.connections.changed`
+   * (§5), the Connect card (§6) and the kind of account `personal`. A UI shows no Your accounts of an agent that does not
+   * declare it.
+   */
+  connections?: boolean
 }
 
 export type BindingMode = 'cross-device' | 'same-device'
@@ -277,6 +291,8 @@ export const CUSTOM_EVENT = {
   memoryUpdated: 'ayni.memory.updated',
   /** a change of a space's tools applied or was dropped: to every bound session of the space's owner (3.4, PROF-TOOL-006) */
   spaceToolsChanged: 'ayni.space.tools.changed',
+  /** one of the Principal's own accounts, or an attempt to connect one, changed (3.5, PROF-TOOL-019) */
+  connectionsChanged: 'ayni.connections.changed',
 } as const
 
 /** What became of a change of a space's tools (3.4, PROF-TOOL-006). */
@@ -299,21 +315,37 @@ export interface MessagesErasedValue {
   conversationId: string
   /** the agent's ids of the erased messages */
   messageIds: string[]
-  /** the ids the client gave those it sent: a client holds them so until it reads the history again */
+  /**
+   * the ids the client gave those it sent, a client holding them so until it reads the history again: when present, of
+   * the length and in the order of `messageIds`, the empty string for an entry the client did not send
+   */
   clientIds?: string[]
 }
 
+/** Why the model never received a message of the person (PROF-STREAM-011): an email check took it, or a credential (3.5). */
+export type WithheldReason = 'email-check' | 'credential'
+
 /**
- * `ayni.messages.withheld` (PROF-STREAM-011, 3.3 amended): messages of the person that the model never received, what
- * the code of an email check took. Sent in the run that carried them; the same messages carry
- * `metadata.modelVisible: false` in history (PROF-HIST-013).
+ * `ayni.messages.withheld` (PROF-STREAM-011, 3.3 amended, 3.5): messages of the person that the model never received,
+ * what the code of an email check took, or a message that carried a credential (`reason: 'credential'`). Sent in the run
+ * that carried them; the same messages carry `metadata.modelVisible: false` in history (PROF-HIST-013).
  */
 export interface MessagesWithheldValue {
   conversationId: string
   /** the agent's ids of the messages */
   messageIds: string[]
-  /** the ids the client gave those it sent */
+  /**
+   * the ids the client gave those it sent: when present, of the length and in the order of `messageIds`, the empty string
+   * for an entry the client did not send
+   */
   clientIds?: string[]
+  /** absent means `email-check` */
+  reason?: WithheldReason
+  /**
+   * with `reason: 'credential'`: the text the agent kept of each message, by the agent's id, each credential replaced by its
+   * first four characters and `…`; a UI puts it in place of the text it holds, in the transcript, its cache and its outbox
+   */
+  texts?: Record<string, string>
 }
 
 /** What became of a memory (3.3). */
@@ -382,8 +414,8 @@ export type ApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED' |
 /** `confirmation` (3.4): the person's own decision on a call of theirs, shown in its conversation only (PROF-TOOL-007) */
 export type ApprovalKind = 'sensitivity' | 'elevation' | 'confirmation'
 
-/** Whose account a tool call runs with (3.4): none, the agent's, or the space's. */
-export type AccountKind = 'none' | 'agent' | 'space'
+/** Whose account a tool call runs with (3.4): none, the agent's, the space's, or the person's own (3.5). */
+export type AccountKind = 'none' | 'agent' | 'space' | 'personal'
 
 /**
  * A tool call as its card shows it (3.4, PROF-TOOL-007/009): the action's title, its source, whose account, and every
@@ -393,7 +425,11 @@ export type AccountKind = 'none' | 'agent' | 'space'
 export interface ToolAction {
   title: string
   source: { id: string; title: string }
-  account: { kind: AccountKind; space?: { id: string; title: string } }
+  /**
+   * whose account: with the space for `space`; for `personal` (3.5, PROF-TOOL-021), `label`, the name of the account at its
+   * service, on the card of the person whose account it is, and on no other card
+   */
+  account: { kind: AccountKind; space?: { id: string; title: string }; label?: string }
   fields: { label: string; value: string; pinned?: boolean }[]
   erased?: boolean
 }
@@ -488,6 +524,11 @@ export interface MessageMetadata {
   /** `false` on a message of the person that the model never received (PROF-HIST-013, 3.3 amended); absent otherwise */
   modelVisible?: false
   /**
+   * `'credential'` on a message held back because it carried a credential, whose text is as the agent kept it, each
+   * credential replaced by its first four characters and `…` (3.5, PROF-HIST-013); absent on every other message
+   */
+  withheld?: 'credential'
+  /**
    * on a message of the agent whose turn ran tools: the sources of the tool results that turn read, and whose account
    * read them, one item per source and account (3.4, PROF-TOOL-010); absent on a message whose turn ran none
    */
@@ -521,6 +562,7 @@ export interface CustomEventValueMap {
   'ayni.messages.withheld': MessagesWithheldValue
   'ayni.memory.updated': MemoryUpdatedValue
   'ayni.space.tools.changed': SpaceToolsChangedValue
+  'ayni.connections.changed': ConnectionsChangedValue
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -663,6 +705,8 @@ export const ACTIVITY = {
   generating: 'ayni.generating',
   /** a line of the transcript: the agent added, changed or removed a memory of the person (3.3) */
   memoryUpdate: 'ayni.memory-update',
+  /** the Connect card: the model offers the person to connect one of their own accounts (3.5, PROF-TOOL-020) */
+  connect: 'ayni.connect',
 } as const
 
 export type ActivityType = (typeof ACTIVITY)[keyof typeof ACTIVITY]
@@ -964,6 +1008,18 @@ export const ERROR_STATUS = {
    * control character inside, or does not match its field's pattern, with `field: "account.<name>"` (§3.10, agent D102)
    */
   'bad-token': 422,
+  /** 3.5: the value of a binding a personal account is for, not one of the owner's own accounts, with `field` (§3.10) */
+  'not-your-account': 422,
+  /** 3.5: `POST /connections/{source}/authorize` on a source of fields (§3.11) */
+  'not-oauth': 409,
+  /** 3.5: `PUT /connections/{source}/account` on a source of OAuth (§3.11) */
+  'not-fields': 409,
+  /** 3.5: the check refused the account: it is for another value of the binding, with `expected` and `chosen` (§3.11) */
+  'wrong-binding': 422,
+  /** 3.5: the check refused the account: it is not the person's own by the email of the directory (§3.11) */
+  'wrong-person': 422,
+  /** 3.5: the service's metadata, its authorization server or the agent's client there cannot be had (§3.11) */
+  'source-unavailable': 502,
 } as const
 
 export type ErrorCode = keyof typeof ERROR_STATUS
@@ -978,6 +1034,9 @@ export interface ErrorBody {
   binding?: BindingMaterial
   /** the field an `out-of-bounds` refusal names (3.3) */
   field?: string
+  /** `wrong-binding` (3.5): the names of the value the space wants and of the one the account is for */
+  expected?: string
+  chosen?: string
 }
 
 /** Binding code format: two letters, a dash, two letters or digits, derived from the nonce (section 3.2). */
@@ -1365,6 +1424,16 @@ export interface SpaceTool {
     set?: boolean
     setAt?: string | null
     setBy?: { name: string } | null
+    /**
+     * a `personal` account (3.5, PROF-TOOL-021): whether the reader's own account of it, for this space, is connected, to
+     * the owner and to every member alike; never a label
+     */
+    connected?: boolean
+    /**
+     * a `personal` account that the tool uses from another source (`account.from`, agent TOOL-CAT-015): the source Your
+     * accounts lists it under (`github` for `github-project`); absent otherwise
+     */
+    source?: string
   }
   bindings: {
     name?: string
@@ -1372,6 +1441,12 @@ export interface SpaceTool {
     value: string | null
     setBy?: 'pack' | 'owner'
     pattern?: string | null
+    /** the name of the value of a binding a personal account is for (3.5, agent D110) */
+    valueLabel?: string | null
+    /** the owner's (3.5): the binding is set from an account of the owner's own, never typed */
+    fromAccount?: true
+    /** the owner's (3.5): the value and name of each of the owner's own accounts of the source */
+    choices?: { value: string; valueLabel: string | null }[]
   }[]
   tools: {
     name?: string
@@ -1441,4 +1516,114 @@ export interface ConversationSource {
 
 export interface ConversationSourcesResponse {
   sources: ConversationSource[]
+}
+
+// ---------------------------------------------------------------------------------------------
+// Your accounts (3.5, §3.11): `{sessions}/connections`, a bound session's token
+
+/** How a person's own account connects: the service's sign-in in the browser, or fields the person types (§3.11). */
+export type ConnectionMethod = 'oauth' | 'fields'
+/** Where a person's own account stands (agent D107). */
+export type ConnectionState = 'not-connected' | 'connected' | 'reconnect'
+export const CONNECTION_STATES: readonly ConnectionState[] = ['not-connected', 'connected', 'reconnect']
+/** Why an account must be reconnected: the service no longer refreshes it, refused it, or how it connects changed. */
+export type ReconnectReason = 'expired' | 'revoked' | 'changed'
+/** What became of a sign-in, or of an account (PROF-TOOL-019). */
+export type ConnectionOutcome =
+  | 'connected'
+  | 'denied'
+  | 'failed'
+  | 'expired'
+  | 'cancelled'
+  | 'wrong-binding'
+  | 'wrong-person'
+  | 'disconnected'
+  | 'ended'
+
+/** Where an account serves: every conversation, Personal, or a space (§3.11). */
+export type ConnectionUse = { kind: 'agent' } | { kind: 'personal' } | { kind: 'space'; id: string; title: string }
+
+/**
+ * One item of `GET {sessions}/connections` (PROF-TOOL-014): an account the person can connect or holds. No item carries a
+ * token or a value of a field; `account.label` is shown to this person only.
+ */
+export interface Connection {
+  source: string
+  title: string
+  description?: string
+  method: ConnectionMethod
+  /** a source of fields: the fields to type, one masked field each (agent D102) */
+  fields?: SpaceAccountField[]
+  /** a source whose accounts are each for one value of a binding (agent D110): this item's value and its name */
+  binding: { name: string; label: string; value: string | null; valueLabel: string | null } | null
+  usedIn: ConnectionUse[]
+  state: ConnectionState
+  reason: ReconnectReason | null
+  moreAccess: boolean
+  account: { id: string; label: string | null; connectedAt: string; lastUsedAt: string | null } | null
+  attempt: { id: string; expiresAt: string } | null
+  /** whether a Disconnect also ends the agent's access at the service */
+  revokesAtSource: boolean
+}
+
+export interface ConnectionsResponse {
+  connections: Connection[]
+}
+
+/** `POST {sessions}/connections/{source}/authorize` (PROF-TOOL-015): `spaceId` for a source of a space's template. */
+export interface AuthorizeConnectionRequest {
+  spaceId?: string
+}
+
+/** The answer `202` of `POST {sessions}/connections/{source}/authorize` (PROF-TOOL-015). */
+export interface AuthorizeConnectionResponse {
+  attemptId: string
+  /** opened in the browser, never in a frame or a web view of the client (PROF-TOOL-018) */
+  authorizationUrl: string
+  expiresAt: string
+}
+
+/** `PUT {sessions}/connections/{source}/account` (PROF-TOOL-016): answered `200 { connection }`. */
+export interface ConnectionAccountRequest {
+  values: Record<string, string>
+  spaceId?: string
+}
+
+export interface ConnectionResponse {
+  connection: Connection
+}
+
+/**
+ * `ayni.connections.changed` (3.5, PROF-TOOL-019): one of the Principal's own accounts, or an attempt to connect one,
+ * changed; to every bound session of the Principal that has its stream open. A UI reads §3.11 again on it.
+ */
+export interface ConnectionsChangedValue {
+  source: string
+  binding?: { value: string; valueLabel: string | null }
+  state: ConnectionState
+  reason?: ReconnectReason
+  moreAccess?: boolean
+  accountId?: string
+  /** the name of the account at its service: this event goes to the Principal's own sessions only */
+  label?: string
+  attemptId?: string
+  outcome?: ConnectionOutcome
+  /** `wrong-binding`: the names of the value expected and of the one the account is for */
+  expected?: string
+  chosen?: string
+}
+
+/**
+ * The Connect card (3.5, PROF-TOOL-020): an `ayni.connect` activity. It holds no state: a UI shows the state of the account
+ * it names (`source`, and `binding.value`) from §3.11. Its Connect starts the flow of §3.11 and never shows a field in the
+ * conversation.
+ */
+export interface ConnectActivity {
+  source: string
+  title: string
+  description?: string
+  method: ConnectionMethod
+  why: 'connect' | 'reconnect'
+  binding?: { label: string; value: string; valueLabel: string | null }
+  spaceId?: string
 }

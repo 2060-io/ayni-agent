@@ -23,6 +23,7 @@ import type { CallAccountSecret, ToolSpec } from '../tools/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import { type ChallengeService, ConfirmationUnavailable, SPACE_TOOL_CHANGE } from './challenges.js'
+import type { ConnectionService } from './connections.js'
 import { isPersonalSpace, SpaceError, type SpaceService } from './spaces.js'
 import type {
   AuthChallengeRecord,
@@ -64,14 +65,30 @@ export interface SpaceToolView {
   add?: 'auto' | 'owner'
   guests: boolean
   account: {
-    kind: 'none' | 'agent' | 'space'
+    kind: 'none' | 'agent' | 'space' | 'personal'
     /** the owner's, for a `space` account: the fields to fill, in the agent-pack's order (D102) */
     fields?: { name: string; label: string; pattern?: string }[]
     set?: boolean
     setAt?: string | null
     setBy?: { name: string } | null
+    /** a `personal` account: whether the reader's own account of it, for this space, is connected (TOOL-SPACE-012) */
+    connected?: boolean
+    /** a `personal` account of another source (`account.from`): the source Your accounts lists it under */
+    source?: string
   }
-  bindings: { name?: string; label: string; value: string | null; setBy?: 'pack' | 'owner'; pattern?: string | null }[]
+  bindings: {
+    name?: string
+    label: string
+    value: string | null
+    setBy?: 'pack' | 'owner'
+    pattern?: string | null
+    /** the binding a personal account is for (D110): the name of its value, read from the owner's account */
+    valueLabel?: string | null
+    /** the owner's: set from an account of their own, never typed (TOOL-SPACE-013) */
+    fromAccount?: true
+    /** the owner's: the value and name of each of the owner's own accounts of the source */
+    choices?: { value: string; valueLabel: string | null }[]
+  }[]
   tools: {
     name?: string
     title: string
@@ -120,6 +137,8 @@ function newCode(): string {
 
 export class SpaceToolService {
   public hooks: SpaceToolsHooks = {}
+  /** each person's own accounts (D104): whether a reader's is connected, the owner's choices of a binding (D110) */
+  public connections?: ConnectionService
 
   public constructor(
     private readonly store: Store,
@@ -252,7 +271,12 @@ export class SpaceToolService {
     return (source.offer ?? Object.keys(source.tools)).map((name) => ({ name }))
   }
 
-  private async view(space: Space, entry: TemplateTool, owner: boolean): Promise<SpaceToolView | undefined> {
+  private async view(
+    space: Space,
+    entry: TemplateTool,
+    owner: boolean,
+    reader?: Principal
+  ): Promise<SpaceToolView | undefined> {
     const source = this.catalog.source(entry.source)
     if (!source) return undefined
     const record = await this.recordOf(space, entry)
@@ -276,18 +300,35 @@ export class SpaceToolService {
       })
     }
     const values = this.bindingValues(source, record)
-    const bindings = source.bindings.map((b) =>
-      owner
+    // the binding each person's account is for (D110): its value's name for every reader, the owner's own accounts as the
+    // choices of its value
+    const accountBinding = this.connections?.accountBindingOf(source)
+    const choices = owner && accountBinding && reader ? await this.connections?.choicesOf(reader, source) : undefined
+    const bindings = source.bindings.map((b) => {
+      const ofAccount = b.name === accountBinding
+      const valueLabel = ofAccount ? { valueLabel: record.bindingLabels?.[b.name] ?? null } : {}
+      return owner
         ? {
             name: b.name,
             label: b.label,
             value: values[b.name] ?? null,
             setBy: b.value !== undefined ? ('pack' as const) : ('owner' as const),
             pattern: b.pattern ?? null,
+            ...valueLabel,
+            ...(ofAccount && b.value === undefined ? { fromAccount: true as const, choices: choices ?? [] } : {}),
           }
-        : { label: b.label, value: values[b.name] ?? null }
-    )
+        : { label: b.label, value: values[b.name] ?? null, ...valueLabel }
+    })
     const accountView: SpaceToolView['account'] = { kind: source.account.kind }
+    // a person's own account (TOOL-SPACE-012): whether the reader's is connected for this space, never a label; and, for
+    // a source that uses another's account, the source Your accounts lists it under (TOOL-CAT-015)
+    if (source.account.kind === 'personal') {
+      accountView.connected = reader
+        ? ((await this.connections?.connectedIn(reader, source, space.id)) ?? false)
+        : false
+      const declaring = this.connections?.declaringOf(source)
+      if (declaring && declaring.name !== source.name) accountView.source = declaring.name
+    }
     if (owner && source.account.kind === 'space') {
       // the fields the owner fills, in the agent-pack's order, and never a value (PROF-TOOL-001)
       accountView.fields = (source.account.fields ?? []).map((f) => ({
@@ -331,16 +372,16 @@ export class SpaceToolService {
     const owner = access.role === 'owner'
     const out: SpaceToolView[] = []
     for (const entry of this.entriesOf(access.space)) {
-      const view = await this.view(access.space, entry, owner)
+      const view = await this.view(access.space, entry, owner, principal)
       if (view) out.push(view)
     }
     return out
   }
 
   /** One source of a space, as its owner reads it. */
-  public async ownerView(space: Space, sourceId: string): Promise<SpaceToolView> {
+  public async ownerView(space: Space, sourceId: string, reader?: Principal): Promise<SpaceToolView> {
     const { entry } = this.entryOf(space, sourceId)
-    return (await this.view(space, entry, true)) as SpaceToolView
+    return (await this.view(space, entry, true, reader)) as SpaceToolView
   }
 
   // ---- what the owner changes -------------------------------------------------------------------------------------
@@ -355,8 +396,34 @@ export class SpaceToolService {
     return { space: access.space, ...this.entryOf(access.space, sourceId) }
   }
 
-  /** The owner's bindings, checked (TOOL-SPACE-004): a declared binding, left to the owner, matching its pattern. */
-  private checkBindings(source: CatalogSource, bindings: unknown): Record<string, string> {
+  /**
+   * The owner's bindings, checked (TOOL-SPACE-004, TOOL-SPACE-013): a declared binding, left to the owner, matching its
+   * pattern; the binding a personal account is for, one of the owner's own accounts' values, with its name.
+   */
+  private async checkBindings(
+    principal: Principal,
+    source: CatalogSource,
+    bindings: unknown
+  ): Promise<{ values: Record<string, string>; labels: Record<string, string> }> {
+    const values = this.checkBindingValues(source, bindings)
+    const labels: Record<string, string> = {}
+    const accountBinding = this.connections?.accountBindingOf(source)
+    if (accountBinding && values[accountBinding] !== undefined) {
+      const choice = (await this.connections?.choicesOf(principal, source))?.find(
+        (c) => c.value === values[accountBinding]
+      )
+      if (!choice)
+        throw new SpaceError(
+          'the value of this binding is set from an account of your own: connect it, then choose it',
+          'not-your-account',
+          `bindings.${accountBinding}`
+        )
+      if (choice.valueLabel) labels[accountBinding] = choice.valueLabel
+    }
+    return { values, labels }
+  }
+
+  private checkBindingValues(source: CatalogSource, bindings: unknown): Record<string, string> {
     if (bindings === undefined || bindings === null) return {}
     if (typeof bindings !== 'object' || Array.isArray(bindings))
       throw new SpaceError('bindings is an object of values', 'bad-binding', 'bindings')
@@ -413,11 +480,16 @@ export class SpaceToolService {
     head: string,
     space: Space,
     source: CatalogSource,
-    change: { bindings?: Record<string, string>; calls?: Record<string, SpaceCallRule> }
+    change: {
+      bindings?: Record<string, string>
+      calls?: Record<string, SpaceCallRule>
+      /** the names of the values of a binding a personal account is for: what the phone shows (D110) */
+      labels?: Record<string, string>
+    }
   ): Promise<string> {
     const parts: string[] = []
     for (const [name, value] of Object.entries(change.bindings ?? {}))
-      parts.push(`${source.bindings.find((b) => b.name === name)?.label ?? name}: ${value}`)
+      parts.push(`${source.bindings.find((b) => b.name === name)?.label ?? name}: ${change.labels?.[name] ?? value}`)
     const tools = await this.toolsOf(source, space.id)
     for (const [name, rule] of Object.entries(change.calls ?? {}))
       parts.push(
@@ -499,11 +571,21 @@ export class SpaceToolService {
     const { space, entry, source } = await this.owned(principal, spaceId, body.source)
     const record = await this.recordOf(space, entry)
     if (record.added) throw new SpaceError('the source is in the space already', 'already-added')
-    const bindings = this.checkBindings(source, body.bindings)
+    const { values: bindings, labels } = await this.checkBindings(principal, source, body.bindings)
     const calls = await this.checkCalls(space, source, body.calls)
-    const summary = await this.summaryOf(`Add ${source.title} to ${space.title}`, space, source, { bindings, calls })
-    await this.hold(principal, session, space, record, { kind: 'add', bindings, calls, summary })
-    return this.ownerView(space, source.name)
+    const summary = await this.summaryOf(`Add ${source.title} to ${space.title}`, space, source, {
+      bindings,
+      calls,
+      labels,
+    })
+    await this.hold(principal, session, space, record, {
+      kind: 'add',
+      bindings,
+      calls,
+      summary,
+      ...(Object.keys(labels).length ? { bindingLabels: labels } : {}),
+    })
+    return this.ownerView(space, source.name, principal)
   }
 
   /**
@@ -520,7 +602,7 @@ export class SpaceToolService {
     const { space, entry, source } = await this.owned(principal, spaceId, sourceId)
     const record = await this.recordOf(space, entry)
     if (!record.added) throw new SpaceError('add the source to the space first', 'not-added')
-    const bindings = this.checkBindings(source, body.bindings)
+    const { values: bindings, labels } = await this.checkBindings(principal, source, body.bindings)
     const calls = await this.checkCalls(space, source, body.calls)
     const changedBindings = Object.fromEntries(Object.entries(bindings).filter(([k, v]) => record.bindings[k] !== v))
     let grants = Object.keys(changedBindings).length > 0
@@ -532,21 +614,24 @@ export class SpaceToolService {
       if (looser(rule, inForce)) grants = true
     }
     if (!Object.keys(changedBindings).length && !Object.keys(changedCalls).length)
-      return { status: 200, tool: await this.ownerView(space, source.name) }
+      return { status: 200, tool: await this.ownerView(space, source.name, principal) }
     if (grants) {
       // one granting change at a time; one that only narrows applies whatever waits (TOOL-SPACE-009)
       if (record.pendingChange) throw new SpaceError('a change of this source waits for the phone', 'change-pending')
+      const changedLabels = Object.fromEntries(Object.entries(labels).filter(([k]) => k in changedBindings))
       const summary = await this.summaryOf(`Change ${source.title} in ${space.title}`, space, source, {
         bindings: changedBindings,
         calls: changedCalls,
+        labels: changedLabels,
       })
       await this.hold(principal, session, space, record, {
         kind: 'patch',
         bindings: changedBindings,
         calls: changedCalls,
         summary,
+        ...(Object.keys(changedLabels).length ? { bindingLabels: changedLabels } : {}),
       })
-      return { status: 202, tool: await this.ownerView(space, source.name) }
+      return { status: 202, tool: await this.ownerView(space, source.name, principal) }
     }
     // only stricter: at once, with no challenge, a change that waits for the phone kept as it is (TOOL-SPACE-008)
     const current = (await this.store.spaceTools.get(space.id, source.name)) ?? record
@@ -558,7 +643,7 @@ export class SpaceToolService {
     })
     await this.hooks.endAllowances?.(space.id, source.name)
     await this.spaces.record(space.id, principal.id, 'tool-changed', { sourceId: source.name })
-    const tool = await this.ownerView(space, source.name)
+    const tool = await this.ownerView(space, source.name, principal)
     await this.announce(space, { spaceId: space.id, source: source.name, state: tool.state, outcome: 'applied' })
     return { status: 200, tool }
   }
@@ -569,7 +654,7 @@ export class SpaceToolService {
    * at its field) when empty, longer than 4096 characters, with whitespace or a control character inside, or not matching
    * its pattern. No message names a value.
    */
-  private checkValues(fields: readonly AccountField[], values: unknown): AccountValues {
+  public checkValues(fields: readonly AccountField[], values: unknown): AccountValues {
     if (!values || typeof values !== 'object' || Array.isArray(values))
       throw new SpaceError('values is an object of the values of the fields of the account', 'bad-request', 'values')
     const given = values as Record<string, unknown>
@@ -626,7 +711,7 @@ export class SpaceToolService {
       sealedValues: { keyRef, cipher: cipher.toString('base64') },
       summary: head,
     })
-    return this.ownerView(space, source.name)
+    return this.ownerView(space, source.name, principal)
   }
 
   /** `DELETE …/account` (TOOL-SPACE-005): cleared at once, its key destroyed. */
@@ -639,7 +724,7 @@ export class SpaceToolService {
       await this.hooks.endAllowances?.(space.id, source.name)
       await this.spaces.record(space.id, principal.id, 'account-cleared', { sourceId: source.name })
     }
-    const tool = await this.ownerView(space, source.name)
+    const tool = await this.ownerView(space, source.name, principal)
     await this.announce(space, { spaceId: space.id, source: source.name, state: tool.state, outcome: 'applied' })
     return tool
   }
@@ -666,7 +751,7 @@ export class SpaceToolService {
     await this.destroyAccount(space.id, source.name)
     await this.hooks.endAllowances?.(space.id, source.name)
     if (wasAdded) await this.spaces.record(space.id, principal.id, 'tool-removed', { sourceId: source.name })
-    const tool = await this.ownerView(space, source.name)
+    const tool = await this.ownerView(space, source.name, principal)
     await this.announce(space, { spaceId: space.id, source: source.name, state: tool.state, outcome: 'applied' })
     return tool
   }
@@ -735,9 +820,17 @@ export class SpaceToolService {
       next.added = true
       next.bindings = { ...(change.bindings ?? {}) }
       next.calls = { ...(change.calls ?? {}) }
+      next.bindingLabels = change.bindingLabels ? { ...change.bindingLabels } : undefined
     } else if (change.kind === 'patch') {
       next.bindings = { ...record.bindings, ...(change.bindings ?? {}) }
       next.calls = { ...record.calls, ...(change.calls ?? {}) }
+      // the name of a value the change sets comes with it; a value set otherwise has none
+      const changed = new Set(Object.keys(change.bindings ?? {}))
+      const labels = {
+        ...Object.fromEntries(Object.entries(record.bindingLabels ?? {}).filter(([name]) => !changed.has(name))),
+        ...(change.bindingLabels ?? {}),
+      }
+      next.bindingLabels = Object.keys(labels).length ? labels : undefined
     }
     if (change.kind === 'account' && change.sealedValues) {
       // the former account's key is destroyed with its row: the new values under a key of their own (TOOL-ACCESS-004)

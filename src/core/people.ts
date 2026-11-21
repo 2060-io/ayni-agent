@@ -52,6 +52,11 @@ export interface PeopleDeps {
    * `credential-invalid`, its devices are unpaired
    */
   endAccess(principal: Principal): Promise<void>
+  /**
+   * ends the person's own tool accounts, their key destroyed with them, in the same reload that ends their access
+   * (IDENT-ROLE-013, TOOL-CONN-008)
+   */
+  endAccounts?(principal: Principal): Promise<void>
   logger: Logger
 }
 
@@ -228,6 +233,15 @@ export class PeopleService implements DirectoryLink {
   /** The access of a person whose entry left the directory ends at once (IDENT-ROLE-013, IDENT-LIVE-005). */
   private async release(principal: Principal, entryId: string): Promise<void> {
     await this.deps.principals.releaseEntry(principal)
+    // their own accounts end first: no call of theirs runs once the entry is gone (TOOL-CONN-008)
+    try {
+      await this.deps.endAccounts?.(principal)
+    } catch (error) {
+      this.deps.logger.error(
+        { err: error, principalId: principal.id },
+        'the own accounts of a removed person were not all ended'
+      )
+    }
     try {
       await this.deps.endAccess(principal)
     } catch (error) {

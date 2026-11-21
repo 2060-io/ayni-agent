@@ -247,7 +247,9 @@ export class MemoryService {
     await this.store.entries.insert(stored)
     if (
       this.pack.features?.semanticRecall !== false &&
-      (entry.sourceType === 'text' || entry.sourceType === 'voice' || entry.sourceType === 'media')
+      (entry.sourceType === 'text' || entry.sourceType === 'voice' || entry.sourceType === 'media') &&
+      // a message held back because it carried a credential is no recall's to bring back (TOOL-ACCESS-013)
+      entry.payload?.withheld !== 'credential'
     ) {
       this.embed(entry).catch((err) => this.logger.warn({ err, entryId: entry.id }, 'embedding failed'))
     }

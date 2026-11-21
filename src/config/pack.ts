@@ -27,6 +27,7 @@ import {
   bundledEnabled,
   bundledSource,
   CALL_RULES,
+  CLIENT_REGISTRATIONS,
   COMPUTED_FUNCTIONS,
   challengeTypesOf,
   DOCUMENT_ATTRIBUTES,
@@ -189,7 +190,14 @@ export function bundledToolNames(pack: AgentPack): string[] {
   }
   if (on('principalPreferences')) names.push('principal_preferences')
   if (on('workingMemory')) names.push('working_memory')
+  // the Connect card, while the agent-pack declares a source of each person's own account (D108, TOOL-CONN-011)
+  if (on('connections') && hasPersonalSource(pack)) names.push('offer_connection')
   return names
+}
+
+/** Whether the agent-pack declares a source of each person's own account (D104). */
+export function hasPersonalSource(pack: Pick<AgentPack, 'tools'>): boolean {
+  return Object.values(pack.tools?.sources ?? {}).some((s) => s.type !== 'bundled' && s.account?.kind === 'personal')
 }
 
 /** A model-visible attribute must be stored, and a stored attribute must be among those asked (PRIV-EVID-006). */
@@ -503,20 +511,16 @@ export function withdrawnAccountKeyErrors(doc: unknown): string[] {
 }
 
 /**
- * The kinds of account of the later phases (TOOL-CAT-002, O28, O29): a source that declares `personal` or `organization`
- * is refused in words, before the schema, which would only name the value.
+ * The kind of account of the later phase (TOOL-CAT-002, O29): a source that declares `organization` is refused in words,
+ * before the schema, which would only name the value.
  */
 export function reservedAccountErrors(doc: unknown): string[] {
   const errors: string[] = []
   for (const { where, body } of docSources(doc)) {
     const kind = isObject(body.account) ? body.account.kind : undefined
-    if (kind === 'personal')
+    if (kind === 'organization')
       errors.push(
-        `${where}.account.kind: personal is not available in this version: each person's own accounts come in phase 2 of the tools (TOOL-CAT-002, O28); use none, agent or space`
-      )
-    else if (kind === 'organization')
-      errors.push(
-        `${where}.account.kind: organization is not available in this version: the accounts the organization opens come in phase 3 of the tools (TOOL-CAT-002, O29); use none, agent or space`
+        `${where}.account.kind: organization is not available in this version: the accounts the organization opens come in phase 3 of the tools (TOOL-CAT-002, O29); use none, agent, space or personal`
       )
   }
   return errors
@@ -582,6 +586,10 @@ export function catalogValueErrors(doc: unknown): string[] {
     const account = isObject(body.account) ? body.account : undefined
     if (account && !(RESERVED_ACCOUNT_KINDS as readonly unknown[]).includes(account.kind))
       one(where, 'account.kind', account.kind, ACCOUNT_KINDS)
+    // how the agent obtains its client at the authorization server of a person's own account (TOOL-CAT-014)
+    const oauth = account && isObject(account.oauth) ? account.oauth : undefined
+    const client = oauth && isObject(oauth.client) ? oauth.client : undefined
+    if (client) one(where, 'account.oauth.client.registration', client.registration, CLIENT_REGISTRATIONS)
     if (type === 'http')
       for (const tool of Object.keys(declared))
         if (tool !== name)
@@ -672,8 +680,20 @@ function sourceErrors(where: string, source: ToolSourceDef): string[] {
       errors.push(
         `${where}.transport: a space account reaches a remote MCP server (sse or streamable-http), never a stdio one (TOOL-AVAIL-003)`
       )
-  } else if (account && (account.fields || account.apply))
-    errors.push(`${where}.account: fields and apply belong to a space account only (TOOL-CAT-002)`)
+  } else if (account?.kind === 'personal') errors.push(...personalSourceErrors(where, source, account))
+  else if (account && (account.fields || account.apply))
+    errors.push(`${where}.account: fields and apply belong to a space's or a person's account only (TOOL-CAT-002)`)
+  if (account && account.kind !== 'personal')
+    for (const key of ['oauth', 'from', 'binding', 'check'] as const)
+      if (account[key] !== undefined)
+        errors.push(`${where}.account.${key}: belongs to a person's own account only, of kind personal (TOOL-CAT-013)`)
+  if (account?.tokenPatterns && account.kind !== 'space' && account.kind !== 'personal')
+    errors.push(`${where}.account.tokenPatterns: belongs to a space's or a person's account only (TOOL-CAT-016)`)
+  for (const pattern of account?.tokenPatterns ?? []) {
+    const bad = regexError(pattern)
+    if (bad)
+      errors.push(`${where}.account.tokenPatterns: ${JSON.stringify(pattern)} is not a regular expression: ${bad}`)
+  }
   const names = new Set<string>()
   for (const binding of source.type === 'bundled' ? [] : (source.bindings ?? [])) {
     const at = `${where}.bindings.${binding.name}`
@@ -686,6 +706,172 @@ function sourceErrors(where: string, source: ToolSourceDef): string[] {
     if (availability !== 'spaces' && binding.value === undefined)
       errors.push(
         `${at}.value: a source of availability ${availability} takes the value of every binding from the agent-pack (TOOL-CAT-005)`
+      )
+  }
+  return errors
+}
+
+/** Whether a text is a JSON pointer (RFC 6901): empty, or `/`-separated tokens where `~` is followed by 0 or 1 only. */
+export function isJsonPointer(text: string): boolean {
+  return text === '' || /^(\/([^~/]|~[01])*)+$/.test(text)
+}
+
+/** The JSON pointers a label template names as `{/pointer}` (D110, TOOL-CAT-017). */
+export function pointersOfLabel(template: string): string[] {
+  return [...template.matchAll(/\{(\/[^{}]*)\}/g)].map((m) => m[1] ?? '')
+}
+
+/**
+ * A person's own account (D104, TOOL-CAT-013, TOOL-CAT-014, TOOL-AVAIL-007): exactly one of `oauth`, `fields` and `apply`,
+ * or `from`; OAuth only for an MCP server reached remotely, without an `Authorization` of its own; a `pre-registered`
+ * client with its issuer and id, the other registrations with neither; a `bindingRequest` only with a `binding`; a remote
+ * source, never a stdio server.
+ */
+function personalSourceErrors(where: string, source: ToolSourceDef, account: SourceAccount): string[] {
+  const errors: string[] = []
+  const declares = [
+    account.oauth !== undefined ? 'oauth' : undefined,
+    account.fields !== undefined || account.apply !== undefined ? 'fields' : undefined,
+    account.from !== undefined ? 'from' : undefined,
+  ].filter((d): d is string => !!d)
+  if (declares.length !== 1)
+    errors.push(
+      `${where}.account: a person's own account declares exactly one of oauth, fields and apply, or from, not ${declares.length ? declares.join(' and ') : 'none of them'} (TOOL-CAT-013)`
+    )
+  if (source.type === 'mcp' && source.transport === 'stdio')
+    errors.push(
+      `${where}.transport: a person's own account reaches a remote MCP server (sse or streamable-http), never a stdio one (TOOL-AVAIL-007)`
+    )
+  if (account.oauth) {
+    if (source.type !== 'mcp')
+      errors.push(`${where}.account.oauth: OAuth is for an MCP server only, not an HTTP tool (TOOL-CAT-013)`)
+    const auth =
+      source.type === 'mcp'
+        ? Object.keys(source.headers ?? {}).find((h) => h.toLowerCase() === 'authorization')
+        : undefined
+    if (auth)
+      errors.push(
+        `${where}.headers.${auth}: a source of OAuth sends each person's own token and no Authorization of its own (TOOL-CAT-013)`
+      )
+    const client = account.oauth.client
+    if (client.registration === 'pre-registered') {
+      for (const key of ['issuer', 'id'] as const)
+        if (!client[key]?.trim())
+          errors.push(
+            `${where}.account.oauth.client.${key}: a pre-registered client declares its ${key === 'id' ? 'id' : 'issuer'}, from the deployment's secrets, and it is empty (TOOL-CAT-014)`
+          )
+    } else
+      for (const key of ['issuer', 'id', 'secret'] as const)
+        if (client[key] !== undefined)
+          errors.push(
+            `${where}.account.oauth.client.${key}: only a pre-registered client declares it, not one of ${client.registration} (TOOL-CAT-014)`
+          )
+    const request = account.oauth.bindingRequest
+    if (request && !account.binding)
+      errors.push(
+        `${where}.account.oauth.bindingRequest: the account declares no binding whose value the sign-in could ask for (TOOL-CAT-014)`
+      )
+    if (request?.resource !== undefined && !request.resource.includes('{value}'))
+      errors.push(
+        `${where}.account.oauth.bindingRequest.resource: the resource names the value as {value} (TOOL-CAT-014)`
+      )
+  }
+  if (account.fields !== undefined || account.apply !== undefined) {
+    if (!account.fields?.length)
+      errors.push(`${where}.account.fields: a person's account of fields declares them, one or more (TOOL-CAT-013)`)
+    if (!account.apply?.length)
+      errors.push(
+        `${where}.account.apply: a person's account of fields declares the headers its calls carry, built from them (TOOL-CAT-013)`
+      )
+    errors.push(...accountFieldErrors(where, account))
+  }
+  if (account.from !== undefined)
+    for (const key of ['binding', 'check'] as const)
+      if (account[key] !== undefined)
+        errors.push(
+          `${where}.account.${key}: an account of from is the account of the source it names, which declares it (TOOL-CAT-015)`
+        )
+  // the binding each account is for, and the read after each connection (TOOL-CAT-017)
+  const bindings = source.type === 'bundled' ? [] : (source.bindings ?? [])
+  if (account.binding !== undefined) {
+    if (!bindings.some((b) => b.name === account.binding))
+      errors.push(`${where}.account.binding: ${account.binding} is not a binding of the source (TOOL-CAT-017)`)
+    if (!account.check?.binding)
+      errors.push(
+        `${where}.account.check.binding: an account for one value of a binding reads that value after each connection (TOOL-CAT-017)`
+      )
+  }
+  const check = account.check
+  if (check) {
+    const pointers: [string, string | undefined][] = [
+      ['check.binding.value', check.binding?.value],
+      ['check.binding.label', check.binding?.label],
+      ['check.email', check.email],
+    ]
+    for (const [field, pointer] of pointers)
+      if (pointer !== undefined && !isJsonPointer(pointer))
+        errors.push(`${where}.account.${field}: ${JSON.stringify(pointer)} is not a JSON pointer (TOOL-CAT-017)`)
+    for (const pointer of check.label ? pointersOfLabel(check.label) : [])
+      if (!isJsonPointer(pointer))
+        errors.push(`${where}.account.check.label: {${pointer}} is not a JSON pointer (TOOL-CAT-017)`)
+    if (check.binding && !account.binding)
+      errors.push(
+        `${where}.account.check.binding: the account declares no binding whose value the check would read (TOOL-CAT-017)`
+      )
+    // an HTTP tool is one tool, named by its source's id; an MCP server offers its `offer`, or every tool it lists
+    const offered =
+      source.type === 'http'
+        ? check.tool === sourceIdOf(where)
+        : source.type === 'mcp' && (!source.offer || source.offer.includes(check.tool))
+    if (!offered)
+      errors.push(`${where}.account.check.tool: ${check.tool} is not a tool the source offers (TOOL-CAT-017)`)
+    const declared = source.tools?.[check.tool]?.effect
+    const effect = declared ?? (source.type === 'http' ? (source.method === 'GET' ? 'read' : 'write') : undefined)
+    if (effect !== undefined && effect !== 'read')
+      errors.push(
+        `${where}.account.check.tool: ${check.tool} is of effect ${effect}: the check reads, with a tool of effect read (TOOL-CAT-017)`
+      )
+  }
+  return errors
+}
+
+/** The id of a source from where it is written (`tools.sources.<id>`). */
+function sourceIdOf(where: string): string {
+  return where.slice('tools.sources.'.length)
+}
+
+/**
+ * The sources whose account is another's (`account.from`, TOOL-CAT-015): a source of a person's own account of OAuth or
+ * fields, of the same type and at the same URL, that is not itself of `from` or of a binding; and a check of the email
+ * only in an agent whose directory is configured (TOOL-CAT-017).
+ */
+function personalAccountErrors(pack: AgentPack): string[] {
+  const errors: string[] = []
+  const sources = pack.tools?.sources ?? {}
+  for (const [id, source] of Object.entries(sources)) {
+    if (source.type === 'bundled' || source.account?.kind !== 'personal') continue
+    const where = `tools.sources.${id}`
+    const account = source.account
+    if (account.check?.email !== undefined && !pack.identity.directory?.file)
+      errors.push(
+        `${where}.account.check.email: the email of an account is compared with the person's entry of the user directory, and this agent has none (TOOL-CAT-017, IDENT-DIR-001)`
+      )
+    if (account.from === undefined) continue
+    const named = sources[account.from]
+    const refuse = (why: string) => errors.push(`${where}.account.from: ${account.from} ${why} (TOOL-CAT-015)`)
+    if (!named) refuse('is not a key of tools.sources')
+    else if (named.type === 'bundled' || named.account?.kind !== 'personal')
+      refuse("is not a source of a person's own account")
+    else if (named.account.from !== undefined || named.account.binding !== undefined)
+      refuse(
+        named.account.from !== undefined
+          ? 'itself uses the account of another source'
+          : 'declares a binding: each of its accounts is for one value'
+      )
+    else if (!named.account.oauth && !named.account.fields) refuse('declares neither oauth nor fields')
+    else if (named.type !== source.type || named.url !== source.url)
+      refuse(
+        `is ${named.type !== source.type ? `of type ${named.type}` : `at another URL, ${named.url}`}: an account is used at the same server only`
       )
   }
   return errors
@@ -718,6 +904,8 @@ export function catalogErrors(pack: AgentPack): string[] {
           `${where}.access.approval names [${entry.tools.join(', ')}], tools of availability spaces: a space's owner approves them (TOOL-CAT-009)`
         )
   }
+  // the accounts of other sources, and the check of the email (TOOL-CAT-015, TOOL-CAT-017)
+  errors.push(...personalAccountErrors(pack))
   // the templates name sources of spaces only (TOOL-AVAIL-002)
   for (const template of pack.spaces?.templates ?? []) {
     const named = new Set<string>()

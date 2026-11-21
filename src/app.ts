@@ -34,6 +34,7 @@ import {
 import { AyniAgent } from './core/agent.js'
 import { ChallengeService } from './core/challenges.js'
 import { CapabilityRouter } from './core/channel.js'
+import { ConnectionService } from './core/connections.js'
 import { ContextAssembler } from './core/context.js'
 import { UserDirectory } from './core/directory.js'
 import { DirectoryClaims } from './core/directoryClaims.js'
@@ -53,7 +54,7 @@ import { LANGUAGE_PREFERENCE, ServiceLanguage } from './core/serviceLanguage.js'
 import { SessionService } from './core/sessions.js'
 import { SpaceService } from './core/spaces.js'
 import { SpaceToolService } from './core/spaceTools.js'
-import { cardCapable, ToolGate } from './core/toolGate.js'
+import { cardCapable, connectCapable, ToolGate } from './core/toolGate.js'
 import { AnchoringService, VeranaLedgerWriter } from './integrity/anchoring.js'
 import { createChatModel, createEmbeddings } from './llm/index.js'
 import { createImageGenerators } from './media/imageGen.js'
@@ -75,7 +76,8 @@ import { createStore } from './store/postgres.js'
 import { BundledToolSource } from './tools/bundled.js'
 import { ToolCatalog } from './tools/catalog.js'
 import { HttpToolSource } from './tools/http.js'
-import { createMcpSources, DEFAULT_IDLE_SECONDS } from './tools/mcp.js'
+import { createMcpSources, DEFAULT_IDLE_SECONDS, PersonalConnections } from './tools/mcp.js'
+import { OAuthClient } from './tools/oauth.js'
 import { ToolRegistry } from './tools/registry.js'
 import { schedule } from './util/async.js'
 import { createLogger, type Logger } from './util/logger.js'
@@ -319,6 +321,7 @@ export async function buildAgent(
   let identityRequestsRef: IdentityRequests | undefined
   let issuanceRef: IssuanceService | undefined
   let emailChecksRef: EmailChecks | undefined
+  let connectionsRef: ConnectionService | undefined
   registry.add(
     new BundledToolSource({
       pack,
@@ -334,12 +337,25 @@ export async function buildAgent(
       stats,
       setReactionPolicy: (sid, policy) => orchestratorRef?.setReactionPolicy(sid, policy),
       emailChecks: () => emailChecksRef,
+      connections: () => connectionsRef,
     })
   )
+  // the names of the tools follow the catalog, discovered or not (D101)
+  registry.useCatalog({
+    place: (source) => catalog.source(source)?.availability ?? 'agent',
+    offers: () =>
+      catalog
+        .sources()
+        .filter((s) => s.kind === 'mcp' && s.offer)
+        .map((s) => [s.name, s.offer ?? []] as [string, string[]]),
+  })
+  // one connection per person's own account, shared by the sources that use it (TOOL-ACCESS-012)
+  const personalConnections = new PersonalConnections(logger, env.toolConnectionIdleSeconds ?? DEFAULT_IDLE_SECONDS)
   for (const source of createMcpSources(
     sourcesOfType(pack, 'mcp'),
     logger,
-    env.toolConnectionIdleSeconds ?? DEFAULT_IDLE_SECONDS
+    env.toolConnectionIdleSeconds ?? DEFAULT_IDLE_SECONDS,
+    personalConnections
   ))
     registry.add(source, false)
 
@@ -376,6 +392,27 @@ export async function buildAgent(
     logger,
     env.toolChangeConfirmationSeconds ?? 300
   )
+  // each person's own accounts (D104 to D110): Your accounts, OAuth as MCP defines it, a key per person
+  let agentDid = 'did:unknown'
+  const connections = new ConnectionService({
+    pack,
+    store,
+    catalog,
+    crypto,
+    spaces,
+    registry,
+    oauth: new OAuthClient(),
+    logger,
+    publicBaseUrl: env.publicBaseUrl,
+    agentDid: () => agentDid,
+    appLinkBase: pack.channels?.agui?.appLinkBase,
+    attemptSeconds: env.toolOAuthAttemptSeconds,
+    directoryEmail: (principal) =>
+      principal.directoryEntryId ? directory?.entry(principal.directoryEntryId)?.email : undefined,
+  })
+  connectionsRef = connections
+  connections.spaceTools = spaceTools
+  spaceTools.connections = connections
   const gate = new ToolGate({
     pack,
     store,
@@ -389,6 +426,7 @@ export async function buildAgent(
     challenges,
     stats,
     logger,
+    connections,
   })
   orchestrator.gate = gate
   gateRef = gate
@@ -406,6 +444,19 @@ export async function buildAgent(
       return principal ? displayNameOf(principal) : ''
     },
     announce: async (space, value) => aguiRoutes?.announceSpaceTools(space, value),
+  }
+  connections.hooks = {
+    announce: async (principalId, value) => aguiRoutes?.announceConnections(principalId, value),
+    accountEnded: (accountId) => registry.closePersonal(accountId),
+    endAllowances: (principalId, sourceIds) => gate.endPersonalAllowances(principalId, sourceIds),
+    // a Connect card shows only in the sessions of a client of profile 3.5 or later (TOOL-CONN-011, PROF-SESS-016)
+    connectSessions: async (conversationId) => {
+      const conversation = await sessions.conversationById(conversationId)
+      if (!conversation) return []
+      return (await sessions.sessionsOfConversation(conversation)).filter((s) =>
+        connectCapable(s.client.profileVersion)
+      )
+    },
   }
   gate.hooks = {
     onApprovalPending: async (session, _principal, record, entry) => {
@@ -450,6 +501,7 @@ export async function buildAgent(
   agent.gate = gate
   agent.spaceTools = spaceTools
   agent.catalog = catalog
+  agent.connections = connections
   // the notes the model reads and writes are those of the space of the conversation (MEM-SPACE-001), and a space may
   // not allow the model this agent uses (SPACE-CONV-004)
   orchestrator.spaceOf = (session, principal) => agent.spaceOfSession(session, principal)
@@ -477,6 +529,7 @@ export async function buildAgent(
     const info = await vsAgent.info()
     did = info.did
     ownDid = did
+    agentDid = did
     agent.did = did
     flows.setAgentDid(did)
     logger.info({ did, vsAgent: info.version }, 'DIDComm agent reachable (IDENT-SELF-001)')
@@ -502,6 +555,8 @@ export async function buildAgent(
             aguiRoutes?.announceErased(principalId, conversationId, ids, clientIds) ?? Promise.resolve(),
         })
   aguiRoutes.register(app, did)
+  // the callback of people's sign-ins and the agent's client metadata document, public paths (D105)
+  aguiRoutes.registerOAuth(app)
   // what the person sends during a turn waits in the store and is answered next (D63): its devices are told what
   // waits, and the turn the agent starts for it goes to their streams
   agent.waitingChanged = (session) => {
@@ -518,6 +573,8 @@ export async function buildAgent(
   }
   // the spaces follow their templates: the sources they add by themselves, those no longer named leave (TOOL-SPACE-011)
   await spaceTools.align()
+  // people's own accounts follow the agent-pack: those of a source it no longer offers as it did end (TOOL-CONN-009)
+  await connections.align()
   // what a restart left waiting is answered now
   await agent.resumeWaiting()
   if (did !== 'did:unknown') await declareAgUiService(vsAgent, did, env.publicBaseUrl, logger)
@@ -574,6 +631,7 @@ export async function buildAgent(
     revocations: credentialRevocations,
     homeKey: () => home.key(),
     endAccess: (principal) => agent.onCredentialInvalid(principal),
+    endAccounts: async (principal) => void (await connections.endPerson(principal.id)),
     logger,
   })
   agent.people = people
@@ -770,6 +828,8 @@ export async function buildAgent(
     schedule('expire-approvals', 60_000, async () => void (await approvals.expirePending()), onJobError),
     // a change of a space's tools whose phone never answered is dropped as expired (TOOL-SPACE-008)
     schedule('expire-tool-changes', 30_000, async () => void (await spaceTools.expirePending()), onJobError),
+    // a sign-in nobody finished in its time ends as expired, and the person's devices are told (TOOL-OAUTH-005)
+    schedule('expire-oauth-attempts', 30_000, async () => void (await connections.expireAttempts()), onJobError),
     schedule('retention', 6 * 3_600_000, () => retention.tick(), onJobError),
   ]
   if (anchoringEnabled)
@@ -818,6 +878,7 @@ export async function buildAgent(
       await app.close()
       await admin?.close()
       await registry.close()
+      await personalConnections.closeAll()
       await redis?.quit().catch(() => undefined)
       // the last thing but one: from here the next process may take the store
       await releaseStore()

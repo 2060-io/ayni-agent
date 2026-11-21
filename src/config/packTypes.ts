@@ -341,10 +341,13 @@ export interface ToolAccess {
 
 // ---- the tool catalog (ayni-spec D96 to D99, D101; TOOL-CAT, TOOL-AVAIL) ---------------------------------------
 
-/** Whose account a source's calls run with (D97, TOOL-CAT-002). `personal` and `organization` are refused (phases 2, 3). */
-export type AccountKind = 'none' | 'agent' | 'space'
-/** The kinds of account reserved for the later phases of the tools (O28, O29): an agent-pack that names one is refused. */
-export const RESERVED_ACCOUNT_KINDS = ['personal', 'organization'] as const
+/**
+ * Whose account a source's calls run with (D97, D104, TOOL-CAT-002): none, the agent's, the space's, or the person's own.
+ * `organization` is refused (phase 3).
+ */
+export type AccountKind = 'none' | 'agent' | 'space' | 'personal'
+/** The kinds of account reserved for the later phases of the tools (O29): an agent-pack that names one is refused. */
+export const RESERVED_ACCOUNT_KINDS = ['organization'] as const
 /** Where a source is available (D96, TOOL-AVAIL-001). */
 export type Availability = 'agent' | 'personal' | 'spaces'
 /** What a tool does (D99, TOOL-CAT-006): it gives its default rule. */
@@ -356,7 +359,7 @@ export type SpaceCallRule = CallRule | 'off'
 /** The type of a source of `tools.sources` (D101, TOOL-CAT-001). */
 export type SourceType = 'mcp' | 'http' | 'bundled'
 
-export const ACCOUNT_KINDS: readonly AccountKind[] = ['none', 'agent', 'space']
+export const ACCOUNT_KINDS: readonly AccountKind[] = ['none', 'agent', 'space', 'personal']
 export const AVAILABILITIES: readonly Availability[] = ['agent', 'personal', 'spaces']
 export const TOOL_EFFECTS: readonly ToolEffect[] = ['read', 'write', 'delete', 'external']
 export const CALL_RULES: readonly CallRule[] = ['none', 'confirm', 'approval']
@@ -376,6 +379,8 @@ export const BUNDLED_TOOLS = {
   credentialIssuance: ['credential_requirements', 'issue_credential'],
   principalPreferences: ['principal_preferences'],
   workingMemory: ['working_memory'],
+  /** the Connect card of a person's own account (D108, TOOL-CONN-011): given only while one is to connect */
+  connections: ['offer_connection'],
 } as const satisfies Record<string, readonly string[]>
 export type BundledName = keyof typeof BUNDLED_TOOLS
 export const BUNDLED_NAMES = Object.keys(BUNDLED_TOOLS) as BundledName[]
@@ -386,6 +391,7 @@ export const BUNDLED_ON_BY_DEFAULT: readonly BundledName[] = [
   'credentialIssuance',
   'principalPreferences',
   'workingMemory',
+  'connections',
 ]
 
 /** The name of a field of a space's account (D102): a lower-case letter, then lower-case letters, digits or `_`. */
@@ -407,16 +413,64 @@ export interface AccountHeader {
   value: string
 }
 
+/** How the agent obtains its client at the authorization server of a person's own account (D105, TOOL-CAT-014). */
+export type ClientRegistration = 'metadata-document' | 'pre-registered' | 'dynamic'
+export const CLIENT_REGISTRATIONS: readonly ClientRegistration[] = ['metadata-document', 'pre-registered', 'dynamic']
+
+/** The OAuth of a person's own account of an MCP server (D105, TOOL-CAT-014). */
+export interface AccountOAuth {
+  client: {
+    registration: ClientRegistration
+    /** `pre-registered`: the issuer identifier of the authorization server the client was registered with */
+    issuer?: string
+    /** `pre-registered`: the client's id, from the deployment's secrets */
+    id?: string
+    /** `pre-registered`: the client's secret, from the deployment's secrets */
+    secret?: string
+  }
+  /** the scopes asked; `[]` asks none; absent, the agent takes MCP's choice (TOOL-OAUTH-005) */
+  scopes?: string[]
+  /**
+   * how the sign-in asks the service for the value of the account's binding (D110, layer a): a parameter of the
+   * authorization request, or a `resource` in which `{value}` stands for it
+   */
+  bindingRequest?: { parameter?: string; resource?: string }
+}
+
+/** The read the agent makes once after each connection of a person's own account (D110, TOOL-CAT-017). */
+export interface AccountCheck {
+  /** a tool the source offers, of effect `read`, called with no argument */
+  tool: string
+  /** JSON pointers into its result: the value of the account's binding and its name */
+  binding?: { value: string; label?: string }
+  /** a JSON pointer to the account's email, compared with the person's entry of the directory */
+  email?: string
+  /** a text naming the account, in which `{/pointer}` stands for the value at that pointer */
+  label?: string
+}
+
 /**
  * The account of a source (TOOL-CAT-002). A `space` account declares the fields its owner fills, in the order the
- * settings show them, and the headers each call carries, built from their values at the call (D102).
+ * settings show them, and the headers each call carries, built from their values at the call (D102). A `personal`
+ * account (D104, TOOL-CAT-013) declares one of `oauth`, `fields` and `apply`, or `from`, and may declare `check`,
+ * `binding` and `tokenPatterns`.
  */
 export interface SourceAccount {
   kind: AccountKind
-  /** a `space` account: the fields its owner fills, one or more; every field is a secret */
+  /** a `space` or `personal` account: the fields its owner, or the person, fills, one or more; every field is a secret */
   fields?: AccountField[]
-  /** a `space` account: the headers of each call, one or more; each field is named by at least one */
+  /** a `space` or `personal` account: the headers of each call, one or more; each field is named by at least one */
   apply?: AccountHeader[]
+  /** a `personal` account of an MCP server: OAuth as MCP defines it (D105) */
+  oauth?: AccountOAuth
+  /** a `personal` account: the id of another source whose account it uses, at the same URL (TOOL-CAT-015) */
+  from?: string
+  /** a `personal` account: the binding whose value each account is for (D110, TOOL-CAT-017) */
+  binding?: string
+  /** a `personal` account: the read after each connection (D110, TOOL-CAT-017) */
+  check?: AccountCheck
+  /** a `space` or `personal` account: the forms of its credentials in a text (D109, TOOL-CAT-016) */
+  tokenPatterns?: string[]
 }
 
 /**

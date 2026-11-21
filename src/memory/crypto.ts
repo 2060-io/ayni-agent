@@ -63,3 +63,24 @@ export function sealJson(crypto: EntryCrypto, wrappedKey: string, value: unknown
 export function openJson<T>(crypto: EntryCrypto, wrappedKey: string, cipher: Buffer): T {
   return JSON.parse(crypto.decrypt(wrappedKey, cipher).toString('utf8')) as T
 }
+
+/**
+ * A key of its own under another key (D106, PRIV-ERASE-013): each person's key, wrapped by the master key, wraps the key of
+ * each of their accounts. The account's key is 32 random bytes sealed under the person's key; destroying the person's
+ * key makes every key it wraps, and so every account of theirs, unreadable at once, with or without the master key.
+ */
+export function newKeyUnder(crypto: EntryCrypto, parentWrapped: string): string {
+  return crypto.encrypt(parentWrapped, randomBytes(32)).toString('base64')
+}
+
+/** Seals a value under a key wrapped by another key (D106): the person's key opens the account's, which seals the value. */
+export function sealUnder(crypto: EntryCrypto, parentWrapped: string, childWrapped: string, value: unknown): Buffer {
+  const key = crypto.decrypt(parentWrapped, Buffer.from(childWrapped, 'base64'))
+  return seal(key, Buffer.from(JSON.stringify(value), 'utf8'))
+}
+
+/** Opens what `sealUnder` sealed: throws when either key is gone or wrong. */
+export function openUnder<T>(crypto: EntryCrypto, parentWrapped: string, childWrapped: string, cipher: Buffer): T {
+  const key = crypto.decrypt(parentWrapped, Buffer.from(childWrapped, 'base64'))
+  return JSON.parse(open(key, cipher).toString('utf8')) as T
+}
