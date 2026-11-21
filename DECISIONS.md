@@ -1693,10 +1693,10 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       `ApprovalResendResponse`), `notificationsWaiting` on `SpaceInfo`, `decidedBy` on the card, `RUN_ERROR_CODE`
       `decide-on-phone` and `not-eligible`, `not-pending`, the link parameter `approval` and `notificationsLink`;
       `CUSTOM_EVENT.approvalRequest` removed.
-    - **Depends on:** the VS Agent plugin answers 400 to an `open` body with `link` (its pipe forbids unknown fields), so
-      until `@ayni.org/vs-agent-plugin-ayni-flow` takes `link` and `io2060/vs-agent-ayni` is released with it, no approval
-      reaches a phone: deploy that image first. `2060-io/credo-ts-ayni-flow` PR #33 carries `link` in the `open` and both
-      records, for the app.
+    - **Depends on:** the VS Agent plugin 0.1.7 answers 400 to an `open` body with `link` (its pipe forbids unknown
+      fields), so with it no approval reaches a phone. `2060-io/credo-ts-ayni-flow` PR #33 carries `link` in the `open`,
+      both records and the plugin's route (0.1.8 of the linked packages): release it, rebuild `io2060/vs-agent-ayni` with
+      it and bump the devnet VS Agents before this agent is deployed.
     - **Tests:** `tests/approvalsOnce.test.ts` (11): the devnet incident (an owner with five sessions in four
       conversations gets one phone request and one item, no card or entry anywhere, one event per session; the requester
       one card on both devices of the asking conversation and none in her other; decided on the phone, the request closes,
