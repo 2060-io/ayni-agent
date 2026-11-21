@@ -5,12 +5,14 @@
  * PROF-TOOL-001..013, PROF-SESS-016, PROF-DESC-009.
  */
 import { ACTIVITY, CUSTOM_EVENT } from '@ayni.org/ayni-agui-profile'
+import pino from 'pino'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import type { RunningAgent } from '../src/app.js'
+import { buildAgent, type RunningAgent } from '../src/app.js'
 import { personalSpaceId } from '../src/core/spaces.js'
 import type { ApprovalRecord, MessageEntry, Principal } from '../src/core/types.js'
+import { createEntryCrypto, openJson, sealJson } from '../src/memory/crypto.js'
 import type { McpServerSource } from '../src/tools/mcp.js'
-import { parseSse, startTestAgent } from './helpers.js'
+import { parseSse, startTestAgent, testEnv } from './helpers.js'
 import {
   crmTools,
   type Doc,
@@ -25,6 +27,7 @@ import {
   searchTools,
   toolsPack,
   until,
+  X_ACCOUNT_FIELDS,
 } from './toolFixtures.js'
 
 const CRM_TOKEN = 'crmToken|0000000000000001'
@@ -38,6 +41,10 @@ let search: FakeMcp
 let x: FakeHttp
 let model: ScriptedModel
 let ph: Phone
+/** What the agent logs, at debug, over this whole file: no value of an account may be in it (TOOL-ACCESS-005). */
+const logLines: string[] = []
+/** The master key of the test agent (`testEnv`), to seal what an earlier version stored. */
+const crypto = createEntryCrypto(Buffer.alloc(32, 7))
 
 interface Device {
   sessionId: string
@@ -253,7 +260,8 @@ beforeAll(async () => {
   search = await fakeMcpServer(searchTools())
   x = await fakeHttpTool()
   const pack = toolsPack({ crmUrl: crm.url, searchUrl: search.url, xUrl: x.url })
-  running = await startTestAgent({ agentPackPath: pack })
+  const logger = pino({ level: 'debug' }, { write: (line: string) => void logLines.push(line) })
+  running = await buildAgent(testEnv({ agentPackPath: pack, logLevel: 'debug' }), logger, { drainMs: 200 })
   mintLocally(running)
   ph = phone(running)
   model = scripted(running)
@@ -303,8 +311,7 @@ describe('the tools of a space (TOOL-SPACE-001..010, PROF-TOOL-001..006, TOOL-AC
       guests: false,
       account: {
         kind: 'space',
-        label: 'API token',
-        pattern: '^[A-Za-z0-9|]{20,200}$',
+        fields: [{ name: 'token', label: 'API token', pattern: '^[A-Za-z0-9|]{20,200}$' }],
         set: false,
         setAt: null,
         setBy: null,
@@ -440,22 +447,23 @@ describe('the tools of a space (TOOL-SPACE-001..010, PROF-TOOL-001..006, TOOL-AC
 
   it('takes the account through the settings only, sealed, used once the phone confirms; a declined one is kept nowhere (TOOL-SPACE-005, TOOL-ACCESS-003/004/006)', async () => {
     const url = `/spaces/${salesEu.id}/tools/relaticle/account`
-    const bad = await call(jonas, 'PUT', url, { token: 'a token with a space in it' })
-    expect(bad).toMatchObject({ status: 422, body: { error: 'bad-token' } })
-    expect((await call(jonas, 'PUT', url, { token: '' })).body.error).toBe('bad-token')
-    expect((await call(jonas, 'PUT', url, { token: `${'A'.repeat(4097)}` })).body.error).toBe('bad-token')
+    const bad = await call(jonas, 'PUT', url, { values: { token: 'a token with a space in it' } })
+    expect(bad).toMatchObject({ status: 422, body: { error: 'bad-token', field: 'account.token' } })
+    expect((await call(jonas, 'PUT', url, { values: { token: '' } })).body.error).toBe('bad-token')
+    expect((await call(jonas, 'PUT', url, { values: { token: `${'A'.repeat(4097)}` } })).body.error).toBe('bad-token')
     expect(JSON.stringify(await running.agent.store.spaceTools.listAll())).not.toContain('a token with a space')
     expect(await running.agent.store.spaceAccounts.listAll()).toEqual([])
     // a source whose account is not the space's
     expect((await call(jonas, 'POST', `/spaces/${salesEu.id}/tools`, { source: 'crm_status' })).status).toBe(202)
     await ph.confirm(jonas.connectionId, true)
     expect(
-      (await call(jonas, 'PUT', `/spaces/${salesEu.id}/tools/crm_status/account`, { token: CRM_TOKEN })).body
+      (await call(jonas, 'PUT', `/spaces/${salesEu.id}/tools/crm_status/account`, { values: { token: CRM_TOKEN } }))
+        .body
     ).toMatchObject({
       error: 'no-space-account',
     })
     // declined: dropped, its token destroyed
-    const set = await call(jonas, 'PUT', url, { token: CRM_TOKEN })
+    const set = await call(jonas, 'PUT', url, { values: { token: CRM_TOKEN } })
     expect(set.status).toBe(202)
     expect(set.body.tool.account.set).toBe(false)
     expect(JSON.stringify(set.body)).not.toContain(CRM_TOKEN)
@@ -470,7 +478,7 @@ describe('the tools of a space (TOOL-SPACE-001..010, PROF-TOOL-001..006, TOOL-AC
     expect(await running.agent.store.spaceAccounts.listAll()).toEqual([])
     expect(JSON.stringify(await running.agent.store.spaceTools.listAll())).not.toContain('crmToken')
     // confirmed: ready, set by Jonas, and no character of it anywhere a client reads
-    await confirmed(jonas, () => call(jonas, 'PUT', url, { token: CRM_TOKEN }))
+    await confirmed(jonas, () => call(jonas, 'PUT', url, { values: { token: CRM_TOKEN } }))
     const ready = await call(jonas, 'GET', `/spaces/${salesEu.id}/tools`)
     expect(ready.body.tools[0]).toMatchObject({
       state: 'ready',
@@ -512,7 +520,9 @@ describe('the tools of a space (TOOL-SPACE-001..010, PROF-TOOL-001..006, TOOL-AC
   it('refuses a granting change with no phone to confirm it, and changes nothing (TOOL-SPACE-008)', async () => {
     const principal = (await running.agent.principals.get(jonas.principal.id)) as Principal
     await running.agent.principals.save({ ...principal, capabilityChannelId: null })
-    const refused = await call(jonas, 'PUT', `/spaces/${salesEu.id}/tools/relaticle/account`, { token: CRM_TOKEN_2 })
+    const refused = await call(jonas, 'PUT', `/spaces/${salesEu.id}/tools/relaticle/account`, {
+      values: { token: CRM_TOKEN_2 },
+    })
     expect(refused).toMatchObject({ status: 409, body: { error: 'confirmation-unavailable' } })
     await running.agent.principals.save(principal)
     expect((await call(jonas, 'GET', `/spaces/${salesEu.id}/tools`)).body.tools[0].pending).toBeNull()
@@ -568,7 +578,8 @@ describe('the tools a turn gives the model (RBAC-FILTER-004, TOOL-AVAIL-001/004/
     model.script = [{ calls: [{ name: 'echo-auth', arguments: {} }] }, { text: 'ok' }]
     await run(anaSales, 'who am I')
     expect(crm.calls.at(-1)?.authorization).toBe(`Bearer ${CRM_TOKEN}`)
-    expect(toolAnswers().at(-1)).toBe('you called with Bearer [account]')
+    // the header built from the token goes whole, as the token alone would (D102)
+    expect(toolAnswers().at(-1)).toBe('you called with [account]')
     const conversation = await conversationOf(anaSales.sessionId)
     const stored = JSON.stringify(await entries(conversation))
     expect(stored).toContain('[account]')
@@ -587,7 +598,9 @@ describe('the tools a turn gives the model (RBAC-FILTER-004, TOOL-AVAIL-001/004/
     await confirmed(jonas, () =>
       call(jonas, 'PATCH', `/spaces/${us}/tools/relaticle`, { bindings: { workspace: 'sales-us' } })
     )
-    await confirmed(jonas, () => call(jonas, 'PUT', `/spaces/${us}/tools/relaticle/account`, { token: CRM_TOKEN_2 }))
+    await confirmed(jonas, () =>
+      call(jonas, 'PUT', `/spaces/${us}/tools/relaticle/account`, { values: { token: CRM_TOKEN_2 } })
+    )
     const jonasUs = await open(jonas, { spaceId: us })
     model.script = [{ calls: [{ name: 'list-companies', arguments: {} }] }, { text: 'ok' }]
     await run(jonasUs, 'list')
@@ -832,7 +845,7 @@ describe('the confirmation of a call (TOOL-CALL-003..008, PROF-TOOL-007/008/012,
     await third
     // the owner replaces the account: the allowance ends
     await confirmed(jonas, () =>
-      call(jonas, 'PUT', `/spaces/${salesEu.id}/tools/relaticle/account`, { token: CRM_TOKEN_3 })
+      call(jonas, 'PUT', `/spaces/${salesEu.id}/tools/relaticle/account`, { values: { token: CRM_TOKEN_3 } })
     )
     await until(async () => !!(await running.agent.store.toolAllowances.get(again.id))?.endedAt)
     model.script = [
@@ -983,7 +996,9 @@ describe('the rules of the owner, and the approval of a tool of a space (TOOL-SP
     expect((await call(jonas, 'POST', `/spaces/${comms.id}/tools`, { source: 'post_to_x' })).body).toMatchObject({
       error: 'already-added',
     })
-    await confirmed(jonas, () => call(jonas, 'PUT', `/spaces/${comms.id}/tools/post_to_x/account`, { token: X_TOKEN }))
+    await confirmed(jonas, () =>
+      call(jonas, 'PUT', `/spaces/${comms.id}/tools/post_to_x/account`, { values: { token: X_TOKEN } })
+    )
     expect((await call(jonas, 'GET', `/spaces/${comms.id}/tools`)).body.tools[0]).toMatchObject({ state: 'ready' })
     const activity = (await call(jonas, 'GET', `/spaces/${comms.id}/activity`)).body.activity.map(
       (a: { kind: string }) => a.kind
@@ -1233,11 +1248,15 @@ describe('the life of the tools of a space (TOOL-SPACE-007/011, TOOL-CALL-001)',
     await confirmed(jonas, () =>
       call(jonas, 'PATCH', `/spaces/${us}/tools/relaticle`, { bindings: { workspace: 'apac' } })
     )
-    await confirmed(jonas, () => call(jonas, 'PUT', `/spaces/${us}/tools/relaticle/account`, { token: CRM_TOKEN_2 }))
+    await confirmed(jonas, () =>
+      call(jonas, 'PUT', `/spaces/${us}/tools/relaticle/account`, { values: { token: CRM_TOKEN_2 } })
+    )
     const cleared = await call(jonas, 'DELETE', `/spaces/${us}/tools/relaticle/account`)
     expect(cleared).toMatchObject({ status: 200, body: { tool: { state: 'setup', account: { set: false } } } })
     expect(await running.agent.store.spaceAccounts.get(us, 'relaticle')).toBeUndefined()
-    await confirmed(jonas, () => call(jonas, 'PUT', `/spaces/${us}/tools/relaticle/account`, { token: CRM_TOKEN_2 }))
+    await confirmed(jonas, () =>
+      call(jonas, 'PUT', `/spaces/${us}/tools/relaticle/account`, { values: { token: CRM_TOKEN_2 } })
+    )
     const removed = await call(jonas, 'DELETE', `/spaces/${us}/tools/relaticle`)
     expect(removed.body.tool).toMatchObject({ state: 'off', account: { set: false } })
     expect(removed.body.tool.bindings[0].value).toBeNull()
@@ -1276,7 +1295,7 @@ describe('the life of the tools of a space (TOOL-SPACE-007/011, TOOL-CALL-001)',
       call(jonas, 'PATCH', `/spaces/${team.id}/tools/relaticle`, { bindings: { workspace: 'latam' } })
     )
     await confirmed(jonas, () =>
-      call(jonas, 'PUT', `/spaces/${team.id}/tools/relaticle/account`, { token: CRM_TOKEN_2 })
+      call(jonas, 'PUT', `/spaces/${team.id}/tools/relaticle/account`, { values: { token: CRM_TOKEN_2 } })
     )
     await addMember(team.id, ana.principal.id)
     expect(
@@ -1346,6 +1365,182 @@ describe('approvals of the whole agent (TOOL-CAT-009, INTX-APPR-005)', () => {
     model.script = [{ calls: [{ name: 'purge', arguments: {} }] }, { text: 'ok' }]
     await run(manager, 'purge')
     expect(x.requests.length).toBe(before + 1)
+  })
+})
+
+describe("a space's account in named fields (D102, TOOL-SPACE-005, TOOL-ACCESS-004..006, PROF-TOOL-001/004)", () => {
+  // the four keys of an X account
+  const keys = {
+    api_key: 'xKey000000001',
+    api_secret: 'xSecret00000000000000000001',
+    access_token: '987654-xAccess0000000001',
+    access_token_secret: 'xTokenSecret000000000000001',
+  }
+  const joined = `${keys.api_key}:${keys.api_secret}:${keys.access_token}:${keys.access_token_secret}`
+  /** what the owner sent and the agent refused: kept nowhere, logged nowhere */
+  const refusedValues = ['xKey00 0000001', '987654xAccess0000000001', 'xSecret0000']
+  let desk: { id: string }
+  let url: string
+  const xTool = async () =>
+    (await call(jonas, 'GET', `/spaces/${desk.id}/tools`)).body.tools.find(
+      (t: { source: string }) => t.source === 'x_mentions'
+    )
+
+  it('shows the owner the fields of the account in the order of the agent-pack, and no value (PROF-TOOL-001)', async () => {
+    desk = (await call(jonas, 'POST', '/spaces', { templateId: 'comms', title: 'X desk', purpose: 'Mentions' })).body
+    await confirmed(jonas, () => call(jonas, 'POST', `/spaces/${desk.id}/tools`, { source: 'x_mentions' }))
+    url = `/spaces/${desk.id}/tools/x_mentions/account`
+    const tool = await xTool()
+    expect(tool).toMatchObject({ state: 'setup', account: { kind: 'space', set: false, setAt: null, setBy: null } })
+    expect(tool.account.fields).toEqual(X_ACCOUNT_FIELDS)
+    expect(Object.keys(tool.account)).not.toContain('label')
+    expect(Object.keys(tool.account)).not.toContain('pattern')
+  })
+
+  it('answers 400 at the field for a field missing or a name the account does not declare, and for the former body', async () => {
+    const { api_secret: _left, ...three } = keys
+    expect(await call(jonas, 'PUT', url, { values: three })).toMatchObject({
+      status: 400,
+      body: { error: 'bad-request', field: 'account.api_secret' },
+    })
+    expect(await call(jonas, 'PUT', url, { values: { ...keys, api_kye: 'xKey000000002' } })).toMatchObject({
+      status: 400,
+      body: { error: 'bad-request', field: 'account.api_kye' },
+    })
+    // the single token of the former form
+    expect(await call(jonas, 'PUT', url, { token: joined })).toMatchObject({
+      status: 400,
+      body: { error: 'bad-request', field: 'values' },
+    })
+    expect(await call(jonas, 'PUT', url, { values: [joined] })).toMatchObject({
+      status: 400,
+      body: { field: 'values' },
+    })
+  })
+
+  it('answers 422 bad-token at the field for a value off its pattern, or with a line break, a space or a control character inside', async () => {
+    const refusedAt = async (values: Record<string, unknown>) => {
+      const answer = await call(jonas, 'PUT', url, { values })
+      expect(answer).toMatchObject({ status: 422, body: { error: 'bad-token' } })
+      for (const value of [...Object.values(keys), ...refusedValues])
+        expect(JSON.stringify(answer.body)).not.toContain(value)
+      return answer.body.field
+    }
+    // the access token without its dash
+    expect(await refusedAt({ ...keys, access_token: '987654xAccess0000000001' })).toBe('account.access_token')
+    // a line break or a space inside, whatever the pattern
+    expect(await refusedAt({ ...keys, api_secret: 'xSecret0000\r\n0000000000000001' })).toBe('account.api_secret')
+    expect(await refusedAt({ ...keys, api_secret: 'xSecret0000\n0000000000000001' })).toBe('account.api_secret')
+    expect(await refusedAt({ ...keys, api_key: 'xKey00 0000001' })).toBe('account.api_key')
+    expect(await refusedAt({ ...keys, access_token_secret: 'xTokenSecret\u00070000000000001' })).toBe(
+      'account.access_token_secret'
+    )
+    // empty once trimmed, too long, not a text
+    expect(await refusedAt({ ...keys, api_key: ' \n ' })).toBe('account.api_key')
+    expect(await refusedAt({ ...keys, api_key: 'A'.repeat(4097) })).toBe('account.api_key')
+    expect(await refusedAt({ ...keys, api_key: 7 })).toBe('account.api_key')
+    // the first refused, in the agent-pack's order
+    expect(await refusedAt({ ...keys, access_token_secret: 'short', api_key: 'short' })).toBe('account.api_key')
+    // nothing of them is kept, and nothing waits for the phone
+    expect(await running.agent.store.spaceAccounts.get(desk.id, 'x_mentions')).toBeUndefined()
+    expect((await xTool()).pending).toBeNull()
+    for (const value of refusedValues)
+      expect(JSON.stringify(await running.agent.store.spaceTools.listAll())).not.toContain(value)
+  })
+
+  it('takes each value trimmed of what a paste adds, and waits for the phone as before (TOOL-SPACE-005/008)', async () => {
+    const asked = ph.callsOf('sendConfirmRequest').length
+    // a space before the key, a line break after the access token
+    const set = await call(jonas, 'PUT', url, {
+      values: { ...keys, api_key: ` ${keys.api_key}`, access_token: `${keys.access_token}\n` },
+    })
+    expect(set.status).toBe(202)
+    // the confirmation on the device is the one of a single token: a code, the words of the change, no value
+    expect(set.body.tool.pending).toMatchObject({
+      summary: 'Set the account of X mentions in X desk',
+      code: expect.stringMatching(/^\d\d \d\d$/),
+    })
+    expect(set.body.tool.account.set).toBe(false)
+    await until(() => ph.callsOf('sendConfirmRequest').length > asked)
+    const request = JSON.stringify(ph.callsOf('sendConfirmRequest').at(-1)?.args)
+    expect(request).toContain('Set the account of X mentions in X desk')
+    expect(request).toContain(set.body.tool.pending.code)
+    for (const value of [...Object.values(keys), joined]) {
+      expect(JSON.stringify(set.body)).not.toContain(value)
+      expect(request).not.toContain(value)
+      expect(JSON.stringify(await running.agent.store.spaceTools.listAll())).not.toContain(value)
+    }
+    await ph.confirm(jonas.connectionId, true)
+    expect(await xTool()).toMatchObject({ state: 'ready', account: { set: true, setBy: { name: 'jonas' } } })
+    // one record: the four values sealed together, as trimmed, under one key; none in the clear
+    const stored = await running.agent.store.spaceAccounts.get(desk.id, 'x_mentions')
+    if (!stored) throw new Error('no account')
+    for (const value of Object.values(keys)) expect(JSON.stringify(stored)).not.toContain(value)
+    expect(openJson(crypto, stored.encKeyRef, Buffer.from(stored.cipher, 'base64'))).toEqual({ values: keys })
+  })
+
+  it('builds the header at the call from the four values, and scrubs an echo of the header and of each value (TOOL-ACCESS-005)', async () => {
+    const jonasDesk = await open(jonas, { spaceId: desk.id })
+    const before = x.requests.length
+    model.script = [{ calls: [{ name: 'x_mentions', arguments: {} }] }, { text: 'ok' }]
+    await run(jonasDesk, 'any mentions?')
+    const sent = x.requests.slice(before).find((r) => r.url === '/echo/mentions')
+    // four fields, one header, in the order its value names them
+    expect(sent?.headers['x-account']).toBe(joined)
+    const answer = toolAnswers().at(-1) ?? ''
+    expect(answer).toContain('"x-account":"[account]"')
+    expect(answer).toContain('"parts":["[account]","[account]","[account]","[account]"]')
+    const stored = JSON.stringify(await entries(await conversationOf(jonasDesk.sessionId)))
+    expect(stored).toContain('[account]')
+    const records = JSON.stringify(await running.agent.store.toolCalls.list({ limit: 1000 }))
+    for (const value of [...Object.values(keys), joined]) {
+      expect(answer).not.toContain(value)
+      expect(stored).not.toContain(value)
+      expect(JSON.stringify(model.requests)).not.toContain(value)
+      expect(records).not.toContain(value)
+    }
+  })
+
+  it('drops at start an account sealed in the former form, one token: its owner sets it again (D102)', async () => {
+    // what 0.27.0 sealed for a space's account: one token
+    const keyRef = crypto.newWrappedKey()
+    await running.agent.store.spaceAccounts.save({
+      spaceId: desk.id,
+      sourceId: 'x_mentions',
+      cipher: sealJson(crypto, keyRef, { token: joined }).cipher.toString('base64'),
+      encKeyRef: keyRef,
+      setAt: new Date().toISOString(),
+      setByPrincipalId: jonas.principal.id,
+    })
+    // until the next start, the call runs with no account rather than with a header of nothing
+    const jonasDesk = await open(jonas, { spaceId: desk.id })
+    const before = x.requests.length
+    model.script = [{ calls: [{ name: 'x_mentions', arguments: {} }] }, { text: 'ok' }]
+    await run(jonasDesk, 'mentions again')
+    expect(x.requests.slice(before).some((r) => r.url === '/echo/mentions')).toBe(false)
+    expect(toolAnswers().at(-1)).toContain('The account of this space is not set.')
+    // what the next start does with what is stored
+    await running.agent.spaceTools?.align()
+    expect(await running.agent.store.spaceAccounts.get(desk.id, 'x_mentions')).toBeUndefined()
+    expect(await xTool()).toMatchObject({ state: 'setup', account: { set: false } })
+    expect(
+      logLines.some((l) => l.includes('a space account that does not fit the fields of its source was dropped'))
+    ).toBe(true)
+  })
+
+  it('leaves no value of any account in the log, at debug, over every test of this file (TOOL-ACCESS-005)', () => {
+    const log = logLines.join('')
+    expect(log).toContain('a change of a space tool applied')
+    for (const value of [
+      ...Object.values(keys),
+      joined,
+      ...refusedValues,
+      CRM_TOKEN,
+      CRM_TOKEN_2,
+      CRM_TOKEN_3,
+      X_TOKEN,
+    ])
+      expect(log).not.toContain(value)
   })
 })
 

@@ -959,7 +959,10 @@ export const ERROR_STATUS = {
   'pinned-by-pack': 422,
   /** 3.4: a rule looser than the agent-pack's, with `field` (§3.10) */
   'looser-than-pack': 422,
-  /** 3.4: a token empty, longer than 4096 characters, or not matching the account's pattern (§3.10) */
+  /**
+   * 3.4: a value of a field of a space's account that, trimmed, is empty, longer than 4096 characters, has whitespace or a
+   * control character inside, or does not match its field's pattern, with `field: "account.<name>"` (§3.10, agent D102)
+   */
   'bad-token': 422,
 } as const
 
@@ -1340,7 +1343,8 @@ export const SPACE_TOOL_STATES: readonly SpaceToolState[] = ['available', 'setup
 /**
  * A source of a space, as `GET {sessions}/spaces/{id}/tools` gives it (PROF-TOOL-001). To the owner, every source the
  * template names, with every field; to another active member, the `ready` sources, without `add`, the bindings' `name`,
- * `setBy` and `pattern`, the tools' `name` and `packRule`, the account's status, and `pending`. No answer carries a token.
+ * `setBy` and `pattern`, the tools' `name` and `packRule`, the account's fields and status, and `pending`. No answer
+ * carries a value of an account.
  */
 export interface SpaceTool {
   source: string
@@ -1352,9 +1356,12 @@ export interface SpaceTool {
   guests: boolean
   account: {
     kind: AccountKind
-    /** the owner's, for a `space` account: what is asked, the pattern, whether it is set, when and by whom */
-    label?: string
-    pattern?: string
+    /**
+     * the owner's, for a `space` account: the fields to fill, one masked field each, in the agent-pack's order (agent
+     * D102); every field is a secret, and no answer carries its value
+     */
+    fields?: SpaceAccountField[]
+    /** the owner's, for a `space` account: whether it is set, when and by whom */
     set?: boolean
     setAt?: string | null
     setBy?: { name: string } | null
@@ -1397,9 +1404,24 @@ export interface SpaceToolPatch {
   calls?: Record<string, SpaceCallRule>
 }
 
-/** `PUT {sessions}/spaces/{id}/tools/{source}/account` (PROF-TOOL-004): answered `202 { tool }` with `pending`. */
+/** One field of a space's account, as its owner reads it (PROF-TOOL-001, agent D102). */
+export interface SpaceAccountField {
+  /** the key of its value in `SpaceAccountRequest.values`; a refusal names it as `account.<name>` */
+  name: string
+  /** what the owner is asked for ("API key") */
+  label: string
+  /** a regular expression its value must match, once trimmed */
+  pattern?: string
+}
+
+/**
+ * `PUT {sessions}/spaces/{id}/tools/{source}/account` (PROF-TOOL-004): one value for each field of the account and for
+ * no other, each trimmed of the whitespace at its ends; answered `202 { tool }` with `pending`, `400 bad-request` with
+ * `field: "account.<name>"` for a field missing or not declared, `422 bad-token` with `field: "account.<name>"` for a
+ * value the agent will not take.
+ */
 export interface SpaceAccountRequest {
-  token: string
+  values: Record<string, string>
 }
 
 export interface SpaceToolResponse {

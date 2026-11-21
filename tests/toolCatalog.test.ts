@@ -9,11 +9,20 @@ import { parse as parseYaml } from 'yaml'
 import { catalogWarnings, loadPack, PackError, validatePackDocument } from '../src/config/pack.js'
 import { DEFAULT_FEATURES } from '../src/config/packTypes.js'
 import { renderPromptAddon } from '../src/core/promptAddon.js'
-import { scrubToken, withoutPinned } from '../src/core/toolGate.js'
+import { withoutPinned } from '../src/core/toolGate.js'
+import { accountSecrets, buildAccountHeaders, scrubAccount } from '../src/tools/accountValues.js'
 import { effectFromAnnotations, ToolCatalog } from '../src/tools/catalog.js'
 import { McpServerSource } from '../src/tools/mcp.js'
 import type { Logger } from '../src/util/logger.js'
-import { crmTools, type Doc, type FakeMcp, fakeMcpServer, toolsPack } from './toolFixtures.js'
+import {
+  crmTools,
+  type Doc,
+  type FakeMcp,
+  fakeMcpServer,
+  toolsPack,
+  X_ACCOUNT_APPLY,
+  X_ACCOUNT_FIELDS,
+} from './toolFixtures.js'
 
 const env = { ...process.env, HOME_BACKING_IDENTITY: 'did:webvh:x:home' }
 const urls = { crmUrl: 'https://crm.example/mcp', searchUrl: 'https://search.example/mcp', xUrl: 'https://x.example' }
@@ -47,7 +56,7 @@ describe('the catalog in the agent-pack (CORE-PACK-001, TOOL-CAT-001/002)', () =
     })
     expect(catalog.source('relaticle')).toMatchObject({
       title: 'Relaticle CRM',
-      account: { kind: 'space', label: 'API token' },
+      account: { kind: 'space', fields: [{ name: 'token', label: 'API token' }] },
       availability: 'spaces',
     })
     // the defaults: an HTTP tool of the agent's account, everywhere; a bundled tool of none
@@ -58,7 +67,16 @@ describe('the catalog in the agent-pack (CORE-PACK-001, TOOL-CAT-001/002)', () =
       { source: 'relaticle', add: 'auto', guests: false },
       { source: 'crm_status', add: 'owner', guests: false },
     ])
-    expect(catalog.templateTools('comms')).toEqual([{ source: 'post_to_x', add: 'owner', guests: false }])
+    expect(catalog.templateTools('comms')).toEqual([
+      { source: 'post_to_x', add: 'owner', guests: false },
+      { source: 'x_mentions', add: 'owner', guests: false },
+    ])
+    // an account of four fields, in the agent-pack's order, sent in one header built from them (D102)
+    expect(catalog.source('x_mentions')?.account).toEqual({
+      kind: 'space',
+      fields: X_ACCOUNT_FIELDS,
+      apply: [{ header: 'X-Account', value: '{api_key}:{api_secret}:{access_token}:{access_token_secret}' }],
+    })
   })
 
   it('refuses an unknown value, naming the source and the field', () => {
@@ -87,8 +105,8 @@ describe('the catalog in the agent-pack (CORE-PACK-001, TOOL-CAT-001/002)', () =
     expect(refusal(doc((p) => (p.tools.sources.relaticle.account.apply = undefined)))).toContain(
       'tools.sources.relaticle.account.apply'
     )
-    expect(refusal(doc((p) => (p.tools.sources.relaticle.account.label = undefined)))).toContain(
-      'tools.sources.relaticle.account.label'
+    expect(refusal(doc((p) => (p.tools.sources.relaticle.account.fields = undefined)))).toContain(
+      'tools.sources.relaticle.account.fields'
     )
   })
 
@@ -216,11 +234,11 @@ describe('effect, rule and trust (TOOL-CAT-006/007/008)', () => {
   })
 
   it('replaces an echo of the account by [account] in a text and in data (TOOL-ACCESS-005)', () => {
-    expect(scrubToken('header Bearer abc|123 seen', 'abc|123')).toBe('header Bearer [account] seen')
-    expect(scrubToken({ auth: 'Bearer abc|123', n: 1 }, 'abc|123')).toEqual({ auth: 'Bearer [account]', n: 1 })
-    expect(scrubToken('nothing', undefined)).toBe('nothing')
+    expect(scrubAccount('header Bearer abc|123 seen', ['abc|123'])).toBe('header Bearer [account] seen')
+    expect(scrubAccount({ auth: 'Bearer abc|123', n: 1 }, ['abc|123'])).toEqual({ auth: 'Bearer [account]', n: 1 })
+    expect(scrubAccount('nothing', undefined)).toBe('nothing')
     // a token with characters JSON escapes is found in data too
-    expect(scrubToken({ auth: ['Bearer a"b\\c'] }, 'a"b\\c')).toEqual({ auth: ['Bearer [account]'] })
+    expect(scrubAccount({ auth: ['Bearer a"b\\c'] }, ['a"b\\c'])).toEqual({ auth: ['Bearer [account]'] })
   })
 
   it('tells the model that actions may ask, only when some tool can (TOOL-CALL-010)', () => {
@@ -246,6 +264,150 @@ describe('effect, rule and trust (TOOL-CAT-006/007/008)', () => {
     }
     expect(renderPromptAddon({ ...base, toolsMayAsk: true })).toContain('never in words in place of the card')
     expect(renderPromptAddon({ ...base, toolsMayAsk: false })).not.toContain('in place of the card')
+  })
+})
+
+describe("a space's account in named fields (D102, TOOL-CAT-002/012, TOOL-ACCESS-005)", () => {
+  const x = (account: Doc) => doc((p) => (p.tools.sources.x_mentions.account = account))
+
+  it('refuses the former form of an account before the schema, with the form that replaces it (TOOL-CAT-012)', () => {
+    const old = refusal(
+      doc((p) => {
+        p.tools.sources.relaticle.account = {
+          kind: 'space',
+          label: 'API token',
+          pattern: '^[A-Za-z0-9|]{20,200}$',
+          apply: { header: 'Authorization', prefix: 'Bearer ' },
+        }
+      })
+    )
+    expect(old).toContain('agent-pack declares a space account in the form that its fields replaced (D102)')
+    expect(old).toContain('tools.sources.relaticle.account.label is withdrawn')
+    expect(old).toContain('fields: [{ name: token, label: API token, pattern: "^[A-Za-z0-9|]{20,200}$" }]')
+    expect(old).toContain('tools.sources.relaticle.account.pattern is withdrawn')
+    expect(old).toContain('tools.sources.relaticle.account.apply as one header with its prefix is withdrawn')
+    expect(old).toContain('apply: [{ header: Authorization, value: "Bearer {token}" }]')
+    // in words, before the schema would name the keys
+    expect(old).not.toContain('schema validation')
+    // the header alone, as the X server of devnet took the four keys joined
+    const header = refusal(x({ kind: 'space', label: 'Keys of the X account', apply: { header: 'X-Account' } }))
+    expect(header).toContain('apply: [{ header: X-Account, value: "{token}" }]')
+  })
+
+  it('refuses a header that names a field the account lacks, and a field no header names (TOOL-CAT-002)', () => {
+    const lacks = refusal(
+      x({
+        kind: 'space',
+        fields: X_ACCOUNT_FIELDS,
+        apply: [{ header: 'X-Account', value: '{api_key}:{api_secrt}:{access_token}:{access_token_secret}' }],
+      })
+    )
+    expect(lacks).toContain(
+      'tools.sources.x_mentions.account.apply[0].value names {api_secrt}, which is not a field of the account'
+    )
+    expect(lacks).toContain('tools.sources.x_mentions.account.fields.api_secret: no header of account.apply names')
+    const unnamed = refusal(
+      x({
+        kind: 'space',
+        fields: X_ACCOUNT_FIELDS,
+        apply: [{ header: 'X-Account', value: '{api_key}:{api_secret}:{access_token}' }],
+      })
+    )
+    expect(unnamed).toContain(
+      'tools.sources.x_mentions.account.fields.access_token_secret: no header of account.apply names {access_token_secret}'
+    )
+  })
+
+  it('refuses two fields of one name, a header declared twice and a pattern that is not one (TOOL-CAT-002)', () => {
+    const twice = refusal(
+      x({
+        kind: 'space',
+        fields: [
+          { name: 'token', label: 'Token' },
+          { name: 'token', label: 'Token again', pattern: '[' },
+        ],
+        apply: [
+          { header: 'Authorization', value: 'Bearer {token}' },
+          { header: 'authorization', value: '{token}' },
+        ],
+      })
+    )
+    expect(twice).toContain("tools.sources.x_mentions.account.fields.token: a field's name is unique in its account")
+    expect(twice).toContain('tools.sources.x_mentions.account.fields.token.pattern is not a regular expression')
+    expect(twice).toContain('tools.sources.x_mentions.account.apply[1].header: authorization is declared twice')
+  })
+
+  it('refuses fields and apply on an account that is not a space, a space account without them, and wrong names (schema)', () => {
+    const agent = refusal(
+      doc((p) => {
+        p.tools.sources.lookup.account = {
+          kind: 'agent',
+          fields: [{ name: 'token', label: 'Token' }],
+          apply: [{ header: 'Authorization', value: 'Bearer {token}' }],
+        }
+      })
+    )
+    expect(agent).toContain('tools.sources.lookup.account: fields and apply belong to a space account only')
+    expect(refusal(x({ kind: 'space', apply: X_ACCOUNT_APPLY }))).toContain('tools.sources.x_mentions.account.fields')
+    expect(refusal(x({ kind: 'space', fields: X_ACCOUNT_FIELDS }))).toContain('tools.sources.x_mentions.account.apply')
+    // a name of lower-case letters, digits and _, starting with a letter
+    expect(
+      refusal(
+        x({
+          kind: 'space',
+          fields: [{ name: 'API-Key', label: 'API key' }],
+          apply: [{ header: 'X-Account', value: '{API-Key}' }],
+        })
+      )
+    ).toContain('/tools/sources/x_mentions/account/fields/0/name must match pattern')
+    // a header's value holds no line break: a header could be split in two
+    expect(
+      refusal(
+        x({
+          kind: 'space',
+          fields: [{ name: 'token', label: 'Token' }],
+          apply: [{ header: 'X-Account', value: '{token}\r\nX-Other: 1' }],
+        })
+      )
+    ).toContain('/tools/sources/x_mentions/account/apply/0/value must match pattern')
+  })
+
+  it('builds the headers of a call from the values of the fields, and scrubs an echo of each (TOOL-ACCESS-005)', () => {
+    const values = {
+      api_key: 'keyKey0001',
+      api_secret: 'secretSecretSecret0001',
+      access_token: '1234-tokenToken01',
+      access_token_secret: 'tokenSecretSecret0001',
+    }
+    // four fields, one header
+    const headers = buildAccountHeaders({ kind: 'space', fields: X_ACCOUNT_FIELDS, apply: X_ACCOUNT_APPLY }, values)
+    expect(headers).toEqual({
+      'X-Account': 'keyKey0001:secretSecretSecret0001:1234-tokenToken01:tokenSecretSecret0001',
+    })
+    // a single token, after Bearer
+    expect(
+      buildAccountHeaders(
+        {
+          kind: 'space',
+          fields: [{ name: 'token', label: 'API token' }],
+          apply: [{ header: 'Authorization', value: 'Bearer {token}' }],
+        },
+        { token: 'abc|123' }
+      )
+    ).toEqual({ Authorization: 'Bearer abc|123' })
+    // the header whole first, then each value alone
+    const secrets = accountSecrets(values, headers)
+    expect(secrets[0]).toBe(headers['X-Account'])
+    const echo = {
+      header: `X-Account: ${headers['X-Account']}`,
+      parts: Object.values(values),
+      [values.api_key]: 'a key named by the value',
+    }
+    expect(scrubAccount(echo, secrets)).toEqual({
+      header: 'X-Account: [account]',
+      parts: ['[account]', '[account]', '[account]', '[account]'],
+      '[account]': 'a key named by the value',
+    })
   })
 })
 
@@ -288,7 +450,7 @@ describe('the MCP client: the offer, one connection per space account (TOOL-CAT-
     await source.close()
   })
 
-  it('opens one connection per space account, sends each its own token, and closes them once idle', async () => {
+  it('opens one connection per space account, sends each its own headers, and closes them once idle', async () => {
     const { logger } = capture()
     const source = new McpServerSource(
       'crm',
@@ -296,7 +458,11 @@ describe('the MCP client: the offer, one connection per space account (TOOL-CAT-
         type: 'mcp',
         transport: 'streamable-http',
         url: crm.url,
-        account: { kind: 'space', label: 'API token', apply: { header: 'Authorization', prefix: 'Bearer ' } },
+        account: {
+          kind: 'space',
+          fields: [{ name: 'token', label: 'API token' }],
+          apply: [{ header: 'Authorization', value: 'Bearer {token}' }],
+        },
         availability: 'spaces',
       },
       logger,
@@ -304,8 +470,10 @@ describe('the MCP client: the offer, one connection per space account (TOOL-CAT-
     )
     // a source of space accounts lists nothing before a space's connection discovers it
     expect(await source.list()).toEqual([])
-    const a = { kind: 'space' as const, spaceId: 'spc_a', token: 'token-of-space-a-000000' }
-    const b = { kind: 'space' as const, spaceId: 'spc_b', token: 'token-of-space-b-000000' }
+    const tokenA = 'token-of-space-a-000000'
+    const tokenB = 'token-of-space-b-000000'
+    const a = { kind: 'space' as const, spaceId: 'spc_a', headers: { Authorization: `Bearer ${tokenA}` } }
+    const b = { kind: 'space' as const, spaceId: 'spc_b', headers: { Authorization: `Bearer ${tokenB}` } }
     await source.discover(a)
     const tool = (await source.list()).find((t) => t.rawName === 'list-companies')
     if (!tool) throw new Error('not discovered')
@@ -315,7 +483,7 @@ describe('the MCP client: the offer, one connection per space account (TOOL-CAT-
     await tool.invoke({ workspace_id: 'two' }, { ...(ctx as object), account: b } as never)
     expect(source.openAccounts).toBe(2)
     const calls = crm.calls.slice(before)
-    expect(calls.map((c) => c.authorization)).toEqual([`Bearer ${a.token}`, `Bearer ${b.token}`])
+    expect(calls.map((c) => c.authorization)).toEqual([`Bearer ${tokenA}`, `Bearer ${tokenB}`])
     // a call of a space without its account does not reach the server
     const refused = await tool.invoke({}, { ...(ctx as object), account: { kind: 'space', spaceId: 'spc_c' } } as never)
     expect(refused).toMatchObject({ isError: true })

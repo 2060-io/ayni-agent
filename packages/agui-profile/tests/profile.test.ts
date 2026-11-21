@@ -23,6 +23,8 @@ import {
   parseAppLink,
   SPACE_CALL_RULES,
   SPACE_TOOL_STATES,
+  type SpaceAccountRequest,
+  type SpaceTool,
   TOOL_EFFECTS,
 } from '../src/index.js'
 
@@ -70,6 +72,26 @@ describe('errors (§9, PROF-ERR-001)', () => {
     expect(ERROR_STATUS['email-unavailable']).toBe(503)
     expect(ERROR_CODES).not.toContain('conversation-started')
     expect(ERROR_CODES).not.toContain('left-space')
+  })
+})
+
+describe("a space's account in named fields (§3.10, PROF-TOOL-001/004, agent D102)", () => {
+  it('reads the fields of an account and sets it with one value per field', () => {
+    const account: SpaceTool['account'] = {
+      kind: 'space',
+      fields: [
+        { name: 'api_key', label: 'API key', pattern: '^[A-Za-z0-9]{10,64}$' },
+        { name: 'access_token', label: 'Access token' },
+      ],
+      set: false,
+      setAt: null,
+      setBy: null,
+    }
+    const request: SpaceAccountRequest = { values: { api_key: 'key', access_token: 'token' } }
+    expect(Object.keys(request.values)).toEqual(account.fields?.map((f) => f.name))
+    // a refusal names the field: 422 for a value, 400 for a field missing or unknown
+    expect(ERROR_STATUS['bad-token']).toBe(422)
+    expect(ERROR_STATUS['bad-request']).toBe(400)
   })
 })
 
