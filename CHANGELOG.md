@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.28.3](https://github.com/2060-io/ayni-agent/compare/v0.28.2...v0.28.3) (2026-11-21)
+
+
+### Bug Fixes
+
+* **agui:** every answer of the profile carries Cache-Control: no-store (PROF-ERR-003) ([#108](https://github.com/2060-io/ayni-agent/issues/108)) ([50001c6](https://github.com/2060-io/ayni-agent/commit/50001c616a270776e9e7ef4fa44ae7fb650bd8f6))
+
 ## [0.28.2](https://github.com/2060-io/ayni-agent/compare/v0.28.1...v0.28.2) (2026-11-21)
 
 
