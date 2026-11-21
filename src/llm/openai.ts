@@ -162,9 +162,18 @@ export class OpenAiChatModel implements ChatModel {
       throw new LlmError(error instanceof Error ? error.message : String(error), this.provider)
     }
     const pending = new Map<number, { id: string; name: string; args: string }>()
+    let started = false
     for await (const chunk of stream as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>) {
       const choice = chunk.choices?.[0]
-      const delta = choice?.delta
+      const delta = choice?.delta as
+        | (OpenAI.Chat.Completions.ChatCompletionChunk.Choice.Delta & { reasoning_content?: string })
+        | undefined
+      // the first token of the answer, its reasoning included (Kimi, DeepSeek: reasoning_content), or of a tool call,
+      // which arrives in pieces and is passed on whole (LLM-USAGE-004)
+      if (!started && (delta?.content || delta?.reasoning_content || delta?.tool_calls?.length)) {
+        started = true
+        yield { type: 'started' }
+      }
       if (delta?.content) yield { type: 'text', text: delta.content }
       for (const tc of delta?.tool_calls ?? []) {
         const slot = pending.get(tc.index) ?? { id: tc.id ?? `call_${tc.index}`, name: '', args: '' }
@@ -178,6 +187,7 @@ export class OpenAiChatModel implements ChatModel {
           yield { type: 'tool_call', call: { id: slot.id, name: slot.name, arguments: parseArguments(slot.args) } }
         }
         pending.clear()
+        yield { type: 'stop', reason: choice.finish_reason }
       }
       if (chunk.usage) yield usageOf(chunk.usage)
     }

@@ -225,7 +225,8 @@ describe('a turn measured (LLM-USAGE-002/003, PLAT-STATS-004, PROF-STREAM-007, P
     const d = await device('did:peer:tools')
     const conversationId = await conversationOfSession(d.sessionId)
     const before = lines.length
-    await run(d, 'note this /call working_memory {"action":"add","content":"likes green tea"}')
+    // a tool whose result the model reads (a reply that only saves a memory is one call, MEM-CTX-008)
+    await run(d, 'let me look /call principal_credentials {}')
     const reply = (await entries(conversationId)).filter((e) => e.role === 'agent' && e.sourceType === 'text').pop()
     const usage = reply?.payload?.usage as Record<string, number>
     expect(usage.calls).toBe(2)

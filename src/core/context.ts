@@ -4,6 +4,7 @@
  * conversation state kept for them (the window's first entry, the sealed summary, the scale, the context figure).
  */
 import type { AgentPack } from '../config/packTypes.js'
+import { callLogFields } from '../llm/timing.js'
 import type { ChatMessage, ChatModel, ToolDefinition } from '../llm/types.js'
 import { type EntryCrypto, openJson, sealJson } from '../memory/crypto.js'
 import type { MemoryService } from '../memory/service.js'
@@ -35,10 +36,10 @@ interface SummaryContent {
 export interface ContextInput {
   principal: Principal
   session: Session
-  /** persona, platform add-on, the Principal's block (MEM-CTX-001, parts 1 to 3) */
+  /** persona, platform add-on, who the person is (MEM-CTX-001, parts 1 to 3) */
   system: ChatMessage[]
   tools: ToolDefinition[]
-  /** what the turn answers, without what is retrieved for it */
+  /** what the turn answers, with what the agent keeps of the person and without what is retrieved for it (MEM-CTX-007) */
   userTurn: ChatMessage
   /** entries that are not the window's: the messages the turn answers, the ones that wait their turn */
   exclude: ReadonlySet<string>
@@ -65,7 +66,7 @@ const before = (a: EntryKey, b: EntryKey) =>
     ? Date.parse(a.initiatedAt) < Date.parse(b.initiatedAt)
     : a.id < b.id
 
-/** How the summary is told to the model: a record of the system, after the Principal's block (MEM-CTX-004). */
+/** How the summary is told to the model: a record of the system, after the system parts (MEM-CTX-004). */
 export function summaryRecord(summary: { text: string; count: number; from?: string; to?: string }): string {
   const span = summary.from && summary.to ? `, ${summary.from.slice(0, 10)} to ${summary.to.slice(0, 10)}` : ''
   return `[system record, written by the system, not by the person and not by you: summary of the earlier part of this conversation (${summary.count} messages${span}), which you no longer see:\n${summary.text}]`
@@ -273,6 +274,12 @@ export class ContextAssembler {
         maxOutputTokens: max,
         chunkTokens,
         signal: input.signal,
+        // one log line per call, whether it completes or not (LLM-USAGE-004)
+        onCall: (measure) =>
+          this.logger.info(
+            { conversationId, sessionId: session.id, purpose: 'summary', ...callLogFields(measure) },
+            'model call'
+          ),
       })
       const dims = {
         model: this.llm.id,
@@ -286,8 +293,8 @@ export class ContextAssembler {
       this.stats.emit('llm-cache-write', usage.cacheWriteTokens, dims)
       this.stats.emit('llm-output', usage.outputTokens, dims)
       this.logger.info(
-        { model: this.llm.id, conversationId, purpose: 'summary', summarized: entries.length, ...usage },
-        'model call'
+        { model: this.llm.id, conversationId, summarized: entries.length, ...usage },
+        'conversation summary made'
       )
       await this.memory.logShown(principal, session, entries)
       const content: SummaryContent = {

@@ -10,6 +10,46 @@ import {
   parseArguments,
 } from './types.js'
 
+/** The Converse messages of a request: the system parts joined, a tool's result in the user turn after the call. */
+export function toBedrockMessages(
+  messages: ChatMessage[],
+  multimodal: boolean
+): { system: string; messages: Message[] } {
+  const system = messages
+    .filter((m) => m.role === 'system')
+    .map((m) => (m.role === 'system' ? m.content : ''))
+    .join('\n\n')
+  const out: Message[] = []
+  for (const m of messages) {
+    if (m.role === 'system') continue
+    if (m.role === 'user') {
+      const content =
+        typeof m.content === 'string'
+          ? [{ text: m.content }]
+          : m.content
+              .filter((p) => multimodal || p.type === 'text')
+              .map((p) =>
+                p.type === 'text'
+                  ? { text: p.text }
+                  : { image: { format: p.mimeType.replace('image/', '') as 'png', source: { bytes: p.data } } }
+              )
+      out.push({ role: 'user', content })
+    } else if (m.role === 'assistant') {
+      const content: Message['content'] = []
+      if (m.content) content.push({ text: m.content })
+      for (const c of m.toolCalls ?? [])
+        content.push({ toolUse: { toolUseId: c.id, name: c.name, input: c.arguments as never } })
+      out.push({ role: 'assistant', content: content.length ? content : [{ text: '' }] })
+    } else {
+      const block = { toolResult: { toolUseId: m.toolCallId, content: [{ text: m.content }] } }
+      const last = out[out.length - 1]
+      if (last?.role === 'user' && last.content?.some((b) => 'toolResult' in b)) last.content.push(block)
+      else out.push({ role: 'user', content: [block] })
+    }
+  }
+  return { system, messages: out }
+}
+
 export class BedrockChatModel implements ChatModel {
   public readonly id: string
   public readonly multimodal: boolean
@@ -25,44 +65,8 @@ export class BedrockChatModel implements ChatModel {
     this.id = `bedrock/${config.model}`
   }
 
-  private toMessages(messages: ChatMessage[]): { system: string; messages: Message[] } {
-    const system = messages
-      .filter((m) => m.role === 'system')
-      .map((m) => (m.role === 'system' ? m.content : ''))
-      .join('\n\n')
-    const out: Message[] = []
-    for (const m of messages) {
-      if (m.role === 'system') continue
-      if (m.role === 'user') {
-        const content =
-          typeof m.content === 'string'
-            ? [{ text: m.content }]
-            : m.content
-                .filter((p) => this.multimodal || p.type === 'text')
-                .map((p) =>
-                  p.type === 'text'
-                    ? { text: p.text }
-                    : { image: { format: p.mimeType.replace('image/', '') as 'png', source: { bytes: p.data } } }
-                )
-        out.push({ role: 'user', content })
-      } else if (m.role === 'assistant') {
-        const content: Message['content'] = []
-        if (m.content) content.push({ text: m.content })
-        for (const c of m.toolCalls ?? [])
-          content.push({ toolUse: { toolUseId: c.id, name: c.name, input: c.arguments as never } })
-        out.push({ role: 'assistant', content: content.length ? content : [{ text: '' }] })
-      } else {
-        const block = { toolResult: { toolUseId: m.toolCallId, content: [{ text: m.content }] } }
-        const last = out[out.length - 1]
-        if (last?.role === 'user' && last.content?.some((b) => 'toolResult' in b)) last.content.push(block)
-        else out.push({ role: 'user', content: [block] })
-      }
-    }
-    return { system, messages: out }
-  }
-
   public async *stream(req: ChatRequest): AsyncIterable<ChatDelta> {
-    const { system, messages } = this.toMessages(req.messages)
+    const { system, messages } = toBedrockMessages(req.messages, this.multimodal)
     const tools: Tool[] | undefined = req.tools?.length
       ? req.tools.map((t) => ({
           toolSpec: {
@@ -83,7 +87,14 @@ export class BedrockChatModel implements ChatModel {
       { abortSignal: req.signal }
     )
     const pending = new Map<number, { id: string; name: string; args: string }>()
+    let started = false
     for await (const event of response.stream ?? []) {
+      // the first block of the answer, of text, of reasoning or of a tool call (LLM-USAGE-004)
+      if (!started && (event.contentBlockStart || event.contentBlockDelta)) {
+        started = true
+        yield { type: 'started' }
+      }
+      if (event.messageStop?.stopReason) yield { type: 'stop', reason: event.messageStop.stopReason }
       if (event.contentBlockStart?.start?.toolUse) {
         const idx = event.contentBlockStart.contentBlockIndex ?? 0
         pending.set(idx, {

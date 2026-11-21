@@ -5,6 +5,7 @@
  */
 import type { AgentPack } from '../config/packTypes.js'
 import { challengeTypesOf, featuresOf } from '../config/packTypes.js'
+import { type CallMeasure, callLogFields, measured } from '../llm/timing.js'
 import type { ChatDelta, ChatMessage, ChatModel, ContentPart, ToolCallRequest } from '../llm/types.js'
 import type { ObjectStore } from '../media/objectStore.js'
 import type { MemoryService, NewEntry, Recalled } from '../memory/service.js'
@@ -127,11 +128,45 @@ export function recallRecord(recalled: Recalled[]): string | undefined {
   return `[system record, written by the system, not by the person and not by you: earlier messages that may be relevant, already authorized:\n${lines.join('\n')}]`
 }
 
-/** The turn's message with what was retrieved for it before its words. */
-export function withRetrieved(turn: ChatMessage, record: string | undefined): ChatMessage {
-  if (!record || turn.role !== 'user') return turn
-  if (typeof turn.content === 'string') return { role: 'user', content: `${record}\n\n${turn.content}` }
-  return { role: 'user', content: [{ type: 'text', text: record }, ...turn.content] }
+/**
+ * The turn's message with the records of the system for it before its words, in their order: what the agent keeps of
+ * the person (MEM-CTX-007), then what was retrieved for it (MEM-RET-007). They ride on the last message of the request,
+ * after the history, so that a change of them changes the tail of the request only.
+ */
+export function withRecords(turn: ChatMessage, records: (string | undefined)[]): ChatMessage {
+  const present = records.filter((r): r is string => !!r)
+  if (!present.length || turn.role !== 'user') return turn
+  if (typeof turn.content === 'string') return { role: 'user', content: [...present, turn.content].join('\n\n') }
+  return { role: 'user', content: [...present.map((text) => ({ type: 'text' as const, text })), ...turn.content] }
+}
+
+/**
+ * What the agent keeps of the person, as the model reads it in the turn (MEM-CTX-007): every preference, which is
+ * global, and the notes of the space of the conversation; nothing when there is neither.
+ */
+export function keptRecord(
+  preferences: { key: string; value: string }[],
+  notes: { id: string; content: string; needsRevision?: boolean }[]
+): string | undefined {
+  const parts: string[] = []
+  if (preferences.length)
+    parts.push(`Preferences of the person: ${preferences.map((p) => `${p.key}=${p.value}`).join('; ')}`)
+  if (notes.length)
+    parts.push(
+      `Working memory notes:\n${notes.map((n) => `- [${n.id}]${n.needsRevision ? ' (needs revision)' : ''} ${n.content}`).join('\n')}`
+    )
+  if (!parts.length) return undefined
+  return `[system record, written by the system, not by the person and not by you: what you keep about the person, as it stands at this message:\n${parts.join('\n')}]`
+}
+
+/**
+ * A call that saves a memory or a preference and asks nothing back (MEM-CTX-008): a note added, changed or removed with
+ * `working_memory`, a preference set with `principal_preferences`. A read of the preferences is not one.
+ */
+export function isMemorySave(call: ToolCallRequest, tools: Pick<TurnTool, 'name' | 'spec'>[]): boolean {
+  const key = tools.find((t) => t.name === call.name)?.spec.key
+  if (key === 'bundled:working_memory') return true
+  return key === 'bundled:principal_preferences' && call.arguments?.action === 'set'
 }
 
 export class TurnCancelled extends Error {
@@ -240,41 +275,36 @@ export class Orchestrator {
   // ---- context assembly -----------------------------------------------------------------------
 
   /**
-   * Parts 1 to 3 of the request, and what of the person's memory they hold (MEM-SPACE-001): every preference, which is
-   * global, and the notes of the space of the conversation only.
+   * Parts 1 to 3 of the request (the persona, the platform add-on, who the person is), and what the agent keeps of the
+   * person (MEM-SPACE-001): every preference, which is global, and the notes of the space of the conversation only. What
+   * it keeps is not a system part: it is a record on the turn's message, after the history (MEM-CTX-007), so that a
+   * memory the agent adds or changes leaves the start of the next request as it was.
    */
   private async systemMessages(
     principal: Principal,
     session: Session,
     spaceId: string
-  ): Promise<{ messages: ChatMessage[]; used: UsedMemory }> {
+  ): Promise<{ messages: ChatMessage[]; kept: string | undefined; used: UsedMemory }> {
     const features = featuresOf(this.pack)
-    const parts: string[] = []
-    const used: UsedMemory = { memories: [], preferences: [] }
     const prefs = features.preferences ? await this.memory.preferences(principal, session) : []
-    if (prefs.length) parts.push(`Preferences of the person: ${prefs.map((p) => `${p.key}=${p.value}`).join('; ')}`)
-    used.preferences = prefs.map((p) => p.key)
-    if (features.workingMemory) {
-      const notes = await this.memory.notes(principal, session, spaceId)
-      if (notes.length)
-        parts.push(
-          `Working memory notes:\n${notes.map((n) => `- [${n.id}]${n.needsRevision ? ' (needs revision)' : ''} ${n.content}`).join('\n')}`
-        )
-      used.memories = notes.map((n) => n.id)
-    }
+    const notes = features.workingMemory ? await this.memory.notes(principal, session, spaceId) : []
+    const used: UsedMemory = { memories: notes.map((n) => n.id), preferences: prefs.map((p) => p.key) }
     // a person identified by a credential is named only when the pack lets the model read the name (D68)
     const name = nameForModel(this.pack, principal)
     const display = name ? `The person is ${name}` : 'The person is authenticated'
     const backing = principal.backingIdentity?.name
       ? `, backed by ${principal.backingIdentity.name} (${principal.backingRelation})`
       : ''
-    parts.push(`${display}${backing}. Roles: ${principal.roles.join(', ') || 'none'}. Channel: ${session.channelType}.`)
     return {
       messages: [
         { role: 'system', content: this.pack.persona.systemPrompt },
         { role: 'system', content: this.addon },
-        { role: 'system', content: parts.join('\n\n') },
+        {
+          role: 'system',
+          content: `${display}${backing}. Roles: ${principal.roles.join(', ') || 'none'}. Channel: ${session.channelType}.`,
+        },
       ],
+      kept: keptRecord(prefs, notes),
       used,
     }
   }
@@ -443,7 +473,7 @@ export class Orchestrator {
     // a space that does not allow this agent's model: no model call, no reply, no summary, no memory (SPACE-CONV-004)
     const refusal = await this.providerRefusal?.(session, principal, spaceId)
     if (refusal) return this.refuse(session, principal, inbounds, refusal, sink, context)
-    const { messages: system, used } = await this.systemMessages(principal, session, spaceId)
+    const { messages: system, kept, used } = await this.systemMessages(principal, session, spaceId)
     const grants = await this.approvals.activeGrants(principal.id)
     // the tools of the turn, taken once: they change only between turns (TOOL-AVAIL-006), in a fixed order, so that the
     // start of the request stays the same from one turn to the next (MEM-CTX-001)
@@ -456,13 +486,15 @@ export class Orchestrator {
       session,
       system,
       tools,
-      userTurn,
+      // what the agent keeps of the person rides on the turn's message, and counts in the budget with it (MEM-CTX-007)
+      userTurn: withRecords(userTurn, [kept]),
       exclude: new Set([...answered, ...notYet]),
       render: (entry) => this.entryToMessages(entry),
       retrievedReserve: features.semanticRecall ? topK * RECALLED_ITEM_TOKENS : 0,
       signal,
     })
-    // what is retrieved for this turn comes after the window, with the message it answers (MEM-CTX-001, MEM-RET-007)
+    // what the agent keeps of the person and what is retrieved for this turn come after the window, with the message
+    // they are for (MEM-CTX-001, MEM-CTX-007, MEM-RET-007)
     const recalled = features.semanticRecall
       ? await this.memory.recall(
           principal,
@@ -473,7 +505,7 @@ export class Orchestrator {
           spaceId
         )
       : []
-    const messages: ChatMessage[] = [...assembled.messages, withRetrieved(userTurn, recallRecord(recalled))]
+    const messages: ChatMessage[] = [...assembled.messages, withRecords(userTurn, [kept, recallRecord(recalled)])]
 
     /** the memories the turn changed: told as lines of the conversation once its reply is written (MEM-SPACE-005) */
     const changes: MemoryChange[] = []
@@ -589,8 +621,9 @@ export class Orchestrator {
         const calls: ToolCallRequest[] = []
         let roundText = ''
         const estimate = estimateRequestTokens(messages, tools)
+        const place = { conversationId, session, round, estimate: Math.ceil(estimate * assembled.factor) }
         let reported: Extract<ChatDelta, { type: 'usage' }> | undefined
-        for await (const delta of this.llm.stream({
+        const request = {
           messages,
           tools,
           temperature: this.pack.llm.temperature,
@@ -599,7 +632,9 @@ export class Orchestrator {
           ...(this.pack.llm.cache?.enabled
             ? { cacheKey: conversationId, cacheTtl: this.pack.llm.cache.ttl ?? '5m' }
             : {}),
-        })) {
+        }
+        // one log line per call, whether it completes, fails or is cancelled (LLM-USAGE-004)
+        for await (const delta of measured(this.llm, request, (measure) => this.logCall(measure, place))) {
           if (signal.aborted) throw new TurnCancelled()
           if (delta.type === 'text') {
             roundText += delta.text
@@ -607,30 +642,30 @@ export class Orchestrator {
           } else if (delta.type === 'tool_call') calls.push(delta.call)
           else if (delta.type === 'usage') reported = delta
         }
-        await this.account(usage, reported, {
-          conversationId,
-          session,
-          round,
-          estimate: Math.ceil(estimate * assembled.factor),
-        })
+        await this.account(usage, reported, place)
         if (round === 0 && reported) await this.context.calibrate(conversationId, reported.inputTokens, estimate)
         if (calls.length === 0) break
         messages.push({ role: 'assistant', content: roundText, toolCalls: calls })
         if (pausedAt === undefined) pausedAt = Date.now()
+        // the answer holds the reply and asks only to save memories or preferences: once they are saved the turn ends,
+        // with no model call to read that they were (MEM-CTX-008)
+        let closes = roundText.trim() !== '' && calls.every((call) => isMemorySave(call, turnTools))
         // one at a time, in the model's order: while a card waits no other call starts (TOOL-CALL-007)
         for (const call of calls) {
           if (signal.aborted) throw new TurnCancelled()
-          const result = await this.gateOf().execute(call, turnTools, toolState, {
+          const { content, outcome } = await this.gateOf().execute(call, turnTools, toolState, {
             session,
             principal,
             inbound,
             toolCtx,
             sink,
           })
-          messages.push({ role: 'tool', toolCallId: call.id, name: call.name, content: result })
+          messages.push({ role: 'tool', toolCallId: call.id, name: call.name, content })
+          // a save that did not run, or failed, is the model's to read: it may say so, or try again
+          if (outcome !== 'completed') closes = false
         }
         // the code takes the conversation over: no model call after it in this turn (INTX-AUTH-012)
-        if (ended) break
+        if (ended || closes) break
       }
     } catch (error) {
       if (error instanceof TurnCancelled || signal.aborted) cancelled = true
@@ -808,11 +843,32 @@ export class Orchestrator {
     if (changes.length && ahead > 0) await new Promise((resolve) => setTimeout(resolve, ahead))
   }
 
-  /** One model call: added to the turn, logged, counted (LLM-USAGE-001/002, PLAT-STATS-004). */
+  /**
+   * One model call, logged (LLM-USAGE-002, LLM-USAGE-004): where it was made, how long it took to its first token and to
+   * its end, what the provider counted and why it stopped. Never what it carried: no prompt, no reply, no tool's name or
+   * argument, nothing sealed.
+   */
+  private logCall(
+    measure: CallMeasure,
+    call: { conversationId: string; session: Session; round: number; estimate: number }
+  ): void {
+    this.logger.info(
+      {
+        conversationId: call.conversationId,
+        sessionId: call.session.id,
+        round: call.round,
+        ...callLogFields(measure),
+        estimatedTokens: call.estimate,
+      },
+      'model call'
+    )
+  }
+
+  /** One model call: added to the turn, counted (LLM-USAGE-001/002, PLAT-STATS-004). */
   private async account(
     usage: TurnUsage,
     reported: Extract<ChatDelta, { type: 'usage' }> | undefined,
-    call: { conversationId: string; session: Session; round: number; estimate: number }
+    call: { conversationId: string; session: Session }
   ): Promise<void> {
     const counts = {
       inputTokens: reported?.inputTokens ?? 0,
@@ -820,18 +876,6 @@ export class Orchestrator {
       cacheWriteTokens: reported?.cacheWriteTokens ?? 0,
       outputTokens: reported?.outputTokens ?? 0,
     }
-    this.logger.info(
-      {
-        model: this.llm.id,
-        conversationId: call.conversationId,
-        sessionId: call.session.id,
-        round: call.round,
-        ...counts,
-        estimatedTokens: call.estimate,
-        reported: !!reported,
-      },
-      'model call'
-    )
     if (!reported) return
     usage.calls++
     usage.inputTokens += counts.inputTokens
@@ -899,9 +943,9 @@ export class Orchestrator {
       signal: new AbortController().signal,
     }
     const call = { id: prefixedId('call'), name, arguments: args }
-    const result = await this.gateOf().execute(call, tools, state, { session, principal, toolCtx: ctx, sink })
+    const { content } = await this.gateOf().execute(call, tools, state, { session, principal, toolCtx: ctx, sink })
     await this.recordMemoryChanges(session, principal, changes, sink, { after: nowIso() })
-    return result
+    return content
   }
 }
 
