@@ -121,7 +121,7 @@ async function connect(
       state: 'completed',
       theirDid: options.theirDid ?? `did:peer:${connectionId}`,
       theirLabel: 'Ayni',
-      outOfBandId: null,
+      invitationId: null,
       metadata: {},
     })
   )
@@ -549,7 +549,7 @@ describe('a protocol learnt from its use (CHAN-PROF-007)', () => {
         state: 'completed',
         theirDid: `did:peer:${connectionId}`,
         theirLabel: 'Ayni',
-        outOfBandId: null,
+        invitationId: null,
         metadata: {},
       })
     )

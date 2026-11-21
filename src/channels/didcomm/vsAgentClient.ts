@@ -10,12 +10,15 @@ export interface VsAgentInfo {
   version: string
 }
 
-export interface OutOfBandInvitation {
-  outOfBandId: string
-  invitationId: string
+/**
+ * A standalone invitation record (`POST /v2/didcomm/invitations`, vs-agent#804). Its id is the id of the Out-of-Band
+ * record it wraps; a connection the invitation produces carries that id as `invitationId`, a handshake reuse names it
+ * as `outOfBandId` (CHAN-BIND-017).
+ */
+export interface InvitationRecordCreated {
+  id: string
   invitation: Record<string, unknown>
-  url: string
-  shortUrl?: string
+  shortUrl: string
 }
 
 export interface ConnectionRecord {
@@ -23,7 +26,8 @@ export interface ConnectionRecord {
   state: string
   theirDid?: string
   theirLabel?: string
-  outOfBandId: string | null
+  /** the invitation record that produced the connection, null for any other connection (vs-agent#804) */
+  invitationId: string | null
   parentConnectionId: string | null
   invitationDid?: string
   didcommVersion?: 'v1' | 'v2'
@@ -188,14 +192,14 @@ export class VsAgentClient {
     }
   }
 
-  public createOutOfBandInvitation(body: {
+  /** A standalone invitation record: the only invitation whose new connections the DIDComm agent names (vs-agent#804). */
+  public createInvitation(body: {
     goal?: string
     goalCode?: string
-    label?: string
-    imageUrl?: string
-    shortUrl?: boolean
-  }): Promise<OutOfBandInvitation> {
-    return this.request('POST', '/didcomm/out-of-band', body)
+    reusable?: boolean
+    didcommVersion?: 'v1' | 'v2'
+  }): Promise<InvitationRecordCreated> {
+    return this.request('POST', '/didcomm/invitations', body)
   }
 
   public getConnection(connectionId: string): Promise<ConnectionRecord> {

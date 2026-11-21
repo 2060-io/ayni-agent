@@ -125,7 +125,7 @@ async function connectFlowCapable(connectionId: string) {
       state: 'completed',
       theirDid: `did:peer:${connectionId}`,
       theirLabel: 'Ayni',
-      outOfBandId: null,
+      invitationId: null,
       metadata: {},
     })
   )
@@ -224,7 +224,7 @@ describe('wake-ups (D57, INTX-NOTIFY-001)', () => {
         id: connectionId,
         state: 'completed',
         theirDid: 'did:peer:conn-silent',
-        outOfBandId: null,
+        invitationId: null,
         metadata: {},
       })
     )
