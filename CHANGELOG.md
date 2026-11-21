@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.1](https://github.com/2060-io/ayni-agent/compare/v0.29.0...v0.29.1) (2026-11-21)
+
+
+### Performance Improvements
+
+* **prompt:** grants, cards and who the person is change only the end of the request; Anthropic and Bedrock report their cache counts ([#112](https://github.com/2060-io/ayni-agent/issues/112)) ([dd54dff](https://github.com/2060-io/ayni-agent/commit/dd54dffa2a93c86870b57debba504e5a90b18964))
+
 ## [0.29.0](https://github.com/2060-io/ayni-agent/compare/v0.28.3...v0.29.0) (2026-11-21)
 
 
