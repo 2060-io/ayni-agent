@@ -371,9 +371,6 @@ export async function buildAgent(
     stats,
     {
       onCredentialInvalid: (principal) => agentRef?.onCredentialInvalid(principal) ?? Promise.resolve(),
-      onApprovalPending: async (session, _principal, record, entry) => {
-        await router.deliver(session, { kind: 'approval', entry, approval: record })
-      },
     },
     logger,
     context
@@ -459,9 +456,8 @@ export async function buildAgent(
     },
   }
   gate.hooks = {
-    onApprovalPending: async (session, _principal, record, entry) => {
-      await router.deliver(session, { kind: 'approval', entry, approval: record })
-    },
+    // the arguments of an approval erased with its turn: its card and its items say so (INTX-APPR-015)
+    approvalErased: (record) => agentRef?.approvalErased(record) ?? Promise.resolve(),
     onCredentialInvalid: (principal) => agentRef?.onCredentialInvalid(principal) ?? Promise.resolve(),
     // a card is asked only of the sessions of a client of profile 3.4 or later (TOOL-CALL-005, PROF-SESS-016)
     cardSessions: async (conversationId) => {
@@ -541,6 +537,9 @@ export async function buildAgent(
   }
 
   aguiRoutes = new AgUiRoutes(agent, agui, streams, logger)
+  // a notification of a person entered, changed or ended: every bound session of theirs hears it (PROF-TOOL-025)
+  agent.notifications.announce = (principalId, value) =>
+    aguiRoutes?.announceNotifications(principalId, value) ?? Promise.resolve()
   // the admin interface (D78): erasure, legal hold, the auditor's reads; served by start() on the loopback
   const admin =
     env.adminPort === 0

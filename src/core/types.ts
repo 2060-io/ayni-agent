@@ -638,10 +638,20 @@ export interface ApprovalRecord {
   untrustedSources?: string[]
   /** the call record of the call it gates (TOOL-PROV-004) */
   callId?: string
-  /** the approval entry of the conversation that shows it as a card */
+  /**
+   * the one entry that draws its card: of the conversation where it was asked, the requester's; no other conversation
+   * holds one (D114, INTX-APPR-016)
+   */
   entryId?: string
-  /** the other entries that carry its card with the action: the approvers' (INTX-APPR-015) */
+  /** before D114, the cards written in the approvers' sessions and the requester's other ones; no longer written */
   cardEntryIds?: string[]
+  /**
+   * the approvers it was asked of when it was made (D114, INTX-APPR-017): their Notifications keep listing it, once it
+   * ended, as one they could decide while it waited
+   */
+  approverIds?: string[]
+  /** when it ended: decided, cancelled or expired; a past item of the Notifications is listed for a retention from it */
+  closedAt?: string
   /**
    * In the store only: the arguments and the action, sealed under a key of the record (INTX-APPR-014, D77); the approval
    * repository opens them, and erasing them destroys that key
@@ -751,7 +761,11 @@ export type CapabilityEvent =
       items: { id: string; label: string; description?: string }[]
     }
   | { kind: 'media'; entry: MessageEntry }
-  | { kind: 'approval'; entry: MessageEntry; approval: ApprovalRecord; update?: boolean }
+  /**
+   * an approval's card: the requester's, in the conversation where it was asked (`entry`, its card's entry, D114); on a
+   * DIDComm peer in chat mode, the question an approver answers from the contextual menu (no entry)
+   */
+  | { kind: 'approval'; entry?: MessageEntry; approval: ApprovalRecord; update?: boolean }
   | {
       kind: 'reaction'
       messageId: string

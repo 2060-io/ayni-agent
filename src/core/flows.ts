@@ -33,6 +33,8 @@ export interface FlowClient {
     origin: FlowOrigin
     expiresTime: string
     requires?: string[]
+    /** an app link the holder offers on the request's sheet, which navigates and never acts (FLOW-CORE-011) */
+    link?: string
   }): Promise<FlowRecordLike>
   closeFlow(
     flowId: string,
@@ -98,6 +100,8 @@ export interface FlowOpenOptions {
   expiresAt?: string
   expiresInMs?: number
   requires?: string[]
+  /** an app link to the place where the person reads more of the request (FLOW-CORE-011, PROF-LINK-005) */
+  link?: string
   /** what the flow serves on the agent's side (an approval, a challenge), persisted with the handle */
   ref?: FlowRef
 }
@@ -200,6 +204,7 @@ export class FlowService {
         origin: this.originOf(opts.origin, opts.withoutConversation === true),
         expiresTime: expiresAt,
         requires: opts.requires,
+        ...(opts.link ? { link: opts.link } : {}),
       })
     } catch (error) {
       this.release(opts.connectionId)

@@ -19,7 +19,7 @@ import { confirmationTimeoutSeconds } from '../config/packTypes.js'
 import type { ToolCallRequest, ToolDefinition } from '../llm/types.js'
 import type { MemoryService } from '../memory/service.js'
 import type { StatsSink } from '../platform/stats.js'
-import { type ApprovalService, displayName } from '../policy/approvals.js'
+import { type ApprovalChange, ApprovalError, type ApprovalService, displayName } from '../policy/approvals.js'
 import { needsGrant, runsNow, type TierResolution } from '../policy/rbac.js'
 import type { Store } from '../store/types.js'
 import { scrubAccount } from '../tools/accountValues.js'
@@ -100,13 +100,8 @@ export interface CallContext {
 }
 
 export interface ToolGateHooks {
-  /** an approval is pending for a tool call started in this session: its card goes to the session */
-  onApprovalPending?: (
-    session: Session,
-    principal: Principal,
-    record: ApprovalRecord,
-    entry: MessageEntry
-  ) => Promise<void>
+  /** the arguments of an approval were erased with its turn: its card and its items of the Notifications say so */
+  approvalErased?: (record: ApprovalRecord) => Promise<void>
   /** the Principal's identity credential failed re-verification */
   onCredentialInvalid?: (principal: Principal) => Promise<void>
   /** events to every bound session of a conversation, outside a turn (an allowance ended, a card expired) */
@@ -148,6 +143,56 @@ export interface ElevatedTool {
 function grantOf(tool: Pick<TurnTool, 'spec'>, grants: ElevationGrant[]): ElevationGrant | undefined {
   const rawName = tool.spec.key.split(':').pop() ?? tool.spec.name
   return grants.find((g) => g.toolName === rawName && (!g.serverName || g.serverName === tool.spec.serverName))
+}
+
+/**
+ * What every answer of a tool to the model says for a call whose rule asked the person or an approver, whatever came of
+ * it, and the record of an approval that ends after its turn (TOOL-CALL-015, D114): it answers that call only.
+ */
+export const ONE_CALL =
+  'This answers this call only: any other action, the same one again included, needs a new call of the tool, which asks again.'
+
+/** An answer of a tool for a call that asked, with what TOOL-CALL-015 says after it. */
+export function askedAnswer(text: string): string {
+  return `${text}\n\n${ONE_CALL}`
+}
+
+/**
+ * What became of an approval, as the model reads it in a record of its own, added when it happens (INTX-APPR-008,
+ * LLM-CACHE-004); the record of an approval of a call that ends says what TOOL-CALL-015 says.
+ */
+export function approvalStateText(
+  record: Pick<
+    ApprovalRecord,
+    'id' | 'status' | 'decisions' | 'kind' | 'toolName' | 'action' | 'sourceId' | 'grantExpiresAt'
+  >,
+  change: ApprovalChange
+): string {
+  const what = `${record.action?.title ?? record.toolName} (${record.id})`
+  const call = (text: string) => (record.sourceId ? `${text} ${ONE_CALL}` : text)
+  const by = (decision: 'approve' | 'reject') =>
+    record.decisions
+      .filter((d) => d.decision === decision)
+      .map((d) => d.approverName)
+      .join(' and ') || 'The approvers'
+  if (change === 'decision') {
+    const last = record.decisions.at(-1)
+    return `${last?.approverName ?? 'An approver'} ${last?.decision === 'reject' ? 'rejected' : 'approved'} ${what}; it waits for the other approvers`
+  }
+  switch (record.status) {
+    case 'APPROVED':
+      return record.kind === 'elevation'
+        ? `${by('approve')} approved the elevation for ${what}${record.grantExpiresAt ? `, granted until ${record.grantExpiresAt}` : ''}`
+        : call(`${by('approve')} approved ${what}: the action runs now.`)
+    case 'REJECTED':
+      return call(
+        `${by('reject')} rejected ${what}: it did not run. Do not try it again unless the person asks for it.`
+      )
+    case 'EXPIRED':
+      return call(`Nobody decided ${what} in time: it did not run.`)
+    default:
+      return call(`The request for ${what} was withdrawn: it did not run.`)
+  }
 }
 
 /** What became of a confirmation, as the model reads it in a record of its own (LLM-CACHE-004). */
@@ -405,7 +450,7 @@ export class ToolGate {
       const approvers = this.deps.catalog.approversOf(tool.packRule)
       if (!approvers.length) {
         await this.finish(record, 'no-approver')
-        return `${title} needs an approval, and nobody can approve it here: it did not run.`
+        return askedAnswer(`${title} needs an approval, and nobody can approve it here: it did not run.`)
       }
       selfApproved =
         this.deps.pack.approvals?.selfApproval !== false &&
@@ -413,6 +458,8 @@ export class ToolGate {
     }
     // 1. the person's confirmation
     const needsCard = rule === 'confirm' || raised || ownerSelf
+    /** a card was asked: every answer of this call says what TOOL-CALL-015 says */
+    let asked = false
     if (needsCard) {
       const allowance = rule === 'confirm' && !raised ? await this.allowanceFor(tool, state) : undefined
       if (allowance) record.confirmation = { allowanceApprovalId: allowance.approvalId }
@@ -422,11 +469,12 @@ export class ToolGate {
           await this.finish(record, 'failed')
           return `The arguments of ${title} are not valid (${invalid}): nothing was asked and nothing ran.`
         }
+        asked = true
         const outcome = await this.confirm(tool, title, args, state, ctx, record, {
           allowForConversation: rule === 'confirm' && !raised && !ownerSelf,
           raised,
         })
-        if (outcome) return outcome
+        if (outcome) return askedAnswer(outcome)
         // the owner's own confirmation stands for the approval (INTX-APPR-005)
         if (ownerSelf) rule = 'confirm'
       }
@@ -438,10 +486,11 @@ export class ToolGate {
         await this.finish(record, 'failed')
         return `The arguments of ${title} are not valid (${invalid}): nothing was asked and nothing ran.`
       }
-      return this.askApproval(tool, title, args, state, ctx, record)
+      return askedAnswer(await this.askApproval(tool, title, args, state, ctx, record))
     }
     record.rule = tool.rule
-    return this.run(tool, title, args, state, ctx, record)
+    const answer = await this.run(tool, title, args, state, ctx, record, undefined, asked)
+    return asked ? askedAnswer(answer) : answer
   }
 
   /** Steps 3 to 5: the credential's liveness, the step-up, the call (TOOL-CALL-001). */
@@ -452,7 +501,9 @@ export class ToolGate {
     state: Pick<TurnToolState, 'conversationId' | 'spaceId' | 'untrustedRead' | 'sources'>,
     ctx: CallContext,
     record: ToolCallRecord,
-    approvalId?: string
+    approvalId?: string,
+    /** the call asked the person or an approver: the model reads after its result what TOOL-CALL-015 says */
+    asked = false
   ): Promise<string> {
     const { principals, challenges, memory } = this.deps
     // the step-up of this tool of this source, never of a tool of the same name elsewhere (TOOL-CAT-010)
@@ -574,6 +625,7 @@ export class ToolGate {
         isError,
         inboundId: ctx.inbound?.id,
         ...(ctx.toolCtx.inboundIds?.length ? { inboundIds: ctx.toolCtx.inboundIds } : {}),
+        ...(asked || approvalId ? { asked: true } : {}),
       },
       // in the clear, beside the sealed arguments and result (TOOL-PROV-001)
       provenance: {
@@ -1064,62 +1116,75 @@ export class ToolGate {
     const action = await this.actionOf(tool, title, args, state.spaceId)
     const owners = tool.spaceTool ? (state.space?.ownerIds ?? []) : []
     const approvers = tool.spaceTool ? [] : this.deps.catalog.approversOf(tool.packRule)
-    const approval = await this.deps.approvals.requestSensitivity({
-      principal: ctx.principal,
-      role: ctx.principal.roles[0] ?? '',
-      originSessionId: ctx.session.id,
-      toolName: tool.spec.rawName,
-      serverName: tool.spec.serverName,
-      args,
-      rule: tool.packRule.approvalRule ?? {
-        tools: [tool.spec.rawName],
-        approvers,
-        // the space's owner decides attested on the phone, whatever the policy (INTX-APPR-013)
-        ...(tool.spaceTool ? { attested: true } : this.deps.pack.approvals?.attested ? { attested: true } : {}),
-      },
-      inboundId: ctx.inbound?.id,
-      tool: {
-        action,
-        sourceId: tool.source.name,
-        conversationId: state.conversationId,
-        callId: record.id,
-        ...(tool.spaceTool ? { spaceId: state.spaceId, ownerApproval: true } : {}),
-      },
-    })
+    const who = tool.spaceTool
+      ? `the owner of the space, ${(await this.ownerNames(owners)).join(' or ') || 'its owner'}`
+      : approvers.join(' or ')
+    let approval: ApprovalRecord
+    try {
+      approval = await this.deps.approvals.requestSensitivity({
+        principal: ctx.principal,
+        role: ctx.principal.roles[0] ?? '',
+        originSessionId: ctx.session.id,
+        toolName: tool.spec.rawName,
+        serverName: tool.spec.serverName,
+        args,
+        rule: tool.packRule.approvalRule ?? {
+          tools: [tool.spec.rawName],
+          approvers,
+          // the space's owner decides attested on the phone, whatever the policy (INTX-APPR-013)
+          ...(tool.spaceTool ? { attested: true } : this.deps.pack.approvals?.attested ? { attested: true } : {}),
+        },
+        inboundId: ctx.inbound?.id,
+        tool: {
+          action,
+          sourceId: tool.source.name,
+          conversationId: state.conversationId,
+          callId: record.id,
+          ...(tool.spaceTool ? { spaceId: state.spaceId, ownerApproval: true } : {}),
+        },
+      })
+    } catch (error) {
+      // an approval to attest with no approver a flow-capable phone reaches: nothing is asked (INTX-APPR-019)
+      if (!(error instanceof ApprovalError) || error.code !== 'no-approver') throw error
+      record.rule = 'approval'
+      await this.finish(record, 'no-approver')
+      return `${title} needs the approval of ${who}, decided on a phone, and no one who can approve it has one now: nothing was asked and it did not run.`
+    }
+    // the requester's card: one entry of this conversation, which every session of it shows and each later status
+    // updates in place (INTX-APPR-016); what the model reads of it is written once (LLM-CACHE-004)
+    const card = await this.requesterCard(
+      approval,
+      state,
+      tool.source.account.kind === 'personal'
+        ? await this.deps.connections?.labelIn(ctx.principal, tool.source, state.spaceId)
+        : undefined
+    )
     const entry = await this.deps.memory.append({
       sessionId: ctx.session.id,
       principalId: ctx.principal.id,
       role: 'system',
       sourceType: 'approval',
-      text: `Approval requested for ${title} (${approval.id})`,
+      text: `The call of ${title} (${approval.id}) asked for the approval of ${who}, shown to the person on a card`,
       backingIdentity: ctx.principal.backingIdentity,
+      // the requester's card shows the action the approver decides on (PROF-TOOL-009), with the name of the requester's
+      // own account, which no approver's item carries (PROF-TOOL-021)
       payload: {
         approvalId: approval.id,
         kind: approval.kind,
         toolName: approval.toolName,
         status: approval.status,
-        // the requester's card shows the action the approver decides on (PROF-TOOL-009), with the name of the
-        // requester's own account, which no approver's card carries (PROF-TOOL-021)
-        card: await this.requesterCard(
-          approval,
-          state,
-          tool.source.account.kind === 'personal'
-            ? await this.deps.connections?.labelIn(ctx.principal, tool.source, state.spaceId)
-            : undefined
-        ),
+        card,
       },
     })
-    // the approvers' cards were recorded meanwhile: the record is read again before it names its own card
+    // the approvers it was asked of were recorded meanwhile: the record is read again before it names its card
     const fresh = (await this.deps.approvals.get(approval.id)) ?? approval
     fresh.entryId = entry.id
     await this.deps.approvals.save(fresh)
-    await this.hooks.onApprovalPending?.(ctx.session, ctx.principal, fresh, entry)
+    // in the turn's run and on every other session of the conversation, and of no other (PROF-TOOL-009)
+    await ctx.sink.emit({ type: 'activity', messageId: entry.id, activityType: ACTIVITY.approval, content: card })
     record.approval = { approvalId: approval.id, status: approval.status, decidedBy: [] }
     record.rule = 'approval'
     await this.finish(record, 'pending')
-    const who = tool.spaceTool
-      ? `the owner of the space, ${(await this.ownerNames(owners)).join(' or ') || 'its owner'}`
-      : approvers.join(' or ')
     return `${title} needs the approval of ${who}. The request is pending: the action runs once approved, and its outcome will be told in this conversation.`
   }
 
@@ -1383,6 +1448,8 @@ export class ToolGate {
           },
         })
       }
+      // the requester's card and the items of the Notifications show the title, the source and the outcome only
+      if (fresh.kind !== 'confirmation') await this.hooks.approvalErased?.(fresh)
     }
   }
 }

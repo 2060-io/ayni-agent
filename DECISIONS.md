@@ -1623,3 +1623,89 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       - A step of the window changes the summary and its start (D75). The previous turn's message, which carried the
         records, is read again once uncached (D103). A roles change re-reads the request (the tools change with it).
       - The Anthropic adapter's `thinking.budget_tokens`, which current models refuse, is a separate fix.
+74. **Approvals reach each person once; only a call asks** (2026-11-21, found by Fabrice on devnet with 0.29.0, his "Yes"
+    to both fixes; ayni-spec D114, PR #116: TOOL-CALL-015 to 017 and INTX-APPR-016 to 019 new; TOOL-CALL-004/009/010,
+    TOOL-PROV-006, LLM-CACHE-004 and INTX-APPR-006/008/010/011/013/014/015 amended; AG-UI profile 3.5 amended in place:
+    §3.12, PROF-TOOL-024 to 027, PROF-DESC-011, PROF-LINK-005, `ayni.approval.request` withdrawn; flow profile `open.link`,
+    FLOW-CORE-011, FLOW-AUTH-003).
+    - **As found:** a member's post in Verana Social wrote the approval's card into each of the owner's five bound
+      sessions (four conversations) and into the member's other conversation, at the request and again at the decision:
+      13 entries (`cardEntryIds`), four requests on the owner's phone. `onApprovalChange` delivered the card to every open
+      session of every eligible approver and of the requester. Then the model answered three times that approval was
+      requested, with no call: its history held the card's record and its own earlier "approval requested", no tool call.
+    - **The approvers (`agent.ts` `onApprovalChange`, `approvalPhones`; `didcomm/adapter.ts` `openApprovalFlow`,
+      `closeApprovalFlow`):** no card, no entry, in any conversation of theirs; `deliver` of an `approval` event goes to
+      the requester's conversation only. The record names the approvers it was asked of (`approverIds`, computed by
+      `ApprovalService` at the request). Each one whose capability channel takes flows (`router.approvalPhone`) gets one
+      `authorize` flow when the approval is made, whatever its kind and policy: `attested` as the policy sets it, always
+      for an owner's approval (`needsAttestation`); `origin: none`, so no conversation records a flow card; `link` to the
+      Notifications that list it (`notificationsLinkOf`, on `channels.agui.appLinkBase`, the DID unencoded as in the link
+      of Your accounts). An approver's flow closes once they decided anywhere, and every flow once the approval ended.
+      `ApprovalService.decide` now also announces a decision that leaves the approval pending (`decision`).
+    - **To attest (INTX-APPR-019):** an approval to attest is asked only of approvers a flow-capable phone reaches; with
+      none the call does not run and the model reads `no-approver`, and an elevation is refused the same way. `decide`
+      takes such an approval only with the attestation of its flow, never `none` (FLOW-AUTH-001, which the agent did not
+      check before); `approval.decide` of one answers `RunError decide-on-phone`, and `POST {sessions}/approvals/{id}/resend`
+      closes the phone's flow and opens a new one (`resendApproval`), or answers 404, 409 `not-pending` or 409
+      `confirmation-unavailable`.
+    - **The requester (`requesterCardChanged`):** one card, the entry `entryId` of the conversation where it was asked,
+      shown on that conversation's sessions in the run (the gate emits it in the turn, no more `onApprovalPending`) and
+      replaced in place at each later status, with `ayni.approval.update`. The entry the model reads keeps its text; each
+      later status is an entry of its own, `sourceType` `approval` (`refusal` for a rejection) with `payload.kind:
+      'card-state'`, so that it stays a first-class approval or refusal entry (INTX-APPR-008) and history gives it to no
+      device. An elevation request now has its card too (the entry it already wrote, with `payload.card`, emitted in the
+      run). `cardEntryIds` is no longer written; old records keep it, and an erasure still clears their cards.
+    - **The Notifications (`core/notifications.ts`; routes `GET {sessions}/spaces/{id}/notifications`,
+      `GET {sessions}/notifications`):** read from the approval records, nothing stored for them. A space's list holds the
+      approvals of its tools (an owner's approval); the agent's every other one; for a person, each they may decide, were
+      asked of, decided, or asked for (`own`). Newest first by the request's time; `before` an id, `limit` 50 by default and
+      200 at most; an unknown `before` gives an empty page. A past item stays for its space's `retentionDays` from
+      `closedAt` (new on the record), Personal's for the agent's list. `ayni.space.notifications.changed` goes to every
+      bound AG-UI session of each person concerned; `GET /spaces` gives `notificationsWaiting`; `state.ayni.pendingApprovals`
+      is pushed to them. Personal's own list is empty, its approvals being the agent's. `features.notifications: true`.
+    - **Decisions from a browser:** `approval.decide` and `approval.cancel` start no turn (`noTurn: 'decision'`, then
+      `RunFinished{ decision }`, or `RunError not-eligible` / `decide-on-phone`) and add nothing to the conversation of the
+      session; a later decision gets the status already decided. The contextual menu of an AG-UI session has no Approvals
+      item; a DIDComm peer in chat mode keeps it with its badge, counting and answering only approvals that need no
+      attestation, and no entry is written for its questions.
+    - **Only a call asks:** the add-on (3.8.0, +94 tokens) tells the six rules of TOOL-CALL-010. Every answer of a call
+      that asked a card or an approval ends with `ONE_CALL` ("This answers this call only: any other action, the same one
+      again included, needs a new call of the tool, which asks again."): pending, allowed and run, refused, expired,
+      cancelled, unavailable, no approver. A call that ran under a card or an approval is marked `asked` on its `tool-call`
+      entry, and history gives the model its result followed by the same line; the card-state records of an approval of a
+      call that ends carry it too. The card's own record now reads "The call of X (apr) asked for the approval of Y, shown
+      to the person on a card". TOOL-CALL-016 needed no change in code: nothing but a call's record and card shows a wait.
+    - **The evaluation (`scripts/eval/approval-claims.ts`, `pnpm eval:approval-claims`, README "Evaluations of the model"):**
+      each run builds the agent with the deployment's agent-pack on the in-memory store, every MCP and HTTP server replaced
+      by a local stub (one per URL), the space's account by values sampled from its fields' patterns, the phone by the
+      stub of the tests; it plays the conversation before the last message with a scripted model, so the history is the
+      agent's, then sends the last turn through the deployment's adapter and passes only when it calls the posting tool.
+      Choices: the posting tool is the first tool of a space whose rule is `approval` (`--post` names another); an MCP
+      stub lists a `text` argument and the pinned ones (`--schemas` gives the real ones); an unset placeholder of the pack
+      gets a stand-in, never an `LLM_*` one, and a missing directory an empty one; the case `confirmation` is the owner's own
+      post (his confirmation, INTX-APPR-005), since the Dev Agent's CRM is each person's own account, which a stub cannot
+      connect; a card the last turn asks is refused so that the turn ends. `--replay` reads
+      `scripts/eval/fixtures/devnet-2026-11-21-215226.json`, a reconstruction: the words of 21:52:26 were not kept. Not
+      run here: no provider key. `tests/evalApprovalClaims.test.ts` checks the harness with a model of the test, which is
+      no evaluation. The log warning TOOL-CALL-017 allows is not built.
+    - **Profile package 3.5.1:** `features.notifications`, `CUSTOM_EVENT.spaceNotificationsChanged` and its value, the
+      §3.12 shapes (`NotificationsPage`, `NotificationItem`, `NotificationApproval`, `NOTIFICATIONS_PAGE`,
+      `ApprovalResendResponse`), `notificationsWaiting` on `SpaceInfo`, `decidedBy` on the card, `RUN_ERROR_CODE`
+      `decide-on-phone` and `not-eligible`, `not-pending`, the link parameter `approval` and `notificationsLink`;
+      `CUSTOM_EVENT.approvalRequest` removed.
+    - **Depends on:** the VS Agent plugin answers 400 to an `open` body with `link` (its pipe forbids unknown fields), so
+      until `@ayni.org/vs-agent-plugin-ayni-flow` takes `link` and `io2060/vs-agent-ayni` is released with it, no approval
+      reaches a phone: deploy that image first. `2060-io/credo-ts-ayni-flow` PR #33 carries `link` in the `open` and both
+      records, for the app.
+    - **Tests:** `tests/approvalsOnce.test.ts` (11): the devnet incident (an owner with five sessions in four
+      conversations gets one phone request and one item, no card or entry anywhere, one event per session; the requester
+      one card on both devices of the asking conversation and none in her other; decided on the phone, the request closes,
+      the item reads decided and the card turns to Approved in place, with one card-state record); the next request's
+      tool result and record end with the line; a second post asks with a new call; rejected and expired records say it;
+      a reply that claims a request without a call shows nothing waiting; Sent by you, paging, 404 outside the space;
+      the agent's Notifications for a delete by roles, a non-flow wallet's menu badge, a decision in the browser with no
+      turn, Approve twice, resend refusals, a withdrawal; an elevation on the managers' phones; `no-approver`. Amended:
+      `tools.test.ts` (the owner decides on his phone, the item of his Notifications, the link and `origin`, Decide on
+      your phone, the answers' line), `notifyAuthorize.test.ts` (a non-attested rule reaches the phone with `attested:
+      false`; an attested decision without authentication is refused), `connections.test.ts` (the owner's approval on
+      the phone), `toolCatalog.test.ts` (each rule of TOOL-CALL-010).

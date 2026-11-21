@@ -998,8 +998,8 @@ describe("calls with each person's own account (TOOL-CALL-011, TOOL-ACCESS-010..
     const github = (await accountsOf(ana.principal.id)).find((a) => a.sourceId === 'github') as PersonalAccountRecord
     expect((await call(ana, 'DELETE', `/connections/accounts/${github.id}`)).status).toBe(200)
     const calls = gh.calls.length
-    const jonasDevice = await open(jonas, { conversationId: undefined, spaceId: testRepo.id })
-    await decide(jonasDevice, approval.id, 'approve')
+    // the owner decides it on his phone (INTX-APPR-019)
+    await ph.authorize(jonas.connectionId, 'approved', { approvalId: approval.id })
     await until(async () => (await running.agent.store.toolCalls.get(approval.callId as string))?.outcome !== 'pending')
     expect((await running.agent.store.toolCalls.get(approval.callId as string))?.outcome).toBe('not-connected')
     expect(gh.calls.length).toBe(calls)

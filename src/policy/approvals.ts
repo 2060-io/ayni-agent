@@ -1,6 +1,8 @@
 /**
  * Approval workflow (D14, INTX-APPR-001..010): sensitivity approvals (in-role, per use) and
- * elevation approvals (out-of-role, purpose-declared) through one mechanism.
+ * elevation approvals (out-of-role, purpose-declared) through one mechanism. Since D114 each approval names the approvers
+ * it was asked of, and one whose decision must be attested is asked only of approvers a flow-capable phone reaches and is
+ * decided only through its `authorize` flow (INTX-APPR-019).
  */
 import type { AgentPack, ApprovalPolicy, ApprovalRule, ElevationRule } from '../config/packTypes.js'
 import type { ApprovalDecision, ApprovalRecord, ElevationGrant, Principal } from '../core/types.js'
@@ -8,9 +10,23 @@ import { type EntryCrypto, openJson, sealJson } from '../memory/crypto.js'
 import type { ApprovalRepo, Store } from '../store/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
 
+/**
+ * What became of an approval: made, decided by one approver while it still waits for others (`decision`), ended by a
+ * decision (`decided`), withdrawn or cancelled, expired.
+ */
+export type ApprovalChange = 'created' | 'decision' | 'decided' | 'cancelled' | 'expired'
+
 export interface ApprovalEvents {
   /** a request was created, decided, cancelled or expired: notify approvers and the requester */
-  onChange(record: ApprovalRecord, change: 'created' | 'decided' | 'cancelled' | 'expired'): Promise<void>
+  onChange(record: ApprovalRecord, change: ApprovalChange): Promise<void>
+}
+
+/**
+ * Whether an approval's decision must be attested (INTX-APPR-019): its policy says so, or a space's owner approves it
+ * (INTX-APPR-013). It is then decided only through its `authorize` flow, on the approver's phone.
+ */
+export function needsAttestation(record: Pick<ApprovalRecord, 'attested' | 'ownerApproval'>): boolean {
+  return record.attested === true || record.ownerApproval === true
 }
 
 export class ApprovalError extends Error {
@@ -23,6 +39,10 @@ export class ApprovalError extends Error {
       | 'not-requester'
       | 'bad-purpose'
       | 'not-requestable'
+      /** its decision must be attested: it is made on the phone (INTX-APPR-019) */
+      | 'decide-on-phone'
+      /** its decision must be attested and no approver has a flow-capable phone (INTX-APPR-019) */
+      | 'no-approver'
   ) {
     super(message)
     this.name = 'ApprovalError'
@@ -46,6 +66,12 @@ export class ApprovalService {
    * of the decision, and nobody else (INTX-APPR-004). Set by the composition root.
    */
   public spaceOwners?: (spaceId: string) => Promise<string[]>
+
+  /**
+   * Whether a person can be asked on their phone: their capability channel is flow-capable (INTX-APPR-011). An approval to
+   * attest is asked only of them (INTX-APPR-019). Set by the composition root; unset, nobody can.
+   */
+  public askable?: (principal: Principal) => Promise<boolean>
 
   /**
    * Who may decide: those whose role grants approval rights (INTX-APPR-004); for a tool of a space, its owner now and
@@ -76,6 +102,7 @@ export class ApprovalService {
     if (record?.status !== 'PENDING') return record
     record.status = 'CANCELLED'
     record.updatedAt = nowIso()
+    record.closedAt = record.updatedAt
     await this.store.approvals.save(record)
     await this.events.onChange(record, 'cancelled')
     return record
@@ -85,6 +112,28 @@ export class ApprovalService {
   public canSelfApprove(principal: Principal, rule: ApprovalRule | ElevationRule): boolean {
     if (this.pack.approvals?.selfApproval === false) return false
     return principal.roles.some((r) => rule.approvers.includes(r) && this.pack.identity.roles?.[r]?.canApprove)
+  }
+
+  /** The people who may decide an approval now, the requester aside (INTX-APPR-004). */
+  public async approversOf(record: ApprovalRecord): Promise<Principal[]> {
+    const out: Principal[] = []
+    for (const p of await this.store.principals.list())
+      if (p.id !== record.requesterId && (await this.isEligible(p, record))) out.push(p)
+    return out
+  }
+
+  /**
+   * The approvers a new request is asked of (INTX-APPR-006, INTX-APPR-019): every eligible one, or, when its decision must
+   * be attested, those a flow-capable phone reaches; none of those refuses the request (`no-approver`), and nothing is
+   * recorded.
+   */
+  private async askedOf(record: ApprovalRecord): Promise<string[]> {
+    const approvers = await this.approversOf(record)
+    if (!needsAttestation(record)) return approvers.map((p) => p.id)
+    const reached: string[] = []
+    for (const p of approvers) if (await this.askable?.(p)) reached.push(p.id)
+    if (!reached.length) throw new ApprovalError('no approver can decide it on a phone now', 'no-approver')
+    return reached
   }
 
   public async requestSensitivity(opts: {
@@ -124,6 +173,7 @@ export class ApprovalService {
       updatedAt: nowIso(),
       ...(opts.tool ?? {}),
     }
+    record.approverIds = await this.askedOf(record)
     await this.store.approvals.save(record)
     await this.events.onChange(record, 'created')
     return record
@@ -170,10 +220,12 @@ export class ApprovalService {
       createdAt: nowIso(),
       updatedAt: nowIso(),
     }
-    await this.store.approvals.save(record)
     if (this.canSelfApprove(opts.principal, opts.rule)) {
-      return this.decide(record.id, opts.principal, 'approve', 'self-approval')
+      await this.store.approvals.save(record)
+      return this.decide(record.id, opts.principal, 'approve', 'self-approval', undefined, { self: true })
     }
+    record.approverIds = await this.askedOf(record)
+    await this.store.approvals.save(record)
     await this.events.onChange(record, 'created')
     return record
   }
@@ -204,20 +256,28 @@ export class ApprovalService {
     return 'PENDING'
   }
 
+  /**
+   * An approver's decision. One whose decision must be attested takes it only with the attestation its `authorize` flow
+   * returned, and never `none` (INTX-APPR-019, FLOW-AUTH-001); a requester who approves their own elevation (`self`)
+   * needs none.
+   */
   public async decide(
     approvalId: string,
     approver: Principal,
     decision: 'approve' | 'reject',
     note?: string,
-    attestation?: ApprovalDecision['attestation']
+    attestation?: ApprovalDecision['attestation'],
+    options: { self?: boolean } = {}
   ): Promise<ApprovalRecord> {
     const record = await this.store.approvals.get(approvalId)
     if (!record) throw new ApprovalError('approval not found', 'not-found')
     if (record.status !== 'PENDING') throw new ApprovalError(`approval is ${record.status}`, 'not-pending')
-    if (!(await this.isEligible(approver, record)))
+    if (!options.self && !(await this.isEligible(approver, record)))
       throw new ApprovalError('principal is not an eligible approver', 'not-eligible')
     if (record.decisions.some((d) => d.approverId === approver.id))
-      throw new ApprovalError('already decided', 'not-eligible')
+      throw new ApprovalError('already decided', 'not-pending')
+    if (!options.self && needsAttestation(record) && (!attestation || attestation.method === 'none'))
+      throw new ApprovalError('the decision of this approval is made on the phone', 'decide-on-phone')
     const role = approver.roles.find((r) => record.eligibleRoles.includes(r)) ?? approver.roles[0] ?? ''
     record.decisions.push({
       approverId: approver.id,
@@ -230,6 +290,7 @@ export class ApprovalService {
     })
     record.status = await this.evaluate(record)
     record.updatedAt = nowIso()
+    if (record.status !== 'PENDING') record.closedAt = record.updatedAt
     if (record.status === 'APPROVED' && record.kind === 'elevation' && record.purpose) {
       record.grantExpiresAt = new Date(Date.now() + (record.grantTtlMinutes ?? 480) * 60_000).toISOString()
       const grant: ElevationGrant = {
@@ -247,7 +308,7 @@ export class ApprovalService {
       await this.store.grants.save(grant)
     }
     await this.store.approvals.save(record)
-    if (record.status !== 'PENDING') await this.events.onChange(record, 'decided')
+    await this.events.onChange(record, record.status === 'PENDING' ? 'decision' : 'decided')
     return record
   }
 
@@ -259,6 +320,7 @@ export class ApprovalService {
     if (record.status !== 'PENDING') throw new ApprovalError(`approval is ${record.status}`, 'not-pending')
     record.status = 'CANCELLED'
     record.updatedAt = nowIso()
+    record.closedAt = record.updatedAt
     await this.store.approvals.save(record)
     await this.events.onChange(record, 'cancelled')
     return record
@@ -272,6 +334,7 @@ export class ApprovalService {
       if (record.expiresAt <= now) {
         record.status = 'EXPIRED'
         record.updatedAt = now
+        record.closedAt = now
         await this.store.approvals.save(record)
         await this.events.onChange(record, 'expired')
         n++

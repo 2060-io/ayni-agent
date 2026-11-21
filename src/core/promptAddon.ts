@@ -5,7 +5,7 @@
 import type { Features } from '../config/packTypes.js'
 import { estimateTokens } from '../util/tokens.js'
 
-export const PROMPT_ADDON_VERSION = '3.7.0'
+export const PROMPT_ADDON_VERSION = '3.8.0'
 export const PROMPT_ADDON_TOKEN_BUDGET = 500
 
 export interface AddonContext {
@@ -77,9 +77,9 @@ export function renderPromptAddon(ctx: AddonContext): string {
   if (ctx.features.rag)
     lines.push('knowledge_search retrieves passages from the configured documents; prefer them to guessing.')
   if (ctx.hasTools && ctx.toolsMayAsk) {
-    // the person or an approver may be asked before an action runs (TOOL-CALL-010)
+    // the person or an approver may be asked before an action runs, and only a call asks (TOOL-CALL-010, D114)
     lines.push(
-      "Tools: only the tools listed are available to this person. Some actions ask the person on a card, an approver or an identity check before they run; the system asks, never you, and never in words in place of the card. Only the tool's answer says whether an action ran."
+      "Tools: only the tools listed are available to this person. Some actions ask the person on a card, an approver or an identity check before they run. Only a call of the tool asks: writing that you asked asks nothing. Each new action, the same one again included, needs a new call of its tool, whatever became of an earlier one. Your own earlier replies are no record of what was asked or done: only the tool's answer says whether a request was made or the action ran. Never ask the person to confirm in words in place of the card, and never say that an action ran, or that a confirmation or an approval was asked, unless the tool's answer says so."
     )
   } else if (ctx.hasTools) {
     lines.push(

@@ -14,6 +14,7 @@ import {
   DESCRIPTOR_PATH,
   type NoTurn,
   RUN_ERROR_CODE,
+  type SpaceNotificationsChangedValue,
 } from '@ayni.org/ayni-agui-profile'
 import { Ajv2020 } from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
@@ -91,6 +92,8 @@ const SHARED_SOURCE_TYPES = ['text', 'voice', 'media']
 interface SpaceViewContext {
   conversations: Conversation[]
   principals: Principal[]
+  /** what waits for the person in the Notifications of each space (PROF-TOOL-025) */
+  waiting?: Map<string | null, number>
 }
 
 /** The status of each code of a `SessionError` (profile §9); `ERROR_STATUS` of the profile package lists the same. */
@@ -210,6 +213,8 @@ export class AgUiRoutes {
         // each person's own accounts, while the agent-pack declares a source of them (ayni-spec D104 to D110,
         // PROF-DESC-010): an agent with none shows no Your accounts
         ...(this.agent.connections?.personalSources().length ? { connections: true } : {}),
+        // the Notifications of a space and of the agent: approvals, pending and past (ayni-spec D114, PROF-DESC-011)
+        notifications: true,
       },
       locales: [this.agent.pack.language.agent],
     }
@@ -722,6 +727,7 @@ export class AgUiRoutes {
     return {
       conversations: await this.agent.sessions.allConversations(principal.id),
       principals: await this.agent.store.principals.list(),
+      waiting: await this.agent.notifications.waiting(principal),
     }
   }
 
@@ -763,6 +769,8 @@ export class AgUiRoutes {
    */
   private async spaceInfo(access: SpaceAccess, ctx: SpaceViewContext, rows?: SpaceMember[]) {
     const { space } = access
+    // what waits for the person in its Notifications: the badge of its row (PROF-TOOL-025); Personal lists none
+    const waiting = space.kind === 'personal' ? 0 : (ctx.waiting?.get(space.id) ?? 0)
     const personal = space.kind === 'personal'
     const mine = ctx.conversations.filter((c) => spaceIdOf(c) === space.id && c.state !== 'final')
     const members = rows ?? (personal ? [] : await this.agent.spaces.memberRows(space.id))
@@ -785,6 +793,7 @@ export class AgUiRoutes {
       role: access.role ?? access.member?.role ?? 'member',
       state: access.left ? 'left' : 'active',
       unread: mine.reduce((sum, c) => sum + (c.unread ?? 0), 0),
+      notificationsWaiting: waiting,
       lastActivityAt: last[last.length - 1] ?? space.updatedAt,
     }
   }
@@ -1308,6 +1317,39 @@ export class AgUiRoutes {
       })
     )
 
+    // ---- the Notifications (§3.12, ayni-spec D114): a space's, and the agent's for what no space holds ---------------
+    const page = (request: FastifyRequest) => {
+      const query = (request.query ?? {}) as { before?: unknown; limit?: unknown }
+      const limit = query.limit === undefined ? undefined : Number(query.limit)
+      if (limit !== undefined && (!Number.isInteger(limit) || limit < 1))
+        throw new SpaceError('limit must be a whole number from 1', 'bad-request', 'limit')
+      return { before: typeof query.before === 'string' && query.before ? query.before : undefined, limit }
+    }
+    // PROF-TOOL-024: the approvals of the space's tools, for a member of it; 404 to anyone else
+    app.get(
+      `${base}/spaces/:spaceId/notifications`,
+      handle(async ({ principal }, request) => {
+        const { spaceId } = request.params as { spaceId: string }
+        const access = await this.agent.spaces.access(principal, spaceId)
+        if (!access || access.left) throw new SpaceError('space not found', 'not-found')
+        // Personal holds no tool of a space: its approvals are the agent's (INTX-APPR-017), and its list is empty
+        return this.agent.notifications.list(principal, access.space.id, page(request))
+      })
+    )
+    // PROF-TOOL-024: every other approval: by roles, of a tool of the whole agent or of Personal, an elevation request
+    app.get(
+      `${base}/notifications`,
+      handle(async ({ principal }, request) => this.agent.notifications.list(principal, null, page(request)))
+    )
+    // PROF-TOOL-026: Decide on your phone, the request sent to the phone again
+    app.post(
+      `${base}/approvals/:approvalId/resend`,
+      handle(async ({ principal }, request, reply) => {
+        const { approvalId } = request.params as { approvalId: string }
+        return reply.code(202).send(await this.agent.resendApproval(principal, approvalId))
+      })
+    )
+
     // ---- Your accounts (profile 3.5 §3.11): each person's own, read and changed by that person alone -----------------
     const connections = () => {
       if (!this.agent.connections) throw new SpaceError('no account is served here', 'not-found')
@@ -1377,6 +1419,13 @@ export class AgUiRoutes {
       if (!this.agent.connections) return reply.code(404).send({ error: 'not-found' })
       return reply.header('cache-control', 'public, max-age=3600').send(this.agent.connections.clientMetadata())
     })
+  }
+
+  /** A notification of a person entered, changed or ended: every bound session of theirs hears it (PROF-TOOL-025). */
+  public async announceNotifications(principalId: string, value: SpaceNotificationsChangedValue): Promise<void> {
+    for (const session of await this.agent.store.sessions.listByPrincipal(principalId, ['bound']))
+      if (session.channelType === 'ag-ui')
+        await this.streams.publish(session.id, ev.custom(CUSTOM_EVENT.spaceNotificationsChanged, { ...value }))
   }
 
   /** One of a person's own accounts, or an attempt, changed: every bound session of theirs hears it (PROF-TOOL-019). */
@@ -1552,10 +1601,22 @@ export class AgUiRoutes {
         )
       } else {
         result = await this.agent.action(session, action, sink, controller.signal)
-        // the person's decision on a confirmation: no turn of its own, the status it has now (PROF-TOOL-008)
+        // a decision on a confirmation or an approval, a request withdrawn: no turn of its own, the status it has now
+        // (PROF-TOOL-008, PROF-TOOL-026)
         if (result && 'decision' in result) {
           start('decision')
           write(ev.runFinished(session.id, runId, { type: 'decision', ...result.decision }))
+          return
+        }
+        // an approval to attest, decided on the phone; one the person may not decide (PROF-TOOL-026)
+        if (result && 'refused' in result) {
+          start('decision')
+          write(
+            ev.runError(
+              result.refused.message,
+              result.refused.code === 'decide-on-phone' ? RUN_ERROR_CODE.decideOnPhone : RUN_ERROR_CODE.notEligible
+            )
+          )
           return
         }
         if (result && 'text' in result && result.text) {

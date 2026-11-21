@@ -49,6 +49,47 @@ it and logs that binding is unavailable until the Admin API answers.
 
 Tests run on the in-memory store with the stub model: `pnpm test`.
 
+## Evaluations of the model
+
+What only a real model shows runs on demand against the model of a deployment, never in CI: it needs the provider's
+key, it costs tokens, and a model does not answer the same way twice (ayni-spec reference implementation profile,
+"Evaluations of the model").
+
+**Requests without a call** (TOOL-CALL-017, D114): after a call that asked an approval or a confirmation was decided,
+does the model call the tool for a new action, or does it only say that it asked, as the Dev Agent did on devnet on
+2026-11-21? Run it with the configuration of the deployment whose model it checks, the variables the container takes:
+
+```bash
+AGENT_PACK_PATH=/path/to/agent-pack \
+LLM_PROVIDER=openai-compatible LLM_MODEL=kimi-k3 LLM_BASE_URL=https://api.moonshot.ai/v1 LLM_API_KEY=… \
+pnpm eval:approval-claims                     # 10 runs of each case; --runs N, --case <id> (repeatable)
+pnpm eval:approval-claims -- --replay scripts/eval/fixtures/devnet-2026-11-21-215226.json   # must FAIL
+```
+
+- `AGENT_PACK_PATH` is a directory holding `agent-pack.yaml`, or the file. The Dev Agent's is the `agentPack` value of
+  `charts/devnet/dev-ayni-agent.yaml` in `2060-io/ayni-deploy`: `yq '.agentPack' charts/devnet/dev-ayni-agent.yaml >
+  /tmp/dev-pack/agent-pack.yaml`. A placeholder of the pack the environment does not set (an OAuth client, a badge
+  schema) gets a stand-in, which nothing the evaluation runs reaches, and a missing user directory an empty one; the
+  `LLM_*` placeholders are never filled in.
+- Each run builds the agent on the in-memory store with that pack. Every tool server is replaced by a local stub, the
+  space's account by values that fit its fields, and the phone by a stub that decides as the case says: nothing is
+  posted and nobody is asked. The conversation before the person's last message is played through the agent's own code
+  with a scripted model, so its history is what the agent writes; the last turn goes to the deployment's provider and
+  model through the agent's adapter.
+- The cases: `devnet-2026-11-21` (a member's post asked, approved on the owner's phone and run; then a new post),
+  `after-a-claim` (the same, then a reply that says approval was requested with no call; then the same post again),
+  `confirmation` (the owner's own post, which is his confirmation, INTX-APPR-005, allowed and run; then another one) and
+  `after-a-refusal` (a post the owner rejected; then "Ask again for the same post"). A run passes only when the turn
+  calls the posting tool, whatever its reply says.
+- The posting tool is the first tool of a space whose rule is `approval`, `x.post_tweet` for the Dev Agent; `--post
+  <source>.<tool>` names another. An MCP stub lists each offered tool with a `text` argument and those its bindings pin;
+  `--schemas <file>` gives the input schemas the real server lists, as `{ "<source>.<tool>": { …schema } }`.
+- The report gives, per case, the provider, the model, the version of the add-on, the runs and the failures, each with
+  the text of its reply; `--out report.md` writes it with its JSON beside it. The command exits with 1 when a run fails.
+- Run it before a release that changes the add-on, the tools' answers of the call rules (TOOL-CALL-015) or the model a
+  deployment uses, and attach its report to that release's pull request. `--replay` checks the evaluation itself: fed
+  the reply of the Dev Agent of 21:52:26 (reconstructed in the fixture: the exact words were not kept), it must fail.
+
 ## Configuration
 
 Behavior lives in the agent-pack (`AGENT_PACK_PATH`, see `docs/agent-pack.md`); deployment values and

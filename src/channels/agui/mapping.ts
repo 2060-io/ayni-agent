@@ -2,7 +2,7 @@
 import { ACTIVITY, type AttachmentActivity } from '@ayni.org/ayni-agui-profile'
 import { isCredentialWithheld } from '../../core/credentials.js'
 import { isWithheldMessage } from '../../core/emailCheck.js'
-import type { ApprovalRecord, MessageAttachment, MessageEntry } from '../../core/types.js'
+import { CARD_STATE, type MessageAttachment, type MessageEntry } from '../../core/types.js'
 
 export function attachmentActivity(a: MessageAttachment, role?: 'user' | 'assistant'): AttachmentActivity {
   return {
@@ -18,24 +18,6 @@ export function attachmentActivity(a: MessageAttachment, role?: 'user' | 'assist
     waveform: a.waveform,
     filename: a.filename,
     thumbnailId: a.thumbnailId,
-  }
-}
-
-export function approvalValue(record: ApprovalRecord, viewerId: string, canDecide: boolean) {
-  return {
-    approvalId: record.id,
-    kind: record.kind,
-    tool: record.toolName,
-    requester: { displayName: record.requesterName, role: record.requesterRole },
-    purpose: record.purpose ? { id: record.purpose, label: record.purpose } : undefined,
-    justification: record.justification,
-    policy: { type: record.policy.type, value: record.policy.value, vetoOnRefusal: record.policy.vetoOnRefusal },
-    expiresAt: record.expiresAt,
-    status: record.status,
-    own: record.requesterId === viewerId,
-    canDecide,
-    grantExpiresAt: record.grantExpiresAt,
-    decidedBy: record.decisions.map((d) => d.approverName).join(', ') || undefined,
   }
 }
 
@@ -178,6 +160,9 @@ export function entryToMessages(
     case 'refusal':
       // the code's answer in a space whose rules do not allow the agent's model: a message (PROF-RUN-014)
       if (spaceRefusal) return [{ id: entry.id, role: 'assistant', content: entry.text, metadata: meta }]
+      // what became of an approval's card is a record for the model; the devices read the card in its current status
+      // (INTX-APPR-008, LLM-CACHE-004)
+      if (entry.payload?.kind === CARD_STATE) return []
       // the card of a tool call, a confirmation still pending included, in its current status (PROF-TOOL-007/009)
       if (entry.payload?.card && typeof entry.payload.card === 'object')
         return [

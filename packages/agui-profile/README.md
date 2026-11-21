@@ -10,8 +10,9 @@ endpoints, binding material, the session grant, `ayni.*` custom events, `forward
 `ayni.*` activity messages including the `ayni.flow` card, `state.ayni`, the app links of §10, from 3.3
 the spaces, the person's memories and preferences and the deletion window of a message, from 3.4 the tools of
 a space, the confirmation card of a tool call and the sources of replies and conversations, and from 3.5 each person's
-own accounts: Your accounts, the Connect card and `ayni.connections.changed`) and the few AG-UI
-message shapes it reuses.
+own accounts: Your accounts, the Connect card and `ayni.connections.changed`; from 3.5.1, the amendment of D114:
+the Notifications of a space and of the agent, `ayni.space.notifications.changed`, the resend of an approval to the
+phone, and `ayni.approval.request` withdrawn) and the few AG-UI message shapes it reuses.
 
 ```ts
 import { APP_LINK_DOMAIN, buildAppLink, parseAppLink, PROFILE_VERSION } from '@ayni.org/ayni-agui-profile'

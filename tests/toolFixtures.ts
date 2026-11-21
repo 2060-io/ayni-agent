@@ -435,6 +435,17 @@ export interface Phone {
   flowCapable(connectionId: string): Promise<void>
   /** answers the latest `confirm` request of a connection */
   confirm(connectionId: string, confirmed: boolean): Promise<void>
+  /**
+   * answers the latest `authorize` request of a connection, for an approval when one is named, attested by the face
+   * unless another method is given (D58, INTX-APPR-011)
+   */
+  authorize(
+    connectionId: string,
+    decision: 'approved' | 'rejected',
+    options?: { approvalId?: string; method?: 'biometric' | 'passcode' | 'none' }
+  ): Promise<void>
+  /** the `authorize` requests sent to a connection, with their flow, oldest first */
+  authorizeRequests(connectionId: string): { flowId: string; request: Record<string, unknown> }[]
 }
 
 /** The DIDComm side of the agent, stubbed: flows, `confirm` and `authorize` requests are recorded, never sent. */
@@ -506,6 +517,38 @@ export function phone(running: RunningAgent): Phone {
         [AYNI_FLOW_PROTOCOL]: feature(AYNI_FLOW_PROTOCOL),
         'https://didcomm.org/confirm/1.0': feature('https://didcomm.org/confirm/1.0'),
         'https://didcomm.org/authorize/1.0': feature('https://didcomm.org/authorize/1.0'),
+      })
+    },
+    authorizeRequests: (connectionId) =>
+      callsOf('sendAuthorizeRequest')
+        .map((c) => c.args[0] as { connectionId: string; flowId: string; request: Record<string, unknown> })
+        .filter((b) => b.connectionId === connectionId),
+    authorize: async (connectionId, decision, options = {}) => {
+      const requests = callsOf('sendAuthorizeRequest').filter((c) => {
+        const body = c.args[0] as { connectionId: string; flowId: string }
+        if (body.connectionId !== connectionId) return false
+        if (!options.approvalId) return true
+        const open = callsOf('openFlow').find((o) => (o.result as { flowId: string }).flowId === body.flowId)
+        return !!open && (open.args[0] as { link?: string }).link?.endsWith(`approval=${options.approvalId}`)
+      })
+      const request = requests.at(-1)
+      if (!request) throw new Error(`no authorize request on ${connectionId}`)
+      const { threadId, flowId } = request.result as { threadId: string; flowId: string }
+      await events.handle({
+        id: `evt-${Math.random()}`,
+        type: 'didcomm.authorize.state-changed',
+        timestamp: new Date().toISOString(),
+        data: {
+          threadId,
+          flowId,
+          connectionId,
+          state: 'response-received',
+          response: {
+            decision,
+            attestation: { method: options.method ?? 'biometric', at: new Date().toISOString() },
+            comment: null,
+          },
+        },
       })
     },
     confirm: async (connectionId, confirmed) => {

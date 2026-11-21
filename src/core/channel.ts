@@ -6,7 +6,7 @@
  */
 import type { Store } from '../store/types.js'
 import type { Logger } from '../util/logger.js'
-import type { CapabilityEvent, ChannelType, Principal, Session } from './types.js'
+import type { ApprovalRecord, CapabilityEvent, ChannelType, Principal, Session } from './types.js'
 
 export type Capability =
   | 'text'
@@ -31,6 +31,27 @@ export interface ChannelAdapter {
   isLive?(session: Session): boolean
   /** A wake-up on the capability channel (`notify`, D57); false when the peer cannot receive one. */
   notify?(connectionId: string, notification: WakeUp): Promise<boolean>
+  /** Whether the session's peer takes the `authorize` flow of an approval: a flow-capable wallet (D54, INTX-APPR-011). */
+  takesApprovalFlows?(session: Session): Promise<boolean>
+  /**
+   * Opens the `authorize` flow of an approval on that peer, once per approval and phone (D114, INTX-APPR-011): `attested`
+   * as its policy sets it, `origin: none`, and `link` to the Notifications that list it (FLOW-AUTH-003).
+   */
+  openApprovalFlow?(session: Session, record: ApprovalRecord, link: string | undefined): Promise<boolean>
+  /** Closes the flow of an approval that peer holds, if any: false when it held none. */
+  closeApprovalFlow?(
+    session: Session,
+    record: ApprovalRecord,
+    outcome: 'completed' | 'cancelled',
+    reason?: string
+  ): Promise<boolean>
+}
+
+/** A person's phone, as an approval reaches it (D114): the capability session and its adapter. */
+export interface ApprovalPhone {
+  session: Session
+  adapter: ChannelAdapter &
+    Required<Pick<ChannelAdapter, 'takesApprovalFlows' | 'openApprovalFlow' | 'closeApprovalFlow'>>
 }
 
 /** The `notify/1.0` notification (flow profile §6.10, INTX-NOTIFY-001). */
@@ -64,13 +85,12 @@ export const DIDCOMM_CAPABILITIES: ReadonlySet<Capability> = new Set([
 ])
 /**
  * Flow mode (D54): a wallet that discloses `ayni-flow/1.0` gets no chat, menus, receipts or reactions on
- * its connection; the trust-bound capabilities are served as flows (INTX-FLOW-001).
+ * its connection; the trust-bound capabilities are served as flows (INTX-FLOW-001). An approval reaches a flow-capable
+ * approver as an `authorize` flow, opened for it alone (D58, D114: `openApprovalFlow`), never as an event of a conversation.
  */
 export const DIDCOMM_FLOW_MODE_CAPABILITIES: ReadonlySet<Capability> = new Set([
   'credential-exchange',
   'auth-challenge',
-  // an attested approval reaches a flow-capable approver as an `authorize` flow (D58)
-  'approval',
 ])
 
 export function capabilityOf(event: CapabilityEvent): Capability {
@@ -201,6 +221,19 @@ export class CapabilityRouter {
 
   public isLive(session: Session): boolean {
     return this.adapters.get(session.channelType)?.isLive?.(session) ?? false
+  }
+
+  /**
+   * The phone an approval reaches (D114, INTX-APPR-011): the Principal's capability session, when its peer takes the
+   * `authorize` flow of an approval; undefined otherwise.
+   */
+  public async approvalPhone(principal: Principal): Promise<ApprovalPhone | undefined> {
+    const session = await this.capabilitySession(principal)
+    if (!session) return undefined
+    const adapter = this.adapters.get(session.channelType)
+    if (!adapter?.takesApprovalFlows || !adapter.openApprovalFlow || !adapter.closeApprovalFlow) return undefined
+    if (!(await adapter.takesApprovalFlows(session))) return undefined
+    return { session, adapter: adapter as ApprovalPhone['adapter'] }
   }
 
   /** The Principal's capability channel: its bound DIDComm session, when live (D3). */
