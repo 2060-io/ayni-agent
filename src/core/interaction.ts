@@ -50,7 +50,9 @@ export function contextualMenuFor(
       label: m.label,
       ...(m.action.type === 'url' && m.action.url ? { url: m.action.url } : {}),
     }))
-  if (bound && (pack.features?.approvals ?? true) && pendingApprovals > 0) {
+  // a DIDComm peer in chat mode keeps the item and its badge (INTX-APPR-006); an AG-UI session offers none, the
+  // approver's requests being in the Notifications, and a flow-capable phone is sent no menu (D54, D114)
+  if (bound && session.channelType === 'didcomm' && (pack.features?.approvals ?? true) && pendingApprovals > 0) {
     items.push({ id: PLATFORM_MENU.approvals, label: 'Approvals', badge: pendingApprovals })
   }
   // a guest may ask to authenticate, when the agent has an authentication schema (IDENT-RES-015). The Ayni app

@@ -15,6 +15,7 @@
     "test:postgres": "node scripts/test-postgres.mjs",
     "test:mail": "node scripts/test-mail.mjs",
     "e2e": "tsx scripts/e2e/spaces-people.e2e.ts",
+    "eval:approval-claims": "tsx scripts/eval/approval-claims.ts",
     "validate": "pnpm check-types && pnpm check-format",
     "pack:validate": "tsx src/cli/validate-pack.ts"
   },

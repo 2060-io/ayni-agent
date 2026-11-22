@@ -5,7 +5,7 @@ import { AGUI_CAPABILITIES, type ChannelAdapter, type RenderResult } from '../..
 import type { CapabilityEvent, Session } from '../../core/types.js'
 import { prefixedId } from '../../util/ids.js'
 import { ev } from './events.js'
-import { approvalValue, attachmentActivity } from './mapping.js'
+import { attachmentActivity } from './mapping.js'
 import type { SessionStreams } from './streams.js'
 
 export class AgUiAdapter implements ChannelAdapter {
@@ -99,17 +99,12 @@ export class AgUiAdapter implements ChannelAdapter {
         await this.pushState(session)
         return 'ok'
       case 'approval': {
-        const principal = this.agent ? await this.agent.principalOf(session) : null
-        const canDecide =
-          !!principal &&
-          !!this.agent &&
-          event.approval.status === 'PENDING' &&
-          (await this.agent.approvals.isEligible(principal, event.approval))
-        // a tool call's approval carries the action and the space whose owner approves it (PROF-TOOL-009)
-        const value =
-          event.approval.action && this.agent
-            ? ((await this.agent.approvalCard(event.approval, principal)) as ReturnType<typeof approvalValue>)
-            : approvalValue(event.approval, principal?.id ?? '', canDecide)
+        // the requester's card, in the one conversation that holds it, replaced in place under its message id by each
+        // later status (PROF-TOOL-009); no approver's session receives it, nor `ayni.approval.request` (D114)
+        const entry = event.entry
+        if (!entry || !this.agent) return 'unsupported'
+        const principal = await this.agent.principalOf(session)
+        const value = await this.agent.approvalCard(event.approval, principal)
         if (event.update)
           await s.publish(
             session.id,
@@ -120,17 +115,9 @@ export class AgUiAdapter implements ChannelAdapter {
               grantExpiresAt: value.grantExpiresAt,
             })
           )
-        else await s.publish(session.id, ev.custom(CUSTOM_EVENT.approvalRequest, value))
-        await this.serverRun(
-          session,
-          async () => {
-            await s.publish(
-              session.id,
-              ev.activitySnapshot(event.entry.id, ACTIVITY.approval, value as unknown as Record<string, unknown>)
-            )
-          },
-          event.update ? undefined : `${event.approval.requesterName} asks for an approval: ${event.approval.toolName}`
-        )
+        await this.serverRun(session, async () => {
+          await s.publish(session.id, ev.activitySnapshot(entry.id, ACTIVITY.approval, value))
+        })
         return 'ok'
       }
       case 'reaction':

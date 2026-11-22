@@ -265,8 +265,21 @@ describe('effect, rule and trust (TOOL-CAT-006/007/008)', () => {
       hasRequestableTools: false,
       challengesConfigured: false,
     }
-    expect(renderPromptAddon({ ...base, toolsMayAsk: true })).toContain('never in words in place of the card')
-    expect(renderPromptAddon({ ...base, toolsMayAsk: false })).not.toContain('in place of the card')
+    // each rule of TOOL-CALL-010 (D114): only a call asks, a new action needs a new call, the model's earlier replies are
+    // no record, only the tool's answer says what was asked or ran, and nothing is claimed that the answer does not say
+    const rules = [
+      'ask the person on a card, an approver',
+      'Only a call of the tool asks: writing that you asked asks nothing.',
+      'Each new action, the same one again included, needs a new call of its tool, whatever became of an earlier one.',
+      'Your own earlier replies are no record of what was asked or done',
+      "only the tool's answer says whether a request was made or the action ran",
+      'Never ask the person to confirm in words in place of the card',
+      "never say that an action ran, or that a confirmation or an approval was asked, unless the tool's answer says so",
+    ]
+    const asks = renderPromptAddon({ ...base, toolsMayAsk: true })
+    for (const rule of rules) expect(asks).toContain(rule)
+    const quietRules = renderPromptAddon({ ...base, toolsMayAsk: false })
+    for (const rule of rules) expect(quietRules).not.toContain(rule)
   })
 })
 

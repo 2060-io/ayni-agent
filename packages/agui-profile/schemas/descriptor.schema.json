@@ -108,6 +108,10 @@
           "type": "boolean",
           "description": "the agent serves each person's own accounts: Your accounts (section 3.11), ayni.connections.changed, the Connect card and the kind of account personal (3.5, PROF-DESC-010)"
         },
+        "notifications": {
+          "type": "boolean",
+          "description": "the agent serves the Notifications of a space and of the agent: the lists of section 3.12, ayni.space.notifications.changed and notificationsWaiting on a space (3.5 amended, agent D114, PROF-DESC-011)"
+        },
         "erasure": {
           "type": "object",
           "required": ["windowSeconds"],

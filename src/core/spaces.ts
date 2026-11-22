@@ -82,6 +82,8 @@ export type SpaceErrorCode =
   | 'wrong-binding'
   | 'wrong-person'
   | 'source-unavailable'
+  /** an approval that ended, or that the person decided, is sent to the phone no more (profile §3.12, D114) */
+  | 'not-pending'
 
 /** The status of each refusal (profile 3.3 §9); `ERROR_STATUS` of the profile package lists the same. */
 export const SPACE_ERROR_STATUS: Record<SpaceErrorCode, number> = {
@@ -119,6 +121,7 @@ export const SPACE_ERROR_STATUS: Record<SpaceErrorCode, number> = {
   'wrong-binding': 422,
   'wrong-person': 422,
   'source-unavailable': 502,
+  'not-pending': 409,
 }
 
 export class SpaceError extends Error {

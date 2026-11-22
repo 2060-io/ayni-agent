@@ -21,11 +21,14 @@ import {
   isAppLink,
   isClientPlatform,
   type MessagesWithheldValue,
+  NOTIFICATIONS_PAGE,
   noTurnOf,
+  notificationsLink,
   PROFILE_MAJOR,
   PROFILE_MINOR,
   PROFILE_VERSION,
   parseAppLink,
+  RUN_ERROR_CODE,
   SPACE_CALL_RULES,
   SPACE_TOOL_STATES,
   type SpaceAccountRequest,
@@ -42,6 +45,24 @@ describe('profile 3.5 constants', () => {
   it('names the revision', () => {
     expect(PROFILE_VERSION).toBe(`${PROFILE_MAJOR}.${PROFILE_MINOR}`)
     expect(PROFILE_VERSION).toBe('3.5')
+    // 3.5 amended (agent D114): the Notifications, their event, and no more approval request
+    expect(CUSTOM_EVENT.spaceNotificationsChanged).toBe('ayni.space.notifications.changed')
+    expect('approvalRequest' in CUSTOM_EVENT).toBe(false)
+    expect(NOTIFICATIONS_PAGE).toEqual({ default: 50, max: 200 })
+    expect(RUN_ERROR_CODE.decideOnPhone).toBe('decide-on-phone')
+    expect(ERROR_STATUS['not-pending']).toBe(409)
+    expect(notificationsLink(APP_LINK_DOMAIN.devnet, 'did:web:a', 'spc_1', 'apr_1')).toBe(
+      'https://app.dev.ayni.org/app/service/did%3Aweb%3Aa/spaces/spc_1/notifications?approval=apr_1'
+    )
+    expect(notificationsLink(APP_LINK_DOMAIN.devnet, 'did:web:a', null, 'apr_1')).toBe(
+      'https://app.dev.ayni.org/app/service/did%3Aweb%3Aa/notifications?approval=apr_1'
+    )
+    expect(
+      parseAppLink(
+        'https://app.dev.ayni.org/app/service/did:web:a/notifications?approval=apr_1',
+        APP_LINK_DOMAIN.devnet
+      )
+    ).toEqual({ route: 'service', segments: ['did:web:a', 'notifications'], params: { approval: 'apr_1' } })
     // 3.5: each person's own accounts, the Connect card (PROF-TOOL-019, PROF-TOOL-020)
     expect(CUSTOM_EVENT.connectionsChanged).toBe('ayni.connections.changed')
     expect(ACTIVITY.connect).toBe('ayni.connect')
@@ -151,6 +172,8 @@ describe('schemas', () => {
       validate({ ...base, profileVersion: '3.5', features: { ...base.features, tools: true, connections: true } })
     ).toBe(true)
     expect(validate({ ...base, features: { ...base.features, connections: 'yes' } })).toBe(false)
+    expect(validate({ ...base, features: { ...base.features, notifications: true } })).toBe(true)
+    expect(validate({ ...base, features: { ...base.features, notifications: 'yes' } })).toBe(false)
     expect(validate({ ...base, features: { ...base.features, erasure: {} } })).toBe(false)
     expect(
       validate({ ...base, binding: { modes: ['cross-device'], walletLinkTemplate: 'didcomm://x?oob={oob}' } })

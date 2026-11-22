@@ -29,9 +29,8 @@ import { nameForModel } from './evidence.js'
 import type { PrincipalService } from './principals.js'
 import { addonTokenCount, renderPromptAddon } from './promptAddon.js'
 import { isPersonalSpace, personalSpaceId } from './spaces.js'
-import type { ElevatedTool, ToolGate, TurnTool, TurnToolState } from './toolGate.js'
+import { askedAnswer, type ElevatedTool, type ToolGate, type TurnTool, type TurnToolState } from './toolGate.js'
 import {
-  type ApprovalRecord,
   CARD_STATE,
   type MessageEntry,
   type Principal,
@@ -116,8 +115,6 @@ export function conversationKey(session: Pick<Session, 'id' | 'conversationId'>)
 export interface OrchestratorHooks {
   /** the Principal's identity credential failed re-verification: terminate its sessions (IDENT-LIVE-004/005) */
   onCredentialInvalid(principal: Principal): Promise<void>
-  /** an approval is pending for a tool call started in this session */
-  onApprovalPending(session: Session, principal: Principal, record: ApprovalRecord, entry: MessageEntry): Promise<void>
 }
 
 /** What a turn's model calls cost (LLM-USAGE-002): the sums, and the input of the last call, the context figure. */
@@ -390,9 +387,11 @@ export class Orchestrator {
 
   private entryToMessages(entry: MessageEntry): ChatMessage[] {
     if (entry.sourceType === 'tool-call') {
-      const p = entry.payload as { name?: string; arguments?: unknown; result?: string } | undefined
+      const p = entry.payload as { name?: string; arguments?: unknown; result?: string; asked?: boolean } | undefined
       if (!p?.name) return []
       const id = `hist_${entry.id}`
+      // a call that asked the person or an approver answers that call only, in history too (TOOL-CALL-015)
+      const result = unmarked((p.result ?? '').slice(0, 2000), 'tool')
       return [
         {
           role: 'assistant',
@@ -400,7 +399,7 @@ export class Orchestrator {
           toolCalls: [{ id, name: p.name, arguments: (p.arguments as Record<string, unknown>) ?? {} }],
         },
         // what a tool answered never passes for a record of the system (MEM-CTX-009)
-        { role: 'tool', toolCallId: id, name: p.name, content: unmarked((p.result ?? '').slice(0, 2000), 'tool') },
+        { role: 'tool', toolCallId: id, name: p.name, content: p.asked ? askedAnswer(result) : result },
       ]
     }
     // receipts and reactions are bookkeeping, not conversation (a reaction the model must know about

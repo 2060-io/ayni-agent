@@ -31,6 +31,7 @@ import type {
   MessageEntry,
   Session,
 } from '../../core/types.js'
+import { needsAttestation } from '../../policy/approvals.js'
 import type { Logger } from '../../util/logger.js'
 import type { PeerProfiles } from './peerProfiles.js'
 import type { VsAgentClient } from './vsAgentClient.js'
@@ -331,7 +332,9 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
       }
       case 'approval': {
         const a = event.approval
-        if (await this.flowMode(connectionId)) return this.renderApprovalAsFlow(connectionId, a, event.update === true)
+        // a flow-capable approver's phone takes the approval as an `authorize` flow, opened for it alone (D114); the
+        // requester's card is the conversation's, never the phone's
+        if (await this.flowMode(connectionId)) return 'ok'
         const text = event.update
           ? `Approval for ${a.toolName} requested by ${a.requesterName}: ${a.status}.`
           : `${a.requesterName} asks to run ${a.toolName}${a.purpose ? ` for "${a.purpose}"` : ''}${a.justification ? `: ${a.justification}` : ''}.`
@@ -369,60 +372,76 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
     }
   }
 
-  // ---- approvals and wake-ups on a flow-capable wallet (D57, D58) -----------------------------------
+  // ---- approvals and wake-ups on a flow-capable wallet (D57, D58, D114) ------------------------------
+
+  /** Whether the session's peer takes the `authorize` flow of an approval: a flow-capable wallet (D54). */
+  public async takesApprovalFlows(session: Session): Promise<boolean> {
+    return session.channelType === 'didcomm' && !!this.flows && (await this.flowMode(session.externalRef))
+  }
 
   /**
-   * An attested approval reaches the approver's phone as an `authorize` flow (INTX-APPR-011); a non-attested one
-   * is decided from the approver's own conversations (the AG-UI card). A later change closes the flow.
+   * Every pending approval an approver can decide reaches their phone as one `authorize` flow, whatever its policy
+   * (INTX-APPR-011, FLOW-AUTH-003): `attested` as the policy sets it, always for an owner's approval; `origin: none`, so
+   * that no conversation records a card of it; and `link` to the Notifications that list it. One flow per approval and
+   * phone: the open one is kept in the store, so a restart still closes or answers it. False when one was open already.
    */
-  private async renderApprovalAsFlow(connectionId: string, a: ApprovalRecord, update: boolean): Promise<RenderResult> {
-    // the open flow per approval and phone is kept in the store, so a restart still closes or answers it
+  public async openApprovalFlow(session: Session, a: ApprovalRecord, link: string | undefined): Promise<boolean> {
+    const connectionId = session.externalRef
     const key = `${AUTHORIZE_INDEX}${a.id}:${connectionId}`
     const kv = this.agent?.store.kv
-    const open = kv ? await kv.get(key) : undefined
-    if (update || a.status !== 'PENDING') {
-      if (open && this.flows && kv) {
-        await kv.set(key, '')
-        await this.flows.close(open, a.status === 'APPROVED' || a.status === 'REJECTED' ? 'completed' : 'cancelled', {
-          reason:
-            a.status === 'APPROVED' || a.status === 'REJECTED'
-              ? undefined
-              : `The request is ${a.status.toLowerCase()}.`,
-        })
-      }
-      return 'ok'
-    }
-    if (!a.attested || !this.flows || !kv || open) return 'ok'
-    // a tool call's approval: the exact call as its justification, the action's title as its purpose (INTX-APPR-013)
+    if (!this.flows || !kv || a.status !== 'PENDING') return false
+    if (await kv.get(key)) return false
+    // a tool call's approval: the exact call as its justification, the action's title as its purpose (INTX-APPR-013);
+    // an elevation: the purpose the person declared, by its label in the governance list, and their justification
     const call = a.action ? authorizeOfCall(a) : undefined
+    const label = a.purpose ? this.agent?.pack.purposes?.find((p) => p.id === a.purpose)?.label : undefined
     const flow = await this.flows.open({
       connectionId,
       kind: 'authorize',
       title: `${a.requesterName} asks to run ${a.action?.title ?? a.toolName}`,
       description: call?.justification ?? a.justification ?? a.purpose,
       expiresAt: a.expiresAt,
+      ...(link ? { link } : {}),
       ref: { type: 'approval', id: a.id },
     })
     try {
-      const exchange = await this.client.sendAuthorizeRequest({
+      await this.client.sendAuthorizeRequest({
         connectionId,
         flowId: flow.flowId,
         request: {
           requester: { name: a.requesterName, role: a.requesterRole || null, did: null },
-          purpose: call?.purpose ?? { id: a.purpose ?? a.toolName, label: a.purpose ?? a.toolName },
+          purpose: call?.purpose ?? { id: a.purpose ?? a.toolName, label: label ?? a.purpose ?? a.toolName },
           justification: call?.justification ?? a.justification ?? '',
           scope: call?.scope ?? [`tool:${a.serverName ? `${a.serverName}.` : ''}${a.toolName}`],
           expiresAt: a.expiresAt,
-          attested: true,
+          attested: needsAttestation(a),
         },
       })
-      void exchange
       await kv.set(key, flow.flowId)
-      return 'ok'
+      return true
     } catch (error) {
       await this.flows.close(flow.flowId, 'failed', { reason: 'The authorization request could not be sent.' })
       throw error
     }
+  }
+
+  /**
+   * Closes the flow of an approval this phone holds (INTX-APPR-011): once this approver decided elsewhere, once the
+   * approval ended, or before it is sent again (INTX-APPR-019). False when the phone held none.
+   */
+  public async closeApprovalFlow(
+    session: Session,
+    a: ApprovalRecord,
+    outcome: 'completed' | 'cancelled',
+    reason?: string
+  ): Promise<boolean> {
+    const key = `${AUTHORIZE_INDEX}${a.id}:${session.externalRef}`
+    const kv = this.agent?.store.kv
+    const open = kv ? await kv.get(key) : undefined
+    if (!open || !this.flows || !kv) return false
+    await kv.set(key, '')
+    await this.flows.close(open, outcome, reason ? { reason } : {})
+    return true
   }
 
   /** The approval an `authorize` response answers (from the flow's persisted handle), consumed once. */

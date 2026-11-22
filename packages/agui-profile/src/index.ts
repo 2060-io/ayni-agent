@@ -2,6 +2,15 @@
  * Ayni AG-UI Profile 3.5 (2060-io/ayni-spec, v4/ayni-agui-profile/profile.md).
  * Every name below cites the section or the PROF-* requirement it implements.
  *
+ * 3.5, amended 2026-11-21 (ayni-spec agent D114, found on devnet): approvals reach each person once. The requester's
+ * card is one `ayni.approval` activity of the conversation where it was asked, replaced in place by each later status
+ * (PROF-TOOL-009); the approver gets no card and no `ayni.approval.request`, which is withdrawn: the request is on their
+ * phone and in the Notifications of the space or of the agent (§3.12, `NotificationsPage`, PROF-TOOL-024), kept current
+ * by `ayni.space.notifications.changed` (PROF-TOOL-025) and counted in `notificationsWaiting` (§3.7). `approval.decide`
+ * and `approval.cancel` start no turn (`noTurn: 'decision'`); an approval to attest answers `decide-on-phone` and is sent
+ * to the phone again by `POST {sessions}/approvals/{approvalId}/resend` (PROF-TOOL-026); app links to the Notifications
+ * (§10, `approval`, PROF-LINK-005); `features.notifications` (PROF-DESC-011). Not additive; `profileVersion` stays 3.5.
+ *
  * 3.5 over 3.4 (ayni-spec agent D104 to D110, tools, phase 2): each person's own accounts, listed and managed in Your
  * accounts (§3.11, PROF-TOOL-014..018); the sign-in in the browser, sent back to the agent and from it to the app link
  * `/app/service/{did}/accounts` (§10, PROF-LINK-004); `ayni.connections.changed` (§5, PROF-TOOL-019); the Connect card,
@@ -110,6 +119,12 @@ export interface DescriptorFeatures {
    * declare it.
    */
   connections?: boolean
+  /**
+   * the agent serves the Notifications of a space and of the agent (3.5 amended, agent D114, PROF-DESC-011): the lists of
+   * §3.12, `ayni.space.notifications.changed` (§5) and `notificationsWaiting` on a space (§3.7). A UI shows no
+   * Notifications of an agent that does not declare it.
+   */
+  notifications?: boolean
 }
 
 export type BindingMode = 'cross-device' | 'same-device'
@@ -277,7 +292,8 @@ export const CUSTOM_EVENT = {
   sessionBound: 'ayni.session.bound',
   sessionToken: 'ayni.session.token',
   capabilityRouted: 'ayni.capability.routed',
-  approvalRequest: 'ayni.approval.request',
+  // `ayni.approval.request` is withdrawn (agent D114): an approver's request is on their phone and in their Notifications
+  /** a later status of the requester's card, to the sessions of the one conversation that holds it (§5, PROF-TOOL-009) */
   approvalUpdate: 'ayni.approval.update',
   reaction: 'ayni.reaction',
   receipt: 'ayni.receipt',
@@ -293,6 +309,11 @@ export const CUSTOM_EVENT = {
   spaceToolsChanged: 'ayni.space.tools.changed',
   /** one of the Principal's own accounts, or an attempt to connect one, changed (3.5, PROF-TOOL-019) */
   connectionsChanged: 'ayni.connections.changed',
+  /**
+   * a notification of the Principal entered, changed or ended in the Notifications of a space, or of the agent when
+   * `spaceId` is null (3.5 amended, agent D114, PROF-TOOL-025)
+   */
+  spaceNotificationsChanged: 'ayni.space.notifications.changed',
 } as const
 
 /** What became of a change of a space's tools (3.4, PROF-TOOL-006). */
@@ -440,6 +461,11 @@ export interface ApprovalPolicyDisplay {
   vetoOnRefusal?: boolean
 }
 
+/**
+ * The content of an approval as the `ayni.approval` activity carries it: the requester's card, in the conversation where
+ * it was asked (PROF-TOOL-009), and the `approval` of an item of the Notifications (§3.12). It was also the value of
+ * `ayni.approval.request`, which is withdrawn (agent D114).
+ */
 export interface ApprovalRequestValue {
   approvalId: string
   kind: ApprovalKind
@@ -450,10 +476,12 @@ export interface ApprovalRequestValue {
   policy: ApprovalPolicyDisplay
   expiresAt: string
   status?: ApprovalStatus
-  /** true when the receiving Principal is the requester */
+  /** true when the receiving Principal is the requester: the requester's card, read-only */
   own?: boolean
-  /** true when the receiving Principal may decide */
+  /** true while the receiving Principal may decide */
   canDecide?: boolean
+  /** who decided, by the names the agent shows, joined with commas */
+  decidedBy?: string
   /** the call of a tool, as its card shows it (3.4, PROF-TOOL-009) */
   action?: ToolAction
   /** the space whose owner approves the call of a tool of the space (3.4, PROF-TOOL-009) */
@@ -554,7 +582,6 @@ export interface CustomEventValueMap {
   'ayni.session.bound': SessionBoundValue
   'ayni.session.token': SessionTokenValue
   'ayni.capability.routed': CapabilityRoutedValue
-  'ayni.approval.request': ApprovalRequestValue
   'ayni.approval.update': ApprovalUpdateValue
   'ayni.reaction': ReactionValue
   'ayni.receipt': ReceiptValue
@@ -563,6 +590,7 @@ export interface CustomEventValueMap {
   'ayni.memory.updated': MemoryUpdatedValue
   'ayni.space.tools.changed': SpaceToolsChangedValue
   'ayni.connections.changed': ConnectionsChangedValue
+  'ayni.space.notifications.changed': SpaceNotificationsChangedValue
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -622,7 +650,9 @@ export interface AyniState {
   context?: ContextFigure
   /** the space of the conversation, `{ id, title, kind }` (3.3, PROF-STREAM-009); absent from an earlier agent */
   space?: SpaceRef
+  /** an AG-UI session's carries no item for approvals (agent D114): an approver's requests are in the Notifications */
   contextualMenu: { items: ContextualMenuItem[] }
+  /** the approvals the Principal may decide now, the same on every session (PROF-TOOL-025): a mark of the agent */
   pendingApprovals: number
   generating: GeneratingEntry[]
   /** what waits, in the order it arrived, the same on every session of the conversation; absent on an agent without `features.queue` */
@@ -797,6 +827,10 @@ export const RUN_ERROR_CODE = {
   internal: 'internal',
   /** more messages wait in the conversation than the agent lets wait (PROF-RUN-011) */
   tooManyWaiting: 'too-many-waiting',
+  /** an `approval.decide` of an approval whose decision must be attested: decided on the phone (PROF-TOOL-026) */
+  decideOnPhone: 'decide-on-phone',
+  /** an `approval.decide` or `approval.cancel` of an approval the Principal may not decide or withdraw (PROF-TOOL-026) */
+  notEligible: 'not-eligible',
 } as const
 
 /** The outcome of a run that ended without a turn of its own: the run named answers its message (PROF-RUN-012). */
@@ -813,8 +847,9 @@ export interface MergedRunOutcome {
 export type NoTurn = 'waiting' | 'refused' | 'withdrawn' | 'decision'
 
 /**
- * The outcome of an `approval.decide` run on a confirmation (3.4, PROF-TOOL-008): it starts no turn, and says the status
- * the confirmation has now: the one it took, or the one an earlier decision gave it.
+ * The outcome of an `approval.decide` run (3.4, PROF-TOOL-008, PROF-TOOL-026) and of an `approval.cancel` (agent D114): it
+ * starts no turn, and says the status the approval has now: the one it took, `PENDING` while it waits for other
+ * approvers, or the one an earlier decision gave it.
  */
 export interface DecisionRunOutcome {
   type: 'decision'
@@ -1020,6 +1055,8 @@ export const ERROR_STATUS = {
   'wrong-person': 422,
   /** 3.5: the service's metadata, its authorization server or the agent's client there cannot be had (§3.11) */
   'source-unavailable': 502,
+  /** 3.5 amended (D114): `POST /approvals/{id}/resend` once the approval ended or the person decided it (§3.12) */
+  'not-pending': 409,
 } as const
 
 export type ErrorCode = keyof typeof ERROR_STATUS
@@ -1068,7 +1105,7 @@ export const APP_LINK_ROUTES = [
 export type AppLinkRoute = (typeof APP_LINK_ROUTES)[number]
 
 /** The only query parameters a link may carry (PROF-LINK-003); a UI ignores any other. */
-export const APP_LINK_PARAMS = ['q', 'to', 'amount', 'memo', 'oob'] as const
+export const APP_LINK_PARAMS = ['q', 'to', 'amount', 'memo', 'oob', 'approval'] as const
 export type AppLinkParam = (typeof APP_LINK_PARAMS)[number]
 
 export interface AppLink {
@@ -1125,6 +1162,17 @@ export function isAppLink(url: string, domain: string): boolean {
   return parseAppLink(url, domain) !== null
 }
 
+/**
+ * The app link of the Notifications that list an approval (3.5 amended, agent D114, PROF-LINK-005), the `link` of its
+ * `authorize` flow: `/app/service/{did}/spaces/{spaceId}/notifications?approval={approvalId}` for an approval of a space's
+ * tool, `/app/service/{did}/notifications?approval={approvalId}` for any other.
+ */
+export function notificationsLink(domain: string, did: string, spaceId: string | null, approvalId: string): string {
+  return buildAppLink(domain, 'service', spaceId ? [did, 'spaces', spaceId, 'notifications'] : [did, 'notifications'], {
+    approval: approvalId,
+  })
+}
+
 // ---------------------------------------------------------------------------------------------
 // Spaces (3.3): `{sessions}/spaces`, a bound session's token
 
@@ -1177,6 +1225,11 @@ export interface SpaceInfo {
   state: 'active' | 'left'
   /** the agent messages the caller has not read in their conversations of it */
   unread: number
+  /**
+   * the notifications of the space that wait for the caller (§3.12): the badge of the space's row and of its
+   * Notifications; from an agent that declares `features.notifications` (agent D114, PROF-TOOL-025)
+   */
+  notificationsWaiting?: number
   lastActivityAt: string
 }
 
@@ -1626,4 +1679,76 @@ export interface ConnectActivity {
   why: 'connect' | 'reconnect'
   binding?: { label: string; value: string; valueLabel: string | null }
   spaceId?: string
+}
+
+// ---------------------------------------------------------------------------------------------
+// Notifications (3.5 amended, §3.12, agent D114): `{sessions}/spaces/{id}/notifications` and `{sessions}/notifications`,
+// a bound session's token
+
+/** The default and the largest page of the Notifications (§3.12, PROF-TOOL-024). */
+export const NOTIFICATIONS_PAGE = { default: 50, max: 200 } as const
+
+/** What a person's notification is: in this version, an approval only (agent D114, O43). */
+export type NotificationKind = 'approval'
+
+/** One decision of an approver, as an item of the Notifications names it. */
+export interface NotificationDecision {
+  by: { displayName: string }
+  decision: 'approve' | 'reject'
+  at: string
+}
+
+/**
+ * The approval of an item (§3.12): the shape of the `ayni.approval` activity as this person may read it, never more of the
+ * conversation it was asked in. `own` on a request the person sent (Sent by you), which they read and never decide;
+ * `canDecide` while they may decide it; `attested`: its decision is made on the phone only; `myDecision` the person's own
+ * while it waits for other approvers; `closedAt` once it ended. An elevation carries `purpose` and `justification` and no
+ * `action`. A `personal` account carries its `label` on the requester's item only (PROF-TOOL-021).
+ */
+export interface NotificationApproval extends ApprovalRequestValue {
+  status: ApprovalStatus
+  own: boolean
+  canDecide: boolean
+  attested: boolean
+  myDecision: 'approve' | 'reject' | null
+  decisions: NotificationDecision[]
+  closedAt?: string
+}
+
+export interface NotificationItem {
+  /** the approval's id */
+  id: string
+  kind: NotificationKind
+  /** when the request was made: the order of the list */
+  at: string
+  /** the person can still decide it: `PENDING`, and not decided by them */
+  waiting: boolean
+  approval: NotificationApproval
+}
+
+/** `GET {sessions}/spaces/{id}/notifications` and `GET {sessions}/notifications`: newest first (PROF-TOOL-024). */
+export interface NotificationsPage {
+  notifications: NotificationItem[]
+  /** the `id` to pass as `before` for the next page; null on the last */
+  nextBefore: string | null
+  /** what waits for the person in the whole place: the badge */
+  waiting: number
+}
+
+/** `POST {sessions}/approvals/{approvalId}/resend` answers `202` with the expiry of the request sent again (PROF-TOOL-026). */
+export interface ApprovalResendResponse {
+  expiresAt: string
+}
+
+/**
+ * `ayni.space.notifications.changed` (PROF-TOOL-025): a notification of the Principal entered, changed or ended in the
+ * Notifications of `spaceId`, or of the agent when it is null; to every bound session of the Principal that has its
+ * stream open. A UI reads the list again on it; `count` is the badge.
+ */
+export interface SpaceNotificationsChangedValue {
+  spaceId: string | null
+  id: string
+  kind: NotificationKind
+  waiting: boolean
+  count: number
 }

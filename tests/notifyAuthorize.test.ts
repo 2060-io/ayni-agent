@@ -367,11 +367,11 @@ describe('attested approvals as authorize flows (D58, INTX-APPR-011)', () => {
     expect(close).toHaveLength(1)
   })
 
-  it('does not open a flow for a non-attested rule', async () => {
+  it('opens a flow for a non-attested rule too, attested false, decided without biometrics (D114, INTX-APPR-011)', async () => {
     const ana = await running.agent.didcommSession('conn-ana')
     if (!ana) throw new Error('peer not connected')
     const before = callsOf('openFlow').length
-    await running.agent.approvals.requestSensitivity({
+    const record = await running.agent.approvals.requestSensitivity({
       principal: ana.principal,
       role: 'guest',
       originSessionId: ana.session.id,
@@ -380,6 +380,57 @@ describe('attested approvals as authorize flows (D58, INTX-APPR-011)', () => {
       rule: { tools: ['echo'], approvers: ['manager'] },
     })
     await settle()
-    expect(callsOf('openFlow').length).toBe(before)
+    expect(callsOf('openFlow').length).toBe(before + 1)
+    expect(callsOf('openFlow').at(-1)?.args[0]).toMatchObject({
+      connectionId: 'conn-manager',
+      kind: 'authorize',
+      origin: { channel: 'none' },
+      link: `https://app.ayni.org/app/service/${running.agent.did}/notifications?approval=${record.id}`,
+    })
+    const request = callsOf('sendAuthorizeRequest').at(-1)
+    if (!request) throw new Error('no authorize request')
+    const body = request.args[0] as { flowId: string; request: Record<string, unknown> }
+    expect(body.request.attested).toBe(false)
+    await events.handle(
+      envelope('didcomm.authorize.state-changed', {
+        threadId: (request.result as { threadId: string }).threadId,
+        flowId: body.flowId,
+        connectionId: 'conn-manager',
+        state: 'response-received',
+        response: { decision: 'approved', attestation: { method: 'none', at: new Date().toISOString() } },
+      })
+    )
+    await settle()
+    expect((await running.agent.store.approvals.get(record.id))?.status).toBe('APPROVED')
+  })
+
+  it('refuses an attested decision the phone made without authenticating the person (FLOW-AUTH-001)', async () => {
+    const ana = await running.agent.didcommSession('conn-ana')
+    if (!ana) throw new Error('peer not connected')
+    const record = await running.agent.approvals.requestSensitivity({
+      principal: ana.principal,
+      role: 'guest',
+      originSessionId: ana.session.id,
+      toolName: 'echo',
+      args: {},
+      rule: { tools: ['echo'], approvers: ['manager'], attested: true },
+    })
+    await settle()
+    const request = callsOf('sendAuthorizeRequest').at(-1)
+    if (!request) throw new Error('no authorize request')
+    const body = request.args[0] as { flowId: string }
+    await events.handle(
+      envelope('didcomm.authorize.state-changed', {
+        threadId: (request.result as { threadId: string }).threadId,
+        flowId: body.flowId,
+        connectionId: 'conn-manager',
+        state: 'response-received',
+        response: { decision: 'approved', attestation: { method: 'none', at: new Date().toISOString() } },
+      })
+    )
+    await settle()
+    expect((await running.agent.store.approvals.get(record.id))?.status).toBe('PENDING')
+    const close = callsOf('closeFlow').filter((c) => c.args[0] === body.flowId)
+    expect(close.at(-1)?.args[1]).toMatchObject({ outcome: 'failed' })
   })
 })

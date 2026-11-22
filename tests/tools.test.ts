@@ -9,6 +9,7 @@ import pino from 'pino'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { buildAgent, type RunningAgent } from '../src/app.js'
 import { personalSpaceId } from '../src/core/spaces.js'
+import { ONE_CALL } from '../src/core/toolGate.js'
 import type { ApprovalRecord, MessageEntry, Principal } from '../src/core/types.js'
 import { createEntryCrypto, openJson, sealJson } from '../src/memory/crypto.js'
 import type { McpServerSource } from '../src/tools/mcp.js'
@@ -686,7 +687,6 @@ describe('the confirmation of a call (TOOL-CALL-003..008, PROF-TOOL-007/008/012,
     ])
     expect(card.untrusted).toBeUndefined()
     // never an approval request, never counted among pending approvals (INTX-APPR-012)
-    expect(mirrored.some((e) => e.type === 'CUSTOM' && e.name === CUSTOM_EVENT.approvalRequest)).toBe(false)
     expect(
       (await running.agent.ayniState((await running.agent.sessions.get(web1.sessionId)) as never)).pendingApprovals
     ).toBe(0)
@@ -730,7 +730,7 @@ describe('the confirmation of a call (TOOL-CALL-003..008, PROF-TOOL-007/008/012,
     await decide(web1, pending.id, 'reject')
     await turn
     expect(toolAnswers().at(-1)).toBe(
-      'The person refused Add a note: it did not run. Do not try it again unless the person asks for it.'
+      `The person refused Add a note: it did not run. Do not try it again unless the person asks for it.\n\n${ONE_CALL}`
     )
     const [record] = await running.agent.store.toolCalls.list({ conversationId, limit: 1 })
     expect(record).toMatchObject({
@@ -747,7 +747,7 @@ describe('the confirmation of a call (TOOL-CALL-003..008, PROF-TOOL-007/008/012,
     await run(web1, 'note')
     confirmation.timeoutSeconds = 300
     expect(toolAnswers().at(-1)).toBe(
-      'The person did not answer the confirmation of Add a note in time: it did not run.'
+      `The person did not answer the confirmation of Add a note in time: it did not run.\n\n${ONE_CALL}`
     )
     const [record] = await running.agent.store.toolCalls.list({ conversationId, limit: 1 })
     expect(record?.outcome).toBe('expired')
@@ -783,7 +783,7 @@ describe('the confirmation of a call (TOOL-CALL-003..008, PROF-TOOL-007/008/012,
     const before = crm.calls.length
     await run(old, 'note')
     expect(toolAnswers().at(-1)).toBe(
-      "Add a note needs the person's confirmation, which could not be asked here: it did not run."
+      `Add a note needs the person's confirmation, which could not be asked here: it did not run.\n\n${ONE_CALL}`
     )
     expect(crm.calls.length).toBe(before)
     const [record] = await running.agent.store.toolCalls.list({
@@ -806,7 +806,7 @@ describe('the confirmation of a call (TOOL-CALL-003..008, PROF-TOOL-007/008/012,
     model.script = [{ calls: [{ name: 'create-note', arguments: { company: 'Acme', note: 'n' } }] }, { text: 'ok' }]
     await run(serviceSales, 'note')
     expect(toolAnswers().at(-1)).toBe(
-      "Add a note needs the person's confirmation, which could not be asked here: it did not run."
+      `Add a note needs the person's confirmation, which could not be asked here: it did not run.\n\n${ONE_CALL}`
     )
   })
 
@@ -945,7 +945,7 @@ describe('the rules of the owner, and the approval of a tool of a space (TOOL-SP
     ]
     await run(anaSales, 'note')
     expect(toolAnswers().at(-1)).toBe(
-      'Add a note needs the approval of the owner of the space, jonas. The request is pending: the action runs once approved, and its outcome will be told in this conversation.'
+      `Add a note needs the approval of the owner of the space, jonas. The request is pending: the action runs once approved, and its outcome will be told in this conversation.\n\n${ONE_CALL}`
     )
     const pending = (await running.agent.store.approvals.list({ status: 'PENDING' })).find((r) => r.ownerApproval)
     expect(pending).toMatchObject({ spaceId: salesEu.id, sourceId: 'relaticle', kind: 'sensitivity' })
@@ -953,7 +953,12 @@ describe('the rules of the owner, and the approval of a tool of a space (TOOL-SP
     const mia = await device('mia', ['employee', 'manager'])
     expect(await running.agent.approvals.pendingFor(mia.principal)).toHaveLength(0)
     expect((await running.agent.approvals.pendingFor(jonas.principal)).map((r) => r.id)).toContain(pending?.id)
-    await decide(jonas, pending?.id as string, 'reject')
+    // an owner's approval is decided on the phone (INTX-APPR-019)
+    expect((await decide(jonas, pending?.id as string, 'reject')).events.at(-1)).toMatchObject({
+      type: 'RUN_ERROR',
+      code: 'decide-on-phone',
+    })
+    await ph.authorize(jonas.connectionId, 'rejected', { approvalId: pending?.id })
     const [record] = await running.agent.store.toolCalls.list({ principalId: ana.principal.id, limit: 1 })
     expect(record).toMatchObject({
       outcome: 'not-approved',
@@ -1016,7 +1021,7 @@ describe('the rules of the owner, and the approval of a tool of a space (TOOL-SP
     expect(activity.slice(0, 2)).toEqual(['account-set', 'tool-added'])
   })
 
-  it("routes a member's post to the owner, with the exact call, on his phone and in his card; approved, it runs (INTX-APPR-013/014)", async () => {
+  it("routes a member's post to the owner, with the exact call, on his phone and in his Notifications; approved, it runs (INTX-APPR-013/014)", async () => {
     anaComms = await open(ana, { spaceId: comms.id })
     const jonasStream = received(jonas.sessionId).length
     model.script = [{ calls: [{ name: 'post_to_x', arguments: { text: post } }] }, { text: 'asked' }]
@@ -1026,30 +1031,44 @@ describe('the rules of the owner, and the approval of a tool of a space (TOOL-SP
       (r) => r.spaceId === comms.id
     )
     if (!pending) throw new Error('no approval')
+    // no card and no request in any session of his: his Notifications changed (D114, PROF-TOOL-025)
     await until(() =>
       received(jonas.sessionId)
         .slice(jonasStream)
-        .some((e) => e.type === 'CUSTOM' && e.name === CUSTOM_EVENT.approvalRequest)
+        .some((e) => e.type === 'CUSTOM' && e.name === CUSTOM_EVENT.spaceNotificationsChanged)
     )
-    const request = received(jonas.sessionId)
-      .slice(jonasStream)
-      .find((e) => e.type === 'CUSTOM' && e.name === CUSTOM_EVENT.approvalRequest)?.value as Doc
-    expect(request).toMatchObject({
-      approvalId: pending.id,
-      kind: 'sensitivity',
-      canDecide: true,
-      space: { id: comms.id, title: 'Communication' },
-      action: {
-        title: 'Post on X',
-        source: { id: 'post_to_x', title: 'Post on X' },
-        account: { kind: 'space', space: { id: comms.id, title: 'Communication' } },
-        fields: [
-          { label: 'X account', value: '@acme', pinned: true },
-          { label: 'Post', value: post },
-        ],
+    const toJonas = received(jonas.sessionId).slice(jonasStream)
+    expect(toJonas.some((e) => e.type === 'ACTIVITY_SNAPSHOT' && e.activityType === ACTIVITY.approval)).toBe(false)
+    expect(
+      toJonas.find((e) => e.type === 'CUSTOM' && e.name === CUSTOM_EVENT.spaceNotificationsChanged)?.value
+    ).toEqual({ spaceId: comms.id, id: pending.id, kind: 'approval', waiting: true, count: 1 })
+    const listed = (await call(jonas, 'GET', `/spaces/${comms.id}/notifications`)).body as Doc
+    expect(listed.waiting).toBe(1)
+    expect(listed.notifications[0]).toMatchObject({
+      id: pending.id,
+      kind: 'approval',
+      waiting: true,
+      approval: {
+        approvalId: pending.id,
+        kind: 'sensitivity',
+        status: 'PENDING',
+        canDecide: true,
+        own: false,
+        attested: true,
+        myDecision: null,
+        space: { id: comms.id, title: 'Communication' },
+        action: {
+          title: 'Post on X',
+          source: { id: 'post_to_x', title: 'Post on X' },
+          account: { kind: 'space', space: { id: comms.id, title: 'Communication' } },
+          fields: [
+            { label: 'X account', value: '@acme', pinned: true },
+            { label: 'Post', value: post },
+          ],
+        },
       },
     })
-    // his phone: an attested authorize flow whose justification is the exact call
+    // his phone: an attested authorize flow whose justification is the exact call, linked to the space's Notifications
     const authorize = ph.callsOf('sendAuthorizeRequest').at(-1)?.args[0] as Doc
     expect(authorize.connectionId).toBe(jonas.connectionId)
     expect(authorize.request).toMatchObject({
@@ -1058,6 +1077,11 @@ describe('the rules of the owner, and the approval of a tool of a space (TOOL-SP
       scope: ['tool:post_to_x.post_to_x', `space:${comms.id}`],
       attested: true,
     })
+    const opened = ph.callsOf('openFlow').find((c) => (c.result as Doc).flowId === authorize.flowId)?.args[0] as Doc
+    expect(opened.origin).toEqual({ channel: 'none' })
+    expect(opened.link).toBe(
+      `https://app.ayni.org/app/service/${running.agent.did}/spaces/${comms.id}/notifications?approval=${pending.id}`
+    )
     // Ana's own card shows the same action, in her history (PROF-TOOL-009)
     const anaHistory = (await call(anaComms, 'GET', `/${anaComms.sessionId}/messages?limit=100`)).body.messages
     const anaCard = anaHistory.find(
@@ -1066,11 +1090,22 @@ describe('the rules of the owner, and the approval of a tool of a space (TOOL-SP
     )
     expect(anaCard.content).toMatchObject({
       status: 'PENDING',
+      own: true,
+      canDecide: false,
       space: { id: comms.id, title: 'Communication' },
       action: { title: 'Post on X', fields: [{ label: 'X account' }, { label: 'Post', value: post }] },
     })
-    // decided in his card: it runs with the text Ana's card showed, and her conversation is told
-    await decide(jonas, pending.id, 'approve')
+    // in his browser it is decided on the phone only (INTX-APPR-019); Decide on your phone sends it again
+    const fromBrowser = await decide(jonas, pending.id, 'approve')
+    expect(fromBrowser.events.at(-1)).toMatchObject({ type: 'RUN_ERROR', code: 'decide-on-phone' })
+    expect((await running.agent.store.approvals.get(pending.id))?.status).toBe('PENDING')
+    const resent = await call(jonas, 'POST', `/approvals/${pending.id}/resend`)
+    expect(resent).toMatchObject({ status: 202, body: { expiresAt: pending.expiresAt } })
+    expect(ph.callsOf('closeFlow').some((c) => c.args[0] === authorize.flowId)).toBe(true)
+    const again = ph.authorizeRequests(jonas.connectionId).at(-1) as Doc
+    expect(again.flowId).not.toBe(authorize.flowId)
+    // decided on his phone: it runs with the text Ana's card showed, and her conversation is told
+    await ph.authorize(jonas.connectionId, 'approved', { approvalId: pending.id })
     await until(() => x.requests.some((r) => r.url === '/2/tweets'))
     const sent = x.requests.find((r) => r.url === '/2/tweets')
     expect(sent).toMatchObject({ method: 'POST', authorization: `Bearer ${X_TOKEN}`, body: { text: post } })
@@ -1085,15 +1120,24 @@ describe('the rules of the owner, and the approval of a tool of a space (TOOL-SP
     const result = (await entries(anaConversation)).find((e) => e.sourceType === 'tool-call')
     expect(JSON.stringify(result?.payload)).toContain('[account]')
     expect(JSON.stringify(result?.payload)).not.toContain(X_TOKEN)
-    // decided in the card, the flow on his phone closes (INTX-APPR-013)
-    const flowOfRequest = authorize.flowId as string
-    await until(() => ph.callsOf('closeFlow').some((c) => c.args[0] === flowOfRequest))
     const [record] = await running.agent.store.toolCalls.list({ conversationId: anaConversation, limit: 1 })
     expect(record).toMatchObject({
       outcome: 'completed',
       sourceId: 'post_to_x',
       account: { kind: 'space', spaceId: comms.id },
       approval: { approvalId: pending.id, status: 'APPROVED', decidedBy: ['jonas'] },
+    })
+    expect((await running.agent.store.approvals.get(pending.id))?.decisions[0]?.attestation?.method).toBe('biometric')
+    // his Notifications keep it, decided (INTX-APPR-017)
+    const after = (await call(jonas, 'GET', `/spaces/${comms.id}/notifications`)).body as Doc
+    expect(after.waiting).toBe(0)
+    expect(after.notifications[0]).toMatchObject({
+      waiting: false,
+      approval: {
+        status: 'APPROVED',
+        canDecide: false,
+        decisions: [{ by: { displayName: 'jonas' }, decision: 'approve' }],
+      },
     })
   })
 
@@ -1105,6 +1149,7 @@ describe('the rules of the owner, and the approval of a tool of a space (TOOL-SP
     )
     if (!pending?.inboundId) throw new Error('no approval')
     void asked
+    const flowId = (ph.authorizeRequests(jonas.connectionId).at(-1) as Doc).flowId
     const deleted = await call(anaComms, 'DELETE', `/${anaComms.sessionId}/messages/${pending.inboundId}`)
     expect(deleted.status).toBe(204)
     const after = await running.agent.store.approvals.get(pending.id)
@@ -1120,8 +1165,19 @@ describe('the rules of the owner, and the approval of a tool of a space (TOOL-SP
       (m: { activityType?: string; content: { approvalId?: string } }) =>
         m.activityType === ACTIVITY.approval && m.content.approvalId === pending.id
     )
-    expect(cards.length).toBeGreaterThan(0)
+    expect(cards).toHaveLength(1)
+    expect(cards[0].content).toMatchObject({ status: 'CANCELLED', action: { fields: [], erased: true } })
     expect(JSON.stringify(history)).not.toContain('a post to delete')
+    // his phone's request closes, and his Notifications keep the title and Withdrawn (INTX-APPR-015)
+    expect(ph.callsOf('closeFlow').some((c) => c.args[0] === flowId)).toBe(true)
+    const item = ((await call(jonas, 'GET', `/spaces/${comms.id}/notifications`)).body as Doc).notifications.find(
+      (n: Doc) => n.id === pending.id
+    )
+    expect(item.approval).toMatchObject({
+      status: 'CANCELLED',
+      action: { title: 'Post on X', fields: [], erased: true },
+    })
+    expect(JSON.stringify(item)).not.toContain('a post to delete')
   })
 })
 
@@ -1361,7 +1417,7 @@ describe('approvals of the whole agent (TOOL-CAT-009, INTX-APPR-005)', () => {
     model.script = [{ calls: [{ name: 'purge', arguments: {} }] }, { text: 'ok' }]
     await run(guest, 'purge')
     expect(toolAnswers().at(-1)).toBe(
-      'Purge needs the approval of manager. The request is pending: the action runs once approved, and its outcome will be told in this conversation.'
+      `Purge needs the approval of manager. The request is pending: the action runs once approved, and its outcome will be told in this conversation.\n\n${ONE_CALL}`
     )
     const pending = (await running.agent.store.approvals.list({ status: 'PENDING' })).find(
       (r) => r.toolName === 'purge'
@@ -1618,7 +1674,9 @@ describe('no approver (TOOL-CAT-009)', () => {
       },
     })
     const answers = (m.requests.at(-1)?.messages ?? []).filter((x) => x.role === 'tool').map((x) => String(x.content))
-    expect(answers.at(-1)).toBe('Purge needs an approval, and nobody can approve it here: it did not run.')
+    expect(answers.at(-1)).toBe(
+      `Purge needs an approval, and nobody can approve it here: it did not run.\n\n${ONE_CALL}`
+    )
     const [record] = await second.agent.store.toolCalls.list({ principalId: principal.id, limit: 1 })
     expect(record?.outcome).toBe('no-approver')
     expect(fakes.x.requests).toHaveLength(0)

@@ -405,6 +405,8 @@ export class VsAgentClient {
     origin: FlowOrigin
     expiresTime: string
     requires?: string[]
+    /** the `open`'s app link, offered on the holder's sheet (flow profile §5.1, FLOW-CORE-011) */
+    link?: string
   }): Promise<FlowRecord> {
     return this.request('POST', '/didcomm/ayni-flow/flows', body)
   }
