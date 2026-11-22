@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.1](https://github.com/2060-io/ayni-agent/compare/v0.30.0...v0.30.1) (2026-11-22)
+
+
+### Bug Fixes
+
+* **approvals:** Decide on your phone sends an approval again at most once every 30 seconds, one resend at a time (PROF-TOOL-026, INTX-APPR-019) ([#116](https://github.com/2060-io/ayni-agent/issues/116)) ([dabae1c](https://github.com/2060-io/ayni-agent/commit/dabae1c76434254ad9900c83ee4cd8779df88a2c))
+
 ## [0.30.0](https://github.com/2060-io/ayni-agent/compare/v0.29.1...v0.30.0) (2026-11-22)
 
 
