@@ -76,6 +76,9 @@ import {
 } from './types.js'
 import { ProcessEnding, TooManyWaiting, type WaitingItem, WaitingList } from './waiting.js'
 
+/** An approval reaches a person's phone again at most once in this time (PROF-TOOL-026, INTX-APPR-019). */
+export const APPROVAL_RESEND_INTERVAL_MS = 30_000
+
 export interface AgentParts {
   env: Env
   pack: AgentPack
@@ -1372,9 +1375,17 @@ export class AyniAgent {
     }
   }
 
+  /** one resend of an approval to a person's phone at a time, by approval and person */
+  private readonly resending = new TurnLock()
+  /** when an approval was last sent again to a person's phone, by approval and person */
+  private readonly resentAt = new Map<string, number>()
+
   /**
    * Decide on your phone (PROF-TOOL-026, INTX-APPR-019): the request of an approval the person may decide is sent to
-   * their phone again, the one it held closed first.
+   * their phone again, the one it held closed first. One at a time, and at most once every 30 seconds for an approval
+   * and a person: a resend that comes while one is under way, or within 30 seconds of the last one, sends nothing new
+   * and answers as it did. Found by Fabrice on devnet, 2026-11-22: ten resends in 22 seconds, his phone away from its
+   * mediator, opened ten flows and closed nine; the phone took the thirty messages at once and listed closed ones.
    */
   public async resendApproval(principal: Principal, approvalId: string): Promise<{ expiresAt: string }> {
     const record = await this.approvals.get(approvalId)
@@ -1384,13 +1395,25 @@ export class AyniAgent {
       throw new SpaceError(`the approval is ${record.status === 'PENDING' ? 'decided' : record.status}`, 'not-pending')
     const phone = await this.router.approvalPhone(principal)
     if (!phone) throw new SpaceError('no phone of the person takes the request', 'confirmation-unavailable')
-    await phone.adapter.closeApprovalFlow(phone.session, record, 'cancelled', 'The request was sent again.')
-    if (!record.approverIds?.includes(principal.id)) {
-      record.approverIds = [...(record.approverIds ?? []), principal.id]
-      await this.approvals.save(record)
+    const key = `${approvalId}:${principal.id}`
+    const release = await this.resending.acquire(key)
+    try {
+      const last = this.resentAt.get(key)
+      if (last !== undefined && Date.now() - last < APPROVAL_RESEND_INTERVAL_MS) return { expiresAt: record.expiresAt }
+      // the close of the flow the phone held leaves before the new open
+      await phone.adapter.closeApprovalFlow(phone.session, record, 'cancelled', 'The request was sent again.')
+      if (!record.approverIds?.includes(principal.id)) {
+        record.approverIds = [...(record.approverIds ?? []), principal.id]
+        await this.approvals.save(record)
+      }
+      await phone.adapter.openApprovalFlow(phone.session, record, this.notificationsLinkOf(record))
+      const now = Date.now()
+      for (const [k, at] of this.resentAt) if (now - at >= APPROVAL_RESEND_INTERVAL_MS) this.resentAt.delete(k)
+      this.resentAt.set(key, now)
+      return { expiresAt: record.expiresAt }
+    } finally {
+      release?.()
     }
-    await phone.adapter.openApprovalFlow(phone.session, record, this.notificationsLinkOf(record))
-    return { expiresAt: record.expiresAt }
   }
 
   /**
