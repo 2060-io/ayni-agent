@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.0](https://github.com/2060-io/ayni-agent/compare/v0.29.1...v0.30.0) (2026-11-22)
+
+
+### Features
+
+* **approvals:** approvals reach each person once, and only a call asks (ayni-spec D114) ([#114](https://github.com/2060-io/ayni-agent/issues/114)) ([051d30d](https://github.com/2060-io/ayni-agent/commit/051d30d0efe412851d9c72296da9d97b3998c47e))
+
 ## [0.29.1](https://github.com/2060-io/ayni-agent/compare/v0.29.0...v0.29.1) (2026-11-21)
 
 
