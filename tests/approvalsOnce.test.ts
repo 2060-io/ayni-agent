@@ -11,6 +11,7 @@
 import { ACTIVITY, CUSTOM_EVENT } from '@ayni.org/ayni-agui-profile'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { RunningAgent } from '../src/app.js'
+import { APPROVAL_RESEND_INTERVAL_MS } from '../src/core/agent.js'
 import { ONE_CALL } from '../src/core/toolGate.js'
 import type { ApprovalRecord, MessageEntry, Principal } from '../src/core/types.js'
 import { parseSse, startTestAgent } from './helpers.js'
@@ -572,6 +573,31 @@ describe('approvals not tied to a space: the agent Notifications (INTX-APPR-017,
       id: purge.id,
       approval: { own: true, canDecide: false },
     })
+  })
+
+  it('sends it again to the phone once for ten Decide on your phone in a row, closing the one the phone held (PROF-TOOL-026)', async () => {
+    // found by Fabrice on devnet, 2026-11-22: ten resends in 22 seconds opened ten flows and closed nine, and his
+    // phone, away from its mediator, took the thirty messages at once
+    const sent = () => ph.authorizeRequests(mia.connectionId)
+    const closes = () => ph.callsOf('closeFlow').map((c) => c.args[0])
+    const held = sent().at(-1)?.flowId
+    const [requestsBefore, closesBefore] = [sent().length, closes().length]
+    const answers = await Promise.all(
+      Array.from({ length: 10 }, () => call(mia, 'POST', `/approvals/${purge.id}/resend`))
+    )
+    for (const answer of answers) expect(answer).toMatchObject({ status: 202, body: { expiresAt: purge.expiresAt } })
+    expect(sent()).toHaveLength(requestsBefore + 1)
+    expect(closes().slice(closesBefore)).toEqual([held])
+    // and again a moment later: nothing new within 30 seconds
+    expect(await call(mia, 'POST', `/approvals/${purge.id}/resend`)).toMatchObject({ status: 202 })
+    expect(sent()).toHaveLength(requestsBefore + 1)
+    // 30 seconds later it goes again, closing the request sent last
+    const resent = (running.agent as unknown as { resentAt: Map<string, number> }).resentAt
+    resent.set(`${purge.id}:${mia.principal.id}`, Date.now() - APPROVAL_RESEND_INTERVAL_MS)
+    const last = sent().at(-1)?.flowId
+    expect(await call(mia, 'POST', `/approvals/${purge.id}/resend`)).toMatchObject({ status: 202 })
+    expect(sent()).toHaveLength(requestsBefore + 2)
+    expect(closes().slice(closesBefore)).toEqual([held, last])
   })
 
   it('lets a manager decide it in the browser: no turn, nothing added to his conversation, his phone request closed', async () => {
