@@ -10,12 +10,14 @@ identity:
   homeBackingIdentity: ${HOME_BACKING_IDENTITY:-did:webvh:QmPk9gWBYyz93N8odMFuTpSS1yMPJhPpKynNwQw1oxjiqf:moonlit-trowel-unedited.ngrok-free.dev}
   userAgentGate: ${USER_AGENT_GATE:-optional}
   # home is the organization of this agent's own Organization credential, and no other (D64): nothing to list.
-  # No authentication schema here: everyone enters unidentified (D53). To authenticate persons, name the one
-  # schema that does (D65), asked at connection or later:
+  # No authentication here: everyone enters unidentified (D53). To authenticate persons, enable methods and list the
+  # combinations accepted (D125), asked at connection or later:
   #   authentication:
-  #     - credential: { jsonSchemaCredentialId: <the badge schema of the network's ECS ecosystem> }
-  #       subjectKey: [badgeNumber]
-  #       request: on-demand        # on-connect (default): identified or refused
+  #     request: on-demand          # on-connect (default): identified or refused
+  #     methods:
+  #       badge: { type: credential, credential: { jsonSchemaCredentialId: <the network's badge schema> },
+  #                subjectKey: [badgeNumber] }
+  #     combinations: [[badge]]
   roles:
     employee: { description: Any verified home employee. }
     # no role reads other people's conversations: a role carries no scope of conversation reads (RBAC-XSESS-005)

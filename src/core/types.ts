@@ -71,6 +71,12 @@ export interface Principal {
    */
   directoryEntryId?: string
   /**
+   * The last authentication that identified or confirmed this Principal (IDENT-AUTH-003): its purpose, the combination,
+   * each step's outcome and the entry it identified. An enrolment reads it: within ten minutes, by a combination that
+   * holds neither an authenticator app nor a passkey (IDENT-AUTH-014)
+   */
+  lastAuthentication?: AuthenticationRecord
+  /**
    * the roles its verified facts give (organization pattern, role rules, overrides); `roles` adds those its directory
    * entry gives, so that a reload of the directory recomputes them without the facts (IDENT-ROLE-002)
    */
@@ -583,10 +589,10 @@ export interface EvidenceRecord {
   id: string
   principalId: string
   /**
-   * a verification (a presentation, a document read, an address verified by an email code) or an issuance, recorded
-   * the same way (INTX-ISSUE-014, INTX-AUTH-015)
+   * a verification (a presentation, a document read, an address verified by an email code, a face match with its
+   * audit fields only, IDENT-AUTH-011) or an issuance, recorded the same way (INTX-ISSUE-014, PRIV-EVID-001)
    */
-  kind: 'presentation' | 'document' | 'email' | 'issuance'
+  kind: 'presentation' | 'document' | 'email' | 'face-match' | 'issuance'
   /** the entry of the agent-pack it answers: `authentication`, a catalog entry, or the evidence kind */
   entry: string
   schema?: string
@@ -610,6 +616,8 @@ export interface EvidenceRecord {
    * presents the credential holds that entry, and the credential is revoked when the entry leaves the directory
    */
   directoryEntryId?: string
+  /** a face match: the reference picture used, `document` or `directory`; no image, no score (IDENT-AUTH-011) */
+  reference?: string
   /**
    * an issuance of the identity credential: a keyed index of the actor it identifies (the home organization, the
    * schema and the subject key, D59), by which the presented credential finds its record (IDENT-ROLE-012)
@@ -771,6 +779,19 @@ export interface ElevationGrant {
 
 export type ChallengeType = 'device' | 'face-match' | 'document' | 'email'
 export type ChallengeOutcome = 'pending' | 'completed' | 'failed' | 'expired' | 'unavailable' | 'degraded'
+
+/**
+ * One authentication, as the Principal it identified or confirmed keeps it (IDENT-AUTH-003): when, why, the combination
+ * the person chose, the types of its methods, each step's outcome and the directory entry it identified.
+ */
+export interface AuthenticationRecord {
+  at: string
+  purpose: 'connection' | 'visitor' | 'step-up' | 'admin' | 'enrol'
+  combination: string[]
+  types: string[]
+  steps: { method: string; type: string; outcome: 'passed' | 'failed' | 'expired' }[]
+  directoryEntryId?: string
+}
 
 export interface AuthChallengeRecord {
   id: string

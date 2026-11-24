@@ -1,13 +1,16 @@
 /**
  * Peer status (D71; IDENT-STAT-001..008, flow profile §4.1): the agent tells a peer where it stands with it. A
  * connection that completes says nothing of what its peer may do on it, and the agent's decision about the peer
- * is invisible from the peer's side. One message carries it: the rule by which the agent identifies the peer,
- * whether it is identified, and what is open to it on the connection. It is sent once the Principal is resolved,
- * before the request for a credential the agent requires, and again whenever a field changes.
+ * is invisible from the peer's side. One message carries it: the rule by which the agent identifies the peer, the
+ * methods and combinations it accepts (D125), what an identified person may enrol and has enrolled (D129), whether the
+ * peer is identified, and what is open to it on the connection. It is sent once the Principal is resolved, before the
+ * authentication the agent asks at connection, and again whenever a field changes.
  */
-import { type AgentPack, authenticationModeOf } from '../../config/packTypes.js'
+
+import { type AgentPack, authenticationModeOf, enrollableTypesOf } from '../../config/packTypes.js'
 import type { ConnectionType, Principal } from '../../core/types.js'
 import type { Logger } from '../../util/logger.js'
+import { Authenticator } from './authenticate.js'
 import { type PeerProfiles, supportsProtocol } from './peerProfiles.js'
 import type { VsAgentClient } from './vsAgentClient.js'
 
@@ -24,12 +27,19 @@ export type PeerStatusRefusalCode =
 export interface PeerStatus {
   authentication: {
     rule: 'none' | 'optional' | 'required'
-    /** the credential that identifies the peer; absent with `none` */
-    credential?: { jsonSchemaCredentialId: string }
-    /** the organizations whose credentials are accepted, by organization key; absent when any issuer is */
-    issuers?: string[]
-    /** how the peer obtains the credential, in the operator's words; absent when the pack says nothing of it */
+    /**
+     * the methods the agent accepts, by name; a `credential` method with its schema and, when it accepts some
+     * organizations only, their keys (`issuers`); absent with `none`
+     */
+    methods?: Record<string, { type: string; credential?: { jsonSchemaCredentialId: string }; issuers?: string[] }>
+    /** the accepted combinations, each a list of method names; absent with `none` */
+    combinations?: string[][]
+    /** how the peer obtains what it lacks, in the operator's words; absent when the pack says nothing of it */
     obtain?: { text?: string; url?: string }
+    /** the types an identified person may enrol (flow profile §6.4); to an identified receiver only */
+    enrol?: string[]
+    /** the types the identified person enrolled; to an identified receiver only */
+    enrolled?: string[]
   }
   identified: boolean
   /** what the peer may use on the connection now */
@@ -47,6 +57,9 @@ export class PeerStatusNotifier {
   private capable: boolean | undefined
   private probedAt = 0
   private probing?: Promise<boolean>
+
+  /** the types a Principal enrolled (D129): what `authentication.enrolled` lists */
+  public enrolledOf?: (principal: Principal) => Promise<string[]>
 
   public constructor(
     private readonly pack: AgentPack,
@@ -92,20 +105,23 @@ export class PeerStatusNotifier {
   }
 
   /**
-   * The rule follows from the agent-pack and from nothing else (IDENT-STAT-002): no authentication schema,
-   * `none`; guests let in, `optional`; the credential required, `required`. With the rule go the organizations
-   * accepted, when the pack lists any, and how the credential is obtained, when it says it. A service is
-   * identified by its DID: nothing is asked of it (IDENT-STAT-007).
+   * The rule follows from the agent-pack and from nothing else (IDENT-STAT-002): no accepted combination, `none`;
+   * visitors let in, `optional`; the authentication required, `required`. With the rule go the methods enabled, a
+   * `credential` method with the organizations it accepts when it lists any, the accepted combinations, and how what is
+   * lacking is obtained, when the pack says it. A service is identified by its DID: nothing is asked of it
+   * (IDENT-STAT-007).
    */
   public authenticationFor(connectionType: ConnectionType): PeerStatus['authentication'] {
-    const entry = connectionType === 'verifiable-user-agent' ? this.pack.identity.authentication?.[0] : undefined
-    if (!entry) return { rule: 'none' }
-    const organizations = entry.issuers?.organizations
-    const obtain = entry.obtain
+    const authentication = connectionType === 'verifiable-user-agent' ? this.pack.identity.authentication : undefined
+    const mode = authenticationModeOf(authentication)
+    if (!authentication || !mode) return { rule: 'none' }
+    const obtain = authentication.obtain
     return {
-      rule: authenticationModeOf(entry) === 'required' ? 'required' : 'optional',
-      credential: { jsonSchemaCredentialId: entry.credential.jsonSchemaCredentialId },
-      ...(organizations?.length ? { issuers: [...organizations] } : {}),
+      rule: mode === 'required' ? 'required' : 'optional',
+      methods: Object.fromEntries(
+        Object.entries(authentication.methods).map(([name, method]) => [name, Authenticator.methodWire(method)])
+      ),
+      combinations: authentication.combinations.map((combination) => [...combination]),
       ...(obtain?.text || obtain?.url
         ? { obtain: { ...(obtain.text ? { text: obtain.text } : {}), ...(obtain.url ? { url: obtain.url } : {}) } }
         : {}),
@@ -121,13 +137,20 @@ export class PeerStatusNotifier {
     return serves && principal.connectionType === 'verifiable-user-agent' ? [AG_UI_ENDPOINT] : []
   }
 
-  public statusOf(principal: Principal): PeerStatus {
-    return {
-      authentication: this.authenticationFor(principal.connectionType),
-      // a person is identified by an accepted credential, a service by its trusted DID
-      identified: principal.connectionType === 'verifiable-user-agent' ? !!principal.identityCredentialRef : true,
-      open: this.openFor(principal),
+  public async statusOf(principal: Principal): Promise<PeerStatus> {
+    const authentication = this.authenticationFor(principal.connectionType)
+    // a person is identified by an accepted authentication, a service by its trusted DID
+    const person = principal.connectionType === 'verifiable-user-agent'
+    const identified = person ? !!principal.identityCredentialRef : true
+    // what an identified person may enrol, and has enrolled (IDENT-STAT-002, IDENT-AUTH-014)
+    const enrol = person && identified && authentication.rule !== 'none' ? enrollableTypesOf(this.pack) : []
+    if (enrol.length) {
+      authentication.enrol = enrol
+      authentication.enrolled = ((await this.enrolledOf?.(principal)) ?? []).filter((type) =>
+        (enrol as string[]).includes(type)
+      )
     }
+    return { authentication, identified, open: this.openFor(principal) }
   }
 
   /**
@@ -135,7 +158,7 @@ export class PeerStatusNotifier {
    * open until the request has an outcome, and the peer is told so before it is asked (IDENT-STAT-003).
    */
   public async identifying(connectionId: string): Promise<void> {
-    const mode = authenticationModeOf(this.pack.identity.authentication?.[0])
+    const mode = authenticationModeOf(this.pack.identity.authentication)
     if (mode !== 'required' && mode !== 'offered') return
     await this.tell(connectionId, {
       authentication: this.authenticationFor('verifiable-user-agent'),
@@ -150,7 +173,7 @@ export class PeerStatusNotifier {
    * to a peer that asked without having disclosed the protocol.
    */
   public async resolved(connectionId: string, principal: Principal, options: { asked?: boolean } = {}): Promise<void> {
-    await this.tell(connectionId, this.statusOf(principal), options.asked)
+    await this.tell(connectionId, await this.statusOf(principal), options.asked)
   }
 
   /**
@@ -160,7 +183,8 @@ export class PeerStatusNotifier {
   public async credentialInvalid(principal: Principal): Promise<void> {
     const connectionId = principal.capabilityChannelId
     if (!connectionId) return
-    await this.tell(connectionId, { ...this.statusOf(principal), identified: false, open: [] })
+    const { enrol: _enrol, enrolled: _enrolled, ...authentication } = (await this.statusOf(principal)).authentication
+    await this.tell(connectionId, { authentication, identified: false, open: [] })
   }
 
   /** The agent does not serve the peer: it is told why before the connection ends (IDENT-STAT-006). */

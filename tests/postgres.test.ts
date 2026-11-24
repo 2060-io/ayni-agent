@@ -20,6 +20,7 @@ import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { buildAgent } from '../src/app.js'
 import { loadPack } from '../src/config/pack.js'
+import { EnrolmentStore } from '../src/core/authentication/enrolments.js'
 import { sealedConversations } from '../src/core/conversationSeal.js'
 import { TRANSLATION_INSTRUCTION_HEAD } from '../src/core/serviceLanguage.js'
 import { personalSpaceId, SpaceService, sealedMembers } from '../src/core/spaces.js'
@@ -1587,5 +1588,37 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
       expect((await store.governanceNotices.get('ntc_1'))?.resolvedAt).toBe('2026-11-23T11:00:00.000Z')
       await store.close()
     })
+  })
+
+  it('keeps what a person enrolled sealed, a passkey found by a keyed index of its id (IDENT-AUTH-014)', async () => {
+    const url = await freshDatabase()
+    const store = new PostgresStore(url)
+    await store.init()
+    const enrolments = new EnrolmentStore(store.kv, crypto)
+    await enrolments.setAuthenticatorApp('prn-ana', 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ')
+    const passkey = {
+      credentialId: 'cred-1',
+      publicKey: { kty: 'EC', crv: 'P-256', x: 'x', y: 'y' },
+      alg: -7,
+      signCount: 0,
+    }
+    await enrolments.setPasskey('prn-ana', passkey)
+    expect(await enrolments.principalOfPasskey('cred-1')).toBe('prn-ana')
+    expect((await enrolments.types('prn-ana')).map((e) => e.type)).toEqual(['authenticator-app', 'passkey'])
+    // neither the secret nor the credential id is in the clear
+    const pool = new pg.Client({ connectionString: url })
+    await pool.connect()
+    const rows = (await pool.query('SELECT key, value FROM kv')).rows as { key: string; value: string }[]
+    await pool.end()
+    expect(JSON.stringify(rows)).not.toContain('GEZDGNBVGY3TQOJQ')
+    expect(JSON.stringify(rows)).not.toContain('cred-1')
+    // a new passkey replaces the earlier one; unenrol and erase remove them
+    await enrolments.setPasskey('prn-ana', { ...passkey, credentialId: 'cred-2' })
+    expect(await enrolments.principalOfPasskey('cred-1')).toBeUndefined()
+    expect(await enrolments.remove('prn-ana', 'authenticator-app')).toBe(true)
+    await enrolments.erase('prn-ana')
+    expect(await enrolments.types('prn-ana')).toEqual([])
+    expect(await enrolments.principalOfPasskey('cred-2')).toBeUndefined()
+    await store.close()
   })
 })

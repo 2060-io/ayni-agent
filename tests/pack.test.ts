@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   coerceBySchema,
+  crossFieldErrors,
   loadPack,
   loadSchema,
   PackError,
@@ -179,9 +180,17 @@ describe('the keys the clean spec removed (ayni-spec PR #123: no backward compat
     }
     return ''
   }
-  const authentication = (over: Record<string, unknown>) => [
-    { credential: { jsonSchemaCredentialId: 'https://ecs.example/badge.json' }, subjectKey: ['badgeNumber'], ...over },
-  ]
+  const authentication = (over: Record<string, unknown>) => ({
+    methods: {
+      badge: {
+        type: 'credential',
+        credential: { jsonSchemaCredentialId: 'https://ecs.example/badge.json' },
+        subjectKey: ['badgeNumber'],
+      },
+    },
+    combinations: [['badge']],
+    ...over,
+  })
 
   it('refuses a role that declares auditor: the admin interface reads the roles auditor and operator instead', () => {
     const pack = dev()
@@ -191,11 +200,11 @@ describe('the keys the clean spec removed (ayni-spec PR #123: no backward compat
     expect(message).toContain('(auditor)')
   })
 
-  it('names the authentication entry that lets people in without the credential visitors, and refuses guests', () => {
+  it('names the authentication setting that lets people in without authenticating visitors, and refuses guests', () => {
     const offered = dev()
     offered.identity.authentication = authentication({ request: 'on-connect', visitors: true })
     const pack = validatePackDocument(offered, env)
-    expect(authenticationModeOf(pack.identity.authentication?.[0])).toBe('offered')
+    expect(authenticationModeOf(pack.identity.authentication)).toBe('offered')
     const old = dev()
     old.identity.authentication = authentication({ request: 'on-connect', guests: true })
     const message = refusal(old)
@@ -263,5 +272,92 @@ describe('the approval policies of the tools of spaces, their bounds and the ste
     const steward = dev()
     steward.spaces.templates[0].stewards = ['ghost']
     expect(refusal(steward)).toMatch(/rule 2.*ghost.*stewards/)
+  })
+})
+
+describe('the methods and combinations of the authentication (IDENT-AUTH-001, D125, D126)', () => {
+  const BADGE = 'https://ecs.example/badge.json'
+  const dev = () => structuredClone(loadPack('agent-packs/dev', { ...process.env, ...env }).pack)
+  const withAuthentication = (
+    methods: Record<string, unknown>,
+    combinations: string[][],
+    more: Record<string, unknown> = {}
+  ) => {
+    const pack = dev()
+    pack.identity.directory = { file: '/run/secrets/ayni/directory.yaml' }
+    pack.identity.authentication = { methods, combinations, ...more } as never
+    return pack
+  }
+  const errors = (pack: ReturnType<typeof dev>) => crossFieldErrors(pack).join('\n')
+
+  it('takes the six types, each combination of enabled methods holding an identifying one', () => {
+    const pack = withAuthentication(
+      {
+        badge: { type: 'credential', credential: { jsonSchemaCredentialId: BADGE }, subjectKey: ['badgeNumber'] },
+        email: { type: 'email' },
+        passport: { type: 'document' },
+        otp: { type: 'authenticator-app' },
+        key: { type: 'passkey' },
+      },
+      [['badge'], ['email'], ['passport'], ['email', 'otp'], ['key']]
+    )
+    expect(crossFieldErrors(pack)).toEqual([])
+    expect(authenticationModeOf(pack.identity.authentication)).toBe('required')
+    // with no combination nobody authenticates (IDENT-RES-010)
+    expect(authenticationModeOf({ methods: {}, combinations: [] })).toBeUndefined()
+  })
+
+  it('refuses to start on an unknown type, naming the method', () => {
+    expect(errors(withAuthentication({ sms: { type: 'sms' } }, [['sms']]))).toMatch(
+      /methods\.sms has the type sms, which this agent does not know/
+    )
+  })
+
+  it('refuses a combination of confirming methods only, one that names a method not enabled, and one listed twice', () => {
+    const methods = { email: { type: 'email' }, otp: { type: 'authenticator-app' } }
+    expect(errors(withAuthentication(methods, [['otp']]))).toMatch(
+      /combinations\[0\] \[otp\] holds no identifying method/
+    )
+    expect(errors(withAuthentication(methods, [['email', 'face']]))).toMatch(/names \[face\], which no method enables/)
+    expect(
+      errors(
+        withAuthentication(methods, [
+          ['email', 'otp'],
+          ['otp', 'email'],
+        ])
+      )
+    ).toMatch(/is listed twice/)
+  })
+
+  it('refuses a credential method without its schema or subject key, and a field of a credential on another type', () => {
+    expect(errors(withAuthentication({ badge: { type: 'credential' } }, [['badge']]))).toMatch(
+      /badge is a credential method without its schema[\s\S]*badge is a credential method without a subject key/
+    )
+    expect(
+      errors(withAuthentication({ email: { type: 'email', issuers: { organizations: ['org:EE:1'] } } }, [['email']]))
+    ).toMatch(/methods\.email is of type email: \[issuers\] belong to a credential method/)
+  })
+
+  it('refuses a face match without the consent of biometric-matching or a face-verification service (IDENT-AUTH-011)', () => {
+    const methods = { email: { type: 'email' }, face: { type: 'face-match', reference: ['directory'] } }
+    const pack = withAuthentication(methods, [['email', 'face']])
+    expect(errors(pack)).toMatch(/face needs the processing activity biometric-matching, with the lawful basis consent/)
+    expect(errors(pack)).toMatch(/face needs a face-verification service/)
+    pack.privacy.processingActivities.push({ id: 'biometric-matching', lawfulBasis: 'legitimate-interest' })
+    expect(errors(pack)).toMatch(/biometric-matching with the lawful basis consent, not legitimate-interest/)
+  })
+
+  it('refuses an email or a document method with no user directory to find the person in (IDENT-DIR-003/004)', () => {
+    const pack = withAuthentication({ email: { type: 'email' } }, [['email']])
+    pack.identity.directory = undefined
+    expect(errors(pack)).toMatch(/methods\.email \(email\) finds a person in the user directory/)
+  })
+
+  it('refuses on-demand with visitors false (IDENT-RES-010)', () => {
+    const pack = withAuthentication({ email: { type: 'email' } }, [['email']], {
+      request: 'on-demand',
+      visitors: false,
+    })
+    expect(errors(pack)).toMatch(/visitors cannot be false/)
   })
 })

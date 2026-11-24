@@ -203,6 +203,34 @@ export class Governance implements SpacePolicyPort {
     return progressOf(policy, named, record.decisions, (_entry, i) => words[i] as EntryWords)
   }
 
+  /**
+   * The approvals an approver's `authorize` request carries (FLOW-AUTH-004, INTX-APPR-026): the threshold, whether the
+   * approver decides their own request, and the other entries of the policy as they are when it is sent, each by the name
+   * of the person it names, else by a label (a role, a department, any member, the owner of a space that has none), each
+   * required or not. Undefined for an approval with no policy of a space.
+   */
+  public async approvalsFor(
+    record: ApprovalRecord,
+    approverId: string
+  ): Promise<
+    { threshold: number; own: boolean; others: { name?: string; label?: string; required: boolean }[] } | undefined
+  > {
+    const policy = record.spacePolicy
+    if (!policy) return undefined
+    const space = record.spaceId ? await this.deps.spaces.find(record.spaceId) : undefined
+    const people = await this.deps.store.principals.list()
+    const named = space ? await this.namedIn(space, policy, record.requesterId, people) : undefined
+    const own = new Set(named ? entriesNaming(named, approverId) : [])
+    const others: { name?: string; label?: string; required: boolean }[] = []
+    for (const [i, entry] of policy.approvers.entries()) {
+      if (own.has(i)) continue
+      const words = await this.words(space, entry, people)
+      if (words.name) others.push({ name: words.name, required: entry.required })
+      else others.push({ label: labelOf(entry), required: entry.required })
+    }
+    return { threshold: policy.threshold, own: approverId === record.requesterId, others }
+  }
+
   /** A policy's approvers as people read them: "Jonas Weber", "any member", "the role manager". */
   public async entryText(space: Space, entry: ApproverEntry): Promise<string> {
     const w = await this.words(space, entry, await this.deps.store.principals.list())
@@ -569,4 +597,13 @@ export class Governance implements SpacePolicyPort {
     const p = id ? await this.deps.store.principals.get(id) : undefined
     return p ? { name: this.deps.nameOf(p) } : null
   }
+}
+
+/** How an entry that names no one person reads on an approver's phone (FLOW-AUTH-004): its kind, its role or department. */
+function labelOf(entry: ApproverEntry): string {
+  if (entry.kind === 'role') return `The role ${entry.role ?? ''}`.trim()
+  if (entry.kind === 'department') return `The department ${entry.department ?? ''}`.trim()
+  if (entry.kind === 'member') return 'Any member of the space'
+  if (entry.kind === 'owner') return 'The owner of the space'
+  return 'A member of the space'
 }

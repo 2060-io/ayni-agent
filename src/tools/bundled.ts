@@ -108,7 +108,7 @@ export class BundledToolSource implements ToolSource {
     // no attribute, no recipient (D68, D69, INTX-PRES-003). The authentication entry is for an unidentified
     // person only (IDENT-RES-015); a catalog entry is for a peer of the subject kind of its schema.
     const onDemand = Object.entries(pack.presentations ?? {}).filter(([, e]) => e.request === 'on-demand')
-    const authenticates = !!pack.identity.authentication?.length
+    const authenticates = !!pack.identity.authentication?.combinations?.length
     if ((authenticates || onDemand.length) && on('requestPresentation')) {
       const mayIdentify = (principal: Principal) =>
         authenticates && principal.connectionType === 'verifiable-user-agent' && !principal.identityCredentialRef
@@ -121,7 +121,7 @@ export class BundledToolSource implements ToolSource {
           'Asks the wallet of the peer for a credential this agent accepts, by the name of its entry. The call sends the request and waits for the answer, given in the wallet, which may take a minute: before you call, nothing has been asked. You get a status, never the content of the credential. After it returns, tell the person what happened.',
           ...(authenticates
             ? [
-                'authentication: the credential that identifies the person, which gives them their roles and their own conversations; only while they are not identified. Ask when they want something that needs it, or when they say they have it.',
+                'authentication: the person authenticates on their phone, in one of the ways this agent accepts, which gives them their roles and their own conversations; only while they are not identified. Ask when they want something that needs it, or when they say they are ready.',
               ]
             : []),
           ...onDemand.map(([name, e]) => `${name}: ${e.purpose}`),

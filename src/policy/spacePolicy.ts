@@ -165,7 +165,8 @@ export function entriesNaming(named: Named, principalId: string): number[] {
   return named.entries.flatMap((ids, i) => (ids.includes(principalId) ? [i] : []))
 }
 
-function satisfiedBy(decisions: ApprovalDecision[], named: Named): Set<number> {
+/** The entries the approvals given satisfy. */
+export function satisfiedBy(decisions: ApprovalDecision[], named: Named): Set<number> {
   const out = new Set<number>()
   for (const d of decisions) {
     if (d.decision !== 'approve') continue

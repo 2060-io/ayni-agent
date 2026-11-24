@@ -1858,3 +1858,90 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       `postgres.test.ts`, the start-up checks in `pack.test.ts`; `tools.test.ts`, `approvalsOnce.test.ts` and the
       evaluation's `confirmation` case moved from the owner's card to his phone. The new integration tests fail on the
       code before this change.
+
+78. **Authentication by combinations of methods, on the phone, over authenticate/1.0; enrolment; approvers on the
+    approval request** (2026-11-24, Fabrice's decisions of 2026-11-23, ayni-spec PR #127: D125 to D131; IDENT-AUTH-001
+    to 014 and 017, IDENT-RES-002, 010, 014, 019, 020, IDENT-DIR-003, 004, 010, IDENT-STAT-002, 005, PLAT-MAIL-001; flow
+    profile §4.1, §6.4, §6.14, §11, FLOW-SIGNIN-001 to 014, FLOW-STAT-001, 003; FLOW-AUTH-004, INTX-APPR-026; the Ayni
+    flow library 0.2.1, credo-ts-ayni-flow PRs #39, #40, #41).
+    - **The agent-pack** (`identity.authentication`, rule 1): one object, `request`, `visitors`, `methods` (by name, each
+      with a `type`: `credential`, `email`, `document`, `face-match`, `authenticator-app`, `passkey`), `combinations`
+      and `obtain`. A `credential` method carries what the one entry carried (`credential`, `subjectKey`, `attributes`,
+      `issuers.organizations`, `store`, `modelVisible`); a `face-match` method its `reference` (`document`,
+      `directory`). The start is refused, naming the method or the combination, on an unknown type, a combination that
+      names a method not enabled, twice, or holds no identifying method, a combination listed twice, a field of a
+      credential on another type, an `email` or `document` method (or a face match by the directory's photo) without
+      `identity.directory`, a face match without `media.faceVerification` or without `biometric-matching` of lawful
+      basis `consent`, and an `email` method with no SMTP server (`buildAgent`). No fallback for the list of one entry
+      (no backward compatibility). The schema's `visitors` has no default any more: with the object, Ajv applied it and
+      refused every `on-demand` pack.
+    - **The peer status** (`peerStatus.ts`): `authentication.methods` (a credential method with its `issuers`),
+      `combinations`, `obtain`; to an identified person `enrol` (the enrollable types of the enabled methods) and
+      `enrolled`. The top-level `credential` and `issuers` are gone. A fresh status follows an enrolment and an
+      `unenrol` (it changed `enrolled`), and a credential that no longer holds drops `enrol`/`enrolled` with
+      `identified: false` (the library refuses them to an unidentified receiver).
+    - **The flow** (`channels/didcomm/authenticate.ts`, `Authenticator`): an `authenticate` flow of fifteen minutes,
+      the request through `POST /v2/didcomm/authenticate` with the combinations the phone can be offered (a face match
+      only to a phone that disclosed `calls/1.0` as `callee` and with a WebRTC server; an enrolment's without an
+      authenticator app or a passkey), a `409` from the plugin answered `pending`. The choice within five minutes, else
+      the flow closes `expired` and the request is unanswered. The steps run the identifying methods first in the order
+      of the choice, then the confirming ones; each `step` and `step-result` through the plugin's routes; the phone's
+      `choice` and `answer`s from `didcomm.authenticate.state-changed` (kept a minute when they come before the route
+      answered). Not accepted: the `step-result` with the reason, then the flow's problem report; the identity is
+      checked against the connection's before the flow closes, so `another-identity` never ends `completed`. The
+      library's constants are mirrored (the agent does not depend on Credo); `timings` shortens them in the tests.
+    - **The methods.** `credential`: present-proof under the flow id; what a badge issued from the directory finds is
+      its entry. `email`: the address (ten minutes), the same answer for an address no entry holds, a code to an
+      entry's address only, in the background, kept as a keyed hash, ten minutes, five tries in all, three new codes
+      thirty seconds apart, each replacing the one before; the email in the language of the phone's locale
+      (`ServiceLanguage.renderIn`, the code replaced by a mark in what the model translates). `document`: mrtd under
+      the flow id, the read matched to exactly one entry (`no-match` otherwise); the passport alone is a combination.
+      `face-match`: the consent, then a call under the flow id (`purpose: face-match`) whose room the face-verification
+      service joins with the reference (the passport read in this flow, else the entry's `photo`), through the vision
+      callbacks keyed by the step's token (`FaceSteps`); evidence `face-match` with the reference used and no image.
+      `authenticator-app`: TOTP (RFC 6238, SHA-1, six digits, thirty seconds, one step either side), each code once,
+      five tries. `passkey`: a 32-byte challenge for the app-link domain's host (`APP_LINK_BASE`), an ES256, EdDSA or
+      RS256 assertion with user presence and verification and a counter that goes on (`core/authentication/webauthn.ts`,
+      a CBOR reader of its own: no new dependency).
+    - **Who is identified** (IDENT-RES-002, IDENT-AUTH-003): a person of the directory is
+      `<home key>|directory|<entry>`, whatever the methods; a badge this agent issued from an entry resolves to the entry,
+      its badge key kept as `legacyActorIdentity`, and a Principal that held the entry is re-keyed on first meeting,
+      so the conversations follow. A person of another organization keeps `<org>|<schema>|<subject>`. The Principal
+      keeps `lastAuthentication` (when, why, the combination, the steps, the entry). The address, the read and the face
+      match become evidence once the authentication is accepted (`VerifiedFacts.moreEvidence`), never before.
+    - **Enrolment** (`channels/didcomm/enrol.ts`, `core/authentication/enrolments.ts`): on `request-received` of an
+      `enrol` flow, a type the pack enables for an identified person (else `not-eligible`); authenticated within ten
+      minutes by a combination holding neither type, or first an `authenticate` flow of purpose `enrol` (`not-eligible`
+      when it does not complete). The authenticator app's secret is handed once, kept sealed in the key-value store and
+      held in memory until the code proves it (a restart drops a pending enrolment); a wrong code gets the same secret
+      again, three challenges in all, then `not-valid`. A passkey's attestation is checked (challenge, relying party,
+      presence, verification), not its statement; its credential id is found by a keyed index. `unenrol` removes the
+      type and sends the status. Both are erased when the entry leaves the directory (`endAccess`).
+    - **The approvers on an approval request** (`Governance.approvalsFor`, `openApprovalFlow`): an approval of a tool of
+      a space carries `approvals`: the threshold, `own` for the requester, and every other entry of the policy, by the
+      person's name, else by a label ("The role manager", "The department Depot Rotterdam", "Any member of the space",
+      "The owner of the space"), each `required` or not; sent once, never again for a later progress.
+    - **Where the spec says nothing, the choice made here:** a face-match consent declined is the flow declined (the
+      library takes only `consent: true`, and a `choice` is sent once); the reason of a refused new code is
+      `step.reason`, as the library writes it; a `choice` that the plugin fails `malformed` is answered `malformed` and
+      ends as a decline (not asked again); the enrolment's "three times at most" is three challenges in all; `requires`
+      is not sent on `open` (the library still takes it); the purpose of a re-authentication that asks the badge again
+      to read its email (SPACE-INV-004) is `step-up`, with the credentials that ask for `email` as its combinations; a
+      person identified through the directory without a badge is named to the model as a badge holder is, only when a
+      `credential` method makes `name` visible (by default the model reads nothing, D67): a pack of `[email]` alone never
+      names the person to the model. The `call` kind and `face-match-failed` were never used by the agent: nothing to remove.
+    - **Not done here:** a tool's `stepUp.authentication` (IDENT-AUTH-015) and admin access from the card (D132 to
+      D134, RBAC-ADMIN): the engine takes `purpose: step-up | admin`, `combinations` and `bound` already; the badge
+      independent of the authentication (D130, IDENT-AUTH-016) and the end of the email check in a conversation
+      (`emailCheck.ts`, `email_check`), which still serve the badge's issuance profiles.
+    - **Deployments:** the VS Agent image must carry `@ayni.org/vs-agent-plugin-ayni-flow` 0.2.1 (the `authenticate`
+      routes, the new peer-status shape and `approvals` on `authorize`; 0.1.10 refuses them), and its calls route must
+      take `parentThreadId` (CC-VSA-006) before a pack enables `face-match`. Every agent-pack with
+      `identity.authentication` moves to the object (the dev agent's `- credential: …` becomes `methods.badge` and
+      `combinations: [[badge]]`).
+    - **Tests:** `authenticate.test.ts` (the request, the choice, the email, document, authenticator-app and passkey
+      steps, `different-identities`, `another-identity`, `409`), `authenticators.test.ts` (RFC 6238 vectors, passkey
+      creation and assertion), `enrol.test.ts`, `authenticationStart.test.ts` (the SMTP refusal, the photo), the new
+      rule 1 in `pack.test.ts`, the enrolments on PostgreSQL in `postgres.test.ts`, `approvals` in
+      `governance.test.ts`; the flows, peer-status and on-demand tests moved to authenticate/1.0 and the new shape. The
+      new tests fail on the code before this change (the modules they import do not exist there).

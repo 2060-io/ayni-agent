@@ -61,7 +61,7 @@ export function contextualMenuFor(
     bound &&
     principal?.connectionType === 'verifiable-user-agent' &&
     !principal.identityCredentialRef &&
-    pack.identity.authentication?.length &&
+    pack.identity.authentication?.combinations?.length &&
     session.client?.name !== AYNI_APP_CLIENT
   ) {
     items.push({ id: PLATFORM_MENU.identify, label: 'Authenticate' })

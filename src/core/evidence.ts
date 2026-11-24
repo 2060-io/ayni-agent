@@ -5,7 +5,7 @@
  * the retention the pack gives, then archived or erased. The model reads the attributes the pack makes
  * visible, and nothing else.
  */
-import { AUTHENTICATION_ENTRY, DOCUMENT_ENTRY, EMAIL_ENTRY } from '../config/pack.js'
+import { AUTHENTICATION_ENTRY, authenticationEvidencePolicy, DOCUMENT_ENTRY, EMAIL_ENTRY } from '../config/pack.js'
 import type { AgentPack, EvidencePolicy } from '../config/packTypes.js'
 import { type EntryCrypto, openJson, sealJson } from '../memory/crypto.js'
 import type { Store, StoredEvidence } from '../store/types.js'
@@ -20,10 +20,8 @@ const NAME_ATTRIBUTES = ['userName', 'name']
 
 /** What the agent-pack says of an entry; nothing stored and nothing visible when it says nothing (PRIV-EVID-004). */
 export function evidencePolicyOf(pack: AgentPack, entry: string): EvidencePolicy {
-  if (entry === AUTHENTICATION_ENTRY) {
-    const authentication = pack.identity.authentication?.[0]
-    return { store: authentication?.store, modelVisible: authentication?.modelVisible }
-  }
+  // the credential methods of the authentication, together (D67, D126)
+  if (entry === AUTHENTICATION_ENTRY) return authenticationEvidencePolicy(pack)
   if (entry === DOCUMENT_ENTRY) return pack.evidence?.document ?? {}
   if (entry === EMAIL_ENTRY) return pack.evidence?.email ?? {}
   const catalog = pack.presentations?.[entry]
@@ -56,7 +54,9 @@ export function storedIdentityAttributes(pack: AgentPack, values: Record<string,
 export function nameForModel(pack: AgentPack, principal: Principal | null | undefined): string | undefined {
   const name = principal?.identityAttributes.userName
   if (!name) return undefined
-  if (!principal?.identityCredentialRef?.startsWith('badge:')) return name
+  // a person identified by a credential, or through the directory (IDENT-AUTH-003), is named as its evidence allows
+  const ref = principal?.identityCredentialRef
+  if (!ref?.startsWith('badge:') && !ref?.startsWith('entry:')) return name
   const visible = evidencePolicyOf(pack, AUTHENTICATION_ENTRY).modelVisible ?? []
   return NAME_ATTRIBUTES.some((n) => visible.includes(n)) ? name : undefined
 }
@@ -79,6 +79,8 @@ export interface EvidenceInput {
   evidenceRefs?: string[]
   /** an issuance: the directory entry its claims came from (IDENT-DIR-006) */
   directoryEntryId?: string
+  /** a face match: the reference picture it compared the live face with, `document` or `directory` (IDENT-AUTH-011) */
+  reference?: string
   /**
    * an issuance of the identity credential: the actor it identifies once presented (D59). Kept only as a keyed index
    * (`holderIndex`), by which the presented credential finds its record (IDENT-ROLE-012)
@@ -146,6 +148,7 @@ export class EvidenceService {
       connectionRef: input.connectionRef,
       evidenceRefs: input.evidenceRefs,
       ...(input.directoryEntryId ? { directoryEntryId: input.directoryEntryId } : {}),
+      ...(input.reference ? { reference: input.reference } : {}),
       ...(input.holder ? { holderIndex: this.holderIndex(input.holder) } : {}),
       ...(input.revocation ? { revocation: { ...input.revocation } } : {}),
       verifiedAt,

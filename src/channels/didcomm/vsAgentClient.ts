@@ -121,6 +121,138 @@ export interface CarrierExchange {
   createdAt: string
 }
 
+// ---- authenticate/1.0 (flow profile §6.14, §6.4; the plugin's authenticate routes, credo-ts-ayni-flow 0.2.1) -------------
+
+/** Why the service asks a person to authenticate (flow profile §6.14). */
+export type AuthenticatePurpose = 'connection' | 'visitor' | 'step-up' | 'admin' | 'enrol'
+
+/** One method of a request, as in the peer status (flow profile §4.1); the API writes it in camelCase. */
+export interface AuthenticateMethodWire {
+  type: string
+  credential?: { jsonSchemaCredentialId: string }
+  issuers?: string[]
+}
+
+/** The `request` body (FLOW-SIGNIN-001). */
+export interface AuthenticateRequestBody {
+  purpose: AuthenticatePurpose
+  methods: Record<string, AuthenticateMethodWire>
+  combinations: string[][]
+  text?: string
+}
+
+/** The `step` body (flow profile §6.14): a step announced, or sent again after a wrong code or a refused new code. */
+export interface AuthenticateStepBody {
+  step: string
+  method: string
+  type: string
+  ask?: 'address' | 'code' | 'consent' | 'assertion'
+  text?: string
+  expiresAt?: string
+  triesLeft?: number
+  newCodesLeft?: number
+  challenge?: string
+  rpId?: string
+  error?: 'wrong-code' | 'new-code-refused'
+  reason?: 'too-soon' | 'no-more'
+}
+
+/** The `answer` body: what the person gave for a step's `ask`. */
+export interface AuthenticateAnswerBody {
+  step: string
+  address?: string
+  locale?: string
+  code?: string
+  newCode?: boolean
+  consent?: boolean
+  assertion?: {
+    id: string
+    clientDataJson: string
+    authenticatorData: string
+    signature: string
+    userHandle: string | null
+  }
+}
+
+/** One step of the combination chosen, as it stands on the DIDComm agent's record. */
+export interface AuthenticateStepEntry {
+  step: string
+  method: string
+  type: string
+  prompt: AuthenticateStepBody
+  answer?: AuthenticateAnswerBody
+  awaitingAnswer: boolean
+  result?: { step: string; outcome: 'passed' | 'failed' | 'expired'; reason?: string }
+}
+
+/** `AuthenticateExchangeDto` of the plugin: one authentication, as the routes return it and the events carry it. */
+export interface AuthenticateExchange {
+  threadId: string
+  flowId?: string
+  connectionId: string
+  role: string
+  state: string
+  request: AuthenticateRequestBody
+  combination?: string[]
+  steps: AuthenticateStepEntry[]
+  errorCode?: string
+  errorDescription?: string
+  createdAt: string
+}
+
+/** The `enrol-challenge` body (flow profile §6.4): a passkey's creation options, or an authenticator app's secret. */
+export interface EnrolChallengeBody {
+  type: 'authenticator-app' | 'passkey'
+  publicKey?: {
+    rp: { id: string; name?: string }
+    user: { id: string; name: string; displayName: string }
+    challenge: string
+    pubKeyCredParams: { type: string; alg: number }[]
+    authenticatorSelection?: { residentKey?: string; userVerification?: string }
+  }
+  secret?: string
+  otpauthUri?: string
+  digits?: number
+  period?: number
+}
+
+/** `EnrolExchangeDto` of the plugin: one enrolment; an authenticator app's secret is never on it. */
+export interface EnrolExchange {
+  threadId: string
+  flowId?: string
+  connectionId: string
+  role: string
+  state: string
+  type: 'authenticator-app' | 'passkey'
+  challenge?: Record<string, unknown>
+  challenges: number
+  answer?: {
+    attestation?: { id: string; clientDataJson: string; attestationObject: string }
+    code?: string
+  }
+  errorCode?: string
+  errorDescription?: string
+  createdAt: string
+}
+
+/**
+ * The approvals an `authorize` request is one of (flow profile §6.5, FLOW-AUTH-004): the approvals needed in total, the
+ * other approvers asked (a person by `name`, a role or a department by `label`), and whether the person decides their
+ * own request.
+ */
+/** Another approver of an `authorize` request: a person by `name`, or a role or a department by `label`; one of the two. */
+export interface AuthorizeApprover {
+  name?: string
+  label?: string
+  required: boolean
+}
+
+export interface AuthorizeApprovals {
+  threshold: number
+  own: boolean
+  others: AuthorizeApprover[]
+}
+
 export class VsAgentError extends Error {
   public constructor(
     public readonly status: number,
@@ -278,12 +410,14 @@ export class VsAgentClient {
     return this.request('POST', '/didcomm/user-profile/send', { connectionId, profile })
   }
 
+  /** `parentThreadId` makes the call a step of a flow: the face step of an `authenticate` flow (CC-VSA-006). */
   public offerCall(
     connectionId: string,
     callType: 'audio' | 'video' | 'service',
     parameters: Record<string, unknown>,
     description?: string,
-    offerExpirationTime?: string
+    offerExpirationTime?: string,
+    parentThreadId?: string
   ): Promise<{ id: string }> {
     return this.request('POST', '/didcomm/calls', {
       connectionId,
@@ -291,6 +425,7 @@ export class VsAgentClient {
       parameters,
       description,
       offerExpirationTime,
+      ...(parentThreadId ? { parentThreadId } : {}),
     })
   }
 
@@ -450,9 +585,43 @@ export class VsAgentClient {
       scope: string[]
       expiresAt: string
       attested: boolean
+      /** present when the request is one of several decisions (FLOW-AUTH-004) */
+      approvals?: AuthorizeApprovals
     }
   }): Promise<CarrierExchange> {
     return this.request('POST', '/didcomm/authorize', body)
+  }
+
+  // ---- authenticate/1.0 (flow profile §6.14, §6.4; CC-VSA-013) ---------------------------------------------------
+
+  /**
+   * `authenticate/1.0/request` inside an `authenticate` flow (FLOW-SIGNIN-001): the purpose, the methods and the accepted
+   * combinations. Returns the exchange, whose `threadId` the later calls name.
+   */
+  public sendAuthenticateRequest(body: {
+    connectionId: string
+    flowId: string
+    request: AuthenticateRequestBody
+  }): Promise<AuthenticateExchange> {
+    return this.request('POST', '/didcomm/authenticate', body)
+  }
+
+  /** A step of the combination chosen, or the current one sent again (FLOW-SIGNIN-008, FLOW-SIGNIN-010). */
+  public sendAuthenticateStep(threadId: string, step: AuthenticateStepBody): Promise<AuthenticateExchange> {
+    return this.request('POST', `/didcomm/authenticate/${encodeURIComponent(threadId)}/step`, { step })
+  }
+
+  /** The end of the current step: `passed`, `failed` or `expired`, with a reason of §11 when it did not pass. */
+  public sendAuthenticateStepResult(
+    threadId: string,
+    result: { step: string; outcome: 'passed' | 'failed' | 'expired'; reason?: string }
+  ): Promise<AuthenticateExchange> {
+    return this.request('POST', `/didcomm/authenticate/${encodeURIComponent(threadId)}/step-result`, { result })
+  }
+
+  /** `enrol-challenge` (flow profile §6.4): the first, or a new one after a wrong code. The secret is sent, never kept. */
+  public sendEnrolChallenge(threadId: string, challenge: EnrolChallengeBody): Promise<EnrolExchange> {
+    return this.request('POST', `/didcomm/authenticate-enrol/${encodeURIComponent(threadId)}/challenge`, { challenge })
   }
 
   /** `notify/1.0/notification`: a wake-up, never for a flow (flow profile §6.10, INTX-NOTIFY-001). */
