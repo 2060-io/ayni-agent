@@ -4,6 +4,7 @@
  * wallet does with it. The claims are those the issuance service resolved; nothing here reads the model.
  */
 import type { FlowService } from '../../core/flows.js'
+import type { Session } from '../../core/types.js'
 import { Deferred } from '../../util/async.js'
 import type { Logger } from '../../util/logger.js'
 import type { CredentialExchangeRecord, VsAgentClient } from './vsAgentClient.js'
@@ -51,6 +52,8 @@ export class CredentialOffers {
     title: string
     /** under a revocable definition: the registry and the index the credential takes (decision 61) */
     revocation?: { registryDefinitionId: string; index: number }
+    /** the conversation session the issuance was asked from: the flow names it as its origin (INTX-FLOW-001) */
+    origin?: Session
   }): Promise<OfferOutcome> {
     const flowMode = !!this.flows && (await this.isFlowCapable(input.connectionId))
     const handle = flowMode
@@ -59,6 +62,7 @@ export class CredentialOffers {
           kind: 'issue',
           title: input.title,
           expiresInMs: this.timeoutMs,
+          ...(input.origin ? { origin: input.origin } : {}),
         })
       : undefined
     let exchangeId: string

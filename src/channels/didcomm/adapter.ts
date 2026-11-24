@@ -36,7 +36,8 @@ import type { Logger } from '../../util/logger.js'
 import type { PeerProfiles } from './peerProfiles.js'
 import type { VsAgentClient } from './vsAgentClient.js'
 
-export const BINDING_GOAL_CODE = 'ayni.bind-session'
+/** goal_code of a binding invitation (flow profile §4, FLOW-CONN-001): a web UI's session linked by the phone. */
+export const BINDING_GOAL_CODE = 'ayni.link-session'
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 
 function decoyCode(): string {

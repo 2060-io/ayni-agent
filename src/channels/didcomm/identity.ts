@@ -19,10 +19,10 @@ import {
   type PresentationEntry,
 } from '../../config/packTypes.js'
 import { AUTHENTICATION_ENTRY, type EvidenceInput } from '../../core/evidence.js'
-import type { FlowService } from '../../core/flows.js'
+import { conversationOrigin, type FlowService } from '../../core/flows.js'
 import { type OrganizationFacts, organizationFrom } from '../../core/organization.js'
 import type { LivenessChecker, VerifiedFacts } from '../../core/principals.js'
-import type { BackingIdentity, ConnectionType, LivenessVerdict, Principal } from '../../core/types.js'
+import type { BackingIdentity, ConnectionType, LivenessVerdict, Principal, Session } from '../../core/types.js'
 import { Deferred } from '../../util/async.js'
 import { nowIso } from '../../util/ids.js'
 import type { Logger } from '../../util/logger.js'
@@ -90,13 +90,32 @@ interface PendingProof {
 /** How long a request for the identity credential is valid (IDENT-RES-020). */
 export const AUTHENTICATION_VALID_MS = 5 * 60_000
 
-/** Why a verified presentation is not accepted as the identity of a person (flow profile §6.14). */
-export type NotAcceptedCode = 'issuer-not-accepted' | 'not-valid' | 'incomplete'
+/**
+ * Why a verified presentation is not accepted as the identity of a person (flow profile §6.14, §11): the first three
+ * are asked again, `another-identity` (the connection is bound to another identity, IDENT-RES-014) is not.
+ */
+export type NotAcceptedCode = 'issuer-not-accepted' | 'not-valid' | 'incomplete' | 'another-identity'
 
 const NOT_ACCEPTED: Record<NotAcceptedCode, string> = {
   'issuer-not-accepted': 'This service does not accept credentials of this issuer.',
   'not-valid': 'This credential could not be verified, or is no longer valid.',
   incomplete: 'This service needs an attribute that was not shared.',
+  'another-identity': 'This credential belongs to another identity than the one of this connection.',
+}
+
+/** Whether a presentation that is not accepted is asked again (FLOW-SIGNIN-004, IDENT-RES-019): all but another identity. */
+export function asksAgain(attempt: AuthenticationAttempt): boolean {
+  return attempt.outcome === 'not-accepted' && attempt.code !== 'another-identity'
+}
+
+/**
+ * A request carried as a flow: its kind, its title and, for a credential request made from a conversation, the
+ * session of that conversation as its origin (INTX-FLOW-001); none for the agent's own requests (`origin: none`).
+ */
+interface FlowRequest {
+  kind: string
+  title: string
+  origin?: Session
 }
 
 /** What one request for the identity credential ends in (D72). */
@@ -150,7 +169,7 @@ export class IdentityFlow {
     connectionId: string,
     credentials: CredentialRef[],
     timeoutMs = 120_000,
-    flow?: { kind: string; title: string }
+    flow?: FlowRequest
   ): Promise<PresentationRecord> {
     if (flow && this.flows) return this.requestInFlow(connectionId, credentials, timeoutMs, flow)
     const { proofExchangeId } = await this.client.requestPresentation(connectionId, credentials)
@@ -176,7 +195,7 @@ export class IdentityFlow {
     connectionId: string,
     credentials: CredentialRef[],
     timeoutMs: number,
-    flow: { kind: string; title: string },
+    flow: FlowRequest,
     /**
      * the agent's own decision on a presentation that verified: a reason not to accept it, or nothing. With it
      * the flow fails with that reason's code, and a presentation that does not verify fails with `not-valid`
@@ -184,7 +203,13 @@ export class IdentityFlow {
     decide?: (record: PresentationRecord) => Promise<NotAcceptedCode | undefined>
   ): Promise<FlowPresentation> {
     const flows = this.flows as FlowService
-    const handle = await flows.open({ connectionId, kind: flow.kind, title: flow.title, expiresInMs: timeoutMs })
+    const handle = await flows.open({
+      connectionId,
+      kind: flow.kind,
+      title: flow.title,
+      expiresInMs: timeoutMs,
+      ...(flow.origin ? { origin: flow.origin } : {}),
+    })
     let proofExchangeId: string
     try {
       proofExchangeId = (await this.client.requestPresentation(connectionId, credentials, true, handle.flowId))
@@ -306,7 +331,7 @@ export class IdentityFlow {
       const attempt = await this.authenticate(connectionId, peerId, flowMode, userAgentVerified)
       if (attempt.outcome === 'accepted') return attempt.facts
       // a wallet without flows cannot be told why: it is asked once
-      if (attempt.outcome === 'not-accepted' && flowMode) continue
+      if (asksAgain(attempt) && flowMode) continue
       // no answer in time ends the connection in both modes (IDENT-RES-020)
       if (attempt.outcome !== 'unanswered' && mode === 'offered') break
       if (this.devAllowUnidentified) {
@@ -331,13 +356,16 @@ export class IdentityFlow {
   /**
    * One request for the credential of the authentication schema, as one credential by its ecosystem schema
    * (IDENT-RES-010), in an `authenticate` flow for a wallet that speaks flows (FLOW-SIGNIN-001), and what it ends
-   * in. Used at connection, and later when a guest asks or the model does (IDENT-RES-015).
+   * in. Used at connection, and later when a guest asks or the model does (IDENT-RES-015). `boundTo` is the actor
+   * identity of a connection already identified: a presentation of another identity is refused on the flow with
+   * `another-identity`, before the flow closes, so that it never ends `completed` (IDENT-RES-014, IDENT-RES-019).
    */
   public async authenticate(
     connectionId: string,
     peerId: string,
     flowMode: boolean,
-    userAgentVerified: boolean
+    userAgentVerified: boolean,
+    boundTo?: string
   ): Promise<AuthenticationAttempt> {
     const authentication = this.pack.identity.authentication?.[0]
     if (!authentication) return { outcome: 'declined' }
@@ -351,6 +379,10 @@ export class IdentityFlow {
     let verdict: VerifiedFacts | NotAcceptedCode | undefined
     const decide = async (verified: PresentationRecord) => {
       verdict = await this.factsFromIdentityCredential(peerId, verified, authentication, userAgentVerified)
+      if (typeof verdict !== 'string' && boundTo && verdict.actorIdentity !== boundTo) {
+        this.logger.warn({ connectionId }, 'another identity presented on an identified connection: refused')
+        verdict = 'another-identity'
+      }
       return typeof verdict === 'string' ? verdict : undefined
     }
     let record: FlowPresentation
@@ -396,7 +428,9 @@ export class IdentityFlow {
     connectionId: string,
     name: string,
     entry: PresentationEntry,
-    flowMode: boolean
+    flowMode: boolean,
+    /** the conversation session that asked: the flow names it as its origin (INTX-FLOW-001) */
+    origin?: Session
   ): Promise<EvidenceInput | undefined> {
     const record = await this.request(
       connectionId,
@@ -407,8 +441,9 @@ export class IdentityFlow {
         },
       ],
       undefined,
-      // the purpose of the entry is what the person reads before answering (INTX-PRES-008)
-      flowMode ? { kind: 'present', title: entry.purpose } : undefined
+      // the purpose of the entry is what the person reads before answering (INTX-PRES-008); a request made from a
+      // conversation names its session as the flow's origin (INTX-FLOW-001)
+      flowMode ? { kind: 'present', title: entry.purpose, origin: conversationOrigin(origin) } : undefined
     ).catch((err) => {
       this.logger.warn({ err, connectionId, entry: name }, 'presentation request failed')
       return undefined

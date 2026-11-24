@@ -149,6 +149,14 @@ const DEFAULT_EXPIRY_MS = 5 * 60_000
 /** a service keeps at most ten flows pending per connection (INTX-FLOW-005, FLOW-CORE-008) */
 export const MAX_PENDING_PER_CONNECTION = 10
 
+/**
+ * The origin of a flow asked from a conversation (INTX-FLOW-001): the conversation's AG-UI session; nothing for a
+ * request of another channel, whose flow opens with `origin: none`.
+ */
+export function conversationOrigin(session: Session | undefined): Session | undefined {
+  return session?.channelType === 'ag-ui' ? session : undefined
+}
+
 export function platformOf(platform: string | undefined): 'web' | 'ios' | 'android' {
   return platform === 'ios' || platform === 'android' ? platform : 'web'
 }

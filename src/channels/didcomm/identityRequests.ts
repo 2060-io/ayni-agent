@@ -10,9 +10,9 @@
 import { type AgentPack, connectionTypeOf, type PresentationEntry } from '../../config/packTypes.js'
 import type { EvidenceInput } from '../../core/evidence.js'
 import type { VerifiedFacts } from '../../core/principals.js'
-import type { Principal } from '../../core/types.js'
+import type { Principal, Session } from '../../core/types.js'
 import type { Logger } from '../../util/logger.js'
-import type { AuthenticationAttempt } from './identity.js'
+import { type AuthenticationAttempt, asksAgain } from './identity.js'
 
 /** What a request ends in. A status, never a value of the credential (D68). */
 export type IdentityRequestOutcome =
@@ -26,12 +26,16 @@ export type IdentityRequestOutcome =
   | 'not-offered'
 
 export interface IdentityRequestDeps {
-  /** asks the wallet once and returns what the request ended in */
+  /**
+   * asks the wallet once and returns what the request ended in; `boundTo`, the actor identity of an identified
+   * connection, refuses a presentation of another identity on the flow (IDENT-RES-019)
+   */
   authenticate(
     connectionId: string,
     peerId: string,
     flowMode: boolean,
-    userAgentVerified: boolean
+    userAgentVerified: boolean,
+    boundTo?: string
   ): Promise<AuthenticationAttempt>
   isFlowCapable(connectionId: string): Promise<boolean>
   /** binds the connection by the rules of D66 */
@@ -41,7 +45,8 @@ export interface IdentityRequestDeps {
     connectionId: string,
     name: string,
     entry: PresentationEntry,
-    flowMode: boolean
+    flowMode: boolean,
+    origin?: Session
   ): Promise<EvidenceInput | undefined>
   /** records what was verified as evidence of the Principal */
   record?(principal: Principal, evidence: EvidenceInput): Promise<unknown>
@@ -89,7 +94,8 @@ export class IdentityRequests {
           flowMode,
           principal.userAgentVerified
         )
-      } while (attempt.outcome === 'not-accepted' && flowMode)
+      } while (asksAgain(attempt) && flowMode)
+      if (attempt.outcome === 'not-accepted' && attempt.code === 'another-identity') return 'another-identity'
       if (attempt.outcome !== 'accepted') {
         this.unanswered.set(connectionId, Date.now())
         return 'not-presented'
@@ -115,12 +121,19 @@ export class IdentityRequests {
     this.pending.add(connectionId)
     try {
       const flowMode = await this.deps.isFlowCapable(connectionId)
+      // the connection is identified: the identity is checked before the flow closes, and another one is refused on
+      // it with no new request (IDENT-RES-014, IDENT-RES-019, FLOW-SIGNIN-004)
       const attempt = await this.deps.authenticate(
         connectionId,
         principal.actorIdentity,
         flowMode,
-        principal.userAgentVerified
+        principal.userAgentVerified,
+        principal.identityCredentialRef ? principal.actorIdentity : undefined
       )
+      if (attempt.outcome === 'not-accepted' && attempt.code === 'another-identity') {
+        this.logger.info({ principalId: principal.id }, 'another identity presented to reveal the email: refused')
+        return 'another-identity'
+      }
       if (attempt.outcome !== 'accepted') return 'not-presented'
       const { outcome } = await this.deps.onIdentityPresented(connectionId, attempt.facts)
       this.logger.info({ principalId: principal.id, outcome }, 'authentication asked again to reveal the email')
@@ -137,7 +150,9 @@ export class IdentityRequests {
   public async present(
     principal: Principal,
     name: string,
-    by: 'model' | 'person' | 'connect'
+    by: 'model' | 'person' | 'connect',
+    /** the conversation session the request was made from, which the flow names as its origin (INTX-FLOW-001) */
+    origin?: Session
   ): Promise<PresentationRequestOutcome> {
     const entry = this.pack.presentations?.[name]
     if (!entry || !this.deps.present || !this.deps.record) return 'not-offered'
@@ -152,7 +167,7 @@ export class IdentityRequests {
     this.pending.add(connectionId)
     try {
       const flowMode = await this.deps.isFlowCapable(connectionId)
-      const evidence = await this.deps.present(connectionId, name, entry, flowMode)
+      const evidence = await this.deps.present(connectionId, name, entry, flowMode, origin)
       if (!evidence) {
         this.unanswered.set(key, Date.now())
         return 'not-presented'

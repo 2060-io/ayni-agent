@@ -10,7 +10,7 @@ import type { PresentationRecord } from '../src/channels/didcomm/vsAgentClient.j
 import { crossFieldErrors, loadPack, validatePackDocument } from '../src/config/pack.js'
 import type { AgentPack, PresentationEntry } from '../src/config/packTypes.js'
 import type { EvidenceInput } from '../src/core/evidence.js'
-import type { Principal } from '../src/core/types.js'
+import type { Principal, Session } from '../src/core/types.js'
 import { startTestAgent } from './helpers.js'
 
 const silent = { info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined }
@@ -116,6 +116,25 @@ describe('asking for a catalog entry (INTX-PRES-003..007)', () => {
     expect(calls).toBe(2)
   })
 
+  it('names the conversation it is asked from as the origin of the present flow (INTX-FLOW-001)', async () => {
+    const origins: unknown[] = []
+    const requests = new IdentityRequests(
+      packWith({ diploma: diploma(), licence: diploma({ request: 'on-connect' }) }),
+      deps({
+        present: async (_connection, name, _entry, _flowMode, origin) => {
+          origins.push(origin?.id)
+          return { ...verified, entry: name }
+        },
+      }),
+      silent as never
+    )
+    const conversation = { id: 'ses_ui', channelType: 'ag-ui', state: 'bound' } as Session
+    expect(await requests.present(person(), 'diploma', 'model', conversation)).toBe('verified')
+    // asked at connection, by no conversation: no origin
+    await requests.onConnect(person())
+    expect(origins).toEqual(['ses_ui', undefined])
+  })
+
   it('asks the on-connect entries of the kind when the connection is established, and no other', async () => {
     const asked: string[] = []
     const requests = new IdentityRequests(
@@ -198,6 +217,47 @@ describe('what a presentation is worth (INTX-PRES-005, IDENT-RES-008)', () => {
     })
     expect(calls[0][1]).toEqual([
       { jsonSchemaCredentialId: DIPLOMA, attributes: ['degree', 'institution', 'graduationDate'] },
+    ])
+  })
+
+  it('opens its present flow with the conversation session as origin, and with none for any other (INTX-FLOW-001)', async () => {
+    const opened: { kind: string; origin?: Session }[] = []
+    const ref: { flow?: IdentityFlow } = {}
+    const client = {
+      requestPresentation: async () => {
+        setTimeout(
+          () =>
+            ref.flow?.onPresentation({
+              proofExchangeId: 'pex-o',
+              state: 'done',
+              claims: [],
+              verified: true,
+              credentials,
+            }),
+          0
+        )
+        return { proofExchangeId: 'pex-o' }
+      },
+    }
+    ref.flow = new IdentityFlow(packWith({}), client as never, resolver, false, silent as never)
+    ref.flow.setFlows({
+      open: async (opts: { kind: string; origin?: Session }) => {
+        opened.push(opts)
+        return { flowId: `flow-${opened.length}`, connectionId: 'conn-1', kind: opts.kind, expiresAt: '' }
+      },
+      waitForClose: () => new Promise(() => undefined),
+      close: async () => undefined,
+      problemReport: async () => undefined,
+    } as never)
+    const conversation = { id: 'ses_ui', channelType: 'ag-ui', state: 'bound' } as Session
+    const chat = { id: 'ses_dc', channelType: 'didcomm', state: 'bound' } as Session
+    expect(await ref.flow.present('conn-1', 'diploma', diploma(), true, conversation)).toBeDefined()
+    expect(await ref.flow.present('conn-1', 'diploma', diploma(), true, chat)).toBeDefined()
+    expect(await ref.flow.present('conn-1', 'diploma', diploma(), true)).toBeDefined()
+    expect(opened.map((o) => [o.kind, o.origin?.id])).toEqual([
+      ['present', 'ses_ui'],
+      ['present', undefined],
+      ['present', undefined],
     ])
   })
 

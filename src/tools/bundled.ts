@@ -21,7 +21,7 @@ import {
 import type { EvidenceService } from '../core/evidence.js'
 import { type IssuanceService, issuanceOutcomeForModel, offeredProfiles } from '../core/issuance.js'
 import { LANGUAGE_PREFERENCE, languageTag } from '../core/serviceLanguage.js'
-import type { Principal } from '../core/types.js'
+import type { Principal, Session } from '../core/types.js'
 import type { MediaService } from '../media/service.js'
 import type { RagService } from '../memory/rag.js'
 import { MemoryService } from '../memory/service.js'
@@ -41,7 +41,8 @@ export interface BundledDeps {
   /** credential issuance, wired once the DIDComm side is (INTX-ISSUE) */
   issuance?: () => IssuanceService | undefined
   /** asks the wallet of the Principal for the credential of a catalog entry (INTX-PRES-003) */
-  requestPresentation?: (principal: Principal, entry: string) => Promise<PresentationRequestOutcome>
+  /** asks for a catalog entry from the conversation of `session`, which the flow names as its origin (INTX-FLOW-001) */
+  requestPresentation?: (principal: Principal, entry: string, session: Session) => Promise<PresentationRequestOutcome>
   media: MediaService
   rag?: RagService
   stats: StatsSink
@@ -147,7 +148,7 @@ export class BundledToolSource implements ToolSource {
             return { content: identityOutcomeForModel(outcome), data: { entry, outcome } }
           }
           const outcome = offered(ctx.principal).some(([name]) => name === entry)
-            ? ((await this.deps.requestPresentation?.(ctx.principal, entry)) ?? 'unavailable')
+            ? ((await this.deps.requestPresentation?.(ctx.principal, entry, ctx.session)) ?? 'unavailable')
             : 'not-offered'
           return { content: presentationOutcomeForModel(outcome), data: { entry, outcome } }
         },

@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest'
 import {
   ACTIVITY,
   APP_LINK_DOMAIN,
+  BINDING_GOAL_CODE,
   buildAppLink,
   CLIENT_PLATFORMS,
   CONNECTION_STATES,
@@ -78,6 +79,8 @@ describe('profile 3.5 constants', () => {
     expect(ACTIVITY.memoryUpdate).toBe('ayni.memory-update')
     expect(ACTIVITY.flow).toBe('ayni.flow')
     expect(INVITATION_GOAL_CODE.linkSession).toBe('ayni.link-session')
+    // a binding invitation carries the goal code of the flow profile §4 (FLOW-CONN-001)
+    expect(BINDING_GOAL_CODE).toBe('ayni.link-session')
     expect(CLIENT_PLATFORMS).toEqual(['web', 'ios', 'android'])
     expect(isClientPlatform('ios')).toBe(true)
     expect(isClientPlatform('Firefox on Linux')).toBe(false)

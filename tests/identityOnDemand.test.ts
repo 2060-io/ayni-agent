@@ -228,6 +228,44 @@ describe('the request on demand (IDENT-RES-015/016)', () => {
     expect(once).toBe(1)
   })
 
+  it('asks an identified connection with its identity, and asks nothing again after another one (IDENT-RES-019)', async () => {
+    const asked: unknown[][] = []
+    const presented: unknown[] = []
+    const requests = new IdentityRequests(
+      pack,
+      deps({
+        authenticate: async (...args) => {
+          asked.push(args)
+          return { outcome: 'not-accepted', code: 'another-identity' }
+        },
+        onIdentityPresented: async (_connectionId, facts) => {
+          presented.push(facts)
+          return { outcome: 'identified' }
+        },
+      }),
+      silent as never
+    )
+    const alice = principal({ actorIdentity: `org:EE:1|${BADGE}|42`, identityCredentialRef: 'badge:pex-1' })
+    // the identity the connection is bound to goes with the request, so the flow refuses another before it closes
+    expect(await requests.reveal(alice)).toBe('another-identity')
+    expect(asked).toEqual([['conn-1', `org:EE:1|${BADGE}|42`, true, false, `org:EE:1|${BADGE}|42`]])
+    // one request, nothing bound, nothing kept
+    expect(presented).toEqual([])
+    // a visitor's request names no identity: any badge may identify it
+    const visitorRequests = new IdentityRequests(
+      pack,
+      deps({
+        authenticate: async (...args) => {
+          asked.push(args)
+          return { outcome: 'declined' }
+        },
+      }),
+      silent as never
+    )
+    expect(await visitorRequests.reveal(principal())).toBe('not-presented')
+    expect(asked.at(-1)?.[4]).toBeUndefined()
+  })
+
   it('keeps one request pending on a connection', async () => {
     let release: (attempt: AuthenticationAttempt) => void = () => undefined
     const waiting = new Promise<AuthenticationAttempt>((resolve) => {

@@ -512,6 +512,44 @@ describe('device challenge as a confirm flow (INTX-AUTH-009, D55)', () => {
     expect(messages.some((m) => m.activityType === 'ayni.capability')).toBe(false)
   })
 
+  it('closes a confirm answered no as completed, as any answer, and fails the challenge (flow profile §6, row confirm)', async () => {
+    const connectionId = 'conn-confirm'
+    const bound = await running.agent.didcommSession(connectionId)
+    if (!bound) throw new Error('no bound connection')
+    const uiSessions = await running.agent.store.sessions.listByPrincipal(bound.principal.id, ['bound'])
+    const uiSession = uiSessions.find((s) => s.channelType === 'ag-ui') as Session
+    const run = running.agent.challenges.run({
+      principal: bound.principal,
+      originSession: uiSession,
+      toolName: 'wire_money',
+      policy: { type: 'device' },
+      purpose: 'Wire 200 EUR',
+    })
+    await settle()
+    const confirm = last<[{ flowId: string }]>('sendConfirmRequest')[0]
+    const pending = (await running.agent.store.challenges.listPending()).find(
+      (c) => c.details?.flowId === confirm.flowId
+    )
+    if (!pending) throw new Error('challenge not pending')
+    await events.handle(
+      envelope('didcomm.confirm.state-changed', {
+        threadId: pending.details?.threadId,
+        flowId: confirm.flowId,
+        connectionId,
+        state: 'response-received',
+        response: { confirmed: false, attestation: { method: 'biometric', at: new Date().toISOString() } },
+      })
+    )
+    const { outcome } = await run
+    // the person said no: the action does not go on
+    expect(outcome).toBe('failed')
+    // but the flow was answered: it closes completed, with no reason, and the phone shows the person's own answer
+    const close = last<[string, { outcome: string; reason?: string }]>('closeFlow')
+    expect(close[0]).toBe(confirm.flowId)
+    expect(close[1].outcome).toBe('completed')
+    expect(close[1].reason).toBeUndefined()
+  })
+
   it('fails the challenge when the holder closes the flow declined', async () => {
     const connectionId = 'conn-confirm'
     const bound = await running.agent.didcommSession(connectionId)
@@ -1018,6 +1056,29 @@ describe('the authentication of a person (D72; IDENT-RES-010/018/019/020, FLOW-S
     const t = setup({ request: 'on-demand' })
     expect(await t.establishing).toMatchObject({ identityCredentialRef: null })
     expect(t.opened()).toEqual([])
+  })
+
+  it('refuses another identity on the flow of an identified connection, before it closes, and asks nothing again (IDENT-RES-019, FLOW-SIGNIN-004)', async () => {
+    const t = setup({ request: 'on-demand' })
+    await t.establishing
+    const identity = t.identityOf()
+    // the connection is bound to the badge number 7; the wallet presents the badge number 42
+    const asking = identity.authenticate('conn-identified', 'did:peer:alice', true, false, `org:EE:1|${BADGE}|7`)
+    await settle()
+    t.present(ISSUER_1)
+    expect(await asking).toEqual({ outcome: 'not-accepted', code: 'another-identity' })
+    await settle()
+    // the reason goes on the flow, which never closes completed, and no new request follows
+    expect(t.problems()).toEqual(['another-identity'])
+    expect(t.calls.filter((c) => c.method === 'closeFlow')).toEqual([])
+    expect(t.opened()).toHaveLength(1)
+    // the same identity is accepted, and its flow closes completed
+    const same = identity.authenticate('conn-identified', 'did:peer:alice', true, false, `org:EE:1|${BADGE}|42`)
+    await settle()
+    t.present(ISSUER_1)
+    expect(await same).toMatchObject({ outcome: 'accepted', facts: { actorIdentity: `org:EE:1|${BADGE}|42` } })
+    const close = t.calls.filter((c) => c.method === 'closeFlow').at(-1)?.args as [string, { outcome: string }]
+    expect(close[1].outcome).toBe('completed')
   })
 })
 
