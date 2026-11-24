@@ -203,3 +203,65 @@ describe('the keys the clean spec removed (ayni-spec PR #123: no backward compat
     expect(message).toContain('(guests)')
   })
 })
+
+describe('the approval policies of the tools of spaces, their bounds and the stewards (TOOL-CAT-023, SPACE-MEMB-011)', () => {
+  const dev = () =>
+    structuredClone(loadPack('agent-packs/dev', { ...process.env, ...env }).pack) as never as Record<
+      string,
+      // biome-ignore lint/suspicious/noExplicitAny: a pack document edited by the test
+      any
+    >
+  const refusal = (pack: unknown): string => {
+    try {
+      validatePackDocument(pack, env)
+    } catch (error) {
+      if (error instanceof PackError) return `${error.message} ${JSON.stringify(error)}`
+      throw error
+    }
+    return ''
+  }
+  const withX = (approval: Record<string, unknown>) => {
+    const pack = dev()
+    pack.tools.sources.post = {
+      type: 'http',
+      title: 'Post on X',
+      description: 'Posts.',
+      method: 'POST',
+      url: 'https://x.example/2/tweets',
+      availability: 'spaces',
+      tools: { post: { effect: 'external', approval } },
+    }
+    return pack
+  }
+
+  it('takes bounds a default fits, and the stewards of a template among the declared roles', () => {
+    expect(() => validatePackDocument(withX({ minApprovals: 2, default: { threshold: 2 } }), env)).not.toThrow()
+    const stewards = dev()
+    stewards.spaces.templates[0].stewards = ['manager']
+    stewards.approvals = {
+      ...stewards.approvals,
+      spaces: { allowedApprovers: { roles: ['manager'] }, timeouts: { 'tool-call': { default: 120, max: 1440 } } },
+    }
+    expect(() => validatePackDocument(stewards, env)).not.toThrow()
+  })
+
+  it('refuses to start, naming the field, on a default outside its bounds, a person, a role that does not approve, a timeout outside its own', () => {
+    expect(refusal(withX({ minApprovals: 2 }))).toContain('tools.sources.post.tools.post.approval.default')
+    expect(refusal(withX({ attested: 'required', default: { attested: false } }))).toContain('attestation-required')
+    const person = dev()
+    person.approvals = { ...person.approvals, spaces: { default: { approvers: [{ kind: 'person', required: true }] } } }
+    expect(refusal(person)).toContain('approvals.spaces.default.approvers.0: an agent-pack names no person')
+    const intern = dev()
+    intern.approvals = {
+      ...intern.approvals,
+      spaces: { default: { approvers: [{ kind: 'role', role: 'employee', required: true }] } },
+    }
+    expect(refusal(intern)).toContain('approvals.spaces.default.approvers.0: role "employee" has no canApprove')
+    const timeout = dev()
+    timeout.approvals = { ...timeout.approvals, spaces: { timeouts: { 'tool-call': { default: 2, min: 5 } } } }
+    expect(refusal(timeout)).toContain('approvals.spaces.timeouts.tool-call.default is outside its min and max')
+    const steward = dev()
+    steward.spaces.templates[0].stewards = ['ghost']
+    expect(refusal(steward)).toMatch(/rule 2.*ghost.*stewards/)
+  })
+})

@@ -42,6 +42,7 @@ import { documentOutcomeForModel } from './core/document.js'
 import { EmailChecks } from './core/emailCheck.js'
 import { EvidenceService } from './core/evidence.js'
 import { FlowService } from './core/flows.js'
+import { Governance } from './core/governance.js'
 import { InvitationService } from './core/invitations.js'
 import { IssuanceService, subjectIdKey } from './core/issuance.js'
 import { Orchestrator } from './core/orchestrator.js'
@@ -421,10 +422,34 @@ export async function buildAgent(
   orchestrator.gate = gate
   gateRef = gate
   orchestrator.spaceById = (spaceId) => spaces.find(spaceId)
-  approvals.spaceOwners = async (spaceId) => (await spaces.find(spaceId))?.ownerIds ?? []
+  // the governance of the spaces (D135 to D142): whom the policies of their tools name, the notices, the owners
+  const governance = new Governance({
+    store,
+    pack,
+    spaces,
+    approvals,
+    // a person by the name the user directory gives them, else as the agent names them
+    nameOf: (principal) =>
+      (principal.directoryEntryId ? directory?.view(principal.directoryEntryId)?.name : undefined) ??
+      displayNameOf(principal),
+    logger,
+  })
+  approvals.spacePolicies = governance
+  governance.policies = spaceTools
+  spaceTools.governance = governance
+  governance.noticeChanged = (notice) => agentRef?.notifications.noticeChanged(notice) ?? Promise.resolve()
+  governance.phones = {
+    open: (record, principalId) => agentRef?.approvalPhoneOpen(record, principalId) ?? Promise.resolve(),
+    close: (record, principalId) => agentRef?.approvalPhoneClose(record, principalId) ?? Promise.resolve(),
+  }
   challenges.onSettled = (record) => spaceTools.settle(record)
   spaces.onCreated = (space) => spaceTools.onCreated(space)
-  spaces.onOwnerChanged = (space) => spaceTools.onOwnerChanged(space)
+  // the owner changed: the tools' pending changes are dropped, the members told, the approvals moved (SPACE-MEMB-012)
+  spaces.onOwnerChanged = async (space, change) => {
+    await spaceTools.onOwnerChanged(space)
+    await governance.ownerChanged(space, change)
+  }
+  spaces.onMembersChanged = (space) => governance.review(space)
   memory.hooks.approvalsErased = (records) => gate.onTurnErased(records)
   spaceTools.hooks = {
     accountEnded: (spaceId, sourceId) => registry.closeAccount(sourceId, spaceId),
@@ -458,6 +483,14 @@ export async function buildAgent(
     deliver: async (session, entry) => {
       await router.deliver(session, { kind: 'text', entry })
     },
+    approvalCard: async (record, viewer) => (agentRef ? agentRef.approvalCard(record, viewer) : {}),
+    noApprover: (record, title) => governance.noApprover(record, title),
+    policyWords: async (spaceId, policy) => {
+      const space = await spaces.find(spaceId)
+      const words: string[] = []
+      for (const entry of policy.approvers) words.push(space ? await governance.entryText(space, entry) : entry.kind)
+      return words
+    },
   }
 
   const agent = new AyniAgent({
@@ -485,6 +518,7 @@ export async function buildAgent(
   agentRef = agent
   agent.gate = gate
   agent.spaceTools = spaceTools
+  agent.governance = governance
   agent.catalog = catalog
   agent.connections = connections
   // the notes the model reads and writes are those of the space of the conversation (MEM-SPACE-001), and a space may
@@ -561,6 +595,10 @@ export async function buildAgent(
   }
   // the spaces follow their templates: the sources they add by themselves, those no longer named leave (TOOL-SPACE-011)
   await spaceTools.align()
+  // every space holds its approval timeouts; its governance in line with its people: successors, spaces with no
+  // owner, policies that need attention (SPACE-DEF-008, D136, D139)
+  await spaces.alignRules()
+  await governance.review()
   // people's own accounts follow the agent-pack: those of a source it no longer offers as it did end (TOOL-CONN-009)
   await connections.align()
   // what a restart left waiting is answered now
@@ -621,6 +659,7 @@ export async function buildAgent(
     homeKey: () => home.key(),
     endAccess: (principal) => agent.onCredentialInvalid(principal),
     endAccounts: async (principal) => void (await connections.endPerson(principal.id)),
+    governance,
     logger,
   })
   agent.people = people

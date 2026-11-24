@@ -12,6 +12,7 @@ import type {
   DigestAnchor,
   ElevationGrant,
   EvidenceRecord,
+  GovernanceNotice,
   LifecycleState,
   MemoryAccessLog,
   MessageEntry,
@@ -331,6 +332,19 @@ export interface SpaceActivityRepo {
   list(spaceId: string, limit: number): Promise<SpaceActivity[]>
 }
 
+/** The notices of a space's governance, each in one person's Notifications (INTX-APPR-027, D142). */
+export interface GovernanceNoticeRepo {
+  save(notice: GovernanceNotice): Promise<void>
+  get(id: string): Promise<GovernanceNotice | undefined>
+  /** those of a person, of a space, of a kind; open ones only (no `resolvedAt`) with `open` */
+  list(filter: {
+    principalId?: string
+    spaceId?: string
+    kind?: GovernanceNotice['kind']
+    open?: boolean
+  }): Promise<GovernanceNotice[]>
+}
+
 /** The sources a space's template names, in each space (D98, TOOL-SPACE-001). */
 export interface SpaceToolRepo {
   get(spaceId: string, sourceId: string): Promise<SpaceToolRecord | undefined>
@@ -459,6 +473,7 @@ export interface Store {
   spaces: SpaceRepo
   spaceMembers: SpaceMemberRepo
   spaceActivity: SpaceActivityRepo
+  governanceNotices: GovernanceNoticeRepo
   spaceTools: SpaceToolRepo
   spaceAccounts: SpaceAccountRepo
   toolAllowances: ToolAllowanceRepo

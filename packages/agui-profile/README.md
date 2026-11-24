@@ -14,7 +14,9 @@ own accounts: Your accounts, the Connect card and `ayni.connections.changed`; fr
 the Notifications of a space and of the agent, `ayni.space.notifications.changed`, the resend of an approval to the
 phone, and `ayni.approval.request` withdrawn; from 3.5.2, the binding goal code `ayni.link-session`, the closure
 reason `replaced` and `features.visitors`; from 3.5.3, what the clean spec removed: `client.profileVersion`, the
-routed kind `authorization` and `INTERRUPT_REASON`) and the few AG-UI message shapes it reuses.
+routed kind `authorization` and `INTERRUPT_REASON`; from 3.5.4, space governance: one owner or none, the successor,
+the stewards, the approval timeouts, the approval policy of a tool of a space, the progress of an approval and the
+notices of a space's governance) and the few AG-UI message shapes it reuses.
 
 ```ts
 import { APP_LINK_DOMAIN, buildAppLink, parseAppLink, PROFILE_VERSION } from '@ayni.org/ayni-agui-profile'

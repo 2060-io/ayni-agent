@@ -5,6 +5,7 @@ import type {
   Conversation,
   DigestAnchor,
   ElevationGrant,
+  GovernanceNotice,
   LifecycleState,
   MemoryAccessLog,
   OAuthAttemptRecord,
@@ -551,6 +552,24 @@ export class MemoryStore implements Store {
           .reverse()
           .sort((a, b) => b.at.localeCompare(a.at))
           .slice(0, limit)
+      ),
+  }
+
+  private readonly noticeRows = new Map<string, GovernanceNotice>()
+  public governanceNotices = {
+    save: async (notice: GovernanceNotice) => {
+      this.noticeRows.set(notice.id, clone(notice))
+    },
+    get: async (id: string) => clone(this.noticeRows.get(id)),
+    list: async (filter: { principalId?: string; spaceId?: string; kind?: GovernanceNotice['kind']; open?: boolean }) =>
+      clone(
+        [...this.noticeRows.values()].filter(
+          (n) =>
+            (!filter.principalId || n.principalId === filter.principalId) &&
+            (!filter.spaceId || n.spaceId === filter.spaceId) &&
+            (!filter.kind || n.kind === filter.kind) &&
+            (!filter.open || !n.resolvedAt)
+        )
       ),
   }
 

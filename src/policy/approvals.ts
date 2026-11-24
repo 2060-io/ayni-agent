@@ -5,16 +5,24 @@
  * decided only through its `authorize` flow (INTX-APPR-019).
  */
 import type { AgentPack, ApprovalPolicy, ApprovalRule, ElevationRule } from '../config/packTypes.js'
-import type { ApprovalDecision, ApprovalRecord, ElevationGrant, Principal } from '../core/types.js'
+import type {
+  ApprovalDecision,
+  ApprovalProgress,
+  ApprovalRecord,
+  ElevationGrant,
+  Principal,
+  SpaceApprovalPolicy,
+} from '../core/types.js'
 import { type EntryCrypto, openJson, sealJson } from '../memory/crypto.js'
 import type { ApprovalRepo, Store } from '../store/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
+import { attestedFor, canStillMeet, entriesNaming, type Named, statusOf } from './spacePolicy.js'
 
 /**
  * What became of an approval: made, decided by one approver while it still waits for others (`decision`), ended by a
  * decision (`decided`), withdrawn or cancelled, expired.
  */
-export type ApprovalChange = 'created' | 'decision' | 'decided' | 'cancelled' | 'expired'
+export type ApprovalChange = 'created' | 'decision' | 'decided' | 'cancelled' | 'expired' | 'moved'
 
 export interface ApprovalEvents {
   /** a request was created, decided, cancelled or expired: notify approvers and the requester */
@@ -22,12 +30,16 @@ export interface ApprovalEvents {
 }
 
 /**
- * Whether an approval's decision must be attested (INTX-APPR-019): its policy says so, or a space's owner approves it
- * (INTX-APPR-013). It is then decided only through its `authorize` flow, on the approver's phone.
+ * The people an approval of a tool of a space names (INTX-APPR-021): for each entry of its policy, the people it names
+ * now, the requester only by their own confirmation (INTX-APPR-023); who may still decide it; and where it stands.
  */
-export function needsAttestation(record: Pick<ApprovalRecord, 'attested' | 'ownerApproval'>): boolean {
-  return record.attested === true || record.ownerApproval === true
+export interface SpacePolicyPort {
+  named(record: ApprovalRecord): Promise<{ named: Named; pool: string[] }>
+  progress(record: ApprovalRecord, named: Named): Promise<ApprovalProgress>
 }
+
+/** The answer of an approval refused at once for want of an approver (INTX-APPR-024). */
+export const NO_APPROVER = 'no-approver'
 
 export class ApprovalError extends Error {
   public constructor(
@@ -62,10 +74,10 @@ export class ApprovalService {
   }
 
   /**
-   * The owners of a space, as they are now: for a call of a tool of a space, the eligible approver is its owner at the time
-   * of the decision, and nobody else (INTX-APPR-004). Set by the composition root.
+   * The people the policy of a tool of a space names, as they are now: for a call of a tool of a space, its approvers are
+   * those and nobody else (INTX-APPR-004, INTX-APPR-021). Set by the composition root.
    */
-  public spaceOwners?: (spaceId: string) => Promise<string[]>
+  public spacePolicies?: SpacePolicyPort
 
   /**
    * Whether a person can be asked on their phone: their capability channel is flow-capable (INTX-APPR-011). An approval to
@@ -79,9 +91,10 @@ export class ApprovalService {
    */
   public async isEligible(principal: Principal, record: ApprovalRecord): Promise<boolean> {
     if (record.kind === 'confirmation') return false
-    if (record.ownerApproval && record.spaceId) {
-      const owners = (await this.spaceOwners?.(record.spaceId)) ?? []
-      return owners.includes(principal.id)
+    if (record.spacePolicy) {
+      if (!this.spacePolicies) return false
+      const { named } = await this.spacePolicies.named(record)
+      return entriesNaming(named, principal.id).length > 0
     }
     if (record.approverConnectionType && principal.connectionType !== record.approverConnectionType) return false
     return principal.roles.some((r) => record.eligibleRoles.includes(r) && this.pack.identity.roles?.[r]?.canApprove)
@@ -114,8 +127,16 @@ export class ApprovalService {
     return principal.roles.some((r) => rule.approvers.includes(r) && this.pack.identity.roles?.[r]?.canApprove)
   }
 
-  /** The people who may decide an approval now, the requester aside (INTX-APPR-004). */
+  /**
+   * The people who may decide an approval now, the requester aside (INTX-APPR-004) but by their own confirmation of a
+   * tool of a space (INTX-APPR-023).
+   */
   public async approversOf(record: ApprovalRecord): Promise<Principal[]> {
+    if (record.spacePolicy) {
+      if (record.kind === 'confirmation' || !this.spacePolicies) return []
+      const { pool } = await this.spacePolicies.named(record)
+      return (await this.store.principals.list()).filter((p) => pool.includes(p.id))
+    }
     const out: Principal[] = []
     for (const p of await this.store.principals.list())
       if (p.id !== record.requesterId && (await this.isEligible(p, record))) out.push(p)
@@ -129,7 +150,7 @@ export class ApprovalService {
    */
   private async askedOf(record: ApprovalRecord): Promise<string[]> {
     const approvers = await this.approversOf(record)
-    if (!needsAttestation(record)) return approvers.map((p) => p.id)
+    if (!record.attested) return approvers.map((p) => p.id)
     const reached: string[] = []
     for (const p of approvers) if (await this.askable?.(p)) reached.push(p.id)
     if (!reached.length) throw new ApprovalError('no approver can decide it on a phone now', 'no-approver')
@@ -146,10 +167,16 @@ export class ApprovalService {
     rule: ApprovalRule
     /** the person's message whose turn asks for it: an erasure of that message erases the arguments (PRIV-ERASE-005) */
     inboundId?: string
-    /** a tool call's (D99): the action as its card shows it, its source, its conversation, the space whose owner approves */
-    tool?: Pick<ApprovalRecord, 'action' | 'sourceId' | 'conversationId' | 'spaceId' | 'ownerApproval' | 'callId'>
+    /** a tool call's (D99): the action as its card shows it, its source, its conversation, its space */
+    tool?: Pick<ApprovalRecord, 'action' | 'sourceId' | 'conversationId' | 'spaceId' | 'callId'>
+    /**
+     * a tool of a space's: the policy in force (D137) and the space's timeout of a call's approval, in minutes
+     * (SPACE-DEF-008); the record is refused at once, `REJECTED` with `no-approver`, when nobody can meet it
+     */
+    space?: { policy: SpaceApprovalPolicy; timeoutMinutes: number }
   }): Promise<ApprovalRecord> {
-    const timeout = (opts.rule.timeoutMinutes ?? this.pack.approvals?.timeoutMinutes ?? 60) * 60_000
+    const timeout =
+      (opts.space?.timeoutMinutes ?? opts.rule.timeoutMinutes ?? this.pack.approvals?.timeoutMinutes ?? 60) * 60_000
     const record: ApprovalRecord = {
       id: prefixedId('apr'),
       kind: 'sensitivity',
@@ -173,7 +200,56 @@ export class ApprovalService {
       updatedAt: nowIso(),
       ...(opts.tool ?? {}),
     }
+    if (opts.space) {
+      const policy = opts.space.policy
+      record.spacePolicy = policy
+      record.attested = policy.attested
+      record.eligibleRoles = []
+      record.policy = { type: 'count', value: policy.threshold, vetoOnRefusal: policy.refusal === 'any' }
+      return this.askSpace(record)
+    }
     record.approverIds = await this.askedOf(record)
+    await this.store.approvals.save(record)
+    await this.events.onChange(record, 'created')
+    return record
+  }
+
+  /**
+   * An approval of a tool of a space (INTX-APPR-021, INTX-APPR-024): asked of the people its policy names now, the
+   * requester only by their own confirmation, and, for a decision to attest, only of those a flow-capable phone reaches
+   * (INTX-APPR-019). When they cannot meet the policy, it is recorded `REJECTED` with `no-approver`, asks nobody, and is
+   * returned as such: the caller ends its card and tells the owner.
+   */
+  private async askSpace(record: ApprovalRecord): Promise<ApprovalRecord> {
+    const policy = record.spacePolicy as SpaceApprovalPolicy
+    const { named, pool } = (await this.spacePolicies?.named(record)) ?? {
+      named: { entries: policy.approvers.map(() => []), ownerless: false },
+      pool: [],
+    }
+    const reached: string[] = []
+    for (const id of pool) {
+      if (!attestedFor(record, id)) {
+        reached.push(id)
+        continue
+      }
+      const p = await this.store.principals.get(id)
+      if (p && (await this.askable?.(p))) reached.push(id)
+    }
+    const reachedNamed: Named = {
+      ...named,
+      entries: named.entries.map((ids) => ids.filter((id) => reached.includes(id))),
+    }
+    if (!canStillMeet(policy, reachedNamed, [], reached)) {
+      record.status = 'REJECTED'
+      record.reason = NO_APPROVER
+      record.approverIds = []
+      record.closedAt = record.updatedAt
+      if (this.spacePolicies) record.progress = await this.spacePolicies.progress(record, named)
+      await this.store.approvals.save(record)
+      return record
+    }
+    record.approverIds = reached
+    if (this.spacePolicies) record.progress = await this.spacePolicies.progress(record, named)
     await this.store.approvals.save(record)
     await this.events.onChange(record, 'created')
     return record
@@ -236,8 +312,16 @@ export class ApprovalService {
     return n
   }
 
-  /** Applies the policy: count (N distinct approvers) or percentage of eligible approvers; veto on refusal. */
+  /**
+   * Applies the policy: for a tool of a space, its entries, threshold and refusal rule over the people they name now
+   * (INTX-APPR-021); else count (N distinct approvers) or percentage of eligible approvers, veto on refusal.
+   */
   private async evaluate(record: ApprovalRecord): Promise<ApprovalRecord['status']> {
+    if (record.spacePolicy && this.spacePolicies) {
+      const { named, pool } = await this.spacePolicies.named(record)
+      record.progress = await this.spacePolicies.progress(record, named)
+      return statusOf(record.spacePolicy, named, record.decisions, pool)
+    }
     const approvals = record.decisions.filter((d) => d.decision === 'approve').length
     const rejections = record.decisions.filter((d) => d.decision === 'reject').length
     if (record.policy.vetoOnRefusal && rejections > 0) {
@@ -272,11 +356,14 @@ export class ApprovalService {
     const record = await this.store.approvals.get(approvalId)
     if (!record) throw new ApprovalError('approval not found', 'not-found')
     if (record.status !== 'PENDING') throw new ApprovalError(`approval is ${record.status}`, 'not-pending')
-    if (!options.self && !(await this.isEligible(approver, record)))
-      throw new ApprovalError('principal is not an eligible approver', 'not-eligible')
+    // a tool of a space's: the entries that name the approver now, which their decision keeps satisfying (INTX-APPR-021)
+    const named = record.spacePolicy && this.spacePolicies ? (await this.spacePolicies.named(record)).named : undefined
+    const satisfies = named ? entriesNaming(named, approver.id) : undefined
+    const eligible = named ? !!satisfies?.length : await this.isEligible(approver, record)
+    if (!options.self && !eligible) throw new ApprovalError('principal is not an eligible approver', 'not-eligible')
     if (record.decisions.some((d) => d.approverId === approver.id))
       throw new ApprovalError('already decided', 'not-pending')
-    if (!options.self && needsAttestation(record) && (!attestation || attestation.method === 'none'))
+    if (!options.self && attestedFor(record, approver.id) && (!attestation || attestation.method === 'none'))
       throw new ApprovalError('the decision of this approval is made on the phone', 'decide-on-phone')
     const role = approver.roles.find((r) => record.eligibleRoles.includes(r)) ?? approver.roles[0] ?? ''
     record.decisions.push({
@@ -287,6 +374,9 @@ export class ApprovalService {
       reason: note,
       ts: nowIso(),
       ...(attestation ? { attestation } : {}),
+      // the requester's own confirmation (INTX-APPR-023)
+      ...(named && approver.id === record.requesterId ? { self: true } : {}),
+      ...(satisfies ? { satisfies } : {}),
     })
     record.status = await this.evaluate(record)
     record.updatedAt = nowIso()
@@ -323,6 +413,40 @@ export class ApprovalService {
     record.closedAt = record.updatedAt
     await this.store.approvals.save(record)
     await this.events.onChange(record, 'cancelled')
+    return record
+  }
+
+  /**
+   * An approval of a tool of a space that the people still named can no longer meet, as when a person it was asked of
+   * left (INTX-APPR-025): it ends `EXPIRED` at once. True when it did.
+   */
+  public async expireIfUnmeetable(approvalId: string): Promise<boolean> {
+    const record = await this.store.approvals.get(approvalId)
+    if (record?.status !== 'PENDING' || !record.spacePolicy || !this.spacePolicies) return false
+    const { named, pool } = await this.spacePolicies.named(record)
+    if (canStillMeet(record.spacePolicy, named, record.decisions, pool)) return false
+    record.status = 'EXPIRED'
+    record.updatedAt = nowIso()
+    record.closedAt = record.updatedAt
+    record.progress = await this.spacePolicies.progress(record, named)
+    await this.store.approvals.save(record)
+    await this.events.onChange(record, 'expired')
+    return true
+  }
+
+  /**
+   * An approval of a tool of a space whose approvers changed without ending it, as when the space's owner changed
+   * (SPACE-MEMB-012): the people it was asked of and where it stands, written again, and every view of it told.
+   */
+  public async moved(record: ApprovalRecord, askedOf: string[]): Promise<ApprovalRecord> {
+    if (record.spacePolicy && this.spacePolicies) {
+      const { named } = await this.spacePolicies.named(record)
+      record.progress = await this.spacePolicies.progress(record, named)
+    }
+    record.approverIds = [...new Set([...(record.approverIds ?? []), ...askedOf])]
+    record.updatedAt = nowIso()
+    await this.store.approvals.save(record)
+    await this.events.onChange(record, 'moved')
     return record
   }
 

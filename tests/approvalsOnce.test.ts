@@ -325,7 +325,10 @@ describe('the devnet incident of 2026-11-21: one post, one request (INTX-APPR-00
     model.script = [{ calls: [{ name: 'post_to_x', arguments: { text: post } }] }, { text: 'I asked Jonas.' }]
     const asked = await run(anaAsks, 'post it on X')
     approval = await pendingOf((r) => r.spaceId === comms.id)
-    expect(approval).toMatchObject({ ownerApproval: true, approverIds: [jonas.principal.id] })
+    expect(approval).toMatchObject({
+      spacePolicy: { approvers: [{ kind: 'owner', required: true }], threshold: 1, attested: true },
+      approverIds: [jonas.principal.id],
+    })
     expect(approval.cardEntryIds).toBeUndefined()
     // one request on his phone, attested, linked to the space's Notifications, naming no conversation (FLOW-AUTH-003)
     const requests = ph.authorizeRequests(jonas.connectionId).slice(phoneBefore)
@@ -701,8 +704,8 @@ describe('approvals not tied to a space: the agent Notifications (INTX-APPR-017,
   })
 })
 
-describe('an approval to attest that no phone can decide (INTX-APPR-019)', () => {
-  it('runs nothing and tells the model no-approver when the owner has no phone that takes flows', async () => {
+describe('an approval to attest that no phone can decide (INTX-APPR-019, INTX-APPR-024)', () => {
+  it('runs nothing, ends its card refused for want of an approver and tells the model no-approver when the owner has no phone that takes flows', async () => {
     const owner = (await running.agent.principals.get(jonas.principal.id)) as Principal
     const channel = owner.capabilityChannelId
     await running.agent.principals.save({ ...owner, capabilityChannelId: null })
@@ -711,9 +714,15 @@ describe('an approval to attest that no phone can decide (INTX-APPR-019)', () =>
     await run(anaSecond, 'post: No phone.')
     await running.agent.principals.save({ ...owner, capabilityChannelId: channel })
     expect(toolAnswers().at(-1)).toBe(
-      `Post on X needs the approval of the owner of the space, jonas, decided on a phone, and no one who can approve it has one now: nothing was asked and it did not run.\n\n${ONE_CALL}`
+      `Post on X needs the approval of the owner of the space, jonas, and no other approver can decide it now: nothing was asked and it did not run.\n\n${ONE_CALL}`
     )
-    expect((await running.agent.store.approvals.list({})).length).toBe(approvals)
+    // recorded refused at once, asked of nobody, its card ended so in the requester's conversation (INTX-APPR-024)
+    const all = await running.agent.store.approvals.list({})
+    expect(all.length).toBe(approvals + 1)
+    const refused = all.find((r) => r.reason === 'no-approver') as ApprovalRecord
+    expect(refused).toMatchObject({ status: 'REJECTED', approverIds: [] })
+    const card = (await approvalEntries(await conversationOf(anaSecond.sessionId), refused.id))[0]
+    expect(card?.payload?.card).toMatchObject({ status: 'REJECTED', reason: 'no-approver', own: true })
     const [record] = await running.agent.store.toolCalls.list({
       conversationId: await conversationOf(anaSecond.sessionId),
       limit: 1,

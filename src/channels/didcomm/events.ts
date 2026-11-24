@@ -12,7 +12,7 @@ import type { AyniAgent } from '../../core/agent.js'
 import { documentRefusalForPerson, readDocument } from '../../core/document.js'
 import type { TurnSink } from '../../core/orchestrator.js'
 import type { MessageAttachment, Principal, Session } from '../../core/types.js'
-import { needsAttestation } from '../../policy/approvals.js'
+import { attestedFor } from '../../policy/spacePolicy.js'
 import { nowIso } from '../../util/ids.js'
 import type { Logger } from '../../util/logger.js'
 import { clientOfConnection, codesAround, DidcommAdapter } from './adapter.js'
@@ -530,7 +530,9 @@ export class DidcommEvents {
     const bound = await this.agent.didcommSession(connectionId)
     if (!bound) return
     // one to attest is decided through its `authorize` flow only (INTX-APPR-019)
-    const pending = (await this.agent.approvals.pendingFor(bound.principal)).filter((r) => !needsAttestation(r))
+    const pending = (await this.agent.approvals.pendingFor(bound.principal)).filter(
+      (r) => !attestedFor(r, bound.principal.id)
+    )
     const sink = this.sinkFor(bound.session)
     if (pending.length === 1 && /^(approve|reject|yes|no)$/i.test(response.trim())) {
       await this.agent.action(

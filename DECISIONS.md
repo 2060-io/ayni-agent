@@ -1789,3 +1789,72 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       `agui.test.ts` (a run's `resume` is not read; no routed `authorization`), the profile package's test, and the
       renamed key in the tests of identity, flows, peer status and the directory. Each new test fails with its removal
       reverted.
+77. **Space governance: one owner, a successor, stewards, and an approval policy per tool of a space** (2026-11-24,
+    Fabrice's decisions of 2026-11-23, ayni-spec PR #125: D135 to D142; SPACE-DEF-008, SPACE-MEMB-008 to 012,
+    TOOL-SPACE-018 to 021, TOOL-CAT-009, TOOL-CAT-023, INTX-APPR-004, 005, 007, 011, 013, 017, 019 to 027; AG-UI profile
+    3.5 amended in place: PROF-SPACE-008/009, PROF-TOOL-003/009/024/036 to 038, §3.12; flow profile FLOW-AUTH-004).
+    - **One owner** (`core/spaces.ts`): `ownerIds` is gone; a space has `ownerPrincipalId`, or none, and
+      `successorPrincipalId`. Schema 3.12.0 keeps the first of a stored space's owners. Only the space's owner is
+      `owner`, whatever a row says. Handover, succession and a steward's naming go through one `changeOwner`, which
+      records `owner-changed` with `how` (and a steward's `reason`), clears the successor (`successor-cleared`) and tells
+      `onOwnerChanged`.
+    - **Successor and stewards** (`PUT`/`DELETE {sessions}/spaces/{id}/successor`, `GET {sessions}/stewardship`,
+      `GET {sessions}/spaces/{id}/owner/candidates`, a steward's `POST {sessions}/spaces/{id}/owner` with `reason`,
+      `403 not-steward`): the successor is anyone the space could be handed to but the owner, kept by Principal. A
+      template's `stewards` are declared roles (rule 2). A steward who is not the owner names an owner through the same
+      `POST …/owner`, answered with the space as the stewardship list gives it, since the steward reads nothing else of
+      it (every other read stays 404).
+    - **An entry that leaves the directory** (`PeopleService.release` → `SpaceService.onEntryLeft`): the person's active
+      rows in every space become `left` (recorded `left` by the directory), so that no policy names them; a space they
+      owned passes to its successor while eligible (`how: succession`), else has no owner; a space whose successor they
+      were has none. A successor who stops being eligible otherwise (removed, a rule that no longer matches) is cleared
+      when the space is reviewed.
+    - **The timeouts** (`rules.approvalTimeouts`, SPACE-DEF-008): per kind, `tool-call` only, from
+      `approvals.spaces.timeouts` (60, 5 to 10080 by default); `PATCH {sessions}/spaces/{id}` with
+      `rules.approvalTimeouts`, `422 out-of-bounds` with `field: rules.approvalTimeouts.tool-call`. A space made before
+      gets the defaults at start (`alignRules`). An approval takes the space's timeout when it is asked.
+    - **The policies** (`policy/spacePolicy.ts`, pure; `core/governance.ts`, whom the entries name): kept on the space's
+      tool record (`SpaceToolRecord.approvals`), the agent-pack's default until the owner sets one, dropped with the rule
+      `approval`, with the source, and never touched by a change of owner. `PATCH …/tools/{source}` takes `approvals`,
+      each policy whole: `400 bad-request` for a field or a value not of a policy (a `timeoutMinutes` included), and the
+      `422` codes in the order of TOOL-SPACE-018. A looser policy is held with the pending change and the phone's text
+      reads "Change who approves Post on X in Communication: from …, to …"; a stricter one applies at once. The answer's
+      `approval.warnings` are those of the policy sent, whether it applied or waits (a `202` keeps the rest of the item as
+      in force). `state`, `attention` and `warnings` are computed when read, from the people named then.
+    - **The workflow** (`ApprovalService`, `SpacePolicyPort`): a tool of a space's approval carries `spacePolicy`, the
+      policy it was asked under (TOOL-SPACE-019), and `progress`; `ownerApproval` is gone (schema 3.12.0 gives a waiting
+      owner's approval the default policy). Eligibility is "an entry names you now"; a decision records the entries that
+      named its maker (`satisfies`), which it keeps satisfying (INTX-APPR-025), and `self: true` for the requester's own
+      confirmation. Approved, rejected, or rejected as soon as the people who have not decided can no longer meet it.
+      At the request, for an attested decision only people with a flow-capable phone count; when they cannot meet the
+      policy the record is saved `REJECTED` with `reason: no-approver`, asked of nobody, its card written ended, the model
+      told "no other approver can decide it now", and the owner told. Afterwards, reviews count everyone named,
+      phone or not.
+    - **The owner's own card is gone** (`toolGate.ts`): no `ownerSelf` path. Untrusted content still asks its card first,
+      then the approval. An approver who asks, under `own-confirmation`, is asked on their own phone (flow title "Your
+      own request: …", always attested), listed in their Notifications with `own` and `canDecide`; on the card in the
+      conversation `canDecide` stays false.
+    - **A change of owner** (`Governance.ownerChanged`): every active member gets an `owner-changed` notice; each pending
+      approval with an `owner` entry closes the former owner's flow when they are named no more and opens the new owner's
+      (a new `ApprovalChange` `moved` updates the card and the Notifications without touching phones). With no owner, the
+      former owner's flows close and the approvals wait (an `owner` entry of an ownerless space counts as one who can).
+    - **Review** (`Governance.review`, after a reload of the directory, a member removed, a policy saved, a change of
+      owner, and at start): successors, `space-without-owner` notices to the stewards, `policy-attention` notices to the
+      owner (one per tool, resolved when the policy no longer needs attention or the owner changes), and the pending
+      approvals that can no longer be met, which expire.
+    - **Notices** (`governance_notices`, one row per person; `Notifications`): listed beside approvals, newest first,
+      `space-without-owner` in the agent's list, the others in the space's; `policy-attention` and `space-without-owner`
+      wait until resolved; `ayni.space.notifications.changed` with the notice's `kind`. An approval of a space's tool is
+      in the agent's Notifications for an approver who is not a member (INTX-APPR-022), its phone link too.
+    - **Not done here:** the `authorize` request's `approvals` (FLOW-AUTH-004) is not sent: the agent posts the request to
+      the DIDComm agent, whose flow plugin (credo-ts-ayni-flow) does not take the field yet; it is one field of
+      `openApprovalFlow` once the plugin is released with it. Conditions on arguments stay O30.
+    - **Profile package 3.5.4:** `owner: null`, `successor`, `approvalTimeouts`, the stewardship shapes, `tools[].approval`,
+      `SpaceToolPatch.approvals`, `progress` and `reason` on the card and its update, notices as `NotificationItem.notice`,
+      the new error codes.
+    - **Deployments:** nothing to change; the default policy is today's (the owner, required, attested), but the owner's
+      own request now goes to his phone instead of a card. `stewards` and `approvals.spaces` are optional.
+    - **Tests:** `spacePolicy.test.ts`, `governance.test.ts`, `stewardship.test.ts`, the migration in
+      `postgres.test.ts`, the start-up checks in `pack.test.ts`; `tools.test.ts`, `approvalsOnce.test.ts` and the
+      evaluation's `confirmation` case moved from the owner's card to his phone. The new integration tests fail on the
+      code before this change.

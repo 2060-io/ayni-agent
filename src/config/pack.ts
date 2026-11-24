@@ -8,15 +8,24 @@ import { fileURLToPath } from 'node:url'
 import { Ajv2020 } from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
 import { parse as parseYaml } from 'yaml'
+import {
+  type ApprovalTimeoutKind,
+  boundsError,
+  boundsOf,
+  defaultPolicyOf,
+  timeoutBoundsOf,
+} from '../policy/spacePolicy.js'
 import { fieldsNamedBy } from '../tools/accountValues.js'
 import type {
   AgentPack,
   AuthenticationEntry,
   BundledName,
   EvidencePolicy,
+  PackApprovalPolicy,
   SourceAccount,
   SpaceTemplate,
   ToolAccess,
+  ToolApprovalBounds,
   ToolSourceDef,
 } from './packTypes.js'
 import {
@@ -793,7 +802,7 @@ export function catalogErrors(pack: AgentPack): string[] {
     if (source.availability === 'spaces')
       for (const entry of source.access?.approval ?? [])
         errors.push(
-          `${where}.access.approval names [${entry.tools.join(', ')}], tools of availability spaces: a space's owner approves them (TOOL-CAT-009)`
+          `${where}.access.approval names [${entry.tools.join(', ')}], tools of availability spaces: their approval policy in each space approves them (TOOL-CAT-009)`
         )
   }
   // the accounts of other sources, and the check of the email (TOOL-CAT-015, TOOL-CAT-017)
@@ -814,6 +823,8 @@ export function catalogErrors(pack: AgentPack): string[] {
       named.add(entry.source)
     }
   }
+  // the policies of the tools of spaces, their bounds and the timeouts of a space (TOOL-CAT-023)
+  errors.push(...spaceApprovalErrors(pack))
   // the roles that approve a tool of the whole agent or of Personal (TOOL-CAT-009)
   const roles = pack.identity.roles ?? {}
   for (const role of pack.approvals?.approvers ?? []) {
@@ -821,6 +832,59 @@ export function catalogErrors(pack: AgentPack): string[] {
     else if (!roles[role]?.canApprove)
       errors.push(`rule 3: approver role "${role}" in approvals.approvers has no canApprove`)
   }
+  return errors
+}
+
+/**
+ * The approval policies of the tools of spaces as the agent-pack bounds them (TOOL-CAT-023, D140): every default within
+ * its bounds, no `person` entry anywhere (the agent-pack names no person), a role declared with `canApprove`, and each
+ * timeout's default within its `min` and `max`. Each error names its field.
+ */
+export function spaceApprovalErrors(pack: AgentPack): string[] {
+  const errors: string[] = []
+  const roles = pack.identity.roles ?? {}
+  const spaces = pack.approvals?.spaces
+  const roleErrors = (where: string, role: string | undefined) => {
+    if (!role) errors.push(`TOOL-CAT-023: ${where} names no role`)
+    else if (!roles[role]) errors.push(`TOOL-CAT-023: ${where}: role "${role}" is not declared in identity.roles`)
+    else if (!roles[role]?.canApprove) errors.push(`TOOL-CAT-023: ${where}: role "${role}" has no canApprove`)
+  }
+  const entries = (where: string, policy: PackApprovalPolicy | undefined) => {
+    for (const [i, entry] of (policy?.approvers ?? []).entries()) {
+      const at = `${where}.approvers.${i}`
+      if (entry.kind === 'person') errors.push(`TOOL-CAT-023: ${at}: an agent-pack names no person`)
+      if (entry.kind === 'role') roleErrors(at, entry.role)
+      if (entry.kind === 'department' && !entry.department) errors.push(`TOOL-CAT-023: ${at} names no department`)
+    }
+  }
+  for (const [i, role] of (spaces?.allowedApprovers?.roles ?? []).entries())
+    roleErrors(`approvals.spaces.allowedApprovers.roles.${i}`, role)
+  entries('approvals.spaces.default', spaces?.default)
+  const declared = (role: string) => !!roles[role]?.canApprove
+  const check = (where: string, tool?: ToolApprovalBounds) => {
+    const policy = defaultPolicyOf(pack, tool)
+    if (policy.approvers.some((e) => e.kind === 'person')) return
+    const broken = boundsError(policy, boundsOf(pack, tool), declared)
+    if (broken)
+      errors.push(
+        `TOOL-CAT-023: ${where} is outside its bounds (${broken.code} at ${broken.field}): give the tool a default within them`
+      )
+  }
+  check('approvals.spaces.default')
+  for (const kind of Object.keys(spaces?.timeouts ?? {})) {
+    const resolved = timeoutBoundsOf(pack, kind as ApprovalTimeoutKind)
+    const where = `approvals.spaces.timeouts.${kind}`
+    if (resolved.min > resolved.max) errors.push(`TOOL-CAT-023: ${where} min is above max`)
+    else if (resolved.default < resolved.min || resolved.default > resolved.max)
+      errors.push(`TOOL-CAT-023: ${where}.default is outside its min and max`)
+  }
+  for (const [id, source] of Object.entries(pack.tools?.sources ?? {}))
+    for (const [tool, decl] of Object.entries(source.tools ?? {})) {
+      if (!decl.approval) continue
+      const where = `tools.sources.${id}.tools.${tool}.approval`
+      entries(`${where}.default`, decl.approval.default)
+      check(`${where}.default`, decl.approval)
+    }
   return errors
 }
 
@@ -1025,6 +1089,8 @@ export function crossFieldErrors(pack: AgentPack): string[] {
   for (const p of pack.purposes ?? []) check(p.permittedRoles, `purposes.${p.id}.permittedRoles`)
   for (const m of pack.persona.menu ?? []) check(m.roles, `persona.menu.${m.id}.roles`)
   for (const t of pack.spaces?.templates ?? []) check(t.creators, `spaces.templates.${t.id}.creators`)
+  // the stewards of a template are declared roles (SPACE-MEMB-011)
+  for (const t of pack.spaces?.templates ?? []) check(t.stewards, `spaces.templates.${t.id}.stewards`)
   // rule 12: the defaults of a space template lie within its bounds (SPACE-DEF-003)
   errors.push(...spaceTemplateErrors(pack))
 

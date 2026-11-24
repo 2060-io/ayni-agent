@@ -37,7 +37,12 @@ export interface ChannelAdapter {
    * Opens the `authorize` flow of an approval on that peer, once per approval and phone (D114, INTX-APPR-011): `attested`
    * as its policy sets it, `origin: none`, and `link` to the Notifications that list it (FLOW-AUTH-003).
    */
-  openApprovalFlow?(session: Session, record: ApprovalRecord, link: string | undefined): Promise<boolean>
+  openApprovalFlow?(
+    session: Session,
+    record: ApprovalRecord,
+    link: string | undefined,
+    approverId: string
+  ): Promise<boolean>
   /** Closes the flow of an approval that peer holds, if any: false when it held none. */
   closeApprovalFlow?(
     session: Session,

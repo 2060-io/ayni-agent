@@ -1493,4 +1493,99 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
       await store.close()
     })
   })
+
+  describe('one owner of a space, approval policies and the notices of governance (D135 to D142, schema 3.12.0)', () => {
+    it('keeps the first owner of a space and gives a waiting approval of the owner the policy it was asked under', async () => {
+      const url = await freshDatabase()
+      const client = new pg.Client({ connectionString: url })
+      await client.connect()
+      await client.query(
+        'CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())'
+      )
+      for (const m of MIGRATIONS.filter((m) => olderThan(m.version, '3.12.0'))) {
+        await client.query(m.sql)
+        await client.query('INSERT INTO schema_migrations (version) VALUES ($1)', [m.version])
+      }
+      const at = '2026-11-23T10:00:00.000Z'
+      const space = {
+        id: 'spc_1',
+        agentId: 'ayni-dev',
+        kind: 'team',
+        templateId: 'comms',
+        title: '',
+        purpose: '',
+        brief: '',
+        language: null,
+        rules: { retentionDays: 365, lawfulBasis: 'contract', allowedProviders: ['stub'], handover: false },
+        membership: { mode: 'list' },
+        ownerIds: ['p-jonas', 'p-ana'],
+        createdAt: at,
+        updatedAt: at,
+      }
+      await client.query(
+        `INSERT INTO spaces (id, agent_id, kind, template_id, membership_mode, created_at, updated_at, data)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [space.id, space.agentId, space.kind, space.templateId, 'list', at, at, JSON.stringify(space)]
+      )
+      const approval = (id: string, ownerApproval: boolean) => ({
+        id,
+        kind: 'sensitivity',
+        toolName: 'post_to_x',
+        requesterId: 'p-ana',
+        requesterName: 'ana',
+        requesterRole: 'comms',
+        originSessionId: 'ses_1',
+        policy: { type: 'count', value: 1, vetoOnRefusal: false },
+        eligibleRoles: [],
+        decisions: [],
+        status: 'PENDING',
+        vetoed: false,
+        expiresAt: at,
+        createdAt: at,
+        updatedAt: at,
+        ...(ownerApproval ? { ownerApproval: true, spaceId: 'spc_1' } : {}),
+      })
+      for (const [id, owner] of [
+        ['apr_owner', true],
+        ['apr_roles', false],
+      ] as const)
+        await client.query(
+          'INSERT INTO approvals (id, status, requester_id, eligible_roles, data) VALUES ($1,$2,$3,$4,$5)',
+          [id, 'PENDING', 'p-ana', [], JSON.stringify(approval(id, owner))]
+        )
+      await client.end()
+      const store = new PostgresStore(url)
+      await store.init()
+      const migrated = await store.spaces.get('spc_1')
+      expect(migrated?.ownerPrincipalId).toBe('p-jonas')
+      expect(migrated).not.toHaveProperty('ownerIds')
+      expect(await store.approvals.get('apr_owner')).toMatchObject({
+        spaceId: 'spc_1',
+        spacePolicy: {
+          approvers: [{ kind: 'owner', required: true }],
+          threshold: 1,
+          refusal: 'any',
+          attested: true,
+          whenApproverAsks: 'own-confirmation',
+        },
+      })
+      expect(await store.approvals.get('apr_owner')).not.toHaveProperty('ownerApproval')
+      expect(await store.approvals.get('apr_roles')).not.toHaveProperty('spacePolicy')
+      // a notice of governance: one person's, open until resolved
+      const notice = {
+        id: 'ntc_1',
+        principalId: 'p-jonas',
+        spaceId: 'spc_1',
+        kind: 'policy-attention' as const,
+        at,
+        subject: { space: { id: 'spc_1', title: 'Communication' } },
+      }
+      await store.governanceNotices.save(notice)
+      expect(await store.governanceNotices.list({ principalId: 'p-jonas', open: true })).toEqual([notice])
+      await store.governanceNotices.save({ ...notice, resolvedAt: '2026-11-23T11:00:00.000Z' })
+      expect(await store.governanceNotices.list({ spaceId: 'spc_1', open: true })).toEqual([])
+      expect((await store.governanceNotices.get('ntc_1'))?.resolvedAt).toBe('2026-11-23T11:00:00.000Z')
+      await store.close()
+    })
+  })
 })
