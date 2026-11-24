@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.34.0](https://github.com/2060-io/ayni-agent/compare/v0.33.0...v0.34.0) (2026-11-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* an agent-pack whose issuance challenge is `email` or `face-match`, whose tool challenge is not `device`, or that sets `referenceImage` no longer starts; a badge from the directory declares no challenge. `ayni.messages.withheld` is for a credential only, and `ChallengeType` drops `face-match`.
+* **admin:** the admin interface lets nobody in without ADMIN_TOKEN until the phone's sign-in exists, and no longer reads the operator or auditor names of a request; an agent-pack that names auditor or operator in a tool's access, among the approvers, with canApprove, among a template's creators or a purpose's permitted roles is refused.
+
+### Features
+
+* a tool's step-up re-authenticates on the phone; the badge is issued apart from the authentication (ayni-spec [#127](https://github.com/2060-io/ayni-agent/issues/127)) ([#127](https://github.com/2060-io/ayni-agent/issues/127)) ([516175c](https://github.com/2060-io/ayni-agent/commit/516175cb7e1c2913520be6ced3f282315b564cf8))
+* **admin:** admin access from the agent's card: roles auditor and operator, Show Admin re-authenticated on the phone, a time-boxed grant, Audit and Operations through the AG-UI profile, the internal admin interface only when enabled (ayni-spec D132 to D134) ([#120](https://github.com/2060-io/ayni-agent/issues/120)) ([6f0c3f4](https://github.com/2060-io/ayni-agent/commit/6f0c3f4944159b16230b82d4df29c34ce01afeb7))
+
+
+### Bug Fixes
+
+* **admin:** find a person by name in Audit; the phone's admin grant holds across its sessions made through a session grant ([#129](https://github.com/2060-io/ayni-agent/issues/129)) ([ce9a393](https://github.com/2060-io/ayni-agent/commit/ce9a3932a7eed1e3ae247b6bb24d2ec12a3a0ef3))
+
 ## [0.33.0](https://github.com/2060-io/ayni-agent/compare/v0.32.0...v0.33.0) (2026-11-24)
 
 
