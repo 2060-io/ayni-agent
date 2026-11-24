@@ -113,6 +113,8 @@ export class AgUiAdapter implements ChannelAdapter {
               status: value.status,
               decidedBy: value.decidedBy,
               grantExpiresAt: value.grantExpiresAt,
+              // where an approval of a space's tool stands, at each decision (PROF-TOOL-037)
+              ...(value.progress ? { progress: value.progress } : {}),
             })
           )
         await this.serverRun(session, async () => {

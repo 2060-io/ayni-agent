@@ -12,12 +12,12 @@ import { DidcommEvents } from '../src/channels/didcomm/events.js'
 import { IdentityFlow, TrustResolver } from '../src/channels/didcomm/identity.js'
 import { AYNI_FLOW_PROTOCOL, PeerProfiles } from '../src/channels/didcomm/peerProfiles.js'
 import type { FlowRecord } from '../src/channels/didcomm/vsAgentClient.js'
-import type { AgentPack, AuthenticationEntry } from '../src/config/packTypes.js'
+import type { AgentPack } from '../src/config/packTypes.js'
 import { FlowService } from '../src/core/flows.js'
 import { greetingFor } from '../src/core/interaction.js'
-import type { Session } from '../src/core/types.js'
+import type { Principal, Session } from '../src/core/types.js'
 import { createLogger } from '../src/util/logger.js'
-import { startTestAgent } from './helpers.js'
+import { badgeAuthentication, startTestAgent } from './helpers.js'
 
 type Call = { method: string; args: unknown[]; result?: unknown }
 
@@ -79,7 +79,42 @@ function stubClient(calls: Call[]) {
     }),
     requestPresentation: rec('requestPresentation', () => ({ proofExchangeId: `pex-${++n}` })),
     requestEmrtd: rec('requestEmrtd', () => ({ id: `emrtd-${++n}` })),
+    // authenticate/1.0 (flow profile §6.14): the plugin's routes answer with the exchange
+    sendAuthenticateRequest: rec('sendAuthenticateRequest', (body) => {
+      const b = body as { connectionId: string; flowId: string; request: unknown }
+      return {
+        threadId: `auth-${++n}`,
+        flowId: b.flowId,
+        connectionId: b.connectionId,
+        role: 'requester',
+        state: 'request-sent',
+        request: b.request,
+        steps: [],
+        createdAt: new Date().toISOString(),
+      }
+    }),
+    sendAuthenticateStep: rec('sendAuthenticateStep', (threadId) => ({ threadId, state: 'step-sent', steps: [] })),
+    sendAuthenticateStepResult: rec('sendAuthenticateStepResult', (threadId) => ({
+      threadId,
+      state: 'step-result-sent',
+      steps: [],
+    })),
   }
+}
+
+/** The phone chooses a combination of the last authentication asked (flow profile §6.14, `choice`). */
+function chooses(identity: IdentityFlow, calls: Call[], combination = ['badge']) {
+  const request = calls.filter((c) => c.method === 'sendAuthenticateRequest').at(-1) as Call
+  const exchange = request.result as { threadId: string; flowId: string; connectionId: string }
+  identity.authenticator.onExchange({
+    ...exchange,
+    role: 'requester',
+    state: 'choice-received',
+    combination,
+    steps: [],
+    request: { purpose: 'connection', methods: {}, combinations: [] },
+    createdAt: new Date().toISOString(),
+  })
 }
 
 const facts = (actor: string) => ({
@@ -512,6 +547,44 @@ describe('device challenge as a confirm flow (INTX-AUTH-009, D55)', () => {
     expect(messages.some((m) => m.activityType === 'ayni.capability')).toBe(false)
   })
 
+  it('closes a confirm answered no as completed, as any answer, and fails the challenge (flow profile §6, row confirm)', async () => {
+    const connectionId = 'conn-confirm'
+    const bound = await running.agent.didcommSession(connectionId)
+    if (!bound) throw new Error('no bound connection')
+    const uiSessions = await running.agent.store.sessions.listByPrincipal(bound.principal.id, ['bound'])
+    const uiSession = uiSessions.find((s) => s.channelType === 'ag-ui') as Session
+    const run = running.agent.challenges.run({
+      principal: bound.principal,
+      originSession: uiSession,
+      toolName: 'wire_money',
+      policy: { type: 'device' },
+      purpose: 'Wire 200 EUR',
+    })
+    await settle()
+    const confirm = last<[{ flowId: string }]>('sendConfirmRequest')[0]
+    const pending = (await running.agent.store.challenges.listPending()).find(
+      (c) => c.details?.flowId === confirm.flowId
+    )
+    if (!pending) throw new Error('challenge not pending')
+    await events.handle(
+      envelope('didcomm.confirm.state-changed', {
+        threadId: pending.details?.threadId,
+        flowId: confirm.flowId,
+        connectionId,
+        state: 'response-received',
+        response: { confirmed: false, attestation: { method: 'biometric', at: new Date().toISOString() } },
+      })
+    )
+    const { outcome } = await run
+    // the person said no: the action does not go on
+    expect(outcome).toBe('failed')
+    // but the flow was answered: it closes completed, with no reason, and the phone shows the person's own answer
+    const close = last<[string, { outcome: string; reason?: string }]>('closeFlow')
+    expect(close[0]).toBe(confirm.flowId)
+    expect(close[1].outcome).toBe('completed')
+    expect(close[1].reason).toBeUndefined()
+  })
+
   it('fails the challenge when the holder closes the flow declined', async () => {
     const connectionId = 'conn-confirm'
     const bound = await running.agent.didcommSession(connectionId)
@@ -705,9 +778,10 @@ describe('identity as flows (IDENT-RES-003, D54)', () => {
       roleRules: [],
       userAgentGate: 'optional',
       credentials: { userAgent: { schemaId: 'ecs-user-agent' } },
-      authentication: [
-        { credential: { jsonSchemaCredentialId: 'https://ecs.example/badge.json' }, subjectKey: ['badgeNumber'] },
-      ],
+      authentication: badgeAuthentication({
+        credential: { jsonSchemaCredentialId: 'https://ecs.example/badge.json' },
+        subjectKey: ['badgeNumber'],
+      }),
     },
   } as unknown as AgentPack
 
@@ -751,10 +825,12 @@ describe('identity as flows (IDENT-RES-003, D54)', () => {
       closedBy: 'peer',
     })
     await settle()
-    // authenticate: the badge, verified
+    // authenticate: the badge, chosen on the phone, then verified
     const badge = localCalls.filter((c) => c.method === 'openFlow').at(-1)?.args[0] as { kind: string; title: string }
     expect(badge.kind).toBe('authenticate')
     expect(badge.title).toContain('Test agent')
+    chooses(identity, localCalls)
+    await settle()
     const presentationCall = localCalls.filter((c) => c.method === 'requestPresentation').at(-1)
     if (!presentationCall) throw new Error('no presentation request')
     const { proofExchangeId } = presentationCall.result as { proofExchangeId: string }
@@ -793,7 +869,7 @@ describe('the authentication of a person (D72; IDENT-RES-010/018/019/020, FLOW-S
   const ISSUER_1 = 'did:webvh:x:issuer-1'
   const ISSUER_2 = 'did:webvh:x:issuer-2'
 
-  function setup(authentication: Partial<AuthenticationEntry> = {}) {
+  function setup(authentication: Partial<Parameters<typeof badgeAuthentication>[0]> = {}) {
     const calls: Call[] = []
     const local = stubClient(calls)
     const flows = new FlowService(
@@ -820,9 +896,11 @@ describe('the authentication of a person (D72; IDENT-RES-010/018/019/020, FLOW-S
         homeBackingIdentity: 'did:webvh:x:home',
         roleRules: [],
         userAgentGate: 'optional',
-        authentication: [
-          { credential: { jsonSchemaCredentialId: BADGE }, subjectKey: ['badgeNumber'], ...authentication },
-        ],
+        authentication: badgeAuthentication({
+          credential: { jsonSchemaCredentialId: BADGE },
+          subjectKey: ['badgeNumber'],
+          ...authentication,
+        }),
       },
     } as unknown as AgentPack
     const identity = new IdentityFlow(pack, local as never, resolver, false, silent as never)
@@ -835,8 +913,13 @@ describe('the authentication of a person (D72; IDENT-RES-010/018/019/020, FLOW-S
     const opened = () =>
       calls.filter((c) => c.method === 'openFlow').map((c) => c.result as FlowRecord & { expiresTime: string })
     const flowNow = () => opened().at(-1) as FlowRecord & { expiresTime: string }
-    /** The wallet presents a badge of an issuer; `unrevealed` are the attributes it leaves private. */
-    const present = (issuerDid: string, unrevealed: string[] = []) => {
+    /**
+     * The person chooses the badge on the phone, and the wallet presents a badge of an issuer; `unrevealed` are the
+     * attributes it leaves private.
+     */
+    const present = async (issuerDid: string, unrevealed: string[] = []) => {
+      chooses(identity, calls)
+      await settle()
       const request = calls.filter((c) => c.method === 'requestPresentation').at(-1) as Call
       const claims = [
         { name: 'badgeNumber', value: '42' },
@@ -855,6 +938,8 @@ describe('the authentication of a person (D72; IDENT-RES-010/018/019/020, FLOW-S
      * reports as an abandoned presentation in the wallet's words, then the close of the flow.
      */
     const declines = async () => {
+      chooses(identity, calls)
+      await settle()
       const request = calls.filter((c) => c.method === 'requestPresentation').at(-1) as Call
       const flow = flowNow()
       identity.onPresentation({
@@ -886,33 +971,60 @@ describe('the authentication of a person (D72; IDENT-RES-010/018/019/020, FLOW-S
     }
   }
 
-  it('asks in an authenticate flow that is valid five minutes, and accepts the badge of any accredited issuer', async () => {
+  it('asks in an authenticate flow valid fifteen minutes, runs the step of the badge chosen, and accepts any accredited issuer', async () => {
     const t = setup()
     await settle()
     const flow = t.flowNow()
     expect(flow.kind).toBe('authenticate')
     expect(flow.title).toBe('Authenticate to Test agent')
     const validMs = Date.parse(flow.expiresTime) - Date.now()
-    expect(validMs).toBeGreaterThan(4.9 * 60_000)
-    expect(validMs).toBeLessThanOrEqual(5 * 60_000)
-    t.present(ISSUER_2)
+    expect(validMs).toBeGreaterThan(14.9 * 60_000)
+    expect(validMs).toBeLessThanOrEqual(15 * 60_000)
+    // the request names the purpose, the methods and the combinations (FLOW-SIGNIN-001)
+    const sent = t.calls.find((c) => c.method === 'sendAuthenticateRequest')?.args[0] as {
+      flowId: string
+      request: unknown
+    }
+    expect(sent).toMatchObject({
+      flowId: flow.flowId,
+      request: {
+        purpose: 'connection',
+        methods: { badge: { type: 'credential', credential: { jsonSchemaCredentialId: BADGE } } },
+        combinations: [['badge']],
+      },
+    })
+    await t.present(ISSUER_2)
     const facts = await t.establishing
     expect(facts).toMatchObject({ actorIdentity: `org:EE:2|${BADGE}|42`, backingIdentity: { id: 'org:EE:2' } })
     expect(facts?.identityCredentialRef).toMatch(/^badge:/)
     expect(t.opened()).toHaveLength(1)
     expect(t.problems()).toEqual([])
     expect(t.refused).toEqual([])
+    // the step, then the presentation request under the flow id, then the step's result (FLOW-SIGNIN-008)
+    const step = t.calls.find((c) => c.method === 'sendAuthenticateStep')?.args[1]
+    expect(step).toEqual({ step: '1', method: 'badge', type: 'credential' })
+    expect(t.calls.find((c) => c.method === 'requestPresentation')?.args[3]).toBe(flow.flowId)
+    expect(t.calls.find((c) => c.method === 'sendAuthenticateStepResult')?.args[1]).toEqual({
+      step: '1',
+      outcome: 'passed',
+    })
   })
 
   it('accepts only the organizations the pack lists: it says why, asks again, and takes the next badge', async () => {
     const t = setup({ issuers: { organizations: ['org:EE:1'] } })
     await settle()
-    t.present(ISSUER_2)
+    await t.present(ISSUER_2)
     await settle()
     // not accepted: the flow fails with its reason, and a new request follows
     expect(t.problems()).toEqual(['issuer-not-accepted'])
     expect(t.opened().map((f) => f.kind)).toEqual(['authenticate', 'authenticate'])
-    t.present(ISSUER_1)
+    // the step ends failed with the reason before the problem report (flow profile §6.14)
+    expect(t.calls.find((c) => c.method === 'sendAuthenticateStepResult')?.args[1]).toEqual({
+      step: '1',
+      outcome: 'failed',
+      reason: 'issuer-not-accepted',
+    })
+    await t.present(ISSUER_1)
     const facts = await t.establishing
     expect(facts?.backingIdentity).toMatchObject({ id: 'org:EE:1' })
     const close = t.calls.filter((c) => c.method === 'closeFlow').at(-1)?.args as [string, { outcome: string }]
@@ -923,7 +1035,7 @@ describe('the authentication of a person (D72; IDENT-RES-010/018/019/020, FLOW-S
     const t = setup()
     await settle()
     for (let attempt = 0; attempt < 3; attempt++) {
-      t.present(ISSUER_1, ['badgeNumber'])
+      await t.present(ISSUER_1, ['badgeNumber'])
       await settle()
     }
     expect(t.problems()).toEqual(['incomplete', 'incomplete', 'incomplete'])
@@ -948,7 +1060,7 @@ describe('the authentication of a person (D72; IDENT-RES-010/018/019/020, FLOW-S
   })
 
   it('offered: a decline lets the person in as a guest; no answer in time still ends the connection', async () => {
-    const guest = setup({ guests: true })
+    const guest = setup({ visitors: true })
     await settle()
     expect(guest.flowNow().kind).toBe('authenticate')
     await guest.holder('declined')
@@ -959,16 +1071,16 @@ describe('the authentication of a person (D72; IDENT-RES-010/018/019/020, FLOW-S
     })
     expect(guest.refused).toEqual([])
 
-    const silentWallet = setup({ guests: true })
+    const silentWallet = setup({ visitors: true })
     await settle()
     await silentWallet.holder('expired')
     expect(await silentWallet.establishing).toBeUndefined()
     expect(silentWallet.refused).toEqual(['authentication-unanswered'])
 
     // offered, and a badge that is not accepted: asked again, and the person may still enter as a guest
-    const retry = setup({ guests: true, issuers: { organizations: ['org:EE:1'] } })
+    const retry = setup({ visitors: true, issuers: { organizations: ['org:EE:1'] } })
     await settle()
-    retry.present(ISSUER_2)
+    await retry.present(ISSUER_2)
     await settle()
     expect(retry.problems()).toEqual(['issuer-not-accepted'])
     await retry.holder('declined')
@@ -979,7 +1091,7 @@ describe('the authentication of a person (D72; IDENT-RES-010/018/019/020, FLOW-S
     // Found on devnet with a phone: Continue as guest brought the request back. The decline reached the agent
     // as an abandoned presentation, a moment before the flow closed, and was taken for a presentation that did
     // not verify: the agent said `not-valid` and asked again, for ever
-    const guest = setup({ guests: true })
+    const guest = setup({ visitors: true })
     await settle()
     await guest.declines()
     expect(await guest.establishing).toMatchObject({ identityCredentialRef: null })
@@ -997,7 +1109,9 @@ describe('the authentication of a person (D72; IDENT-RES-010/018/019/020, FLOW-S
   })
 
   it('still says not-valid, and asks again, of a presentation that came and did not verify', async () => {
-    const t = setup({ guests: true })
+    const t = setup({ visitors: true })
+    await settle()
+    chooses(t.identityOf(), t.calls)
     await settle()
     const request = t.calls.filter((c) => c.method === 'requestPresentation').at(-1) as Call
     t.identityOf().onPresentation({
@@ -1018,6 +1132,37 @@ describe('the authentication of a person (D72; IDENT-RES-010/018/019/020, FLOW-S
     const t = setup({ request: 'on-demand' })
     expect(await t.establishing).toMatchObject({ identityCredentialRef: null })
     expect(t.opened()).toEqual([])
+  })
+
+  it('refuses another identity on the flow of an identified connection, before it closes, and asks nothing again (IDENT-RES-019, FLOW-SIGNIN-004)', async () => {
+    const t = setup({ request: 'on-demand' })
+    await t.establishing
+    const identity = t.identityOf()
+    // the connection is bound to the badge number 7; the wallet presents the badge number 42
+    const boundTo = (badgeNumber: string) =>
+      ({ actorIdentity: `org:EE:1|${BADGE}|${badgeNumber}`, identityCredentialRef: 'badge:earlier' }) as Principal
+    const asking = identity.authenticate('conn-identified', 'did:peer:alice', true, false, {
+      purpose: 'visitor',
+      bound: boundTo('7'),
+    })
+    await settle()
+    await t.present(ISSUER_1)
+    expect(await asking).toEqual({ outcome: 'not-accepted', code: 'another-identity' })
+    await settle()
+    // the reason goes on the flow, which never closes completed, and no new request follows
+    expect(t.problems()).toEqual(['another-identity'])
+    expect(t.calls.filter((c) => c.method === 'closeFlow')).toEqual([])
+    expect(t.opened()).toHaveLength(1)
+    // the same identity is accepted, and its flow closes completed
+    const same = identity.authenticate('conn-identified', 'did:peer:alice', true, false, {
+      purpose: 'visitor',
+      bound: boundTo('42'),
+    })
+    await settle()
+    await t.present(ISSUER_1)
+    expect(await same).toMatchObject({ outcome: 'accepted', facts: { actorIdentity: `org:EE:1|${BADGE}|42` } })
+    const close = t.calls.filter((c) => c.method === 'closeFlow').at(-1)?.args as [string, { outcome: string }]
+    expect(close[1].outcome).toBe('completed')
   })
 })
 

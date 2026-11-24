@@ -8,20 +8,30 @@ import { fileURLToPath } from 'node:url'
 import { Ajv2020 } from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
 import { parse as parseYaml } from 'yaml'
+import {
+  type ApprovalTimeoutKind,
+  boundsError,
+  boundsOf,
+  defaultPolicyOf,
+  timeoutBoundsOf,
+} from '../policy/spacePolicy.js'
 import { fieldsNamedBy } from '../tools/accountValues.js'
 import type {
   AgentPack,
-  AuthenticationEntry,
   BundledName,
   EvidencePolicy,
+  PackApprovalPolicy,
+  PackAuthentication,
   SourceAccount,
   SpaceTemplate,
   ToolAccess,
+  ToolApprovalBounds,
   ToolSourceDef,
 } from './packTypes.js'
 import {
   ACCOUNT_KINDS,
   ADMIN_ROLES,
+  AUTHENTICATION_METHOD_TYPES,
   AVAILABILITIES,
   BUNDLED_NAMES,
   BUNDLED_TOOLS,
@@ -31,9 +41,11 @@ import {
   CLIENT_REGISTRATIONS,
   COMPUTED_FUNCTIONS,
   challengeTypesOf,
+  credentialMethodsOf,
   DOCUMENT_ATTRIBUTES,
   EMAIL_ATTRIBUTES,
   featuresOf,
+  IDENTIFYING_METHOD_TYPES,
   PERSONAL_RETENTION_DAYS,
   providerNameOf,
   RESERVED_ACCOUNT_KINDS,
@@ -49,6 +61,8 @@ export const DOCUMENT_ENTRY = 'document'
 /** The entry under which an address verified by an email code is kept as evidence: the `email` evidence kind (D89). */
 export const EMAIL_ENTRY = 'email'
 /** The attributes of a document read the matching of a directory entry reads (IDENT-DIR-003). */
+/** The entry under which a face match is kept as evidence, its audit fields only (D131, IDENT-AUTH-011). */
+export const FACE_MATCH_ENTRY = 'face-match'
 export const DIRECTORY_MATCH_ATTRIBUTES = ['lastName', 'firstName', 'dateOfBirth', 'nationality'] as const
 
 export class PackError extends Error {
@@ -182,7 +196,7 @@ export function bundledToolNames(pack: AgentPack): string[] {
   if (on('generateImage')) names.push('generate_image')
   if (on('principalCredentials')) names.push('principal_credentials')
   const asksOnDemand = Object.values(pack.presentations ?? {}).some((e) => e.request === 'on-demand')
-  if (on('requestPresentation') && (pack.identity.authentication?.length || asksOnDemand))
+  if (on('requestPresentation') && (pack.identity.authentication?.combinations?.length || asksOnDemand))
     names.push('request_presentation')
   if (on('credentialIssuance') && Object.keys(pack.issuance ?? {}).length) {
     names.push('credential_requirements')
@@ -222,7 +236,7 @@ export function evidenceWarnings(pack: AgentPack): string[] {
   const conversation = pack.privacy.processingActivities.find((a) => a.id === 'conversation-memory')?.retention?.days
   const warnings: string[] = []
   const policies: [string, EvidencePolicy][] = [
-    ...(pack.identity.authentication ?? []).map((e): [string, EvidencePolicy] => ['identity.authentication', e]),
+    ...credentialMethodsOf(pack).map(([n, e]): [string, EvidencePolicy] => [`identity.authentication.methods.${n}`, e]),
     ...Object.entries(pack.presentations ?? {}).map(([n, e]): [string, EvidencePolicy] => [`presentations.${n}`, e]),
     ...(pack.evidence?.document ? [['evidence.document', pack.evidence.document] as [string, EvidencePolicy]] : []),
   ]
@@ -240,48 +254,117 @@ export function evidenceWarnings(pack: AgentPack): string[] {
 }
 
 /**
- * What an authentication entry may not say (D72, IDENT-RES-010): `on-demand` lets guests in by itself; a list of
- * organizations is not empty and holds organization keys; how the credential is obtained is a text, an https
- * link, or both.
+ * The evidence policy of the `authentication` entry: what is kept of a presentation of a `credential` method, and what
+ * the model may read of it (D67). Each method says it for its own presentations; the entry the rest of the agent reads
+ * (a claim's source, the model's view) takes all of them together.
  */
-export function authenticationErrors(entry: AuthenticationEntry): string[] {
-  const errors: string[] = []
-  if (entry.request === 'on-demand' && entry.guests === false)
-    errors.push('rule 1: identity.authentication asked on-demand lets guests in: guests cannot be false')
-  const organizations = entry.issuers?.organizations
-  if (organizations !== undefined) {
-    if (!organizations.length)
-      errors.push(
-        'rule 1: identity.authentication.issuers.organizations is empty: it would accept nobody; leave it out to accept any accredited issuer'
-      )
-    const unkeyed = organizations.filter((key) => !/^org:[A-Z]{2}:.+$/.test(key))
-    if (unkeyed.length)
-      errors.push(
-        `rule 1: identity.authentication.issuers.organizations [${unkeyed.join(', ')}] must be organization keys, org:<country>:<register id>`
-      )
+export function authenticationEvidencePolicy(pack: Pick<AgentPack, 'identity'>): EvidencePolicy {
+  const methods = credentialMethodsOf(pack).map(([, m]) => m)
+  const stored = [...new Set(methods.flatMap((m) => m.store?.attributes ?? []))]
+  const visible = [...new Set(methods.flatMap((m) => m.modelVisible ?? []))]
+  const retention = methods.find((m) => m.store?.retention)?.store?.retention
+  return {
+    ...(stored.length ? { store: { attributes: stored, ...(retention ? { retention } : {}) } } : {}),
+    ...(visible.length ? { modelVisible: visible } : {}),
   }
-  if (entry.obtain) {
-    if (!entry.obtain.text && !entry.obtain.url)
-      errors.push('rule 1: identity.authentication.obtain says a text, a link, or both')
-    if (entry.obtain.url && !entry.obtain.url.startsWith('https://'))
-      errors.push('rule 1: identity.authentication.obtain.url must be an https link')
-  }
-  return errors
 }
 
 /**
- * What a role may no longer say (RBAC-XSESS-005, decision 60): a role carries no scope of conversation reads, so
- * `crossSession` is withdrawn, whatever its value. Said in words before the schema, which would only name the key.
+ * What `identity.authentication` may not say (D72, D125, D126; IDENT-RES-010, IDENT-AUTH-001): `on-demand` lets visitors
+ * in by itself; a type the agent does not know; a combination that names a method not enabled, names one twice, is
+ * listed twice or holds no identifying method; a `credential` method without its schema or subject key, whose subject
+ * key is not among the attributes it asks, or whose list of organizations is empty or not of organization keys; a field
+ * of one type on a method of another; how a person obtains what they lack as neither a text nor an https link. What a
+ * method needs of the deployment (an SMTP server, a face-verification service) is checked when the agent starts.
  */
-export function removedCrossSessionErrors(doc: unknown): string[] {
-  const roles = (doc as { identity?: { roles?: Record<string, { crossSession?: unknown }> } })?.identity?.roles
-  if (!roles || typeof roles !== 'object') return []
-  return Object.entries(roles)
-    .filter(([, role]) => role && typeof role === 'object' && role.crossSession !== undefined)
-    .map(
-      ([name, role]) =>
-        `identity.roles.${name}.crossSession (${JSON.stringify(role.crossSession)}) is withdrawn: no role reads other people's conversations (RBAC-XSESS-005); remove it. A conversation is read by its author, by the active members of its space when its author shares it, and by an auditor through the admin interface (RBAC-XSESS-007)`
-    )
+export function authenticationErrors(
+  authentication: PackAuthentication,
+  pack?: Pick<AgentPack, 'privacy' | 'media'>
+): string[] {
+  const errors: string[] = []
+  const at = 'identity.authentication'
+  if (authentication.request === 'on-demand' && authentication.visitors === false)
+    errors.push(`rule 1: ${at} asked on-demand lets visitors in: visitors cannot be false`)
+  const methods = authentication.methods ?? {}
+  for (const [name, method] of Object.entries(methods)) {
+    const where = `${at}.methods.${name}`
+    if (!(AUTHENTICATION_METHOD_TYPES as readonly string[]).includes(method.type)) {
+      errors.push(
+        `rule 1: ${where} has the type ${method.type}, which this agent does not know (${AUTHENTICATION_METHOD_TYPES.join(', ')})`
+      )
+      continue
+    }
+    if (method.type === 'credential') {
+      if (!method.credential?.jsonSchemaCredentialId)
+        errors.push(`rule 1: ${where} is a credential method without its schema (credential.jsonSchemaCredentialId)`)
+      if (!method.subjectKey?.length)
+        errors.push(`rule 1: ${where} is a credential method without a subject key (subjectKey)`)
+      const hidden = method.attributes ? (method.subjectKey ?? []).filter((a) => !method.attributes?.includes(a)) : []
+      if (hidden.length)
+        errors.push(
+          `rule 1: ${where}.subjectKey [${hidden.join(', ')}] must be among the attributes asked, or the credential can never identify`
+        )
+      const organizations = method.issuers?.organizations
+      if (organizations !== undefined) {
+        if (!organizations.length)
+          errors.push(
+            `rule 1: ${where}.issuers.organizations is empty: it would accept nobody; leave it out to accept any accredited issuer`
+          )
+        const unkeyed = organizations.filter((key) => !/^org:[A-Z]{2}:.+$/.test(key))
+        if (unkeyed.length)
+          errors.push(
+            `rule 1: ${where}.issuers.organizations [${unkeyed.join(', ')}] must be organization keys, org:<country>:<register id>`
+          )
+      }
+      errors.push(...evidencePolicyErrors(where, method, method.attributes))
+    } else {
+      const foreign = (['credential', 'subjectKey', 'attributes', 'issuers', 'store', 'modelVisible'] as const).filter(
+        (field) => method[field] !== undefined
+      )
+      if (foreign.length)
+        errors.push(`rule 1: ${where} is of type ${method.type}: [${foreign.join(', ')}] belong to a credential method`)
+    }
+    if (method.type === 'face-match') {
+      if (!method.reference?.length)
+        errors.push(`rule 1: ${where} names no reference picture (reference: document, directory)`)
+      // consent is the one lawful basis of a face match (D131, IDENT-AUTH-011)
+      const activity = pack?.privacy.processingActivities.find((a) => (a.id as string) === 'biometric-matching')
+      if (pack && activity?.lawfulBasis !== 'consent')
+        errors.push(
+          activity
+            ? `IDENT-AUTH-011: ${where} needs the processing activity biometric-matching with the lawful basis consent, not ${activity.lawfulBasis}`
+            : `IDENT-AUTH-011: ${where} needs the processing activity biometric-matching, with the lawful basis consent`
+        )
+      if (pack && !pack.media?.faceVerification)
+        errors.push(`IDENT-AUTH-001: ${where} needs a face-verification service (media.faceVerification)`)
+    } else if (method.reference !== undefined) {
+      errors.push(`rule 1: ${where} is of type ${method.type}: reference belongs to a face-match method`)
+    }
+  }
+  const seen = new Set<string>()
+  for (const [i, combination] of (authentication.combinations ?? []).entries()) {
+    const where = `${at}.combinations[${i}] [${combination.join(', ')}]`
+    const unknown = combination.filter((name) => !methods[name])
+    if (unknown.length) {
+      errors.push(`rule 1: ${where} names [${unknown.join(', ')}], which no method enables`)
+      continue
+    }
+    if (new Set(combination).size !== combination.length) errors.push(`rule 1: ${where} names a method twice`)
+    const key = [...combination].sort().join('\u0000')
+    if (seen.has(key)) errors.push(`rule 1: ${where} is listed twice`)
+    seen.add(key)
+    if (!combination.some((name) => IDENTIFYING_METHOD_TYPES.includes(methods[name].type)))
+      errors.push(
+        `rule 1: ${where} holds no identifying method (${IDENTIFYING_METHOD_TYPES.join(', ')}): it would identify nobody`
+      )
+  }
+  if (authentication.obtain) {
+    if (!authentication.obtain.text && !authentication.obtain.url)
+      errors.push(`rule 1: ${at}.obtain says a text, a link, or both`)
+    if (authentication.obtain.url && !authentication.obtain.url.startsWith('https://'))
+      errors.push(`rule 1: ${at}.obtain.url must be an https link`)
+  }
+  return errors
 }
 
 /**
@@ -389,59 +472,6 @@ type Doc = Record<string, unknown>
 
 const isObject = (value: unknown): value is Doc => !!value && typeof value === 'object' && !Array.isArray(value)
 
-/**
- * The keys a pack may no longer use (D101, TOOL-CAT-011): every source is one entry of `tools.sources`, its tier model is
- * its `access`, and a tool's step-up is in its own source. Each is refused in words before the schema, which would only
- * name the key, with the key that replaces it.
- */
-export function withdrawnToolKeyErrors(doc: unknown): string[] {
-  const d = isObject(doc) ? doc : {}
-  const errors: string[] = []
-  const named = (list: unknown, key: string): string[] =>
-    Array.isArray(list)
-      ? list.map((item, i) => (isObject(item) && typeof item[key] === 'string' ? (item[key] as string) : `#${i}`))
-      : []
-  if (d.mcp !== undefined) {
-    const servers = named(isObject(d.mcp) ? d.mcp.servers : undefined, 'name')
-    const fix =
-      'declare each MCP server as an entry of tools.sources keyed by its name, with type: mcp, and its toolAccess as access (D101, TOOL-CAT-011)'
-    if (servers.length) for (const name of servers) errors.push(`mcp.servers.${name} is withdrawn: ${fix}`)
-    else errors.push(`mcp is withdrawn: ${fix}`)
-  }
-  const tools = isObject(d.tools) ? d.tools : {}
-  if (tools.http !== undefined) {
-    const fix =
-      'declare each HTTP tool as an entry of tools.sources keyed by its name, with type: http (D101, TOOL-CAT-011)'
-    const names = named(tools.http, 'name')
-    if (names.length) for (const name of names) errors.push(`tools.http.${name} is withdrawn: ${fix}`)
-    else errors.push(`tools.http is withdrawn: ${fix}`)
-  }
-  if (tools.bundled !== undefined) {
-    const keys = isObject(tools.bundled) ? Object.keys(tools.bundled) : []
-    const fix = (key: string) =>
-      `declare it as an entry of tools.sources with type: bundled and bundled: ${key} (D101, TOOL-CAT-011)`
-    if (keys.length) for (const key of keys) errors.push(`tools.bundled.${key} is withdrawn: ${fix(key)}`)
-    else errors.push(`tools.bundled is withdrawn: ${fix('<its name>')}`)
-  }
-  if (tools.access !== undefined)
-    errors.push(
-      'tools.access is withdrawn: each source declares the tier model of its own tools in tools.sources.<id>.access (D101, TOOL-CAT-011)'
-    )
-  if (d.actions !== undefined) {
-    const entries = isObject(d.actions) ? Object.keys(d.actions) : []
-    if (entries.length)
-      for (const tool of entries)
-        errors.push(
-          `actions.${tool} is withdrawn: declare its step-up in the source of the tool, as tools.sources.<id>.tools.${tool}.stepUp (D101, TOOL-CAT-011)`
-        )
-    else
-      errors.push(
-        "actions is withdrawn: a tool's step-up is tools.sources.<id>.tools.<tool>.stepUp (D101, TOOL-CAT-011)"
-      )
-  }
-  return errors
-}
-
 /** Every source of a pack document before the schema: an entry of `tools.sources`, where it is written (TOOL-CAT-001). */
 function docSources(doc: unknown): { where: string; name: string; type: unknown; body: Doc }[] {
   const tools = isObject(doc) && isObject(doc.tools) ? doc.tools : {}
@@ -466,46 +496,6 @@ export function emailChallengeStepUpErrors(doc: unknown): string[] {
         errors.push(
           `${where}.tools.${tool}.stepUp.authChallenge: the email code is the challenge of an issuance profile that takes claims from the user directory, and of no tool (INTX-AUTH-011)`
         )
-    }
-  }
-  return errors
-}
-
-/** A text as the agent-pack would write it in a flow mapping: quoted when YAML would read it otherwise. */
-function yamlText(value: unknown): string {
-  const text = String(value)
-  return /^[A-Za-z0-9][A-Za-z0-9 ._-]*$/.test(text) ? text : JSON.stringify(text)
-}
-
-/**
- * The keys of an account that named fields replaced (D102, TOOL-CAT-012): `label` and `pattern`, now each field's, and
- * `apply` as one header with its `prefix`, now a list of headers built from the fields. Each is refused in words before
- * the schema, which would only name the key, with the form that replaces it, written from what the account declares.
- */
-export function withdrawnAccountKeyErrors(doc: unknown): string[] {
-  const errors: string[] = []
-  for (const { where, body } of docSources(doc)) {
-    if (!isObject(body.account)) continue
-    const account = body.account
-    const apply = isObject(account.apply) ? account.apply : undefined
-    if (account.label === undefined && account.pattern === undefined && !apply) continue
-    const label = account.label !== undefined ? yamlText(account.label) : 'API token'
-    const pattern = account.pattern !== undefined ? `, pattern: ${JSON.stringify(String(account.pattern))}` : ''
-    const fields = `fields: [{ name: token, label: ${label}${pattern} }]`
-    if (account.label !== undefined)
-      errors.push(
-        `${where}.account.label is withdrawn: a space account declares the fields its owner fills, each with its own label, as account.${fields} (D102, TOOL-CAT-012)`
-      )
-    if (account.pattern !== undefined)
-      errors.push(
-        `${where}.account.pattern is withdrawn: each field carries the pattern of its own value, as account.${fields} (D102, TOOL-CAT-012)`
-      )
-    if (apply) {
-      const header = typeof apply.header === 'string' ? apply.header : 'Authorization'
-      const prefix = typeof apply.prefix === 'string' ? apply.prefix : ''
-      errors.push(
-        `${where}.account.apply as one header with its prefix is withdrawn: account.apply is a list of headers, each a header and a value that names the fields as {name}, as apply: [{ header: ${header}, value: ${JSON.stringify(`${prefix}{token}`)} }] with ${fields} (D102, TOOL-CAT-012)`
-      )
     }
   }
   return errors
@@ -902,7 +892,7 @@ export function catalogErrors(pack: AgentPack): string[] {
     if (source.availability === 'spaces')
       for (const entry of source.access?.approval ?? [])
         errors.push(
-          `${where}.access.approval names [${entry.tools.join(', ')}], tools of availability spaces: a space's owner approves them (TOOL-CAT-009)`
+          `${where}.access.approval names [${entry.tools.join(', ')}], tools of availability spaces: their approval policy in each space approves them (TOOL-CAT-009)`
         )
   }
   // the accounts of other sources, and the check of the email (TOOL-CAT-015, TOOL-CAT-017)
@@ -923,6 +913,8 @@ export function catalogErrors(pack: AgentPack): string[] {
       named.add(entry.source)
     }
   }
+  // the policies of the tools of spaces, their bounds and the timeouts of a space (TOOL-CAT-023)
+  errors.push(...spaceApprovalErrors(pack))
   // the roles that approve a tool of the whole agent or of Personal (TOOL-CAT-009)
   const roles = pack.identity.roles ?? {}
   for (const role of pack.approvals?.approvers ?? []) {
@@ -930,6 +922,59 @@ export function catalogErrors(pack: AgentPack): string[] {
     else if (!roles[role]?.canApprove)
       errors.push(`rule 3: approver role "${role}" in approvals.approvers has no canApprove`)
   }
+  return errors
+}
+
+/**
+ * The approval policies of the tools of spaces as the agent-pack bounds them (TOOL-CAT-023, D140): every default within
+ * its bounds, no `person` entry anywhere (the agent-pack names no person), a role declared with `canApprove`, and each
+ * timeout's default within its `min` and `max`. Each error names its field.
+ */
+export function spaceApprovalErrors(pack: AgentPack): string[] {
+  const errors: string[] = []
+  const roles = pack.identity.roles ?? {}
+  const spaces = pack.approvals?.spaces
+  const roleErrors = (where: string, role: string | undefined) => {
+    if (!role) errors.push(`TOOL-CAT-023: ${where} names no role`)
+    else if (!roles[role]) errors.push(`TOOL-CAT-023: ${where}: role "${role}" is not declared in identity.roles`)
+    else if (!roles[role]?.canApprove) errors.push(`TOOL-CAT-023: ${where}: role "${role}" has no canApprove`)
+  }
+  const entries = (where: string, policy: PackApprovalPolicy | undefined) => {
+    for (const [i, entry] of (policy?.approvers ?? []).entries()) {
+      const at = `${where}.approvers.${i}`
+      if (entry.kind === 'person') errors.push(`TOOL-CAT-023: ${at}: an agent-pack names no person`)
+      if (entry.kind === 'role') roleErrors(at, entry.role)
+      if (entry.kind === 'department' && !entry.department) errors.push(`TOOL-CAT-023: ${at} names no department`)
+    }
+  }
+  for (const [i, role] of (spaces?.allowedApprovers?.roles ?? []).entries())
+    roleErrors(`approvals.spaces.allowedApprovers.roles.${i}`, role)
+  entries('approvals.spaces.default', spaces?.default)
+  const declared = (role: string) => !!roles[role]?.canApprove
+  const check = (where: string, tool?: ToolApprovalBounds) => {
+    const policy = defaultPolicyOf(pack, tool)
+    if (policy.approvers.some((e) => e.kind === 'person')) return
+    const broken = boundsError(policy, boundsOf(pack, tool), declared)
+    if (broken)
+      errors.push(
+        `TOOL-CAT-023: ${where} is outside its bounds (${broken.code} at ${broken.field}): give the tool a default within them`
+      )
+  }
+  check('approvals.spaces.default')
+  for (const kind of Object.keys(spaces?.timeouts ?? {})) {
+    const resolved = timeoutBoundsOf(pack, kind as ApprovalTimeoutKind)
+    const where = `approvals.spaces.timeouts.${kind}`
+    if (resolved.min > resolved.max) errors.push(`TOOL-CAT-023: ${where} min is above max`)
+    else if (resolved.default < resolved.min || resolved.default > resolved.max)
+      errors.push(`TOOL-CAT-023: ${where}.default is outside its min and max`)
+  }
+  for (const [id, source] of Object.entries(pack.tools?.sources ?? {}))
+    for (const [tool, decl] of Object.entries(source.tools ?? {})) {
+      if (!decl.approval) continue
+      const where = `tools.sources.${id}.tools.${tool}.approval`
+      entries(`${where}.default`, decl.approval.default)
+      check(`${where}.default`, decl.approval)
+    }
   return errors
 }
 
@@ -1023,27 +1068,27 @@ function templateBoundsErrors(pack: AgentPack, template: SpaceTemplate, where: s
 export function crossFieldErrors(pack: AgentPack): string[] {
   const errors: string[] = []
   const identity = pack.identity
-  // rule 1: one authentication schema, whose subject key is among the attributes asked (D65, IDENT-RES-010/012)
-  const authentication = identity.authentication ?? []
-  if (authentication.length > 1) errors.push('rule 1: identity.authentication must hold exactly one entry')
-  for (const entry of authentication) {
-    const hidden = entry.attributes ? entry.subjectKey.filter((a) => !entry.attributes?.includes(a)) : []
-    if (hidden.length) {
+  // rule 1: the methods and the accepted combinations (D125, D126; IDENT-RES-010, IDENT-AUTH-001), what is read by the
+  // model is stored and what is stored is asked (PRIV-EVID-006)
+  if (identity.authentication) errors.push(...authenticationErrors(identity.authentication, pack))
+  // an email, a document and a directory photo find or picture an entry of the user directory (IDENT-DIR-003/004/010)
+  for (const [name, method] of Object.entries(identity.authentication?.methods ?? {})) {
+    const needsDirectory =
+      method.type === 'email' ||
+      method.type === 'document' ||
+      (method.type === 'face-match' && method.reference?.includes('directory'))
+    if (needsDirectory && !identity.directory)
       errors.push(
-        `rule 1: identity.authentication subjectKey [${hidden.join(', ')}] must be among the attributes asked, or the credential can never bind`
+        `rule 1: identity.authentication.methods.${name} (${method.type}) finds a person in the user directory: identity.directory names none`
       )
-    }
   }
-  // rule 1, the mode (D72): who enters, who is accepted and how the credential is obtained
-  for (const entry of authentication) errors.push(...authenticationErrors(entry))
-  // what is read by the model is stored, what is stored is asked (PRIV-EVID-006)
-  for (const entry of authentication)
-    errors.push(...evidencePolicyErrors('identity.authentication', entry, entry.attributes))
+  const authenticationStore = authenticationEvidencePolicy(pack).store?.attributes
   for (const [name, entry] of Object.entries(pack.presentations ?? {})) {
     if (name === AUTHENTICATION_ENTRY)
       errors.push('presentations: the name authentication is the entry of identity.authentication')
     if (name === DOCUMENT_ENTRY) errors.push('presentations: the name document is the entry of evidence.document')
     if (name === EMAIL_ENTRY) errors.push('presentations: the name email is the entry of evidence.email')
+    if (name === FACE_MATCH_ENTRY) errors.push('presentations: the name face-match is the entry of a face match')
     errors.push(...evidencePolicyErrors(`presentations.${name}`, entry, entry.attributes))
   }
   // a document read gives a closed list of attributes: only those can be stored (PRIV-EVID-012)
@@ -1090,7 +1135,7 @@ export function crossFieldErrors(pack: AgentPack): string[] {
       }
       const stored =
         source.entry === AUTHENTICATION_ENTRY
-          ? identity.authentication?.[0]?.store?.attributes
+          ? authenticationStore
           : source.entry === DOCUMENT_ENTRY
             ? document?.store?.attributes
             : source.entry === EMAIL_ENTRY
@@ -1098,7 +1143,7 @@ export function crossFieldErrors(pack: AgentPack): string[] {
               : pack.presentations?.[source.entry]?.store?.attributes
       const known =
         source.entry === AUTHENTICATION_ENTRY
-          ? authentication.length > 0
+          ? credentialMethodsOf(pack).length > 0
           : source.entry === DOCUMENT_ENTRY
             ? !!document
             : source.entry === EMAIL_ENTRY
@@ -1134,6 +1179,8 @@ export function crossFieldErrors(pack: AgentPack): string[] {
   for (const p of pack.purposes ?? []) check(p.permittedRoles, `purposes.${p.id}.permittedRoles`)
   for (const m of pack.persona.menu ?? []) check(m.roles, `persona.menu.${m.id}.roles`)
   for (const t of pack.spaces?.templates ?? []) check(t.creators, `spaces.templates.${t.id}.creators`)
+  // the stewards of a template are declared roles (SPACE-MEMB-011)
+  for (const t of pack.spaces?.templates ?? []) check(t.stewards, `spaces.templates.${t.id}.stewards`)
   // rule 12: the defaults of a space template lie within its bounds (SPACE-DEF-003)
   errors.push(...spaceTemplateErrors(pack))
 
@@ -1293,20 +1340,9 @@ export function validatePackDocument(doc: unknown, env: Record<string, string | 
   if (!/^3\.\d+$/.test(version)) {
     throw new PackError(`schemaVersion "${version}" is not supported (CORE-PACK-004, major 3 required)`)
   }
-  // RBAC-XSESS-005: a role that declares crossSession is refused in words, before the schema names the key
-  const removed = removedCrossSessionErrors(coerced)
-  if (removed.length) throw new PackError('agent-pack names a cross-session scope that was removed', removed)
   // IDENT-ROLE-012: the people of the user directory are refused in words, before the schema names the key
   const inline = inlineDirectoryErrors(coerced)
   if (inline.length) throw new PackError('agent-pack writes the people of the user directory inline', inline)
-  // TOOL-CAT-011: the keys one map replaced are refused in words, with the key that replaces each (D101)
-  const withdrawn = withdrawnToolKeyErrors(coerced)
-  if (withdrawn.length)
-    throw new PackError('agent-pack declares tools under keys that tools.sources replaced (D101)', withdrawn)
-  // TOOL-CAT-012: the keys of an account that named fields replaced are refused in words, with their new form (D102)
-  const accountKeys = withdrawnAccountKeyErrors(coerced)
-  if (accountKeys.length)
-    throw new PackError('agent-pack declares a space account in the form that its fields replaced (D102)', accountKeys)
   // INTX-AUTH-011: a step-up that declares the email code is refused in words, before the schema names the value
   const email = emailChallengeStepUpErrors(coerced)
   if (email.length)

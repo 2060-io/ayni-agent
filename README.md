@@ -78,7 +78,8 @@ pnpm eval:approval-claims -- --replay scripts/eval/fixtures/devnet-2026-11-21-21
   model through the agent's adapter.
 - The cases: `devnet-2026-11-21` (a member's post asked, approved on the owner's phone and run; then a new post),
   `after-a-claim` (the same, then a reply that says approval was requested with no call; then the same post again),
-  `confirmation` (the owner's own post, which is his confirmation, INTX-APPR-005, allowed and run; then another one) and
+  `confirmation` (the owner's own post, his own confirmation on his phone, INTX-APPR-023, confirmed and run; then
+  another one) and
   `after-a-refusal` (a post the owner rejected; then "Ask again for the same post"). A run passes only when the turn
   calls the posting tool, whatever its reply says.
 - The posting tool is the first tool of a space whose rule is `approval`, `x.post_tweet` for the Dev Agent; `--post
@@ -165,8 +166,8 @@ docker run --rm -p 3010:3010 --env-file .env io2060/ayni-agent:local
   image `io2060/vs-agent-ayni` (ayni-deploy) ships both.
 - In flow mode the agent uses the plugin's routes (`/v2/didcomm/ayni-flow/flows`, `/v2/didcomm/confirm`,
   `/v2/didcomm/link-session`) and its events (`didcomm.ayni-flow.state-changed`, `didcomm.confirm.state-changed`,
-  `didcomm.link-session.state-changed`): identity at connect is an `identify-ua` then a `present` flow, the device
-  challenge a `confirm` flow, browser binding a `link-session` flow (ayni-spec D55, INTX-FLOW, INTX-AUTH-009,
+  `didcomm.link-session.state-changed`): identity at connect is an `identify-ua` flow then an `authenticate` flow, the
+  device challenge a `confirm` flow, browser binding a `link-session` flow (ayni-spec D55, INTX-FLOW, INTX-AUTH-009,
   CHAN-BIND-009). Every flow opened from a conversation is one entry (`sourceType: flow`) shown as the `ayni.flow`
   card and updated in place at its close; `presentation-request` and `credential-offer` take `parentThreadId`
   (VS Agent branch `feat/ayni-plugin-loader`). Face-match calls and NFC reads still go out as v3 messages until
@@ -177,9 +178,23 @@ docker run --rm -p 3010:3010 --env-file .env io2060/ayni-agent:local
   (ayni-spec D56, CHAN-BIND-014). `client.platform` is `web`, `ios` or `android` and `client.description` is what the
   phone shows for the session (CHAN-BIND-015). The request names its `endpoint`, `ag-ui` when absent; one that is
   not open to the peer is refused with `not-eligible`.
+- The authentication runs on the phone only, over `authenticate/1.0` (ayni-spec D125 to D131, flow profile §6.14):
+  the agent opens an `authenticate` flow (one at a time on a connection: the plugin answers `409` to a second) and
+  sends the request (`POST /v2/didcomm/authenticate`: the purpose, the methods and the accepted combinations of
+  `identity.authentication`), hears the person's `choice` and `answer`s (`didcomm.authenticate.state-changed`), runs the
+  methods of the combination chosen with `POST .../{threadId}/step` and `.../step-result` (a credential by
+  `presentation-request`, a document by `mrtd/request-emrtd`, a face match by a call, each under the flow id), and
+  closes the flow `completed` or answers it with a problem report (`issuer-not-accepted`, `not-valid`, `incomplete`,
+  `step-failed`, `step-expired`, `no-match`, `different-identities`, `another-identity`). An authenticator app or a
+  passkey is enrolled in an `enrol` flow the phone opens (`didcomm.authenticate.enrol-state-changed`, `POST
+  /v2/didcomm/authenticate-enrol/{threadId}/challenge`) and removed by an `unenrol`
+  (`didcomm.authenticate.unenrol-received`). A person who declines the consent of a face match chooses another combination in
+  the same flow (the step ends `consent-declined`). It needs `@ayni.org/vs-agent-plugin-ayni-flow` 0.3.1. A wallet that takes
+  no flows is asked a `credential` method that is a combination by itself, as a presentation request, and nothing else.
 - The agent tells each peer where it stands with it (`peer-status/1.0`, `POST /v2/didcomm/peer-status`; ayni-spec
   D71, IDENT-STAT): the rule by which it identifies the peer, following from `identity.authentication` (`none`
-  with no schema, `optional` asked on demand, `required` asked on connect), whether the peer is identified, and
+  with no combination, `optional` with visitors let in, `required` without), its methods and accepted combinations,
+  to an identified person the types they may enrol and those they enrolled, whether the peer is identified, and
   what is open to it on the connection (`ag-ui` for a person). It is sent once the Principal is resolved, before
   the credential is asked when it is required, and again when a field changes; a peer the agent refuses is told why
   (`untrusted`, `identity-refused`, `not-admitted`) before the connection ends. A wallet waits for this message

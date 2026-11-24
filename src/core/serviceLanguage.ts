@@ -156,6 +156,24 @@ export class ServiceLanguage {
     return sentence.text
   }
 
+  /**
+   * A finished sentence in the language a phone gave, with no session to read it from: the email that carries the code
+   * of an email step is in the language of the phone's locale (INTX-AUTH-020, IDENT-AUTH-006). No conversation is
+   * involved, so the translation is made when none is kept; the default language, then English, otherwise.
+   */
+  public async renderIn(sentence: ServiceSentence, locale: string | undefined): Promise<string> {
+    const target = languageTag(locale) ?? this.defaultLanguage
+    if (sameLanguage(target, SOURCE_LANGUAGE)) return sentence.text
+    const translated = await this.translation(sentence, target, true)
+    if (translated !== undefined) return translated
+    const fallback = this.defaultLanguage
+    if (!sameLanguage(fallback, target) && !sameLanguage(fallback, SOURCE_LANGUAGE)) {
+      const inDefault = await this.translation(sentence, fallback, true)
+      if (inDefault !== undefined) return inDefault
+    }
+    return sentence.text
+  }
+
   private async allowed(principal: Principal, session: Session): Promise<boolean> {
     try {
       return await this.deps.modelAllowed(principal, session)

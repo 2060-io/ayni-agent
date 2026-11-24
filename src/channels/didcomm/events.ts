@@ -12,17 +12,21 @@ import type { AyniAgent } from '../../core/agent.js'
 import { documentRefusalForPerson, readDocument } from '../../core/document.js'
 import type { TurnSink } from '../../core/orchestrator.js'
 import type { MessageAttachment, Principal, Session } from '../../core/types.js'
-import { needsAttestation } from '../../policy/approvals.js'
+import { attestedFor } from '../../policy/spacePolicy.js'
 import { nowIso } from '../../util/ids.js'
 import type { Logger } from '../../util/logger.js'
 import { clientOfConnection, codesAround, DidcommAdapter } from './adapter.js'
+import type { EnrolService } from './enrol.js'
+import type { FaceSteps } from './faceSteps.js'
 import { type IdentityFlow, isServicePeer } from './identity.js'
 import { AYNI_FLOW_PROTOCOL, type PeerProfiles } from './peerProfiles.js'
 import { AG_UI_ENDPOINT, PEER_STATUS_PROTOCOL, type PeerStatusRefusalCode } from './peerStatus.js'
 import type {
+  AuthenticateExchange,
   CarrierExchange,
   ConnectionRecord,
   CredentialExchangeRecord,
+  EnrolExchange,
   FlowRecord,
   PresentationRecord,
   VsAgentClient,
@@ -40,11 +44,17 @@ const LINK_ATTEMPTS = 5
 const LINK_WINDOW_MS = 10 * 60_000
 /** How long the serving-mode decision waits for a disclosure the DIDComm agent announced (D54). */
 export const DISCLOSURE_WAIT_MS = 3_000
+/** How long a face step's verdict may follow the end of its call before the step fails. */
+export const FACE_VERDICT_GRACE_MS = 10_000
 
 /** The connection event as the DIDComm agent forwards it: state changes and, in state `updated`, disclosed features. */
 type ConnectionEvent = ConnectionRecord & { previousState?: string; metadata?: Record<string, string> }
 
 export class DidcommEvents {
+  /** the enrolments of an authenticator app or a passkey (flow profile §6.4), set when the agent enrols */
+  public enrol?: Pick<EnrolService, 'onExchange' | 'onUnenrol'>
+  /** the face steps of the authentications, whose calls the phone may reject or end (IDENT-AUTH-010) */
+  public faceSteps?: Pick<FaceSteps, 'byCall' | 'settle'>
   private readonly identifying = new Set<string>()
   /** connections that chose "Link a web session" and owe a code */
   private readonly awaitingCode = new Map<string, number>()
@@ -147,6 +157,15 @@ export class DidcommEvents {
         return this.onAuthorizeStateChanged(data as unknown as CarrierExchange & { previousState?: string })
       case 'didcomm.reissue.state-changed':
         return this.onReissueStateChanged(data as unknown as CarrierExchange & { previousState?: string })
+      // ---- authenticate/1.0 (flow profile §6.14, §6.4; CC-VSA-013) ----
+      case 'didcomm.authenticate.state-changed':
+        // a choice, an answer, an exchange the DIDComm agent failed: the authentication running reads it
+        this.identity.authenticator?.onExchange(data as unknown as AuthenticateExchange)
+        return
+      case 'didcomm.authenticate.enrol-state-changed':
+        return this.enrol?.onExchange(data as unknown as EnrolExchange)
+      case 'didcomm.authenticate.unenrol-received':
+        return this.enrol?.onUnenrol(String(data.connectionId ?? ''), String(data.type ?? ''))
       // ---- peer status (plugin events, CC-VSA-012) ----
       case 'didcomm.peer-status.query-received':
         return this.onPeerStatusQuery(String(data.connectionId ?? ''), data.answered === true)
@@ -530,7 +549,9 @@ export class DidcommEvents {
     const bound = await this.agent.didcommSession(connectionId)
     if (!bound) return
     // one to attest is decided through its `authorize` flow only (INTX-APPR-019)
-    const pending = (await this.agent.approvals.pendingFor(bound.principal)).filter((r) => !needsAttestation(r))
+    const pending = (await this.agent.approvals.pendingFor(bound.principal)).filter(
+      (r) => !attestedFor(r, bound.principal.id)
+    )
     const sink = this.sinkFor(bound.session)
     if (pending.length === 1 && /^(approve|reject|yes|no)$/i.test(response.trim())) {
       await this.agent.action(
@@ -577,11 +598,17 @@ export class DidcommEvents {
       attestation: response.attestation,
       ...(exchange.errorCode ? { reason: exchange.errorCode } : {}),
     })
-    // the opener closes the flow when the carrier protocol ends (flow profile §5.2)
-    if (exchange.flowId)
-      await this.agent.flows.close(exchange.flowId, ok ? 'completed' : 'failed', {
-        reason: ok ? undefined : 'Not confirmed.',
-      })
+    // the opener closes the flow when the carrier protocol ends (flow profile §5.2): an answer, yes or no, closes it
+    // `completed`, as an `authorize` answered either way does (flow profile §6, row `confirm`), and the holder shows
+    // the person's own answer; only a carrier that failed closes it `failed`
+    if (exchange.flowId) {
+      const answered = exchange.state === 'response-received'
+      await this.agent.flows.close(
+        exchange.flowId,
+        answered ? 'completed' : 'failed',
+        answered ? {} : { reason: 'Not confirmed.' }
+      )
+    }
   }
 
   /**
@@ -945,6 +972,13 @@ export class DidcommEvents {
   // ---- challenges (INTX-AUTH-007/009) ----------------------------------------------------------------
 
   private async onCallEnded(connectionId: string, threadId: string, rejected: boolean): Promise<void> {
+    // the call of a face step: rejected, the step fails; ended, the verdict has a moment to come first (IDENT-AUTH-010)
+    const face = this.faceSteps?.byCall(connectionId, threadId)
+    if (face) {
+      if (rejected) this.faceSteps?.settle(face.token, 'failed')
+      else setTimeout(() => this.faceSteps?.settle(face.token, 'failed'), FACE_VERDICT_GRACE_MS).unref()
+      return
+    }
     const challenge = await this.agent.challenges.findPendingByThread(connectionId, threadId)
     if (challenge && rejected) await this.agent.challenges.complete(challenge.id, 'failed', { reason: 'call-rejected' })
   }
@@ -962,6 +996,8 @@ export class DidcommEvents {
     received: boolean,
     data: Record<string, unknown>
   ): Promise<void> {
+    // the document step of an authentication takes its own read (IDENT-DIR-003)
+    if (this.identity.authenticator?.onDocument(connectionId, threadId, received, data)) return
     const challenge = await this.agent.challenges.findPendingByThread(connectionId, threadId)
     if (!challenge) return
     const flowId = typeof challenge.details?.flowId === 'string' ? challenge.details.flowId : undefined

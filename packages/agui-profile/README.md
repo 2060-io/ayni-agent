@@ -12,7 +12,11 @@ the spaces, the person's memories and preferences and the deletion window of a m
 a space, the confirmation card of a tool call and the sources of replies and conversations, and from 3.5 each person's
 own accounts: Your accounts, the Connect card and `ayni.connections.changed`; from 3.5.1, the amendment of D114:
 the Notifications of a space and of the agent, `ayni.space.notifications.changed`, the resend of an approval to the
-phone, and `ayni.approval.request` withdrawn) and the few AG-UI message shapes it reuses.
+phone, and `ayni.approval.request` withdrawn; from 3.5.2, the binding goal code `ayni.link-session`, the closure
+reason `replaced` and `features.visitors`; from 3.5.3, what the clean spec removed: `client.profileVersion`, the
+routed kind `authorization` and `INTERRUPT_REASON`; from 3.5.4, space governance: one owner or none, the successor,
+the stewards, the approval timeouts, the approval policy of a tool of a space, the progress of an approval and the
+notices of a space's governance) and the few AG-UI message shapes it reuses.
 
 ```ts
 import { APP_LINK_DOMAIN, buildAppLink, parseAppLink, PROFILE_VERSION } from '@ayni.org/ayni-agui-profile'

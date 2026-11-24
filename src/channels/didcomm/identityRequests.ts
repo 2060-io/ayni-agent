@@ -7,12 +7,17 @@
  * after a request that was declined or left unanswered the model waits; the person's own request is always
  * served.
  */
-import { type AgentPack, connectionTypeOf, type PresentationEntry } from '../../config/packTypes.js'
+import {
+  type AgentPack,
+  connectionTypeOf,
+  credentialMethodsOf,
+  type PresentationEntry,
+} from '../../config/packTypes.js'
 import type { EvidenceInput } from '../../core/evidence.js'
 import type { VerifiedFacts } from '../../core/principals.js'
-import type { Principal } from '../../core/types.js'
+import type { Principal, Session } from '../../core/types.js'
 import type { Logger } from '../../util/logger.js'
-import type { AuthenticationAttempt } from './identity.js'
+import { type AuthenticateAsk, type AuthenticationAttempt, asksAgain } from './identity.js'
 
 /** What a request ends in. A status, never a value of the credential (D68). */
 export type IdentityRequestOutcome =
@@ -26,12 +31,16 @@ export type IdentityRequestOutcome =
   | 'not-offered'
 
 export interface IdentityRequestDeps {
-  /** asks the wallet once and returns what the request ended in */
+  /**
+   * asks once and returns what the request ended in; `ask.bound`, the Principal of an identified connection, refuses an
+   * authentication of another identity on the flow (IDENT-RES-019)
+   */
   authenticate(
     connectionId: string,
     peerId: string,
     flowMode: boolean,
-    userAgentVerified: boolean
+    userAgentVerified: boolean,
+    ask: AuthenticateAsk
   ): Promise<AuthenticationAttempt>
   isFlowCapable(connectionId: string): Promise<boolean>
   /** binds the connection by the rules of D66 */
@@ -41,7 +50,8 @@ export interface IdentityRequestDeps {
     connectionId: string,
     name: string,
     entry: PresentationEntry,
-    flowMode: boolean
+    flowMode: boolean,
+    origin?: Session
   ): Promise<EvidenceInput | undefined>
   /** records what was verified as evidence of the Principal */
   record?(principal: Principal, evidence: EvidenceInput): Promise<unknown>
@@ -69,7 +79,7 @@ export class IdentityRequests {
   ) {}
 
   public async request(principal: Principal, by: 'model' | 'person'): Promise<IdentityRequestOutcome> {
-    if (!this.pack.identity.authentication?.length) return 'not-offered'
+    if (!this.pack.identity.authentication?.combinations?.length) return 'not-offered'
     if (principal.identityCredentialRef) return 'already-identified'
     const connectionId = principal.capabilityChannelId
     if (!connectionId) return 'unavailable'
@@ -80,16 +90,22 @@ export class IdentityRequests {
     try {
       const flowMode = await this.deps.isFlowCapable(connectionId)
       let attempt: AuthenticationAttempt
-      // a credential that is not accepted is asked again, as long as the person presents one (IDENT-RES-019);
-      // a wallet without flows cannot be told why, and is asked once
+      // an authentication that is not accepted is asked again, as long as the person goes on (IDENT-RES-019); a wallet
+      // without flows cannot be told why, and is asked once
       do {
         attempt = await this.deps.authenticate(
           connectionId,
           principal.actorIdentity,
           flowMode,
-          principal.userAgentVerified
+          principal.userAgentVerified,
+          {
+            purpose: 'visitor',
+          }
         )
-      } while (attempt.outcome === 'not-accepted' && flowMode)
+      } while (asksAgain(attempt) && flowMode)
+      if (attempt.outcome === 'not-accepted' && attempt.code === 'another-identity') return 'another-identity'
+      // one authenticate flow at a time on a connection: one is open already (FLOW-SIGNIN-001)
+      if (attempt.outcome === 'pending') return 'pending'
       if (attempt.outcome !== 'accepted') {
         this.unanswered.set(connectionId, Date.now())
         return 'not-presented'
@@ -108,19 +124,37 @@ export class IdentityRequests {
    * binds as at a connection (`onIdentityPresented`); another identity is refused there.
    */
   public async reveal(principal: Principal): Promise<IdentityRequestOutcome> {
-    if (!this.pack.identity.authentication?.length) return 'not-offered'
+    // the credentials that reveal the email: a `credential` method alone that asks for it
+    const combinations = credentialMethodsOf(this.pack)
+      .filter(([, m]) => !m.attributes || m.attributes.includes('email'))
+      .map(([name]) => [name])
+    if (!combinations.length) return 'not-offered'
     const connectionId = principal.capabilityChannelId
     if (!connectionId) return 'unavailable'
     if (this.pending.has(connectionId)) return 'pending'
     this.pending.add(connectionId)
     try {
       const flowMode = await this.deps.isFlowCapable(connectionId)
+      // the connection is identified: the identity is checked before the flow closes, and another one is refused on
+      // it with no new request (IDENT-RES-014, IDENT-RES-019, FLOW-SIGNIN-004)
+      // a re-authentication by the credential, on the identified connection (flow profile §6.14, purpose `step-up`)
+      const name = this.pack.metadata?.displayName ?? 'The agent'
       const attempt = await this.deps.authenticate(
         connectionId,
         principal.actorIdentity,
         flowMode,
-        principal.userAgentVerified
+        principal.userAgentVerified,
+        {
+          purpose: 'step-up',
+          combinations,
+          text: `Share your credential again so that ${name} reads the email address it carries`,
+          ...(principal.identityCredentialRef ? { bound: principal } : {}),
+        }
       )
+      if (attempt.outcome === 'not-accepted' && attempt.code === 'another-identity') {
+        this.logger.info({ principalId: principal.id }, 'another identity presented to reveal the email: refused')
+        return 'another-identity'
+      }
       if (attempt.outcome !== 'accepted') return 'not-presented'
       const { outcome } = await this.deps.onIdentityPresented(connectionId, attempt.facts)
       this.logger.info({ principalId: principal.id, outcome }, 'authentication asked again to reveal the email')
@@ -137,7 +171,9 @@ export class IdentityRequests {
   public async present(
     principal: Principal,
     name: string,
-    by: 'model' | 'person' | 'connect'
+    by: 'model' | 'person' | 'connect',
+    /** the conversation session the request was made from, which the flow names as its origin (INTX-FLOW-001) */
+    origin?: Session
   ): Promise<PresentationRequestOutcome> {
     const entry = this.pack.presentations?.[name]
     if (!entry || !this.deps.present || !this.deps.record) return 'not-offered'
@@ -152,7 +188,7 @@ export class IdentityRequests {
     this.pending.add(connectionId)
     try {
       const flowMode = await this.deps.isFlowCapable(connectionId)
-      const evidence = await this.deps.present(connectionId, name, entry, flowMode)
+      const evidence = await this.deps.present(connectionId, name, entry, flowMode, origin)
       if (!evidence) {
         this.unanswered.set(key, Date.now())
         return 'not-presented'

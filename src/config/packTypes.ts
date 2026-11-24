@@ -12,10 +12,6 @@ export type ConnectionType = 'verifiable-user-agent' | 'verifiable-service'
 export type ToolNameOrStar = string
 
 /**
- * A role: approval rights and flags, never a scope of conversation reads (RBAC-XSESS-005, decision 60): `crossSession`
- * is withdrawn and a pack that declares it is refused at start.
- */
-/**
  * The admin interface's two roles (RBAC-XSESS-008), declared like any other role and given by the user directory:
  * `auditor` reads what the admin interface serves, `operator` erases, sets and releases legal hold and rotates keys.
  * Nothing but the admin interface reads them.
@@ -23,10 +19,10 @@ export type ToolNameOrStar = string
 export const ADMIN_ROLES = ['auditor', 'operator'] as const
 export type AdminRole = (typeof ADMIN_ROLES)[number]
 
+/** A role: approval rights and flags, never a scope of conversation reads (RBAC-XSESS-005, decision 60). */
 export interface RoleDefinition {
   description?: string
   canApprove?: boolean
-  auditor?: boolean
   /** the role reads the admin view of roles and of the changes of the user directory (IDENT-DIR-008, decision 61) */
   admin?: boolean
 }
@@ -86,40 +82,124 @@ export interface EvidencePolicy {
   modelVisible?: string[]
 }
 
-export interface AuthenticationEntry extends EvidencePolicy {
-  /** requested by its ecosystem schema, so that any accredited issuer satisfies the request */
-  credential: { jsonSchemaCredentialId: string }
-  /** the attributes that, with the issuer's organization and the schema, form the principal key */
-  subjectKey: string[]
-  /** the attributes asked of the credential; every attribute of the schema when omitted */
+/**
+ * The types of an authentication method (ayni-spec D126, IDENT-AUTH-001; flow profile §4.1). `credential`, `email`,
+ * `document` and `passkey` find an identity (**identifying**); `face-match` and `authenticator-app` confirm the one an
+ * identifying method of the same combination found (**confirming**).
+ */
+export const AUTHENTICATION_METHOD_TYPES = [
+  'credential',
+  'email',
+  'document',
+  'face-match',
+  'authenticator-app',
+  'passkey',
+] as const
+export type AuthenticationMethodType = (typeof AUTHENTICATION_METHOD_TYPES)[number]
+export const IDENTIFYING_METHOD_TYPES: readonly AuthenticationMethodType[] = [
+  'credential',
+  'email',
+  'document',
+  'passkey',
+]
+export const CONFIRMING_METHOD_TYPES: readonly AuthenticationMethodType[] = ['face-match', 'authenticator-app']
+/** The types a person enrols with the agent, on the phone, after a first authentication by another method (D129). */
+export const ENROLLABLE_METHOD_TYPES = ['authenticator-app', 'passkey'] as const
+export type EnrollableMethodType = (typeof ENROLLABLE_METHOD_TYPES)[number]
+
+/** Where the reference picture of a face match comes from, in the method's order of preference (D131). */
+export type FaceReference = 'document' | 'directory'
+
+/**
+ * One method of `identity.authentication.methods`, keyed by a name the operator chooses (D126, IDENT-AUTH-001). A
+ * `credential` method names its schema and the attributes that key the person (D59), and may say what is kept of the
+ * presentation (D67); a `face-match` method names where its reference picture comes from (D131).
+ */
+export interface AuthenticationMethod extends EvidencePolicy {
+  type: AuthenticationMethodType
+  /** `credential`: requested by its ecosystem schema, so that any accredited issuer satisfies the request */
+  credential?: { jsonSchemaCredentialId: string }
+  /** `credential`: the attributes that, with the issuer's organization and the schema, form the principal key */
+  subjectKey?: string[]
+  /** `credential`: the attributes asked of the credential; every attribute of the schema when omitted */
   attributes?: string[]
+  /** `credential`: the organizations whose credentials are accepted, by organization key; any accredited issuer when absent */
+  issuers?: { organizations?: string[] }
+  /** `face-match`: the reference picture, in order: a passport read in the same flow, the directory entry's `photo` */
+  reference?: FaceReference[]
+}
+
+/** A `credential` method, its schema and subject key given (checked at start-up). */
+export type CredentialMethod = AuthenticationMethod & {
+  type: 'credential'
+  credential: { jsonSchemaCredentialId: string }
+  subjectKey: string[]
+}
+
+/**
+ * How a person authenticates (D72, D125; IDENT-RES-010, IDENT-AUTH-001): the methods enabled and the combinations
+ * accepted, one of which the person completes on the phone in one `authenticate` flow (D128), and when it is asked.
+ */
+export interface PackAuthentication {
   /**
    * when it is asked: at connection (default), or only when it is asked for, by the person, from their wallet or
    * a menu item, or by the model's tool (D65, D72)
    */
   request?: 'on-connect' | 'on-demand'
   /**
-   * whether a person may enter without the credential, as a guest (D72). `false` by default with `on-connect`:
-   * nothing opens without it. `on-demand` lets guests in by itself, and refuses `false`.
+   * whether a person may enter without authenticating, as a visitor (D72). `false` by default with `on-connect`:
+   * nothing opens without it. `on-demand` lets visitors in by itself, and refuses `false`.
    */
-  guests?: boolean
-  /** the organizations whose credentials are accepted, by organization key; any accredited issuer when absent */
-  issuers?: { organizations?: string[] }
-  /** how a person obtains the credential, in the operator's words, with a link when there is one */
+  visitors?: boolean
+  methods: Record<string, AuthenticationMethod>
+  /** the accepted combinations, each a list of method names; the identifying ones run first (D126, D127) */
+  combinations: string[][]
+  /** how a person obtains what they lack to authenticate, in the operator's words, with a link when there is one */
   obtain?: { text?: string; url?: string }
 }
 
 /**
  * How an agent authenticates a person (D72, IDENT-RES-010): **required**, asked at connection and nothing opens
- * without it; **offered**, asked at connection and the person may enter as a guest instead; **on-request**,
- * nothing asked at connection and a guest authenticates when they ask.
+ * without it; **offered**, asked at connection and the person may enter as a visitor instead; **on-request**,
+ * nothing asked at connection and a visitor authenticates when they ask. None when the pack accepts no combination.
  */
 export type AuthenticationMode = 'required' | 'offered' | 'on-request'
 
-export function authenticationModeOf(entry: AuthenticationEntry | undefined): AuthenticationMode | undefined {
-  if (!entry) return undefined
-  if (entry.request === 'on-demand') return 'on-request'
-  return entry.guests ? 'offered' : 'required'
+export function authenticationModeOf(authentication: PackAuthentication | undefined): AuthenticationMode | undefined {
+  if (!authentication?.combinations?.length) return undefined
+  if (authentication.request === 'on-demand') return 'on-request'
+  return authentication.visitors ? 'offered' : 'required'
+}
+
+/** Whether the pack authenticates anyone: it accepts at least one combination (D125, IDENT-RES-010). */
+export function authenticates(pack: Pick<AgentPack, 'identity'>): boolean {
+  return !!pack.identity.authentication?.combinations?.length
+}
+
+/** The `credential` methods of the authentication, by name, in the order the pack lists them. */
+export function credentialMethodsOf(pack: Pick<AgentPack, 'identity'>): [string, CredentialMethod][] {
+  return Object.entries(pack.identity.authentication?.methods ?? {}).filter(
+    (entry): entry is [string, CredentialMethod] =>
+      entry[1].type === 'credential' && !!entry[1].credential && !!entry[1].subjectKey
+  )
+}
+
+/** The `credential` method of a schema, when the authentication has one. */
+export function credentialMethodFor(
+  pack: Pick<AgentPack, 'identity'>,
+  jsonSchemaCredentialId: string | undefined
+): CredentialMethod | undefined {
+  if (!jsonSchemaCredentialId) return undefined
+  return credentialMethodsOf(pack).find(([, m]) => m.credential.jsonSchemaCredentialId === jsonSchemaCredentialId)?.[1]
+}
+
+/**
+ * The types a person may enrol with this agent (D129, IDENT-STAT-002): those of the enabled `authenticator-app` and
+ * `passkey` methods, which a person can use only once enrolled.
+ */
+export function enrollableTypesOf(pack: Pick<AgentPack, 'identity'>): EnrollableMethodType[] {
+  const types = new Set(Object.values(pack.identity.authentication?.methods ?? {}).map((m) => m.type))
+  return ENROLLABLE_METHOD_TYPES.filter((type) => types.has(type))
 }
 
 export interface OrganizationPattern {
@@ -235,7 +315,9 @@ export function challengeTypesOf(profile: Pick<IssuanceProfile, 'authChallenge'>
  * Badges are obtained from the directory with a passport: then every entry carries a birthdate and a nationality,
  * which only the matching of a document read reads (IDENT-ROLE-012, IDENT-DIR-002, IDENT-DIR-007).
  */
-export function directoryReadsDocuments(pack: Pick<AgentPack, 'issuance'>): boolean {
+export function directoryReadsDocuments(pack: Pick<AgentPack, 'issuance' | 'identity'>): boolean {
+  // a `document` method of the authentication matches an entry the same way (IDENT-DIR-003)
+  if (Object.values(pack.identity?.authentication?.methods ?? {}).some((m) => m.type === 'document')) return true
   return Object.values(pack.issuance ?? {}).some(
     (profile) => takesClaimsFromDirectory(profile) && challengeTypesOf(profile).includes('document')
   )
@@ -260,14 +342,14 @@ export function connectionTypeOf(subjectKind: PresentationEntry['subjectKind']):
  * requires it authenticates a person or refuses them.
  */
 export function admitsUnidentified(pack: Pick<AgentPack, 'identity'>): boolean {
-  return authenticationModeOf(pack.identity.authentication?.[0]) !== 'required'
+  return authenticationModeOf(pack.identity.authentication) !== 'required'
 }
 
 export interface PackIdentity {
   homeBackingIdentity: string
   userAgentGate?: 'required' | 'optional'
-  /** the one credential schema that authenticates a person: a list validated to one entry (D65, IDENT-RES-010) */
-  authentication?: AuthenticationEntry[]
+  /** how a person authenticates: the methods, the accepted combinations, when it is asked (D125, IDENT-AUTH-001) */
+  authentication?: PackAuthentication
   /** patterns over the verified Organization credential, first match wins; `home` is never set here (D64) */
   organizations?: OrganizationPattern[]
   roles?: Record<string, RoleDefinition>
@@ -518,6 +600,49 @@ export interface ToolDeclaration {
   call?: CallRule
   untrusted?: boolean
   stepUp?: StepUp
+  /** the bounds and the default of its approval policy in a space, tighter than `approvals.spaces` (TOOL-CAT-023) */
+  approval?: ToolApprovalBounds
+}
+
+/** An entry of an approval policy as the agent-pack may write it: never a `person` (TOOL-CAT-023). */
+export interface PackApproverEntry {
+  kind: 'owner' | 'person' | 'member' | 'role' | 'department'
+  role?: string
+  department?: string
+  required: boolean
+}
+
+/** An approval policy of a tool of a space as the agent-pack writes it (INTX-APPR-020). */
+export interface PackApprovalPolicy {
+  approvers?: PackApproverEntry[]
+  threshold?: number
+  refusal?: 'any' | 'required'
+  attested?: boolean
+  whenApproverAsks?: 'another-approver' | 'own-confirmation'
+}
+
+/** One tool's bounds of its approval policy in a space (TOOL-CAT-023, D140). */
+export interface ToolApprovalBounds {
+  minApprovals?: number
+  attested?: 'optional' | 'required'
+  /** the fields it changes of `approvals.spaces.default` */
+  default?: PackApprovalPolicy
+}
+
+/** The defaults and bounds of a kind of approval's timeout, in minutes (SPACE-DEF-008, D138). */
+export interface TimeoutBounds {
+  default?: number
+  min?: number
+  max?: number
+}
+
+/** `approvals.spaces` (TOOL-CAT-023, D140): the policies of the tools of spaces, their bounds, the timeouts. */
+export interface SpaceApprovalBounds {
+  default?: PackApprovalPolicy
+  minApprovals?: number
+  allowedApprovers?: { kinds?: PackApproverEntry['kind'][]; roles?: string[] }
+  attested?: 'optional' | 'required'
+  timeouts?: Record<string, TimeoutBounds>
 }
 
 /** What every source of `tools.sources` may declare (D101, TOOL-CAT-001), whatever its type. */
@@ -545,8 +670,6 @@ export interface McpSource extends SourceFields {
   args?: string[]
   env?: Record<string, string>
   headers?: Record<string, string>
-  lazy?: boolean
-  reconnect?: boolean
   /** the tools of the server the model is given; every tool it lists when absent (TOOL-CAT-003) */
   offer?: string[]
   bindings?: SourceBinding[]
@@ -612,6 +735,8 @@ export type ProcessingActivityId =
   | 'credential-presentations'
   | 'approvals'
   | 'statistics'
+  /** a face match: consent is its one lawful basis (D131, IDENT-AUTH-011) */
+  | 'biometric-matching'
 
 export interface ProcessingActivity {
   id: ProcessingActivityId
@@ -660,6 +785,8 @@ export interface SpaceTemplate {
   kind: 'team' | 'organization'
   /** the roles of the people who may create a space from it */
   creators: string[]
+  /** the roles of its stewards, who name an owner of a space of it that has none, or on request (SPACE-MEMB-011) */
+  stewards?: string[]
   /** by a list the owner keeps, or by a rule over verified facts of the people of the home organization */
   membership: { mode: 'list' } | { mode: 'rule'; rule: { department?: string; group?: string; organization?: true } }
   rules?: {
@@ -747,6 +874,8 @@ export interface AgentPack {
     approvers?: string[]
     /** how long a confirmation card waits for the person (TOOL-CALL-004): 300 seconds by default */
     confirmation?: { timeoutSeconds?: number }
+    /** the policies of the tools of spaces: a default, its bounds, the timeouts of a space (TOOL-CAT-023) */
+    spaces?: SpaceApprovalBounds
   }
   sessions?: {
     idleTimeoutSeconds?: number

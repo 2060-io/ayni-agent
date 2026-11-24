@@ -10,6 +10,8 @@ import { nowIso } from '../../util/ids.js'
 import type { Logger } from '../../util/logger.js'
 
 export const AYNI_FLOW_PROTOCOL = 'https://didcomm.org/ayni-flow/1.0'
+/** The calls a face step is carried by (IDENT-AUTH-010): offered only to a peer that disclosed it as `callee`. */
+export const CALLS_PROTOCOL = 'https://didcomm.org/calls/1.0'
 
 export interface PeerProfile {
   connectionId: string
@@ -103,6 +105,15 @@ export class PeerProfiles {
   public async supports(connectionId: string, protocol: string): Promise<boolean> {
     const profile = await this.get(connectionId)
     return !!profile && supportsProtocol(profile, protocol)
+  }
+
+  /** Whether the peer disclosed `calls/1.0` as `callee`, or with no role (IDENT-AUTH-010, FLOW-SIGNIN-012). */
+  public async takesCalls(connectionId: string): Promise<boolean> {
+    const profile = await this.get(connectionId)
+    if (!profile || !supportsProtocol(profile, CALLS_PROTOCOL)) return false
+    const id = profile.protocols.find((p) => p === CALLS_PROTOCOL || p.startsWith('https://didcomm.org/calls/1.'))
+    const roles = id ? profile.roles[id] : undefined
+    return !roles?.length || roles.includes('callee')
   }
 
   public async isFlowCapable(connectionId: string): Promise<boolean> {

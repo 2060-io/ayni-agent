@@ -1,5 +1,5 @@
 /** Memory schema versions (CORE-VER-001/002). Each migration is applied once, in order. */
-export const MEMORY_SCHEMA_VERSION = '3.10.0'
+export const MEMORY_SCHEMA_VERSION = '3.12.0'
 
 export const MIGRATIONS: { version: string; sql: string }[] = [
   {
@@ -241,8 +241,7 @@ CREATE INDEX IF NOT EXISTS admin_audit_ts ON admin_audit (ts DESC);
   },
   {
     // D77: a preference keeps its name and value only as ciphertext under a key of its own, found by a keyed index
-    // of its name; the agent seals at start what an earlier version kept in the clear (working-memory notes keep
-    // theirs in `data`, which needs no column)
+    // of its name (working-memory notes keep theirs in `data`, which needs no column)
     version: '3.5.0',
     sql: `
 ALTER TABLE preferences ADD COLUMN IF NOT EXISTS enc_key_ref TEXT;
@@ -445,6 +444,43 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
   ref TEXT PRIMARY KEY,
   data JSONB NOT NULL
 );
+`,
+  },
+  {
+    // a device secret is handed to its client once and only its hash is kept (D51, IDENT-DEV-001): the secrets an
+    // earlier version left on the session records are erased
+    version: '3.11.0',
+    sql: `
+UPDATE sessions SET data = data - 'deviceSecret' - 'deviceSecretAt' WHERE data ? 'deviceSecret' OR data ? 'deviceSecretAt';
+`,
+  },
+  {
+    // space governance (ayni-spec D135 to D142): one owner of a space, the first of its owners, and no list of them; an
+    // approval of a tool of a space waits under a policy (its owner, required, one approval, attested, own confirmation:
+    // what the owner's approval was), no longer `ownerApproval`; the notices of a space's governance, each in one
+    // person's Notifications, waiting until `resolved_at` for the kinds that wait
+    version: '3.12.0',
+    sql: `
+UPDATE spaces SET data = (data - 'ownerIds') || jsonb_build_object('ownerPrincipalId', data->'ownerIds'->0)
+  WHERE data ? 'ownerIds' AND jsonb_array_length(data->'ownerIds') > 0;
+UPDATE spaces SET data = data - 'ownerIds' WHERE data ? 'ownerIds';
+UPDATE approvals SET data = (data - 'ownerApproval') || jsonb_build_object('spacePolicy', jsonb_build_object(
+    'approvers', jsonb_build_array(jsonb_build_object('kind', 'owner', 'required', true)),
+    'threshold', 1, 'refusal', 'any', 'attested', true, 'whenApproverAsks', 'own-confirmation'))
+  WHERE data->>'ownerApproval' = 'true';
+UPDATE approvals SET data = data - 'ownerApproval' WHERE data ? 'ownerApproval';
+
+CREATE TABLE IF NOT EXISTS governance_notices (
+  id TEXT PRIMARY KEY,
+  principal_id TEXT NOT NULL,
+  space_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('owner-changed','policy-attention','no-approver','space-without-owner')),
+  at TIMESTAMPTZ NOT NULL,
+  resolved_at TIMESTAMPTZ,
+  data JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS governance_notices_principal ON governance_notices (principal_id, at DESC);
+CREATE INDEX IF NOT EXISTS governance_notices_space ON governance_notices (space_id, kind) WHERE resolved_at IS NULL;
 `,
   },
 ]

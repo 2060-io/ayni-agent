@@ -14,21 +14,41 @@ metadata:
 identity:
   homeBackingIdentity: ${HOME_BACKING_IDENTITY}          # did:webvh:... of this agent, operated by Northwind Logistics GmbH
   userAgentGate: ${USER_AGENT_GATE:-required}              # required | optional (D38)
-  # the one credential schema that authenticates a person, asked on connect by its ecosystem schema: a badge
-  # of any accredited issuer satisfies it (D65). With the issuer's organization, badgeNumber is the person.
+  # How a person authenticates, on the phone only (D125, D128): the methods enabled, each named here, and the accepted
+  # combinations, one of which the person chooses and completes in one authenticate flow. The identifying methods
+  # (credential, email, document, passkey) run first, then the confirming ones (face-match, authenticator-app).
   authentication:
-    - credential: { jsonSchemaCredentialId: "${IDENTITY_SCHEMA_ID:-https://ecs.example/vt/schemas-badge-jsc.json}" }
-      subjectKey: [badgeNumber]
-      request: on-connect        # before any conversation: identified or refused; on-demand lets people in first
-      attributes: [badgeNumber, name, email, title, department, photo]
-      # what is kept of the badge, sealed, and for how long; by default nothing but the audit record (D67). The email
-      # binds an invitation of another organization to a person the agent knows already, asking nothing (SPACE-INV-004)
-      store:
-        attributes: [name, email, title, department, photo]
-        retention: { days: 365, onExpiry: erase }
-      # what the model may read of it; by default nothing. department is used by the role rules and kept for
-      # audit, the photo is the reference of the face-match challenge: neither is shown to the model
-      modelVisible: [name, title]
+    request: on-connect          # before any conversation: identified or refused; on-demand lets people in first
+    visitors: false              # true: a person may continue as a visitor instead (D72)
+    methods:
+      # a badge of any accredited issuer of the ecosystem's schema (D65); with the issuer's organization, badgeNumber is
+      # the person. A badge this agent issued from its user directory identifies the entry it was issued from.
+      badge:
+        type: credential
+        credential: { jsonSchemaCredentialId: "${IDENTITY_SCHEMA_ID:-https://ecs.example/vt/schemas-badge-jsc.json}" }
+        subjectKey: [badgeNumber]
+        attributes: [badgeNumber, name, email, title, department, photo]
+        # what is kept of the badge, sealed, and for how long; by default nothing but the audit record (D67). The email
+        # binds an invitation of another organization to a person the agent knows already, asking nothing (SPACE-INV-004)
+        store:
+          attributes: [name, email, title, department, photo]
+          retention: { days: 365, onExpiry: erase }
+        # what the model may read of it; by default nothing. department is used by the role rules and kept for
+        # audit, the photo is the reference of a tool's face-match challenge: neither is shown to the model
+        modelVisible: [name, title]
+      # with identity.directory below: an address of an entry, by a code sent to it (MAIL_HOST and MAIL_FROM_ADDRESS),
+      # the chip of a passport matched to one entry, a face against the passport's portrait or the entry's photo, an
+      # authenticator app and a passkey enrolled on the phone after a first authentication by another method (D129)
+      # email:    { type: email }
+      # passport: { type: document }
+      # face:     { type: face-match, reference: [document, directory] }   # needs biometric-matching with consent
+      # otp:      { type: authenticator-app }
+      # passkey:  { type: passkey }
+    combinations:
+      - [badge]
+      # - [passport]               # the passport alone, without a face match in this version (D127)
+      # - [email, otp]
+      # - [passkey]
   # home is Northwind itself, the organization of this agent's own Organization credential: it is never listed.
   # Every other organization is recognized by a pattern over its verified attributes, first match wins (D64).
   organizations:
@@ -59,7 +79,6 @@ identity:
       description: People of an accredited organization this agent does not otherwise know.
     auditor:
       description: Read-only access to the persistent store.
-      auditor: true
     people-admin:
       description: Reads who holds which role of the user directory, and what each reload changed (D92).
       admin: true
@@ -227,7 +246,6 @@ tools:
       transport: streamable-http
       url: ${CRM_MCP_URL}
       headers: { Authorization: "Bearer ${CRM_MCP_TOKEN}" }   # the agent's account, deployment-held (TOOL-ACCESS-002)
-      lazy: true
       access:
         roles:
           employee: [search_customer, search_invoices]

@@ -778,27 +778,17 @@ describe('the confirmation of a call (TOOL-CALL-003..008, PROF-TOOL-007/008/012,
     expect((await running.agent.store.approvals.list({})).length).toBe(before)
   })
 
-  it('runs no call when no session of the conversation can show the card, nor for a service (TOOL-CALL-005, PROF-SESS-016)', async () => {
-    const old = await open(ana, { spaceId: salesEu.id, profileVersion: null })
+  it('asks the card of every bound AG-UI session of the conversation, whatever its client declares, and none of a service (TOOL-CALL-005)', async () => {
+    // a client that declares no profile version is asked the card: there is no run-time test of a version any more
+    const unversioned = await open(ana, { spaceId: salesEu.id, profileVersion: null })
     model.script = [{ calls: [{ name: 'create-note', arguments: { company: 'Acme', note: 'n' } }] }, { text: 'ok' }]
     const before = crm.calls.length
-    await run(old, 'note')
-    expect(toolAnswers().at(-1)).toBe(
-      `Add a note needs the person's confirmation, which could not be asked here: it did not run.\n\n${ONE_CALL}`
-    )
-    expect(crm.calls.length).toBe(before)
-    const [record] = await running.agent.store.toolCalls.list({
-      conversationId: await conversationOf(old.sessionId),
-      limit: 1,
-    })
-    expect(record?.outcome).toBe('unavailable')
-    // the same conversation open in a client of 3.4 too gets the card there
-    const current = await otherDevice(ana, await conversationOf(old.sessionId))
-    model.script = [{ calls: [{ name: 'create-note', arguments: { company: 'Acme', note: 'n' } }] }, { text: 'ok' }]
-    const turn = start(old, 'note')
-    const pending = await pendingConfirmation(await conversationOf(old.sessionId))
-    await decide(current, pending.id, 'reject')
+    const turn = start(unversioned, 'note')
+    const pending = await pendingConfirmation(await conversationOf(unversioned.sessionId))
+    expect(pending.kind).toBe('confirmation')
+    await decide(unversioned, pending.id, 'reject')
     await turn
+    expect(crm.calls.length).toBe(before)
     // a service peer is asked no card: its call does not run (TOOL-CALL-005)
     const service = await device('svc', ['sales'])
     await addMember(salesEu.id, service.principal.id)
@@ -948,7 +938,7 @@ describe('the rules of the owner, and the approval of a tool of a space (TOOL-SP
     expect(toolAnswers().at(-1)).toBe(
       `Add a note needs the approval of the owner of the space, jonas. The request is pending: the action runs once approved, and its outcome will be told in this conversation.\n\n${ONE_CALL}`
     )
-    const pending = (await running.agent.store.approvals.list({ status: 'PENDING' })).find((r) => r.ownerApproval)
+    const pending = (await running.agent.store.approvals.list({ status: 'PENDING' })).find((r) => r.spacePolicy)
     expect(pending).toMatchObject({ spaceId: salesEu.id, sourceId: 'relaticle', kind: 'sensitivity' })
     // a manager of the pack who is not the owner is no approver (INTX-APPR-004)
     const mia = await device('mia', ['employee', 'manager'])
@@ -966,15 +956,24 @@ describe('the rules of the owner, and the approval of a tool of a space (TOOL-SP
       rule: 'approval',
       approval: { status: 'REJECTED', decidedBy: ['jonas'] },
     })
-    // the owner asking a call of his own space confirms it himself, with no allowance (INTX-APPR-005)
+    // the owner asking a call of his own space, its one approver under the default policy, confirms it on his phone,
+    // attested, a self-approval; no card in the conversation asks it (INTX-APPR-005, INTX-APPR-023)
     const jonasSales = await open(jonas, { spaceId: salesEu.id })
     model.script = [{ calls: [{ name: 'create-note', arguments: { company: 'Acme', note: 'mine' } }] }, { text: 'ok' }]
-    const own = start(jonasSales, 'note')
-    const confirmation = await pendingConfirmation(await conversationOf(jonasSales.sessionId))
-    expect(confirmation.allowForConversation).toBe(false)
-    await decide(jonasSales, confirmation.id, 'approve', 'conversation')
-    await own
-    expect(crm.calls.at(-1)).toMatchObject({ name: 'create-note', args: { note: 'mine' } })
+    const phoneBefore = ph.authorizeRequests(jonas.connectionId).length
+    await run(jonasSales, 'note')
+    const own = (await running.agent.store.approvals.list({ status: 'PENDING' })).find(
+      (r) => r.requesterId === jonas.principal.id && r.spaceId === salesEu.id
+    ) as ApprovalRecord
+    expect(own).toMatchObject({ approverIds: [jonas.principal.id], kind: 'sensitivity' })
+    const request = ph.authorizeRequests(jonas.connectionId).slice(phoneBefore)
+    expect(request).toHaveLength(1)
+    expect(request[0]?.request).toMatchObject({ attested: true })
+    await ph.authorize(jonas.connectionId, 'approved', { approvalId: own.id })
+    await until(() => crm.calls.at(-1)?.args.note === 'mine')
+    const decided = await running.agent.store.approvals.get(own.id)
+    expect(decided).toMatchObject({ status: 'APPROVED' })
+    expect(decided?.decisions[0]).toMatchObject({ approverId: jonas.principal.id, self: true })
     // back to the pack's rule: looser than the one in force, so it waits for the phone
     await confirmed(jonas, () =>
       call(jonas, 'PATCH', `/spaces/${salesEu.id}/tools/relaticle`, { calls: { 'create-note': 'confirm' } })

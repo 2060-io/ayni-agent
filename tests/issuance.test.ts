@@ -281,6 +281,32 @@ describe('the offer in the wallet (INTX-ISSUE-004)', () => {
     expect(await broken.offer(input)).toEqual({ outcome: 'failed' })
   })
 
+  it('opens the issue flow with the conversation session it is asked from as origin (INTX-FLOW-001)', async () => {
+    const client = { offerCredential: async () => ({ credentialExchangeId: 'cex-origin' }) }
+    const opened: { origin?: Session }[] = []
+    const flows = {
+      open: async (opts: { origin?: Session }) => {
+        opened.push(opts)
+        return { flowId: 'flow-o', connectionId: 'conn-2', kind: 'issue' }
+      },
+      waitForClose: async () => ({ flowId: 'flow-o', state: 'declined', outcome: 'declined', closedBy: 'peer' }),
+      close: async () => undefined,
+    }
+    const offers = new CredentialOffers(client as never, flows as never, async () => true, silent as never, 5_000)
+    const input = { connectionId: 'conn-2', credentialDefinitionId: 'def-1', claims: {}, title: 'Badge' }
+    const conversation = { id: 'ses_ui', channelType: 'ag-ui', state: 'bound' } as Session
+    await offers.offer({ ...input, origin: conversation })
+    await offers.offer(input)
+    expect(opened.map((o) => o.origin?.id)).toEqual(['ses_ui', undefined])
+    // the issuance names the conversation of an AG-UI session, and none for the DIDComm chat of a wallet
+    const { service, offers: made } = setup({ pass })
+    const asked = made as unknown as { origin?: Session }[]
+    expect((await service.issue(person(), conversation, 'pass', 'person')).outcome).toBe('issued')
+    const chat = { id: 'ses_dc', channelType: 'didcomm', state: 'bound' } as Session
+    expect((await service.issue(person({ id: 'prn_3' }), chat, 'pass', 'person')).outcome).toBe('issued')
+    expect(asked.map((o) => o.origin?.id)).toEqual(['ses_ui', undefined])
+  })
+
   it('tells apart the person who declines, the offer nobody answers and the wallet that refuses it (INTX-ISSUE-018)', async () => {
     const client = { offerCredential: async () => ({ credentialExchangeId: 'cex-flow' }) }
     const input = { connectionId: 'conn-2', credentialDefinitionId: 'def-1', claims: {}, title: 'Badge' }

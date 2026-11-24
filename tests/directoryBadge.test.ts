@@ -19,6 +19,7 @@ import { dateInt, documentId, emailId, type IssuanceDeps, IssuanceService, subje
 import type { Principal, Session } from '../src/core/types.js'
 import { createEntryCrypto } from '../src/memory/crypto.js'
 import { MemoryStore } from '../src/store/memory.js'
+import { badgeAuthentication } from './helpers.js'
 
 // biome-ignore lint/suspicious/noExplicitAny: a YAML document the tests edit freely
 type Doc = Record<string, any>
@@ -358,14 +359,12 @@ describe('what the agent-pack may say of a badge from the directory (IDENT-DIR-0
   function packWith(edit: (doc: Doc) => void): () => AgentPack {
     const doc = parseYaml(readFileSync('agent-packs/dev/agent-pack.yaml', 'utf8')) as Doc
     doc.identity.directory = { file: '/var/run/secrets/directory.yaml' }
-    doc.identity.authentication = [
-      {
-        credential: { jsonSchemaCredentialId: BADGE },
-        subjectKey: ['badgeNumber'],
-        request: 'on-demand',
-        guests: true,
-      },
-    ]
+    doc.identity.authentication = badgeAuthentication({
+      credential: { jsonSchemaCredentialId: BADGE },
+      subjectKey: ['badgeNumber'],
+      request: 'on-demand',
+      visitors: true,
+    })
     doc.evidence = { document, email: { store: { attributes: ['address'] } } }
     doc.issuance = {
       badge: { ...fromDirectory([{ type: 'email' }]), credential: { jsonSchemaCredentialId: BADGE } },

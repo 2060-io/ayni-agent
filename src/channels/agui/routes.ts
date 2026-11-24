@@ -19,7 +19,7 @@ import {
 import { Ajv2020 } from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
-import { messageDeletionWindowSeconds } from '../../config/packTypes.js'
+import { admitsUnidentified, messageDeletionWindowSeconds } from '../../config/packTypes.js'
 import type { AyniAgent, QueuedRun } from '../../core/agent.js'
 import { CLIENT_METADATA_PATH, type ConnectionsChanged, OAUTH_CALLBACK_PATH } from '../../core/connections.js'
 import { conversationOf } from '../../core/conversationOf.js'
@@ -28,7 +28,6 @@ import { conversationKey, type TurnEvent, type TurnSink, withheldValue } from '.
 import { normalizeClient, SessionError } from '../../core/sessions.js'
 import { type SpaceAccess, SpaceError, spaceIdOf } from '../../core/spaces.js'
 import type { SpaceToolsChanged } from '../../core/spaceTools.js'
-import { profileAtLeast } from '../../core/toolGate.js'
 import {
   type ClientDescription,
   type Conversation,
@@ -77,7 +76,6 @@ interface RunAgentInput {
   messages?: { id?: string; role: string; content?: unknown }[]
   tools?: unknown[]
   forwardedProps?: { ayni?: AyniAction }
-  resume?: { interruptId: string; status: string; payload?: unknown }[]
 }
 
 const ajv = new Ajv2020({ allErrors: true, strict: false })
@@ -215,6 +213,10 @@ export class AgUiRoutes {
         ...(this.agent.connections?.personalSources().length ? { connections: true } : {}),
         // the Notifications of a space and of the agent: approvals, pending and past (ayni-spec D114, PROF-DESC-011)
         notifications: true,
+        // a person may enter without authenticating, as a visitor: the agent-pack names no authentication schema, or
+        // one offered or asked on request (IDENT-RES-007, IDENT-RES-010, PROF-DESC-012); an agent that requires it
+        // declares nothing
+        ...(admitsUnidentified(this.agent.pack) ? { visitors: true } : {}),
       },
       locales: [this.agent.pack.language.agent],
     }
@@ -321,6 +323,8 @@ export class AgUiRoutes {
             body.spaceId
           )
           const principal = await this.agent.principalOf(session)
+          // the response hands the device secret: the session keeps it no longer (IDENT-DEV-001)
+          const deviceSecret = await this.agent.sessions.takeDeviceSecret(session)
           await this.agent.welcome(session)
           return reply.code(201).send({
             sessionId: session.id,
@@ -329,7 +333,7 @@ export class AgUiRoutes {
             agent: { did, name: this.agent.pack.metadata.displayName },
             principal: principal ? this.agent.principalDisplay(principal) : undefined,
             deviceHandle: session.deviceHandle,
-            deviceSecret: session.deviceSecret,
+            deviceSecret,
             conversationId: session.conversationId,
             resumedFromSessionId: session.resumedFromSessionId,
             idleTimeoutSeconds: this.agent.sessions.idleTimeoutSeconds,
@@ -387,8 +391,10 @@ export class AgUiRoutes {
           body.spaceId
         )
         if (session.state === 'bound') {
-          // a paired device: bound at once, no phone round trip (PROF-SESS-010)
+          // a paired device: bound at once, no phone round trip (PROF-SESS-010); the response hands the rotated
+          // secret, which the session keeps no longer (IDENT-DEV-001)
           const principal = await this.agent.principalOf(session)
+          const deviceSecret = await this.agent.sessions.takeDeviceSecret(session)
           await this.agent.welcome(session)
           return reply.code(201).send({
             sessionId: session.id,
@@ -397,7 +403,7 @@ export class AgUiRoutes {
             agent: { did, name: this.agent.pack.metadata.displayName },
             principal: principal ? this.agent.principalDisplay(principal) : undefined,
             deviceHandle: session.deviceHandle,
-            deviceSecret: session.deviceSecret,
+            deviceSecret,
             conversationId: session.conversationId,
             resumedFromSessionId: session.resumedFromSessionId,
             idleTimeoutSeconds: this.agent.sessions.idleTimeoutSeconds,
@@ -613,17 +619,10 @@ export class AgUiRoutes {
           : Array.isArray(content)
             ? (content as { type: string; text?: string }[]).map((p) => p.text ?? '').join(' ')
             : ''
-      let resumeAction: AyniAction | undefined
-      const resumed = input.resume?.find((r) => r.status === 'resolved')
-      if (resumed?.payload && typeof resumed.payload === 'object') {
-        const p = resumed.payload as { menuId?: string; itemId?: string }
-        if (p.menuId && p.itemId) resumeAction = { kind: 'menu.select', menuId: p.menuId, itemId: p.itemId }
-      }
-      const effective = resumeAction ?? action
       // a conversation of a space its author left: 409 space-left, nothing recorded (PROF-RUN-014)
-      const refusal = await this.agent.runRefusal(session, effective.kind)
+      const refusal = await this.agent.runRefusal(session, action.kind)
       if (refusal) return reply.code(refusal.status).send({ error: refusal.code, message: refusal.message })
-      await this.run(session, input.runId, effective, text, reply, request, last?.id ? String(last.id) : undefined)
+      await this.run(session, input.runId, action, text, reply, request, last?.id ? String(last.id) : undefined)
     })
 
     // PROF-RUN-007
@@ -789,7 +788,15 @@ export class AgUiRoutes {
         ...(space.membership.mode === 'rule' ? { rule: space.membership.rule } : {}),
         memberCount: this.agent.spaces.memberCount(space, members, ctx.principals),
       },
-      owner: { name: this.nameOf(ctx.principals, space.ownerIds[0] ?? '') },
+      // null while it has no owner (SPACE-MEMB-011); its successor to its owner alone (PROF-SPACE-008)
+      owner: space.ownerPrincipalId ? { name: this.nameOf(ctx.principals, space.ownerPrincipalId) } : null,
+      ...(access.role === 'owner' && !personal
+        ? {
+            successor: space.successorPrincipalId
+              ? { name: this.nameOf(ctx.principals, space.successorPrincipalId) }
+              : null,
+          }
+        : {}),
       role: access.role ?? access.member?.role ?? 'member',
       state: access.left ? 'left' : 'active',
       unread: mine.reduce((sum, c) => sum + (c.unread ?? 0), 0),
@@ -827,6 +834,7 @@ export class AgUiRoutes {
         lawfulBasis: resolved.lawfulBasis,
         allowedProviders: resolved.allowedProviders,
         handover: resolved.handover,
+        approvalTimeouts: resolved.approvalTimeouts,
       },
     }
   }
@@ -851,6 +859,23 @@ export class AgUiRoutes {
       ...(a.conversationId ? { conversationId: a.conversationId } : {}),
       // the source of a change of the space's tools, never a value of its account (PROF-TOOL-006)
       ...(a.sourceId ? { tool: { source: a.sourceId, title: this.titleOf(a.sourceId) } } : {}),
+      // how the owner changed, and a steward's reason (SPACE-MEMB-008, PROF-SPACE-009)
+      ...(a.how ? { how: a.how } : {}),
+      ...(a.reason ? { reason: a.reason } : {}),
+    }
+  }
+
+  /** A space as a steward reads it (PROF-SPACE-009): its title, template, kind, owner, successor and size; nothing else. */
+  private async stewardedInfo(space: Space, principals: Principal[]) {
+    const rows = await this.agent.spaces.memberRows(space.id)
+    return {
+      id: space.id,
+      title: space.title,
+      templateId: space.templateId,
+      kind: space.kind,
+      owner: space.ownerPrincipalId ? { name: this.nameOf(principals, space.ownerPrincipalId) } : null,
+      successor: space.successorPrincipalId ? { name: this.nameOf(principals, space.successorPrincipalId) } : null,
+      memberCount: this.agent.spaces.memberCount(space, rows, principals),
     }
   }
 
@@ -981,16 +1006,62 @@ export class AgUiRoutes {
     )
 
     // PROF-SPACE-006, SPACE-MEMB-007: a member of a list space by `memberId`; a person the rule of a rule space matches,
-    // who holds a Principal, by `directoryId`
+    // who holds a Principal, by `directoryId`. From a steward of the space's template who is not its owner, with a reason
+    // (SPACE-MEMB-011, PROF-SPACE-009)
     app.post(
       `${base}/spaces/:spaceId/owner`,
       handle(async ({ principal }, request) => {
         const { spaceId } = request.params as { spaceId: string }
-        const { memberId, directoryId } = (request.body ?? {}) as { memberId?: unknown; directoryId?: unknown }
+        const body = (request.body ?? {}) as { memberId?: unknown; directoryId?: unknown; reason?: unknown }
+        const { memberId, directoryId } = body
+        const space = await this.agent.spaces.find(spaceId)
+        const owner = !!space && space.ownerPrincipalId === principal.id
+        if (space && !owner && (this.agent.spaces.isSteward(principal, space) || body.reason !== undefined)) {
+          const named = await this.agent.spaces.stewardNames(principal, spaceId, { memberId, directoryId }, body.reason)
+          return this.stewardedInfo(named, await this.agent.store.principals.list())
+        }
         if (memberId === undefined && directoryId === undefined)
           throw new SpaceError('memberId or directoryId is required', 'bad-request')
         await this.agent.spaces.transferOwner(principal, spaceId, { memberId, directoryId })
         return this.spaceDetail(await visible(principal, spaceId), await this.spaceViewContext(principal))
+      })
+    )
+
+    // PROF-SPACE-008, SPACE-MEMB-010: the owner names the successor, or clears it
+    app.put(
+      `${base}/spaces/:spaceId/successor`,
+      handle(async ({ principal }, request) => {
+        const { spaceId } = request.params as { spaceId: string }
+        const { memberId, directoryId } = (request.body ?? {}) as { memberId?: unknown; directoryId?: unknown }
+        await this.agent.spaces.setSuccessor(principal, spaceId, { memberId, directoryId })
+        return this.spaceDetail(await visible(principal, spaceId), await this.spaceViewContext(principal))
+      })
+    )
+    app.delete(
+      `${base}/spaces/:spaceId/successor`,
+      handle(async ({ principal }, request) => {
+        const { spaceId } = request.params as { spaceId: string }
+        await this.agent.spaces.removeSuccessor(principal, spaceId)
+        return this.spaceDetail(await visible(principal, spaceId), await this.spaceViewContext(principal))
+      })
+    )
+
+    // PROF-SPACE-009, SPACE-MEMB-011: the spaces of the templates a steward stewards, and who could own one
+    app.get(
+      `${base}/stewardship`,
+      handle(async ({ principal }) => {
+        const principals = await this.agent.store.principals.list()
+        const spaces = []
+        for (const space of await this.agent.spaces.stewarded(principal))
+          spaces.push(await this.stewardedInfo(space, principals))
+        return { spaces }
+      })
+    )
+    app.get(
+      `${base}/spaces/:spaceId/owner/candidates`,
+      handle(async ({ principal }, request) => {
+        const { spaceId } = request.params as { spaceId: string }
+        return { candidates: await this.agent.spaces.candidates(principal, spaceId, (p) => this.personName(p)) }
       })
     )
 
@@ -1435,12 +1506,12 @@ export class AgUiRoutes {
         await this.streams.publish(session.id, ev.custom(CUSTOM_EVENT.connectionsChanged, { ...value }))
   }
 
-  /** A change of a space's tools applied or was dropped: every bound session of its owners hears it (PROF-TOOL-006). */
+  /** A change of a space's tools applied or was dropped: every bound session of its owner hears it (PROF-TOOL-006). */
   public async announceSpaceTools(space: Space, value: SpaceToolsChanged): Promise<void> {
-    for (const ownerId of space.ownerIds)
-      for (const session of await this.agent.store.sessions.listByPrincipal(ownerId, ['bound']))
-        if (session.channelType === 'ag-ui')
-          await this.streams.publish(session.id, ev.custom(CUSTOM_EVENT.spaceToolsChanged, { ...value }))
+    if (!space.ownerPrincipalId) return
+    for (const session of await this.agent.store.sessions.listByPrincipal(space.ownerPrincipalId, ['bound']))
+      if (session.channelType === 'ag-ui')
+        await this.streams.publish(session.id, ev.custom(CUSTOM_EVENT.spaceToolsChanged, { ...value }))
   }
 
   /** Events to every bound session of a conversation, outside a turn: an allowance ended, a card expired. */
@@ -1538,20 +1609,8 @@ export class AgUiRoutes {
             return emit(ev.stepStarted(event.label))
           case 'step-finished':
             return emit(ev.stepFinished(event.label))
-          case 'activity': {
-            const activity = ev.activitySnapshot(event.messageId, event.activityType, event.content)
-            // a Connect card, only to the sessions of a client of profile 3.5 or later (PROF-TOOL-020)
-            if (event.minProfile) {
-              const least = event.minProfile
-              if (profileAtLeast(session.client.profileVersion, least)) write(activity)
-              mirror.only(
-                activity,
-                new Set(peers.filter((p) => profileAtLeast(p.client.profileVersion, least)).map((p) => p.id))
-              )
-              return
-            }
-            return emit(activity)
-          }
+          case 'activity':
+            return emit(ev.activitySnapshot(event.messageId, event.activityType, event.content))
           case 'inbound':
             // the other devices get the person's message whole; the device that sent it already shows it
             mirror.inbound(event.entry)
@@ -1747,18 +1806,8 @@ export class AgUiRoutes {
             return mirror.event(ev.stepStarted(event.label))
           case 'step-finished':
             return mirror.event(ev.stepFinished(event.label))
-          case 'activity': {
-            const activity = ev.activitySnapshot(event.messageId, event.activityType, event.content)
-            // a Connect card, only to the sessions of a client of profile 3.5 or later (PROF-TOOL-020)
-            if (event.minProfile) {
-              const least = event.minProfile
-              return mirror.only(
-                activity,
-                new Set(targets.filter((t) => profileAtLeast(t.client.profileVersion, least)).map((t) => t.id))
-              )
-            }
-            return mirror.event(activity)
-          }
+          case 'activity':
+            return mirror.event(ev.activitySnapshot(event.messageId, event.activityType, event.content))
           case 'inbound':
             // every device but the one that sent it, which shows it already and gets its echo
             mirror.inbound(event.entry)
@@ -1839,17 +1888,22 @@ export class AgUiRoutes {
   public async announceBound(session: Session): Promise<void> {
     const principal = await this.agent.principalOf(session)
     if (!principal) return
+    const deviceSecret = this.agent.sessions.heldDeviceSecret(session)
     await this.streams.publish(
       session.id,
       ev.custom(CUSTOM_EVENT.sessionBound, {
         principal: this.agent.principalDisplay(principal),
         boundAt: session.boundAt,
         deviceHandle: session.deviceHandle,
-        deviceSecret: session.deviceSecret,
+        deviceSecret,
         conversationId: session.conversationId,
         resumedFromSessionId: session.resumedFromSessionId,
       })
     )
+    // a client on the stream has collected the secret: the session keeps it no longer; one that was not listening
+    // picks it up from the status within five minutes (IDENT-DEV-001, PROF-BIND-010)
+    if (deviceSecret && this.streams.subscriberCount(session.id) > 0)
+      await this.agent.sessions.eraseDeviceSecret(session)
     await this.announceState(session)
     await this.adapter.pushState(session)
   }

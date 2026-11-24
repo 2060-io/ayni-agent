@@ -9,24 +9,26 @@ import { type IdentityRequestDeps, IdentityRequests } from '../src/channels/didc
 import { authenticationErrors } from '../src/config/pack.js'
 import {
   type AgentPack,
-  type AuthenticationEntry,
   admitsUnidentified,
   authenticationModeOf,
+  type PackAuthentication,
 } from '../src/config/packTypes.js'
 import type { EvidenceInput } from '../src/core/evidence.js'
 import { contextualMenuFor, PLATFORM_MENU } from '../src/core/interaction.js'
 import type { VerifiedFacts } from '../src/core/principals.js'
 import type { Principal, Session } from '../src/core/types.js'
-import { startTestAgent } from './helpers.js'
+import { badgeAuthentication, startTestAgent } from './helpers.js'
 
 const silent = { info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined }
 const BADGE = 'https://ecs.example/vt/schemas-badge-jsc.json'
-const entry = (over: Partial<AuthenticationEntry> = {}): AuthenticationEntry => ({
-  credential: { jsonSchemaCredentialId: BADGE },
-  subjectKey: ['badgeNumber'],
-  ...over,
-})
-const packWith = (authentication?: AuthenticationEntry[]): AgentPack =>
+type Entry = Parameters<typeof badgeAuthentication>[0]
+const entry = (over: Partial<Entry> = {}): PackAuthentication =>
+  badgeAuthentication({
+    credential: { jsonSchemaCredentialId: BADGE },
+    subjectKey: ['badgeNumber'],
+    ...over,
+  })
+const packWith = (authentication?: PackAuthentication): AgentPack =>
   ({
     metadata: { displayName: 'Test agent' },
     persona: {},
@@ -63,26 +65,26 @@ const visitor = (peer: string): VerifiedFacts => ({
 describe('who enters unidentified follows from the authentication (D53, IDENT-RES-007/010)', () => {
   it('no schema and on demand admit; on connect identifies or refuses', () => {
     expect(admitsUnidentified(packWith())).toBe(true)
-    expect(admitsUnidentified(packWith([entry({ request: 'on-demand' })]))).toBe(true)
-    expect(admitsUnidentified(packWith([entry({ request: 'on-connect' })]))).toBe(false)
-    expect(admitsUnidentified(packWith([entry()]))).toBe(false)
+    expect(admitsUnidentified(packWith(entry({ request: 'on-demand' })))).toBe(true)
+    expect(admitsUnidentified(packWith(entry({ request: 'on-connect' })))).toBe(false)
+    expect(admitsUnidentified(packWith(entry()))).toBe(false)
   })
 
   it('gives the agent one of three modes, and refuses a pack that contradicts itself (D72, IDENT-RES-010)', () => {
     expect(authenticationModeOf(undefined)).toBeUndefined()
     expect(authenticationModeOf(entry())).toBe('required')
-    expect(authenticationModeOf(entry({ request: 'on-connect', guests: true }))).toBe('offered')
+    expect(authenticationModeOf(entry({ request: 'on-connect', visitors: true }))).toBe('offered')
     expect(authenticationModeOf(entry({ request: 'on-demand' }))).toBe('on-request')
-    expect(authenticationModeOf(entry({ request: 'on-demand', guests: true }))).toBe('on-request')
-    // offered lets guests in; required does not
-    expect(admitsUnidentified(packWith([entry({ guests: true })]))).toBe(true)
-    expect(admitsUnidentified(packWith([entry({ guests: false })]))).toBe(false)
+    expect(authenticationModeOf(entry({ request: 'on-demand', visitors: true }))).toBe('on-request')
+    // offered lets visitors in; required does not
+    expect(admitsUnidentified(packWith(entry({ visitors: true })))).toBe(true)
+    expect(admitsUnidentified(packWith(entry({ visitors: false })))).toBe(false)
 
-    const errorsOf = (over: Partial<AuthenticationEntry>) => authenticationErrors(entry(over))
+    const errorsOf = (over: Partial<Entry>) => authenticationErrors(entry(over))
     expect(
-      errorsOf({ guests: true, issuers: { organizations: ['org:EE:1'] }, obtain: { text: 'At the desk.' } })
+      errorsOf({ visitors: true, issuers: { organizations: ['org:EE:1'] }, obtain: { text: 'At the desk.' } })
     ).toEqual([])
-    expect(errorsOf({ request: 'on-demand', guests: false })[0]).toMatch(/guests cannot be false/)
+    expect(errorsOf({ request: 'on-demand', visitors: false })[0]).toMatch(/visitors cannot be false/)
     expect(errorsOf({ issuers: { organizations: [] } })[0]).toMatch(/would accept nobody/)
     expect(errorsOf({ issuers: { organizations: ['Acme'] } })[0]).toMatch(/must be organization keys/)
     expect(errorsOf({ obtain: {} })[0]).toMatch(/a text, a link, or both/)
@@ -90,7 +92,7 @@ describe('who enters unidentified follows from the authentication (D53, IDENT-RE
   })
 
   it('asks nothing at connection when there is no schema or it is asked on demand', async () => {
-    for (const pack of [packWith(), packWith([entry({ request: 'on-demand' })])]) {
+    for (const pack of [packWith(), packWith(entry({ request: 'on-demand' }))]) {
       const calls: unknown[] = []
       const client = { requestPresentation: async (...args: unknown[]) => void calls.push(args) }
       const flow = new IdentityFlow(pack, client as never, {} as never, false, silent as never)
@@ -114,7 +116,7 @@ describe('who enters unidentified follows from the authentication (D53, IDENT-RE
         return { proofExchangeId: 'pex-1' }
       },
     }
-    ref.flow = new IdentityFlow(packWith([entry()]), client as never, {} as never, false, silent as never)
+    ref.flow = new IdentityFlow(packWith(entry()), client as never, {} as never, false, silent as never)
     expect(await ref.flow.establish('conn-1', 'did:peer:4zVisitor')).toBeUndefined()
   })
 })
@@ -135,7 +137,7 @@ describe('the request on demand (IDENT-RES-015/016)', () => {
     onIdentityPresented: async () => ({ outcome: 'identified' }),
     ...over,
   })
-  const pack = packWith([entry({ request: 'on-demand' })])
+  const pack = packWith(entry({ request: 'on-demand' }))
 
   it('asks an unidentified person only, on their own connection', async () => {
     const asked: unknown[][] = []
@@ -150,7 +152,7 @@ describe('the request on demand (IDENT-RES-015/016)', () => {
       silent as never
     )
     expect(await requests.request(principal(), 'model')).toBe('identified')
-    expect(asked).toEqual([['conn-1', 'did:peer:4zVisitor', true, false]])
+    expect(asked).toEqual([['conn-1', 'did:peer:4zVisitor', true, false, { purpose: 'visitor' }]])
     expect(await requests.request(principal({ identityCredentialRef: 'badge:x' }), 'model')).toBe('already-identified')
     expect(await requests.request(principal({ capabilityChannelId: null }), 'model')).toBe('unavailable')
     expect(await new IdentityRequests(packWith(), deps(), silent as never).request(principal(), 'person')).toBe(
@@ -226,6 +228,53 @@ describe('the request on demand (IDENT-RES-015/016)', () => {
     )
     expect(await plain.request(principal(), 'person')).toBe('not-presented')
     expect(once).toBe(1)
+  })
+
+  it('asks an identified connection with its identity, and asks nothing again after another one (IDENT-RES-019)', async () => {
+    const asked: unknown[][] = []
+    const presented: unknown[] = []
+    const requests = new IdentityRequests(
+      pack,
+      deps({
+        authenticate: async (...args) => {
+          asked.push(args)
+          return { outcome: 'not-accepted', code: 'another-identity' }
+        },
+        onIdentityPresented: async (_connectionId, facts) => {
+          presented.push(facts)
+          return { outcome: 'identified' }
+        },
+      }),
+      silent as never
+    )
+    const alice = principal({ actorIdentity: `org:EE:1|${BADGE}|42`, identityCredentialRef: 'badge:pex-1' })
+    // the identity the connection is bound to goes with the request, so the flow refuses another before it closes
+    expect(await requests.reveal(alice)).toBe('another-identity')
+    // a re-authentication by the credential alone that carries the email, on the identified connection
+    expect(asked).toEqual([
+      [
+        'conn-1',
+        `org:EE:1|${BADGE}|42`,
+        true,
+        false,
+        expect.objectContaining({ purpose: 'step-up', combinations: [['badge']], bound: alice }),
+      ],
+    ])
+    // one request, nothing bound, nothing kept
+    expect(presented).toEqual([])
+    // a visitor's request names no identity: any badge may identify it
+    const visitorRequests = new IdentityRequests(
+      pack,
+      deps({
+        authenticate: async (...args) => {
+          asked.push(args)
+          return { outcome: 'declined' }
+        },
+      }),
+      silent as never
+    )
+    expect(await visitorRequests.reveal(principal())).toBe('not-presented')
+    expect((asked.at(-1)?.[4] as { bound?: unknown } | undefined)?.bound).toBeUndefined()
   })
 
   it('keeps one request pending on a connection', async () => {
@@ -338,7 +387,7 @@ describe('binding after connect (D66, IDENT-RES-013/014/017)', () => {
   it('offers the request to an unidentified person only: in the model’s tools and in the menu', async () => {
     running = await startTestAgent()
     const { agent } = running
-    agent.pack.identity.authentication = [entry({ request: 'on-demand' })]
+    agent.pack.identity.authentication = entry({ request: 'on-demand' })
     const guest = await visit(agent, 'conn-menu')
     const names = async (p: Principal) => (await agent.registry.visible(p.roles, [], p)).map((t) => t.spec.name)
     expect(await names(guest.principal)).toContain('request_presentation')

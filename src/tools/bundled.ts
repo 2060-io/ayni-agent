@@ -21,7 +21,7 @@ import {
 import type { EvidenceService } from '../core/evidence.js'
 import { type IssuanceService, issuanceOutcomeForModel, offeredProfiles } from '../core/issuance.js'
 import { LANGUAGE_PREFERENCE, languageTag } from '../core/serviceLanguage.js'
-import type { Principal } from '../core/types.js'
+import type { Principal, Session } from '../core/types.js'
 import type { MediaService } from '../media/service.js'
 import type { RagService } from '../memory/rag.js'
 import { MemoryService } from '../memory/service.js'
@@ -41,7 +41,8 @@ export interface BundledDeps {
   /** credential issuance, wired once the DIDComm side is (INTX-ISSUE) */
   issuance?: () => IssuanceService | undefined
   /** asks the wallet of the Principal for the credential of a catalog entry (INTX-PRES-003) */
-  requestPresentation?: (principal: Principal, entry: string) => Promise<PresentationRequestOutcome>
+  /** asks for a catalog entry from the conversation of `session`, which the flow names as its origin (INTX-FLOW-001) */
+  requestPresentation?: (principal: Principal, entry: string, session: Session) => Promise<PresentationRequestOutcome>
   media: MediaService
   rag?: RagService
   stats: StatsSink
@@ -107,7 +108,7 @@ export class BundledToolSource implements ToolSource {
     // no attribute, no recipient (D68, D69, INTX-PRES-003). The authentication entry is for an unidentified
     // person only (IDENT-RES-015); a catalog entry is for a peer of the subject kind of its schema.
     const onDemand = Object.entries(pack.presentations ?? {}).filter(([, e]) => e.request === 'on-demand')
-    const authenticates = !!pack.identity.authentication?.length
+    const authenticates = !!pack.identity.authentication?.combinations?.length
     if ((authenticates || onDemand.length) && on('requestPresentation')) {
       const mayIdentify = (principal: Principal) =>
         authenticates && principal.connectionType === 'verifiable-user-agent' && !principal.identityCredentialRef
@@ -120,7 +121,7 @@ export class BundledToolSource implements ToolSource {
           'Asks the wallet of the peer for a credential this agent accepts, by the name of its entry. The call sends the request and waits for the answer, given in the wallet, which may take a minute: before you call, nothing has been asked. You get a status, never the content of the credential. After it returns, tell the person what happened.',
           ...(authenticates
             ? [
-                'authentication: the credential that identifies the person, which gives them their roles and their own conversations; only while they are not identified. Ask when they want something that needs it, or when they say they have it.',
+                'authentication: the person authenticates on their phone, in one of the ways this agent accepts, which gives them their roles and their own conversations; only while they are not identified. Ask when they want something that needs it, or when they say they are ready.',
               ]
             : []),
           ...onDemand.map(([name, e]) => `${name}: ${e.purpose}`),
@@ -147,7 +148,7 @@ export class BundledToolSource implements ToolSource {
             return { content: identityOutcomeForModel(outcome), data: { entry, outcome } }
           }
           const outcome = offered(ctx.principal).some(([name]) => name === entry)
-            ? ((await this.deps.requestPresentation?.(ctx.principal, entry)) ?? 'unavailable')
+            ? ((await this.deps.requestPresentation?.(ctx.principal, entry, ctx.session)) ?? 'unavailable')
             : 'not-offered'
           return { content: presentationOutcomeForModel(outcome), data: { entry, outcome } }
         },

@@ -14,11 +14,11 @@ import {
   PeerStatusNotifier,
   type PeerStatusRefusalCode,
 } from '../src/channels/didcomm/peerStatus.js'
-import type { AgentPack, AuthenticationEntry } from '../src/config/packTypes.js'
+import type { AgentPack } from '../src/config/packTypes.js'
 import { FlowService } from '../src/core/flows.js'
 import type { VerifiedFacts } from '../src/core/principals.js'
 import { createLogger } from '../src/util/logger.js'
-import { startTestAgent } from './helpers.js'
+import { badgeAuthentication, startTestAgent } from './helpers.js'
 
 const BADGE = 'https://ecs.example/vt/schemas-badge-jsc.json'
 
@@ -85,23 +85,28 @@ const statuses = (connectionId: string) =>
   calls.filter((c) => c.method === 'sendPeerStatus' && c.args[0] === connectionId).map((c) => c.args[1] as PeerStatus)
 
 /** The agent-pack of the test agent, with the authentication rule of a case and what else its entry says. */
-function packWith(rule: 'none' | 'optional' | 'required', entry: Partial<AuthenticationEntry> = {}): AgentPack {
+type Entry = Partial<Parameters<typeof badgeAuthentication>[0]>
+function packWith(rule: 'none' | 'optional' | 'required', entry: Entry = {}): AgentPack {
   const pack = running.agent.pack
   const authentication =
     rule === 'none'
       ? undefined
-      : [
-          {
-            credential: { jsonSchemaCredentialId: BADGE },
-            subjectKey: ['id'],
-            request: rule === 'optional' ? ('on-demand' as const) : ('on-connect' as const),
-            ...entry,
-          },
-        ]
+      : badgeAuthentication({
+          credential: { jsonSchemaCredentialId: BADGE },
+          subjectKey: ['id'],
+          request: rule === 'optional' ? ('on-demand' as const) : ('on-connect' as const),
+          ...entry,
+        })
   return { ...pack, identity: { ...pack.identity, authentication } } as AgentPack
 }
 
-function useRule(rule: 'none' | 'optional' | 'required', entry: Partial<AuthenticationEntry> = {}): PeerStatusNotifier {
+/** What a status says of a pack that accepts the badge alone (flow profile §4.1). */
+const BADGE_ACCEPTED = {
+  methods: { badge: { type: 'credential', credential: { jsonSchemaCredentialId: BADGE } } },
+  combinations: [['badge']],
+}
+
+function useRule(rule: 'none' | 'optional' | 'required', entry: Entry = {}): PeerStatusNotifier {
   const notifier = new PeerStatusNotifier(packWith(rule, entry), stubClient() as never, peers, logger)
   running.agent.peerStatus = notifier
   return notifier
@@ -212,7 +217,7 @@ describe('the status of a person (IDENT-STAT-001/002/003/004)', () => {
     await connect('ps-optional')
     expect(statuses('ps-optional')).toEqual([
       {
-        authentication: { rule: 'optional', credential: { jsonSchemaCredentialId: BADGE } },
+        authentication: { rule: 'optional', ...BADGE_ACCEPTED },
         identified: false,
         open: ['ag-ui'],
       },
@@ -223,7 +228,7 @@ describe('the status of a person (IDENT-STAT-001/002/003/004)', () => {
     useRule('required')
     outcome = { facts: person('did:peer:ps-required', true) }
     await connect('ps-required')
-    const authentication = { rule: 'required', credential: { jsonSchemaCredentialId: BADGE } }
+    const authentication = { rule: 'required', ...BADGE_ACCEPTED }
     expect(statuses('ps-required')).toEqual([
       { authentication, identified: false, open: [] },
       { authentication, identified: true, open: ['ag-ui'] },
@@ -236,9 +241,9 @@ describe('the status of a person (IDENT-STAT-001/002/003/004)', () => {
 
   it('a schema offered at connection: the rule is optional, nothing is open until the person has answered, then a guest enters', async () => {
     // asked at connection, with guests let in (D72): the person declined, and is a guest
-    useRule('required', { guests: true })
+    useRule('required', { visitors: true })
     await connect('ps-offered')
-    const authentication = { rule: 'optional', credential: { jsonSchemaCredentialId: BADGE } }
+    const authentication = { rule: 'optional', ...BADGE_ACCEPTED }
     expect(statuses('ps-offered')).toEqual([
       { authentication, identified: false, open: [] },
       { authentication, identified: false, open: ['ag-ui'] },
@@ -246,7 +251,7 @@ describe('the status of a person (IDENT-STAT-001/002/003/004)', () => {
     const order = calls.map((c) => c.method)
     expect(order.indexOf('sendPeerStatus')).toBeLessThan(order.indexOf('establish'))
     // the same agent, and a person who authenticated
-    useRule('required', { guests: true })
+    useRule('required', { visitors: true })
     outcome = { facts: person('did:peer:ps-offered-2', true) }
     await connect('ps-offered-2')
     expect(statuses('ps-offered-2')).toEqual([
@@ -261,8 +266,15 @@ describe('the status of a person (IDENT-STAT-001/002/003/004)', () => {
     await connect('ps-issuers')
     expect(statuses('ps-issuers')[0]?.authentication).toEqual({
       rule: 'optional',
-      credential: { jsonSchemaCredentialId: BADGE },
-      issuers: ['org:EE:1', 'org:FR:552100554'],
+      // the organizations a credential method accepts go with that method (flow profile §4.1)
+      methods: {
+        badge: {
+          type: 'credential',
+          credential: { jsonSchemaCredentialId: BADGE },
+          issuers: ['org:EE:1', 'org:FR:552100554'],
+        },
+      },
+      combinations: [['badge']],
       obtain,
     })
     // a text alone; and a pack that lists nobody and says nothing sends neither field
@@ -270,12 +282,12 @@ describe('the status of a person (IDENT-STAT-001/002/003/004)', () => {
       useRule('required', { obtain: { text: 'At the desk.' } }).authenticationFor('verifiable-user-agent')
     ).toEqual({
       rule: 'required',
-      credential: { jsonSchemaCredentialId: BADGE },
+      ...BADGE_ACCEPTED,
       obtain: { text: 'At the desk.' },
     })
     expect(useRule('required').authenticationFor('verifiable-user-agent')).toEqual({
       rule: 'required',
-      credential: { jsonSchemaCredentialId: BADGE },
+      ...BADGE_ACCEPTED,
     })
   })
 
@@ -323,7 +335,7 @@ describe('a status that changes (IDENT-STAT-005)', () => {
     if (!bound) throw new Error('no session on the connection')
     // what the application does when a credential is presented on a connection already served
     await notifier.resolved('ps-upgrade', { ...bound.principal, identityCredentialRef: 'badge:alice' })
-    const authentication = { rule: 'optional', credential: { jsonSchemaCredentialId: BADGE } }
+    const authentication = { rule: 'optional', ...BADGE_ACCEPTED }
     expect(statuses('ps-upgrade')).toEqual([
       { authentication, identified: false, open: ['ag-ui'] },
       { authentication, identified: true, open: ['ag-ui'] },
@@ -338,7 +350,7 @@ describe('a status that changes (IDENT-STAT-005)', () => {
     if (!bound) throw new Error('no session on the connection')
     await running.agent.onCredentialInvalid(bound.principal)
     expect(statuses('ps-invalid').at(-1)).toEqual({
-      authentication: { rule: 'required', credential: { jsonSchemaCredentialId: BADGE } },
+      authentication: { rule: 'required', ...BADGE_ACCEPTED },
       identified: false,
       open: [],
     })
@@ -381,7 +393,7 @@ describe('a peer the agent does not serve (IDENT-STAT-006)', () => {
     outcome = { refusal: 'authentication-declined' }
     await connect('ps-refused')
     expect(statuses('ps-refused').at(-1)).toEqual({
-      authentication: { rule: 'required', credential: { jsonSchemaCredentialId: BADGE } },
+      authentication: { rule: 'required', ...BADGE_ACCEPTED },
       identified: false,
       open: [],
       refusal: { code: 'authentication-declined' },

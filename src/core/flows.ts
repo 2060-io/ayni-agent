@@ -23,7 +23,10 @@ import {
   type Session,
 } from './types.js'
 
-/** What the service needs from the DIDComm agent's flow routes (a subset of VsAgentClient). */
+/**
+ * What the service needs from the DIDComm agent's flow routes (a subset of VsAgentClient). An `open` carries no
+ * `requires`: the profile retired it, and the plugin (0.3.0) answers 400 to a body that holds it.
+ */
 export interface FlowClient {
   openFlow(body: {
     connectionId: string
@@ -32,7 +35,6 @@ export interface FlowClient {
     description?: string
     origin: FlowOrigin
     expiresTime: string
-    requires?: string[]
     /** an app link the holder offers on the request's sheet, which navigates and never acts (FLOW-CORE-011) */
     link?: string
   }): Promise<FlowRecordLike>
@@ -99,7 +101,6 @@ export interface FlowOpenOptions {
   withoutConversation?: boolean
   expiresAt?: string
   expiresInMs?: number
-  requires?: string[]
   /** an app link to the place where the person reads more of the request (FLOW-CORE-011, PROF-LINK-005) */
   link?: string
   /** what the flow serves on the agent's side (an approval, a challenge), persisted with the handle */
@@ -148,6 +149,14 @@ const KEY_PREFIX = 'flow:'
 const DEFAULT_EXPIRY_MS = 5 * 60_000
 /** a service keeps at most ten flows pending per connection (INTX-FLOW-005, FLOW-CORE-008) */
 export const MAX_PENDING_PER_CONNECTION = 10
+
+/**
+ * The origin of a flow asked from a conversation (INTX-FLOW-001): the conversation's AG-UI session; nothing for a
+ * request of another channel, whose flow opens with `origin: none`.
+ */
+export function conversationOrigin(session: Session | undefined): Session | undefined {
+  return session?.channelType === 'ag-ui' ? session : undefined
+}
 
 export function platformOf(platform: string | undefined): 'web' | 'ios' | 'android' {
   return platform === 'ios' || platform === 'android' ? platform : 'web'
@@ -203,7 +212,6 @@ export class FlowService {
         description: opts.description,
         origin: this.originOf(opts.origin, opts.withoutConversation === true),
         expiresTime: expiresAt,
-        requires: opts.requires,
         ...(opts.link ? { link: opts.link } : {}),
       })
     } catch (error) {

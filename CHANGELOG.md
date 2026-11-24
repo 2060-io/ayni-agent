@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.33.0](https://github.com/2060-io/ayni-agent/compare/v0.32.0...v0.33.0) (2026-11-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* authentication by combinations of methods on the phone over authenticate/1.0, enrolment of an authenticator app or a passkey, approvers on the approval request (ayni-spec #127, flow library 0.2.1) ([#124](https://github.com/2060-io/ayni-agent/issues/124))
+
+### Features
+
+* authentication by combinations of methods on the phone over authenticate/1.0, enrolment of an authenticator app or a passkey, approvers on the approval request (ayni-spec [#127](https://github.com/2060-io/ayni-agent/issues/127), flow library 0.2.1) ([#124](https://github.com/2060-io/ayni-agent/issues/124)) ([7c96a3a](https://github.com/2060-io/ayni-agent/commit/7c96a3a308436406ec495514946ac329ca4db88f))
+* **authentication:** flow library 0.3.1: a declined face-match consent leaves another combination; no requires on open; three enrolment codes with the codes left (ayni-spec [#128](https://github.com/2060-io/ayni-agent/issues/128), [#129](https://github.com/2060-io/ayni-agent/issues/129)) ([#126](https://github.com/2060-io/ayni-agent/issues/126)) ([90b8404](https://github.com/2060-io/ayni-agent/commit/90b840401a9d748bc3f39b7f6ec64f5fb52b73cc))
+
+## [0.32.0](https://github.com/2060-io/ayni-agent/compare/v0.31.0...v0.32.0) (2026-11-24)
+
+
+### Features
+
+* **spaces:** one owner, a successor and stewards; an approval policy per tool of a space (ayni-spec D135 to D142) ([#122](https://github.com/2060-io/ayni-agent/issues/122)) ([0ff5026](https://github.com/2060-io/ayni-agent/commit/0ff502610472ebb5f828ac7a7af081d91406190f))
+
+## [0.31.0](https://github.com/2060-io/ayni-agent/compare/v0.30.1...v0.31.0) (2026-11-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* an agent-pack whose authentication entry says guests must say visitors; an agent-pack that declares a role's auditor flag, an MCP server's lazy or reconnect, or crossSession is refused by the schema.
+
+### Features
+
+* what the clean spec removed: the refusals of earlier pack keys, the sealing at start, the client profile-version tests, lazy and reconnect, the routed authorization, resume, the role key auditor; visitors in place of guests (ayni-spec [#123](https://github.com/2060-io/ayni-agent/issues/123)) ([#119](https://github.com/2060-io/ayni-agent/issues/119)) ([55c06ae](https://github.com/2060-io/ayni-agent/commit/55c06ae5779dd71525bc564c7e164681e50795f4))
+
+
+### Bug Fixes
+
+* the device secret handed once, the binding goal code ayni.link-session, a confirm answered no completed, another-identity on the flow, the origin of present and issue, the reason replaced (ayni-spec [#123](https://github.com/2060-io/ayni-agent/issues/123)) ([#118](https://github.com/2060-io/ayni-agent/issues/118)) ([628711b](https://github.com/2060-io/ayni-agent/commit/628711bdf83e99ee9dda3300174660170a2a43ea))
+
 ## [0.30.1](https://github.com/2060-io/ayni-agent/compare/v0.30.0...v0.30.1) (2026-11-22)
 
 

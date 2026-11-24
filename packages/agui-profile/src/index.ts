@@ -2,6 +2,16 @@
  * Ayni AG-UI Profile 3.5 (2060-io/ayni-spec, v4/ayni-agui-profile/profile.md).
  * Every name below cites the section or the PROF-* requirement it implements.
  *
+ * 3.5, package 3.5.4 (space governance, ayni-spec PR #125, agent D135 to D142): one owner of a space, or none (`owner:
+ * null`), its `successor` to the owner (PROF-SPACE-008), the stewards' endpoints (PROF-SPACE-009), the rule
+ * `approvalTimeouts`; the approval policy of a tool of a space in `tools[].approval` and in `PATCH ….approvals`
+ * (PROF-TOOL-036); the progress of an approval, a requester's own confirmation and a refusal for want of an approver
+ * (PROF-TOOL-037); the notices of a space's governance in the Notifications (PROF-TOOL-038). Additive.
+ *
+ * 3.5, package 3.5.2 (the clean spec, ayni-spec PR #123): `client.profileVersion` (PROF-SESS-016), the routed kind
+ * `authorization` and the interrupts with `resume` (PROF-RUN-006) are withdrawn; a client that sends a version is not
+ * refused, and nothing reads it.
+ *
  * 3.5, amended 2026-11-21 (ayni-spec agent D114, found on devnet): approvals reach each person once. The requester's
  * card is one `ayni.approval` activity of the conversation where it was asked, replaced in place by each later status
  * (PROF-TOOL-009); the approver gets no card and no `ayni.approval.request`, which is withdrawn: the request is on their
@@ -52,12 +62,6 @@ export const PROFILE_MINOR = 5
 export const DID_SERVICE_TYPE = 'AyniAgUI'
 /** Well-known path of the descriptor on the agent origin (PROF-DESC-001). */
 export const DESCRIPTOR_PATH = '/.well-known/ayni-agent.json'
-/**
- * goal_code of the 3.0 binding invitation (profile section 4). Flow-capable wallets read the flow profile's codes
- * below instead; agents keep emitting this one for wallets without flows.
- */
-export const BINDING_GOAL_CODE = 'ayni.bind-session'
-
 /** goal_code values of the flow profile §4 (FLOW-CONN-001): what follows the invitation. */
 export const INVITATION_GOAL_CODE = {
   /** just connect */
@@ -67,6 +71,9 @@ export const INVITATION_GOAL_CODE = {
   /** a service-initiated flow follows */
   flow: 'ayni.flow',
 } as const
+
+/** goal_code of a binding invitation (profile section 4, flow profile §4, FLOW-CONN-001): `ayni.link-session`. */
+export const BINDING_GOAL_CODE = INVITATION_GOAL_CODE.linkSession
 
 export type InvitationGoalCode = (typeof INVITATION_GOAL_CODE)[keyof typeof INVITATION_GOAL_CODE]
 
@@ -125,6 +132,12 @@ export interface DescriptorFeatures {
    * Notifications of an agent that does not declare it.
    */
   notifications?: boolean
+  /**
+   * the agent lets a person in without authenticating, as a visitor (3.5.2, PROF-DESC-012): it names no authentication
+   * schema, or one that lets visitors in (offered, or on request; agent IDENT-RES-007, IDENT-RES-010). An agent that
+   * requires the authentication does not declare it. The web UI says so on the agent's page.
+   */
+  visitors?: boolean
 }
 
 export type BindingMode = 'cross-device' | 'same-device'
@@ -153,7 +166,10 @@ export type SessionState = 'provisional' | 'bound' | 'closed'
 /** Closure reasons (section 5, ayni.session.state). */
 export type ClosureReason =
   | 'user'
+  /** a new phone: the old capability channel and every session that depends on it (agent IDENT-SESS-003) */
   | 'supersede'
+  /** a newer session of the same device on the conversation (§3.6, agent IDENT-SESS-014) */
+  | 'replaced'
   | 'channel-closed'
   | 'credential-invalid'
   | 'idle-timeout'
@@ -163,6 +179,7 @@ export type ClosureReason =
 export const CLOSURE_REASONS: readonly ClosureReason[] = [
   'user',
   'supersede',
+  'replaced',
   'channel-closed',
   'credential-invalid',
   'idle-timeout',
@@ -184,11 +201,6 @@ export interface ClientDescription {
   platform: ClientPlatform | (string & {})
   /** what the phone shows when it links this session: "Firefox on Linux", "Ayni on iPhone" (PROF-SESS-014) */
   description?: string
-  /**
-   * the version of this profile the client implements (3.4, PROF-SESS-016): the agent asks the confirmation of a tool
-   * call only of sessions whose client declared 3.4 or later. A client that implements 3.4 sends it.
-   */
-  profileVersion?: string
 }
 
 export function isClientPlatform(value: unknown): value is ClientPlatform {
@@ -391,7 +403,6 @@ export type CapabilityKind =
   | 'authentication'
   | 'credential-exchange'
   | 'auth-challenge'
-  | 'authorization'
   | 'confirmation'
   | 'signature'
   | 'link-session'
@@ -461,6 +472,41 @@ export interface ApprovalPolicyDisplay {
   vetoOnRefusal?: boolean
 }
 
+/** The kinds of approver of a policy of a space's tool (agent INTX-APPR-020). */
+export type ApproverKind = 'owner' | 'person' | 'member' | 'role' | 'department'
+export const APPROVER_KINDS: readonly ApproverKind[] = ['owner', 'person', 'member', 'role', 'department']
+
+/**
+ * An approver as people read it (PROF-TOOL-036, §3.12): `name` for the person an `owner` or a `person` entry names,
+ * `role` or `department` for those entries; to the owner, a `person` also carries `memberId` (a list space) or
+ * `directoryId` (a rule space).
+ */
+export interface ApproverView {
+  kind: ApproverKind
+  memberId?: string
+  directoryId?: string
+  name?: string
+  role?: string
+  department?: string
+  required: boolean
+}
+
+/** The policy of a space's tool on a card and in the Notifications, as a member reads it (§3.12). */
+export interface SpacePolicyDisplay {
+  approvers: ApproverView[]
+  threshold: number
+}
+
+/**
+ * Where an approval of a space's tool stands (PROF-TOOL-037, agent INTX-APPR-026): the threshold, the approvals counted,
+ * and the entries not yet satisfied, the required ones first ("1 of 2 approvals, waiting for Jonas Weber (required)").
+ */
+export interface ApprovalProgress {
+  threshold: number
+  approvals: number
+  waitingFor: { kind: ApproverKind; name?: string; role?: string; department?: string; required: boolean }[]
+}
+
 /**
  * The content of an approval as the `ayni.approval` activity carries it: the requester's card, in the conversation where
  * it was asked (PROF-TOOL-009), and the `approval` of an item of the Notifications (§3.12). It was also the value of
@@ -473,7 +519,8 @@ export interface ApprovalRequestValue {
   requester: { displayName: string; role?: string }
   purpose?: { id: string; label: string }
   justification?: string
-  policy: ApprovalPolicyDisplay
+  /** an approval by roles: `{ type, value }`; of a tool of a space: its approvers and threshold (§3.12) */
+  policy: ApprovalPolicyDisplay | SpacePolicyDisplay
   expiresAt: string
   status?: ApprovalStatus
   /** true when the receiving Principal is the requester: the requester's card, read-only */
@@ -484,8 +531,12 @@ export interface ApprovalRequestValue {
   decidedBy?: string
   /** the call of a tool, as its card shows it (3.4, PROF-TOOL-009) */
   action?: ToolAction
-  /** the space whose owner approves the call of a tool of the space (3.4, PROF-TOOL-009) */
+  /** the space of the tool whose call it approves (3.4, PROF-TOOL-009) */
   space?: { id: string; title: string }
+  /** a tool of a space's: where it stands (PROF-TOOL-037) */
+  progress?: ApprovalProgress
+  /** refused at once: no other approver could decide it, "No other approver can decide this" (PROF-TOOL-037) */
+  reason?: 'no-approver'
 }
 
 export interface ApprovalUpdateValue {
@@ -493,6 +544,8 @@ export interface ApprovalUpdateValue {
   status: ApprovalStatus
   decidedBy?: string
   grantExpiresAt?: string
+  /** a tool of a space's: where it stands after this change (PROF-TOOL-037) */
+  progress?: ApprovalProgress
   /** a confirmation allowed: for this call, or for the conversation (3.4) */
   scope?: 'once' | 'conversation'
   /** the allowance a confirmation gave ended (3.4, PROF-TOOL-012) */
@@ -814,11 +867,6 @@ export interface MemoryUpdateActivity {
   action: MemoryAction
 }
 
-/** Interrupt reasons the agent uses (PROF-RUN-006). */
-export const INTERRUPT_REASON = {
-  menu: 'ayni.menu',
-} as const
-
 /** RunError codes the agent uses (PROF-RUN-007). */
 export const RUN_ERROR_CODE = {
   cancelled: 'cancelled',
@@ -969,6 +1017,8 @@ export const ERROR_STATUS = {
   'not-bound': 403,
   /** 3.3: only the owner of the space does this (§3.7) */
   'not-owner': 403,
+  /** 3.5 (D136): a steward's request of a Principal who holds no steward role of the space's template (§3.7) */
+  'not-steward': 403,
   /** 3.3: the person holds no creator role of the template; the member picker for a person who may add nobody (§3.7, §3.9) */
   'not-creator': 403,
   /** 3.3: only a holder of an admin role reads the admin view (PROF-DIR-003) */
@@ -1057,6 +1107,18 @@ export const ERROR_STATUS = {
   'source-unavailable': 502,
   /** 3.5 amended (D114): `POST /approvals/{id}/resend` once the approval ended or the person decided it (§3.12) */
   'not-pending': 409,
+  /** 3.5 (D137): a policy for a tool whose rule is not `approval`, with `field: "approvals.<tool>"` (§3.10) */
+  'not-approval': 422,
+  /** 3.5 (D140): an approver of a kind or a role the agent-pack does not allow, with `field` (§3.10) */
+  'approver-not-allowed': 422,
+  /** 3.4/3.5: an entry equal to an earlier one, of a list or of a policy, with `field` (§3.10) */
+  'repeated-entry': 422,
+  /** 3.5 (D140): a threshold below the agent-pack's least number of approvals, with `field` (§3.10) */
+  'below-pack-minimum': 422,
+  /** 3.5 (D137): a threshold below the number of required approvers, with `field` (§3.10) */
+  'threshold-below-required': 422,
+  /** 3.5 (D140): attestation turned off where the agent-pack requires it, with `field` (§3.10) */
+  'attestation-required': 422,
 } as const
 
 export type ErrorCode = keyof typeof ERROR_STATUS
@@ -1189,6 +1251,8 @@ export interface SpaceRules {
   allowedProviders: string[]
   /** its members may read the conversations their authors share with it */
   handover: boolean
+  /** minutes an approval of the space waits, per kind of approval: `tool-call` (agent SPACE-DEF-008); none for Personal */
+  approvalTimeouts?: Record<string, number>
 }
 
 /** Membership by rule, over verified facts: a department, a group, or the whole organization. */
@@ -1218,7 +1282,10 @@ export interface SpaceInfo {
   language: string | null
   rules: SpaceRules
   membership: SpaceMembership
-  owner: { name: string }
+  /** null while the space has no owner (agent SPACE-MEMB-011) */
+  owner: { name: string } | null
+  /** the owner's only: the person who becomes the owner when the owner's entry leaves the directory (PROF-SPACE-008) */
+  successor?: { name: string } | null
   /** the caller's role in it */
   role: SpaceRole
   /** `left`: the caller's own conversations of it stay readable, and take no run (409 `space-left`) */
@@ -1246,6 +1313,8 @@ export interface SpaceTemplateInfo {
     lawfulBasis: { default: LawfulBasis; allowed: LawfulBasis[] }
     allowedProviders: { default: string[]; allowed: string[] }
     handover: { default: boolean; allowed: boolean[] }
+    /** per kind of approval, in minutes (agent SPACE-DEF-008) */
+    approvalTimeouts?: Record<string, { default: number; min: number; max: number }>
   }
 }
 
@@ -1290,8 +1359,37 @@ export interface SpacePatch {
 /** `POST {sessions}/spaces/{id}/members`: a person of the employee list, or of another organization. */
 export type AddMemberRequest = { directoryId: string } | { organizationKey: string; email: string }
 
-/** `POST {sessions}/spaces/{id}/owner`: a member of a list space, or a person of the directory for a rule space. */
-export type OwnerTransferRequest = { memberId: string } | { directoryId: string }
+/**
+ * `POST {sessions}/spaces/{id}/owner`: a member of a list space, or a person of the directory for a rule space; from a
+ * steward of the space's template, with `reason`, 1 to 500 characters (PROF-SPACE-009).
+ */
+export type OwnerTransferRequest = ({ memberId: string } | { directoryId: string }) & { reason?: string }
+
+/** `PUT {sessions}/spaces/{id}/successor` (PROF-SPACE-008): the owner names the successor; `DELETE` clears it. */
+export type SuccessorRequest = { memberId: string } | { directoryId: string }
+
+/** One space of `GET {sessions}/stewardship` (PROF-SPACE-009): of a template whose `stewards` roles the caller holds. */
+export interface StewardedSpace {
+  id: string
+  title: string
+  templateId: string
+  kind: Exclude<SpaceKind, 'personal'>
+  owner: { name: string } | null
+  successor: { name: string } | null
+  memberCount: number
+}
+
+export interface StewardshipResponse {
+  spaces: StewardedSpace[]
+}
+
+/** `GET {sessions}/spaces/{id}/owner/candidates` (PROF-SPACE-009): who could own the space, to a steward. */
+export interface OwnerCandidatesResponse {
+  candidates: (({ memberId: string } | { directoryId: string }) & { name: string; department: string | null })[]
+}
+
+/** How the owner of a space changed (agent SPACE-MEMB-012). */
+export type OwnerChange = 'handover' | 'succession' | 'steward'
 
 export type SpaceActivityKind =
   | 'tool-added'
@@ -1305,6 +1403,8 @@ export type SpaceActivityKind =
   | 'invited'
   | 'removed'
   | 'owner-changed'
+  | 'successor-set'
+  | 'successor-cleared'
   | 'rules-changed'
   | 'shared'
   | 'unshared'
@@ -1321,6 +1421,9 @@ export interface SpaceActivityItem {
   conversationId?: string
   /** the source a change of the space's tools concerns (3.4); never a value of its account */
   tool?: { source: string; title: string }
+  /** an `owner-changed`: how, the new owner being `member`, and a steward's reason (PROF-SPACE-009) */
+  how?: OwnerChange
+  reason?: string
 }
 
 export interface SpaceActivityPage {
@@ -1510,6 +1613,8 @@ export interface SpaceTool {
     /** the owner's: the agent-pack's rule, the loosest the owner may choose */
     packRule?: Exclude<SpaceCallRule, 'off'>
     stepUp: 'device' | 'face-match' | 'document' | null
+    /** a rule `approval`: its policy in this space, whole to the owner, its approvers and threshold to a member */
+    approval?: SpaceApprovalPolicyView
   }[]
   /** the owner's: the change waiting for the owner's phone */
   pending?: { changeId: string; summary: string; code: string; expiresAt: string } | null
@@ -1530,6 +1635,45 @@ export interface AddSpaceToolRequest {
 export interface SpaceToolPatch {
   bindings?: Record<string, string>
   calls?: Record<string, SpaceCallRule>
+  /** a whole policy for each tool it names (PROF-TOOL-036); a looser one waits for the phone (`202`) */
+  approvals?: Record<string, SpaceApprovalPolicyInput>
+}
+
+/** An approval policy as the owner sends it (PROF-TOOL-036): `whenApproverAsks` defaults by the number of approvers. */
+export interface SpaceApprovalPolicyInput {
+  approvers: (
+    | { kind: 'owner' | 'member'; required: boolean }
+    | { kind: 'person'; memberId: string; required: boolean }
+    | { kind: 'person'; directoryId: string; required: boolean }
+    | { kind: 'role'; role: string; required: boolean }
+    | { kind: 'department'; department: string; required: boolean }
+  )[]
+  threshold: number
+  refusal: 'any' | 'required'
+  attested: boolean
+  whenApproverAsks?: 'another-approver' | 'own-confirmation'
+}
+
+/** A warning of a policy (agent TOOL-SPACE-020): it refuses nothing. */
+export type SpaceApprovalPolicyWarning =
+  | { code: 'own-requests-blocked'; approvers: { name: string }[] }
+  | { code: 'unreachable' }
+
+/**
+ * The policy of a tool of a space (PROF-TOOL-036). To the owner: every field, its `state` (`needs-attention` while a
+ * required entry names nobody, `attention` listing their indexes), its `warnings` and the agent-pack's `bounds`; to a
+ * member: `approvers` and `threshold` only.
+ */
+export interface SpaceApprovalPolicyView {
+  approvers: ApproverView[]
+  threshold: number
+  refusal?: 'any' | 'required'
+  attested?: boolean
+  whenApproverAsks?: 'another-approver' | 'own-confirmation'
+  state?: 'ok' | 'needs-attention'
+  attention?: number[]
+  warnings?: SpaceApprovalPolicyWarning[]
+  bounds?: { minApprovals: number; kinds: ApproverKind[]; roles: string[]; attested: 'optional' | 'required' }
 }
 
 /** One field of a space's account, as its owner reads it (PROF-TOOL-001, agent D102). */
@@ -1688,14 +1832,19 @@ export interface ConnectActivity {
 /** The default and the largest page of the Notifications (§3.12, PROF-TOOL-024). */
 export const NOTIFICATIONS_PAGE = { default: 50, max: 200 } as const
 
-/** What a person's notification is: in this version, an approval only (agent D114, O43). */
-export type NotificationKind = 'approval'
+/** What a person's notification is: an approval, or a notice of a space's governance (agent D114, D142). */
+export type NotificationKind = 'approval' | GovernanceNoticeKind
+
+/** The notices of a space's governance (PROF-TOOL-038, agent INTX-APPR-027). */
+export type GovernanceNoticeKind = 'owner-changed' | 'policy-attention' | 'no-approver' | 'space-without-owner'
 
 /** One decision of an approver, as an item of the Notifications names it. */
 export interface NotificationDecision {
   by: { displayName: string }
   decision: 'approve' | 'reject'
   at: string
+  /** a requester's own confirmation of their own request (PROF-TOOL-037) */
+  self?: boolean
 }
 
 /**
@@ -1715,15 +1864,41 @@ export interface NotificationApproval extends ApprovalRequestValue {
   closedAt?: string
 }
 
+/**
+ * A notice of a space's governance (PROF-TOOL-038), read-only: `owner-changed` to every active member (`how`, `from`,
+ * `to`, a steward's `reason`); `policy-attention` to the owner (`tool`, `entries`, the required entries that name nobody);
+ * `no-approver` to the owner (`tool`, `requester`); `space-without-owner` to the stewards, in the agent's Notifications
+ * (`template`, `formerOwner`). `resolvedAt` once what it reports is resolved.
+ */
+export interface GovernanceNoticeBody {
+  space: { id: string; title: string }
+  how?: OwnerChange
+  from?: { name: string } | null
+  to?: { name: string } | null
+  reason?: string
+  tool?: { source: string; title: string }
+  entries?: ApprovalProgress['waitingFor']
+  requester?: { displayName: string }
+  template?: { id: string; title: string }
+  formerOwner?: { name: string } | null
+  resolvedAt?: string
+}
+
 export interface NotificationItem {
-  /** the approval's id */
+  /** the approval's id, or the notice's */
   id: string
   kind: NotificationKind
-  /** when the request was made: the order of the list */
+  /** when the request was made, or the notice: the order of the list */
   at: string
-  /** the person can still decide it: `PENDING`, and not decided by them */
+  /**
+   * the person can still decide it: `PENDING`, and not decided by them; a `policy-attention` or a `space-without-owner`
+   * until resolved
+   */
   waiting: boolean
-  approval: NotificationApproval
+  /** the approval of an item of kind `approval` */
+  approval?: NotificationApproval
+  /** the notice of any other kind */
+  notice?: GovernanceNoticeBody
 }
 
 /** `GET {sessions}/spaces/{id}/notifications` and `GET {sessions}/notifications`: newest first (PROF-TOOL-024). */
@@ -1749,6 +1924,8 @@ export interface SpaceNotificationsChangedValue {
   spaceId: string | null
   id: string
   kind: NotificationKind
+  /** the approval's status after the change; absent for a notice */
+  status?: ApprovalStatus
   waiting: boolean
   count: number
 }

@@ -161,7 +161,7 @@ describe('session grant (D56, CHAN-BIND-014, PROF-SESS-013)', () => {
       language: null,
       rules: { retentionDays: 365, lawfulBasis: 'contract', allowedProviders: ['stub'], handover: false },
       membership: { mode: 'list' },
-      ownerIds: [phone.principal.id],
+      ownerPrincipalId: phone.principal.id,
       createdAt: now,
       updatedAt: now,
     })

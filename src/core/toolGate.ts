@@ -19,7 +19,13 @@ import { confirmationTimeoutSeconds } from '../config/packTypes.js'
 import type { ToolCallRequest, ToolDefinition } from '../llm/types.js'
 import type { MemoryService } from '../memory/service.js'
 import type { StatsSink } from '../platform/stats.js'
-import { type ApprovalChange, ApprovalError, type ApprovalService, displayName } from '../policy/approvals.js'
+import {
+  type ApprovalChange,
+  ApprovalError,
+  type ApprovalService,
+  displayName,
+  NO_APPROVER,
+} from '../policy/approvals.js'
 import { needsGrant, runsNow, type TierResolution } from '../policy/rbac.js'
 import type { Store } from '../store/types.js'
 import { scrubAccount } from '../tools/accountValues.js'
@@ -44,6 +50,7 @@ import {
   type Principal,
   type Session,
   type Space,
+  type SpaceApprovalPolicy,
   type ToolAction,
   type ToolAllowance,
   type ToolCallOutcome,
@@ -110,6 +117,12 @@ export interface ToolGateHooks {
   cardSessions?: (conversationId: string) => Promise<Session[]>
   /** a message of the agent to a conversation, outside a turn: the outcome of an approved action */
   deliver?: (session: Session, entry: MessageEntry) => Promise<void>
+  /** the requester's card of an approval, as the requester reads it (PROF-TOOL-009, PROF-TOOL-037) */
+  approvalCard?: (record: ApprovalRecord, viewer: Principal) => Promise<Record<string, unknown>>
+  /** a call refused at once for want of an approver: the space's owner is told (INTX-APPR-024) */
+  noApprover?: (record: ApprovalRecord, title: string) => Promise<void>
+  /** whom a policy of a space names, each by name, role or department (TOOL-CALL-009) */
+  policyWords?: (spaceId: string, policy: SpaceApprovalPolicy) => Promise<string[]>
 }
 
 export interface ToolGateDeps {
@@ -226,26 +239,6 @@ export function fieldValue(value: unknown): string {
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
   if (value === null || value === undefined) return String(value)
   return JSON.stringify(value, null, 2)
-}
-
-/** Whether a profile version is a given one or later (PROF-SESS-016): `3.5` is at least `3.4`. */
-export function profileAtLeast(profileVersion: string | undefined, least: string): boolean {
-  const m = /^(\d+)\.(\d+)/.exec(profileVersion ?? '')
-  const l = /^(\d+)\.(\d+)/.exec(least)
-  if (!m || !l) return false
-  const [major, minor] = [Number(m[1]), Number(m[2])]
-  const [lMajor, lMinor] = [Number(l[1]), Number(l[2])]
-  return major > lMajor || (major === lMajor && minor >= lMinor)
-}
-
-/** A profile version is 3.4 or later (PROF-SESS-016). */
-export function cardCapable(profileVersion: string | undefined): boolean {
-  return profileAtLeast(profileVersion, '3.4')
-}
-
-/** A profile version is 3.5 or later: its sessions show a Connect card (PROF-SESS-016, TOOL-CONN-011). */
-export function connectCapable(profileVersion: string | undefined): boolean {
-  return profileAtLeast(profileVersion, '3.5')
 }
 
 const ajv = new Ajv2020({ allErrors: true, strict: false })
@@ -441,10 +434,9 @@ export class ToolGate {
     // a call that is not a read, in a turn that read untrusted content, asks the person (TOOL-CALL-008)
     const raised = !!tool.effect && tool.effect !== 'read' && state.untrustedRead.size > 0
     record.raisedByUntrusted = raised
-    let rule = tool.rule
-    // the owner asks a call of a tool of their own space: the approval is their own confirmation (INTX-APPR-005)
-    const ownerSelf = rule === 'approval' && tool.spaceTool && !!state.space?.ownerIds.includes(ctx.principal.id)
-    // a requester who holds an approver role runs it without a prompt (INTX-APPR-005)
+    const rule = tool.rule
+    // a requester who holds an approver role of a tool of the whole agent or of Personal runs it without a prompt; the
+    // requester of a tool of a space counts only by their own confirmation, on their phone (INTX-APPR-005, INTX-APPR-023)
     let selfApproved = false
     if (rule === 'approval' && !tool.spaceTool) {
       const approvers = this.deps.catalog.approversOf(tool.packRule)
@@ -456,8 +448,8 @@ export class ToolGate {
         this.deps.pack.approvals?.selfApproval !== false &&
         ctx.principal.roles.some((r) => approvers.includes(r) && this.deps.pack.identity.roles?.[r]?.canApprove)
     }
-    // 1. the person's confirmation
-    const needsCard = rule === 'confirm' || raised || ownerSelf
+    // 1. the person's confirmation: untrusted content asks its card first, the approval comes after (INTX-APPR-023)
+    const needsCard = rule === 'confirm' || raised
     /** a card was asked: every answer of this call says what TOOL-CALL-015 says */
     let asked = false
     if (needsCard) {
@@ -471,12 +463,10 @@ export class ToolGate {
         }
         asked = true
         const outcome = await this.confirm(tool, title, args, state, ctx, record, {
-          allowForConversation: rule === 'confirm' && !raised && !ownerSelf,
+          allowForConversation: rule === 'confirm' && !raised,
           raised,
         })
         if (outcome) return askedAnswer(outcome)
-        // the owner's own confirmation stands for the approval (INTX-APPR-005)
-        if (ownerSelf) rule = 'confirm'
       }
     }
     // 2. the approval
@@ -1114,11 +1104,10 @@ export class ToolGate {
     record: ToolCallRecord
   ): Promise<string> {
     const action = await this.actionOf(tool, title, args, state.spaceId)
-    const owners = tool.spaceTool ? (state.space?.ownerIds ?? []) : []
     const approvers = tool.spaceTool ? [] : this.deps.catalog.approversOf(tool.packRule)
-    const who = tool.spaceTool
-      ? `the owner of the space, ${(await this.ownerNames(owners)).join(' or ') || 'its owner'}`
-      : approvers.join(' or ')
+    // a tool of a space: the policy in force in the space, and the space's timeout of a call's approval (D137, D138)
+    const space = tool.spaceTool ? await this.spacePolicyOf(tool, state) : undefined
+    const who = space ? await this.policyWho(state.spaceId, space.policy) : approvers.join(' or ')
     let approval: ApprovalRecord
     try {
       approval = await this.deps.approvals.requestSensitivity({
@@ -1131,8 +1120,7 @@ export class ToolGate {
         rule: tool.packRule.approvalRule ?? {
           tools: [tool.spec.rawName],
           approvers,
-          // the space's owner decides attested on the phone, whatever the policy (INTX-APPR-013)
-          ...(tool.spaceTool ? { attested: true } : this.deps.pack.approvals?.attested ? { attested: true } : {}),
+          ...(this.deps.pack.approvals?.attested ? { attested: true } : {}),
         },
         inboundId: ctx.inbound?.id,
         tool: {
@@ -1140,8 +1128,9 @@ export class ToolGate {
           sourceId: tool.source.name,
           conversationId: state.conversationId,
           callId: record.id,
-          ...(tool.spaceTool ? { spaceId: state.spaceId, ownerApproval: true } : {}),
+          ...(tool.spaceTool ? { spaceId: state.spaceId } : {}),
         },
+        ...(space ? { space } : {}),
       })
     } catch (error) {
       // an approval to attest with no approver a flow-capable phone reaches: nothing is asked (INTX-APPR-019)
@@ -1155,10 +1144,46 @@ export class ToolGate {
     const card = await this.requesterCard(
       approval,
       state,
+      ctx.principal,
       tool.source.account.kind === 'personal'
         ? await this.deps.connections?.labelIn(ctx.principal, tool.source, state.spaceId)
         : undefined
     )
+    // nobody else can meet the policy of a tool of a space: refused at once, its card ended so, the owner told
+    // (INTX-APPR-024)
+    if (approval.status === 'REJECTED' && approval.reason === NO_APPROVER) {
+      const ended = await this.deps.memory.append({
+        sessionId: ctx.session.id,
+        principalId: ctx.principal.id,
+        role: 'system',
+        sourceType: 'refusal',
+        text: `The call of ${title} (${approval.id}) needed the approval of ${who}, and no other approver could decide it: refused at once, shown to the person on a card`,
+        backingIdentity: ctx.principal.backingIdentity,
+        payload: {
+          approvalId: approval.id,
+          kind: approval.kind,
+          toolName: approval.toolName,
+          status: 'REJECTED',
+          card,
+        },
+      })
+      const fresh = (await this.deps.approvals.get(approval.id)) ?? approval
+      fresh.entryId = ended.id
+      await this.deps.approvals.save(fresh)
+      await ctx.sink.emit({ type: 'activity', messageId: ended.id, activityType: ACTIVITY.approval, content: card })
+      await this.hooks
+        .noApprover?.(fresh, title)
+        .catch((err) =>
+          this.deps.logger.warn(
+            { err, approvalId: fresh.id },
+            'the owner was not told of a call refused for want of an approver'
+          )
+        )
+      record.approval = { approvalId: approval.id, status: 'REJECTED', decidedBy: [] }
+      record.rule = 'approval'
+      await this.finish(record, 'no-approver')
+      return `${title} needs the approval of ${who}, and no other approver can decide it now: nothing was asked and it did not run.`
+    }
     const entry = await this.deps.memory.append({
       sessionId: ctx.session.id,
       principalId: ctx.principal.id,
@@ -1185,15 +1210,53 @@ export class ToolGate {
     record.approval = { approvalId: approval.id, status: approval.status, decidedBy: [] }
     record.rule = 'approval'
     await this.finish(record, 'pending')
-    return `${title} needs the approval of ${who}. The request is pending: the action runs once approved, and its outcome will be told in this conversation.`
+    // the requester an approver who counts by their own confirmation: asked on their phone (INTX-APPR-023)
+    const own = approval.approverIds?.includes(ctx.principal.id)
+      ? ' The person is asked for their own confirmation on their phone, which counts as one approval.'
+      : ''
+    return `${title} needs the approval of ${who}. The request is pending: the action runs once approved, and its outcome will be told in this conversation.${own}`
   }
 
-  /** The requester's card of an approval of a call: the action, and the space whose owner approves it. */
+  /** The policy in force of a tool of a space, and the space's timeout of a call's approval (D137, D138). */
+  private async spacePolicyOf(
+    tool: TurnTool,
+    state: TurnToolState
+  ): Promise<{ policy: SpaceApprovalPolicy; timeoutMinutes: number } | undefined> {
+    const space = state.space ?? (await this.deps.spaces.find(state.spaceId))
+    if (!space) return undefined
+    const record = (await this.store.spaceTools.get(space.id, tool.source.name)) ?? { approvals: undefined }
+    return {
+      policy: this.deps.spaceTools.policyOf(tool.source, record, tool.spec.rawName),
+      timeoutMinutes: this.deps.spaces.approvalTimeout(space, 'tool-call'),
+    }
+  }
+
+  /**
+   * Who must approve under a space's policy, as the model is told (TOOL-CALL-009): the owner by name for a policy of the
+   * owner alone, else the number of approvals and each approver, by name, role or department, required or not.
+   */
+  private async policyWho(spaceId: string, policy: SpaceApprovalPolicy): Promise<string> {
+    const words = (await this.hooks.policyWords?.(spaceId, policy)) ?? policy.approvers.map((e) => e.kind)
+    const [only] = policy.approvers
+    if (policy.approvers.length === 1 && only?.kind === 'owner' && policy.threshold === 1)
+      return `the owner of the space, ${words[0] ?? 'once a steward names one'}`
+    const named = policy.approvers.map((e, i) => (e.required ? `${words[i]} (required)` : `${words[i]}`))
+    const n = policy.threshold
+    return `${n} approver${n === 1 ? '' : 's'} among ${named.join(', ')}`
+  }
+
+  /** The requester's card of an approval of a call: the action, the space, where it stands (PROF-TOOL-009, PROF-TOOL-037). */
   private async requesterCard(
     record: ApprovalRecord,
     state: TurnToolState,
+    requester: Principal,
     label?: string
   ): Promise<Record<string, unknown>> {
+    if (this.hooks.approvalCard) {
+      const card = await this.hooks.approvalCard(record, requester)
+      const action = card.action as ApprovalRecord['action'] | undefined
+      return label && action ? { ...card, action: { ...action, account: { ...action.account, label } } } : card
+    }
     return {
       approvalId: record.id,
       kind: record.kind,
@@ -1207,17 +1270,10 @@ export class ToolGate {
       ...(record.action
         ? { action: label ? { ...record.action, account: { ...record.action.account, label } } : record.action }
         : {}),
-      ...(record.ownerApproval && state.space ? { space: { id: state.space.id, title: state.space.title } } : {}),
+      ...(record.spaceId && state.space ? { space: { id: state.space.id, title: state.space.title } } : {}),
+      ...(record.progress ? { progress: record.progress } : {}),
+      ...(record.reason ? { reason: record.reason } : {}),
     }
-  }
-
-  private async ownerNames(ids: string[]): Promise<string[]> {
-    const names: string[] = []
-    for (const id of ids) {
-      const p = await this.deps.principals.get(id)
-      if (p) names.push(displayName(p))
-    }
-    return names
   }
 
   /**

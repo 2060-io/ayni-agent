@@ -56,8 +56,6 @@ export type TurnEvent =
       messageId: string
       activityType: string
       content: Record<string, unknown>
-      /** shown only to the sessions of a client of this profile version or later: the Connect card, 3.5 (PROF-TOOL-020) */
-      minProfile?: string
     }
   | { type: 'inbound'; entry: MessageEntry }
   /** the turn starts: until then it may have waited for another to end (D63) */
@@ -679,7 +677,6 @@ export class Orchestrator {
           messageId: entry.id,
           activityType: ACTIVITY.connect,
           content: { ...card },
-          minProfile: '3.5',
         })
       },
     }

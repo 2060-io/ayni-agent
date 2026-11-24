@@ -14,7 +14,7 @@
  *   its next connection, for a presentation of the authentication schema that reveals it.
  */
 import { AUTHENTICATION_ENTRY } from '../config/pack.js'
-import type { AgentPack } from '../config/packTypes.js'
+import { type AgentPack, credentialMethodsOf } from '../config/packTypes.js'
 import { isEmailAddress, type Mailer } from '../platform/mail.js'
 import type { Store } from '../store/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
@@ -64,10 +64,12 @@ export class InvitationService implements OutsiderInvitations {
     return !!this.deps.mailer
   }
 
-  /** Whether the authentication asks for `email`: when it does not, a known Principal cannot be asked to reveal it. */
+  /**
+   * Whether a `credential` method of the authentication asks for `email`: when none does, a known Principal cannot be
+   * asked to reveal it.
+   */
   private get asksEmail(): boolean {
-    const authentication = this.deps.pack.identity.authentication?.[0]
-    return !!authentication && (!authentication.attributes || authentication.attributes.includes('email'))
+    return credentialMethodsOf(this.deps.pack).some(([, m]) => !m.attributes || m.attributes.includes('email'))
   }
 
   /** The organizations of the trust graph for the member picker, the agent's own excluded (PROF-DIR-002). */
@@ -104,9 +106,9 @@ export class InvitationService implements OutsiderInvitations {
     const home = await this.deps.home()
     if (home.key && key === home.key)
       throw new SpaceError('the people of this organization are added from the directory', 'home-organization')
-    // its people could never authenticate (IDENT-RES-018)
-    const accepted = this.deps.pack.identity.authentication?.[0]?.issuers?.organizations
-    if (accepted && !accepted.includes(key))
+    // its people could never authenticate: no `credential` method accepts that organization's credentials (IDENT-RES-018)
+    const methods = credentialMethodsOf(this.deps.pack).map(([, m]) => m)
+    if (!methods.some((m) => !m.issuers?.organizations || m.issuers.organizations.includes(key)))
       throw new SpaceError(
         'this agent does not accept the credentials of that organization',
         'organization-not-accepted'

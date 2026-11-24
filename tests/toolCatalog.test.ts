@@ -286,7 +286,7 @@ describe('effect, rule and trust (TOOL-CAT-006/007/008)', () => {
 describe("a space's account in named fields (D102, TOOL-CAT-002/012, TOOL-ACCESS-005)", () => {
   const x = (account: Doc) => doc((p) => (p.tools.sources.x_mentions.account = account))
 
-  it('refuses the former form of an account before the schema, with the form that replaces it (TOOL-CAT-012)', () => {
+  it('leaves the former form of an account to the schema, which refuses its keys (no backward compatibility)', () => {
     const old = refusal(
       doc((p) => {
         p.tools.sources.relaticle.account = {
@@ -297,17 +297,8 @@ describe("a space's account in named fields (D102, TOOL-CAT-002/012, TOOL-ACCESS
         }
       })
     )
-    expect(old).toContain('agent-pack declares a space account in the form that its fields replaced (D102)')
-    expect(old).toContain('tools.sources.relaticle.account.label is withdrawn')
-    expect(old).toContain('fields: [{ name: token, label: API token, pattern: "^[A-Za-z0-9|]{20,200}$" }]')
-    expect(old).toContain('tools.sources.relaticle.account.pattern is withdrawn')
-    expect(old).toContain('tools.sources.relaticle.account.apply as one header with its prefix is withdrawn')
-    expect(old).toContain('apply: [{ header: Authorization, value: "Bearer {token}" }]')
-    // in words, before the schema would name the keys
-    expect(old).not.toContain('schema validation')
-    // the header alone, as the X server of devnet took the four keys joined
-    const header = refusal(x({ kind: 'space', label: 'Keys of the X account', apply: { header: 'X-Account' } }))
-    expect(header).toContain('apply: [{ header: X-Account, value: "{token}" }]')
+    expect(old).toContain('agent-pack fails schema validation')
+    expect(old).not.toContain('is withdrawn')
   })
 
   it('refuses a header that names a field the account lacks, and a field no header names (TOOL-CAT-002)', () => {

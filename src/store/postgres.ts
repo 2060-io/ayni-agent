@@ -6,6 +6,7 @@ import type {
   Conversation,
   DigestAnchor,
   ElevationGrant,
+  GovernanceNotice,
   LifecycleState,
   MemoryAccessLog,
   OAuthAttemptRecord,
@@ -350,16 +351,6 @@ export class PostgresStore implements Store {
         params
       )
       return rows.map((r) => ({ item: this.entryFromRow(r), score: Number(r.score) }) as VectorHit<StoredEntry>)
-    },
-    listWithPlainAttachments: async (limit: number) => {
-      const rows = await this.rows(
-        `SELECT * FROM entries e WHERE EXISTS (
-           SELECT 1 FROM jsonb_array_elements(COALESCE(e.data->'attachments', '[]'::jsonb)) a
-           WHERE COALESCE(a->>'textRepr', '') <> '' OR a ? 'filename'
-         ) LIMIT $1`,
-        [limit]
-      )
-      return rows.map((r) => this.entryFromRow(r))
     },
     listAll: async (q: { conversationId?: string; principalId?: string; limit: number }) => {
       const where: string[] = ['true']
@@ -970,6 +961,34 @@ export class PostgresStore implements Store {
         'SELECT data FROM space_activity WHERE space_id = $1 ORDER BY at DESC, seq DESC LIMIT $2',
         [spaceId, limit]
       ),
+  }
+
+  public governanceNotices = {
+    save: async (n: GovernanceNotice) => {
+      await this.pool.query(
+        `INSERT INTO governance_notices (id, principal_id, space_id, kind, at, resolved_at, data)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (id) DO UPDATE SET resolved_at = $6, data = $7`,
+        [n.id, n.principalId, n.spaceId, n.kind, n.at, n.resolvedAt ?? null, n]
+      )
+    },
+    get: (id: string) => this.one<GovernanceNotice>('SELECT data FROM governance_notices WHERE id = $1', [id]),
+    list: (f: { principalId?: string; spaceId?: string; kind?: GovernanceNotice['kind']; open?: boolean }) => {
+      const where: string[] = ['true']
+      const params: unknown[] = []
+      const add = (column: string, value: unknown) => {
+        params.push(value)
+        where.push(`${column} = $${params.length}`)
+      }
+      if (f.principalId) add('principal_id', f.principalId)
+      if (f.spaceId) add('space_id', f.spaceId)
+      if (f.kind) add('kind', f.kind)
+      if (f.open) where.push('resolved_at IS NULL')
+      return this.many<GovernanceNotice>(
+        `SELECT data FROM governance_notices WHERE ${where.join(' AND ')} ORDER BY at, id`,
+        params
+      )
+    },
   }
 
   public personKeys = {

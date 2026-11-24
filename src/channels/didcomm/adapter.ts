@@ -31,12 +31,13 @@ import type {
   MessageEntry,
   Session,
 } from '../../core/types.js'
-import { needsAttestation } from '../../policy/approvals.js'
+import { attestedFor } from '../../policy/spacePolicy.js'
 import type { Logger } from '../../util/logger.js'
 import type { PeerProfiles } from './peerProfiles.js'
 import type { VsAgentClient } from './vsAgentClient.js'
 
-export const BINDING_GOAL_CODE = 'ayni.bind-session'
+/** goal_code of a binding invitation (flow profile §4, FLOW-CONN-001): a web UI's session linked by the phone. */
+export const BINDING_GOAL_CODE = 'ayni.link-session'
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 
 function decoyCode(): string {
@@ -381,11 +382,17 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
 
   /**
    * Every pending approval an approver can decide reaches their phone as one `authorize` flow, whatever its policy
-   * (INTX-APPR-011, FLOW-AUTH-003): `attested` as the policy sets it, always for an owner's approval; `origin: none`, so
-   * that no conversation records a card of it; and `link` to the Notifications that list it. One flow per approval and
-   * phone: the open one is kept in the store, so a restart still closes or answers it. False when one was open already.
+   * (INTX-APPR-011, FLOW-AUTH-003): `attested` as the policy sets it, always for a requester's own confirmation
+   * (INTX-APPR-023); `origin: none`, so that no conversation records a card of it; and `link` to the Notifications that
+   * list it. One flow per approval and phone: the open one is kept in the store, so a restart still closes or answers
+   * it. False when one was open already.
    */
-  public async openApprovalFlow(session: Session, a: ApprovalRecord, link: string | undefined): Promise<boolean> {
+  public async openApprovalFlow(
+    session: Session,
+    a: ApprovalRecord,
+    link: string | undefined,
+    approverId: string
+  ): Promise<boolean> {
     const connectionId = session.externalRef
     const key = `${AUTHORIZE_INDEX}${a.id}:${connectionId}`
     const kv = this.agent?.store.kv
@@ -398,13 +405,20 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
     const flow = await this.flows.open({
       connectionId,
       kind: 'authorize',
-      title: `${a.requesterName} asks to run ${a.action?.title ?? a.toolName}`,
+      // the requester's own confirmation says it is theirs (INTX-APPR-023, FLOW-AUTH-004)
+      title:
+        approverId === a.requesterId
+          ? `Your own request: ${a.action?.title ?? a.toolName}`
+          : `${a.requesterName} asks to run ${a.action?.title ?? a.toolName}`,
       description: call?.justification ?? a.justification ?? a.purpose,
       expiresAt: a.expiresAt,
       ...(link ? { link } : {}),
       ref: { type: 'approval', id: a.id },
     })
     try {
+      // an approval of a tool of a space is one of several decisions: the threshold, the approver's own request, the
+      // other entries as they are now; never sent again to show a later progress (FLOW-AUTH-004, INTX-APPR-026)
+      const approvals = await this.agent?.governance?.approvalsFor(a, approverId)
       await this.client.sendAuthorizeRequest({
         connectionId,
         flowId: flow.flowId,
@@ -414,7 +428,8 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
           justification: call?.justification ?? a.justification ?? '',
           scope: call?.scope ?? [`tool:${a.serverName ? `${a.serverName}.` : ''}${a.toolName}`],
           expiresAt: a.expiresAt,
-          attested: needsAttestation(a),
+          attested: attestedFor(a, approverId),
+          ...(approvals ? { approvals } : {}),
         },
       })
       await kv.set(key, flow.flowId)

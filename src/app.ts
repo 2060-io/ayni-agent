@@ -14,7 +14,9 @@ import { DidcommAdapter, MediaLinks } from './channels/didcomm/adapter.js'
 import { registerDidcommCallbacks } from './channels/didcomm/callbacks.js'
 import { CredentialDefinitions } from './channels/didcomm/credentialDefinitions.js'
 import { CredentialOffers } from './channels/didcomm/credentialOffers.js'
+import { EnrolService } from './channels/didcomm/enrol.js'
 import { DidcommEvents } from './channels/didcomm/events.js'
+import { FaceSteps } from './channels/didcomm/faceSteps.js'
 import { actorIdentityOf, IdentityFlow, TrustResolver } from './channels/didcomm/identity.js'
 import { IdentityRequests } from './channels/didcomm/identityRequests.js'
 import { PeerProfiles } from './channels/didcomm/peerProfiles.js'
@@ -27,11 +29,14 @@ import {
   type AgentPack,
   admitsUnidentified,
   challengeTypesOf,
+  credentialMethodFor,
+  credentialMethodsOf,
   directoryReadsDocuments,
   featuresOf,
   sourcesOfType,
 } from './config/packTypes.js'
 import { AyniAgent } from './core/agent.js'
+import { EnrolmentStore } from './core/authentication/enrolments.js'
 import { ChallengeService } from './core/challenges.js'
 import { CapabilityRouter } from './core/channel.js'
 import { ConnectionService } from './core/connections.js'
@@ -42,7 +47,8 @@ import { documentOutcomeForModel } from './core/document.js'
 import { EmailChecks } from './core/emailCheck.js'
 import { EvidenceService } from './core/evidence.js'
 import { FlowService } from './core/flows.js'
-import { InvitationService } from './core/invitations.js'
+import { Governance } from './core/governance.js'
+import { DEFAULT_APP_LINK_BASE, InvitationService } from './core/invitations.js'
 import { IssuanceService, subjectIdKey } from './core/issuance.js'
 import { Orchestrator } from './core/orchestrator.js'
 import { HomeOrganization } from './core/organization.js'
@@ -54,7 +60,7 @@ import { LANGUAGE_PREFERENCE, ServiceLanguage } from './core/serviceLanguage.js'
 import { SessionService } from './core/sessions.js'
 import { SpaceService } from './core/spaces.js'
 import { SpaceToolService } from './core/spaceTools.js'
-import { cardCapable, connectCapable, ToolGate } from './core/toolGate.js'
+import { ToolGate } from './core/toolGate.js'
 import { AnchoringService, VeranaLedgerWriter } from './integrity/anchoring.js'
 import { createChatModel, createEmbeddings } from './llm/index.js'
 import { createImageGenerators } from './media/imageGen.js'
@@ -119,12 +125,14 @@ export async function buildAgent(
     logger.warn(
       'UNIDENTIFIED_PEERS is no longer read: who enters unidentified follows from identity.authentication of the agent-pack (D53)'
     )
+  // the relying party of a passkey: the network's app-link domain, which the Ayni app is associated with (FLOW-SIGNIN-013)
+  const rpId = new URL(pack.channels?.agui?.appLinkBase ?? DEFAULT_APP_LINK_BASE).hostname
   // who enters unidentified follows from the authentication alone, and is said at start-up (IDENT-RES-007)
   if (admitsUnidentified(pack))
     logger.warn(
-      pack.identity.authentication?.length
-        ? 'identity: the authentication lets guests in: user agents enter unidentified until they authenticate (D53, D72)'
-        : 'identity: the agent-pack names no authentication schema: every user agent enters unidentified (D53)'
+      pack.identity.authentication?.combinations?.length
+        ? 'identity: the authentication lets visitors in: user agents enter unidentified until they authenticate (D53, D72)'
+        : 'identity: the agent-pack accepts no combination of authentication methods: every user agent enters unidentified (D53)'
     )
   const features = featuresOf(pack)
   logger.info(
@@ -182,6 +190,14 @@ export async function buildAgent(
   // email: the email code and the invitations of other organizations, only through the deployment's SMTP server
   const mailer = hooks.mailer ?? createMailer(env.mail, logger)
   for (const warning of mailWarnings(pack, !!mailer, !!env.veranaGraphUrl)) logger.warn(warning)
+  // an email method with no SMTP server stops the start, naming the method (IDENT-AUTH-001, PLAT-MAIL-001)
+  const emailMethods = Object.entries(pack.identity.authentication?.methods ?? {})
+    .filter(([, m]) => m.type === 'email')
+    .map(([name]) => name)
+  if (emailMethods.length && !mailer)
+    throw new Error(
+      `identity.authentication.methods [${emailMethods.join(', ')}] send an email code, and MAIL_HOST and MAIL_FROM_ADDRESS are not both set (IDENT-AUTH-001, PLAT-MAIL-001)`
+    )
   const s3 = env.objectStore ? new S3ObjectStore(env.objectStore, crypto) : undefined
   const objects: ObjectStore = s3 ?? new MemoryObjectStore(crypto)
   if (!s3) logger.warn('OBJECT_STORE_ENDPOINT not set: media objects are kept in memory (development only)')
@@ -279,13 +295,6 @@ export async function buildAgent(
     await context.discardSummary(conversationId)
     await sessions.refreshPreview(conversationId)
   }
-  const sealed = await sessions.sealPlainConversations()
-  if (sealed) logger.info({ sealed }, 'conversation titles and previews sealed (D77)')
-  const resealed = await memory.sealPlainAttachments()
-  if (resealed) logger.info({ resealed }, 'attachment texts and names sealed with their entries (D77)')
-  const plainMemory = await memory.sealPlainNotesAndPreferences()
-  if (plainMemory.notes || plainMemory.preferences)
-    logger.info(plainMemory, 'working-memory notes and preferences sealed (D77)')
 
   let agentRef: AyniAgent | undefined
   const approvals = new ApprovalService(store, pack, {
@@ -330,8 +339,8 @@ export async function buildAgent(
       evidence,
       requestIdentity: async (principal, by) => (await identityRequestsRef?.request(principal, by)) ?? 'unavailable',
       issuance: () => issuanceRef,
-      requestPresentation: async (principal, entry) =>
-        (await identityRequestsRef?.present(principal, entry, 'model')) ?? 'unavailable',
+      requestPresentation: async (principal, entry, session) =>
+        (await identityRequestsRef?.present(principal, entry, 'model', session)) ?? 'unavailable',
       media,
       rag,
       stats,
@@ -428,10 +437,34 @@ export async function buildAgent(
   orchestrator.gate = gate
   gateRef = gate
   orchestrator.spaceById = (spaceId) => spaces.find(spaceId)
-  approvals.spaceOwners = async (spaceId) => (await spaces.find(spaceId))?.ownerIds ?? []
+  // the governance of the spaces (D135 to D142): whom the policies of their tools name, the notices, the owners
+  const governance = new Governance({
+    store,
+    pack,
+    spaces,
+    approvals,
+    // a person by the name the user directory gives them, else as the agent names them
+    nameOf: (principal) =>
+      (principal.directoryEntryId ? directory?.view(principal.directoryEntryId)?.name : undefined) ??
+      displayNameOf(principal),
+    logger,
+  })
+  approvals.spacePolicies = governance
+  governance.policies = spaceTools
+  spaceTools.governance = governance
+  governance.noticeChanged = (notice) => agentRef?.notifications.noticeChanged(notice) ?? Promise.resolve()
+  governance.phones = {
+    open: (record, principalId) => agentRef?.approvalPhoneOpen(record, principalId) ?? Promise.resolve(),
+    close: (record, principalId) => agentRef?.approvalPhoneClose(record, principalId) ?? Promise.resolve(),
+  }
   challenges.onSettled = (record) => spaceTools.settle(record)
   spaces.onCreated = (space) => spaceTools.onCreated(space)
-  spaces.onOwnerChanged = (space) => spaceTools.onOwnerChanged(space)
+  // the owner changed: the tools' pending changes are dropped, the members told, the approvals moved (SPACE-MEMB-012)
+  spaces.onOwnerChanged = async (space, change) => {
+    await spaceTools.onOwnerChanged(space)
+    await governance.ownerChanged(space, change)
+  }
+  spaces.onMembersChanged = (space) => governance.review(space)
   memory.hooks.approvalsErased = (records) => gate.onTurnErased(records)
   spaceTools.hooks = {
     accountEnded: (spaceId, sourceId) => registry.closeAccount(sourceId, spaceId),
@@ -446,28 +479,32 @@ export async function buildAgent(
     announce: async (principalId, value) => aguiRoutes?.announceConnections(principalId, value),
     accountEnded: (accountId) => registry.closePersonal(accountId),
     endAllowances: (principalId, sourceIds) => gate.endPersonalAllowances(principalId, sourceIds),
-    // a Connect card shows only in the sessions of a client of profile 3.5 or later (TOOL-CONN-011, PROF-SESS-016)
+    // a Connect card shows in the bound AG-UI sessions of the conversation (TOOL-CONN-011)
     connectSessions: async (conversationId) => {
       const conversation = await sessions.conversationById(conversationId)
-      if (!conversation) return []
-      return (await sessions.sessionsOfConversation(conversation)).filter((s) =>
-        connectCapable(s.client.profileVersion)
-      )
+      return conversation ? sessions.sessionsOfConversation(conversation) : []
     },
   }
   gate.hooks = {
     // the arguments of an approval erased with its turn: its card and its items say so (INTX-APPR-015)
     approvalErased: (record) => agentRef?.approvalErased(record) ?? Promise.resolve(),
     onCredentialInvalid: (principal) => agentRef?.onCredentialInvalid(principal) ?? Promise.resolve(),
-    // a card is asked only of the sessions of a client of profile 3.4 or later (TOOL-CALL-005, PROF-SESS-016)
+    // a card is asked of the bound AG-UI sessions of the conversation, which show it (TOOL-CALL-005)
     cardSessions: async (conversationId) => {
       const conversation = await sessions.conversationById(conversationId)
-      if (!conversation) return []
-      return (await sessions.sessionsOfConversation(conversation)).filter((s) => cardCapable(s.client.profileVersion))
+      return conversation ? sessions.sessionsOfConversation(conversation) : []
     },
     toConversation: async (conversationId, events) => aguiRoutes?.announceToConversation(conversationId, events),
     deliver: async (session, entry) => {
       await router.deliver(session, { kind: 'text', entry })
+    },
+    approvalCard: async (record, viewer) => (agentRef ? agentRef.approvalCard(record, viewer) : {}),
+    noApprover: (record, title) => governance.noApprover(record, title),
+    policyWords: async (spaceId, policy) => {
+      const space = await spaces.find(spaceId)
+      const words: string[] = []
+      for (const entry of policy.approvers) words.push(space ? await governance.entryText(space, entry) : entry.kind)
+      return words
     },
   }
 
@@ -496,6 +533,7 @@ export async function buildAgent(
   agentRef = agent
   agent.gate = gate
   agent.spaceTools = spaceTools
+  agent.governance = governance
   agent.catalog = catalog
   agent.connections = connections
   // the notes the model reads and writes are those of the space of the conversation (MEM-SPACE-001), and a space may
@@ -573,6 +611,10 @@ export async function buildAgent(
   }
   // the spaces follow their templates: the sources they add by themselves, those no longer named leave (TOOL-SPACE-011)
   await spaceTools.align()
+  // every space holds its approval timeouts; its governance in line with its people: successors, spaces with no
+  // owner, policies that need attention (SPACE-DEF-008, D136, D139)
+  await spaces.alignRules()
+  await governance.review()
   // people's own accounts follow the agent-pack: those of a source it no longer offers as it did end (TOOL-CONN-009)
   await connections.align()
   // what a restart left waiting is answered now
@@ -580,6 +622,15 @@ export async function buildAgent(
   if (did !== 'did:unknown') await declareAgUiService(vsAgent, did, env.publicBaseUrl, logger)
   const identity = new IdentityFlow(pack, vsAgent, resolver, env.devAllowUnidentifiedPrincipals, logger)
   identity.setFlows(flows)
+  // what a person enrolled: an authenticator app's secret, sealed; a passkey's key (D129)
+  const enrolments = new EnrolmentStore(store.kv, crypto)
+  // the face steps of the authentications, joined by the face-verification service (D131)
+  const faceSteps = new FaceSteps(
+    vsAgent,
+    env.webrtcServerUrl ?? pack.media?.faceVerification?.webrtcServerUrl,
+    env.publicBaseUrl,
+    logger
+  )
   // each peer is told where it stands with the agent (D71); the descriptor declares it once the DIDComm agent
   // is known to speak the protocol (PROF-DESC-007)
   const peerStatus = new PeerStatusNotifier(pack, vsAgent, peerProfiles, logger)
@@ -589,8 +640,8 @@ export async function buildAgent(
   identityRequestsRef = new IdentityRequests(
     pack,
     {
-      authenticate: (connectionId, peerId, flowMode, userAgentVerified) =>
-        identity.authenticate(connectionId, peerId, flowMode, userAgentVerified),
+      authenticate: (connectionId, peerId, flowMode, userAgentVerified, ask) =>
+        identity.authenticate(connectionId, peerId, flowMode, userAgentVerified, ask),
       isFlowCapable: (connectionId) => peerProfiles.isFlowCapable(connectionId),
       onIdentityPresented: async (connectionId, facts) => {
         const result = await agent.onIdentityPresented(connectionId, facts)
@@ -598,7 +649,8 @@ export async function buildAgent(
         if (result.principal) await peerStatus.resolved(connectionId, result.principal)
         return result
       },
-      present: (connectionId, name, entry, flowMode) => identity.present(connectionId, name, entry, flowMode),
+      present: (connectionId, name, entry, flowMode, origin) =>
+        identity.present(connectionId, name, entry, flowMode, origin),
       record: async (principal, input) => {
         const record = await evidence.record(principal, input)
         // a credential the agent issues by itself may now be complete (INTX-ISSUE-008)
@@ -630,8 +682,13 @@ export async function buildAgent(
     spaces,
     revocations: credentialRevocations,
     homeKey: () => home.key(),
-    endAccess: (principal) => agent.onCredentialInvalid(principal),
+    // the access ends, and with the entry the authenticator app and the passkey enrolled (IDENT-AUTH-014)
+    endAccess: async (principal) => {
+      await agent.onCredentialInvalid(principal)
+      await enrolments.erase(principal.id)
+    },
     endAccounts: async (principal) => void (await connections.endPerson(principal.id)),
+    governance,
     logger,
   })
   agent.people = people
@@ -706,10 +763,11 @@ export async function buildAgent(
       // the actor the issued identity credential identifies once presented: the home organization, the schema and the
       // subject key (D59), of which its record keeps a keyed index (IDENT-ROLE-012)
       holderOf: async (_name, profile, claims) => {
-        const authentication = pack.identity.authentication?.[0]
         const schema = profile.credential.jsonSchemaCredentialId
-        if (!authentication || !schema || schema !== authentication.credential.jsonSchemaCredentialId) return undefined
-        const subject = authentication.subjectKey.map((attribute) => claims[attribute])
+        // the `credential` method of the authentication whose schema the profile issues (D126)
+        const method = credentialMethodFor(pack, schema)
+        if (!method || !schema) return undefined
+        const subject = method.subjectKey.map((attribute) => claims[attribute])
         if (subject.some((value) => !value)) return undefined
         const key = await home.key()
         return key ? actorIdentityOf(key, schema, subject as string[]) : undefined
@@ -718,13 +776,11 @@ export async function buildAgent(
         await people.onIssued(principal, record, holder)
         // issuing identifies nobody (IDENT-RES-017): a guest who just received the badge that authenticates is asked to
         // present it, and holds its entry once it has (IDENT-DIR-006)
-        const authentication = pack.identity.authentication?.[0]?.credential.jsonSchemaCredentialId
         const profile = pack.issuance?.[record.entry.replace(/^issuance:/, '')]
         if (
           !principal.identityCredentialRef &&
           record.directoryEntryId &&
-          authentication &&
-          profile?.credential.jsonSchemaCredentialId === authentication
+          credentialMethodFor(pack, profile?.credential.jsonSchemaCredentialId)
         )
           void identityRequestsRef
             ?.request(principal, 'person')
@@ -770,7 +826,46 @@ export async function buildAgent(
   )
   didcommEvents.register(app)
   agent.rebindOffer = (session, principal) => didcommEvents.offerRebind(session, principal)
-  registerDidcommCallbacks(app, agent, mediaLinks, logger)
+  // the authentication on the phone (D125 to D131): what its methods need of the rest of the agent
+  identity.authenticator.extend({
+    takesCalls: (connectionId) => peerProfiles.takesCalls(connectionId),
+    ...(directory ? { directory } : {}),
+    entryOfCredential: (facts) => people.entryOf(facts),
+    home: async () => {
+      const key = await home.key()
+      return key ? { key, name: await home.name(), attributes: {} } : null
+    },
+    principals: {
+      get: (id) => principals.get(id),
+      findByActor: (actor) => store.principals.findByActor(actor),
+      // the organization of the issuer of the credential a Principal of another organization was identified by (D64)
+      organizationOf: async (principal) => {
+        const issuer = principal.identityAttributes.issuerDid
+        return typeof issuer === 'string' ? resolver.organizationOf(await resolver.resolve(issuer)) : null
+      },
+    },
+    enrolments,
+    faceSteps,
+    ...(mailer ? { mailer } : {}),
+    renderIn: (sentence, locale) => serviceLanguage.renderIn(sentence, locale),
+    blindIndex: (value) => crypto.blindIndex(value),
+    rpId,
+  })
+  peerStatus.enrolledOf = async (principal) => (await enrolments.types(principal.id)).map((e) => e.type)
+  // the enrolments the phone opens, and the methods it removes (flow profile §6.4, FLOW-SIGNIN-014)
+  didcommEvents.enrol = new EnrolService({
+    pack,
+    client: vsAgent,
+    authenticator: identity.authenticator,
+    principalOf: async (connectionId) => (await agent.didcommSession(connectionId))?.principal,
+    savePrincipal: (principal) => principals.save(principal),
+    enrolments,
+    statusChanged: (connectionId, principal) => peerStatus.resolved(connectionId, principal),
+    rpId,
+    logger,
+  })
+  didcommEvents.faceSteps = faceSteps
+  registerDidcommCallbacks(app, agent, mediaLinks, logger, faceSteps)
   if (pack.channels?.a2a?.enabled) new A2aRoutes(agent, a2a, logger).register(app, did)
 
   app.get('/health/live', async () => ({ status: 'ok' }))
@@ -903,9 +998,9 @@ export function mailWarnings(pack: AgentPack, smtp: boolean, graph: boolean): st
       `email: MAIL_HOST and MAIL_FROM_ADDRESS are not both set: the email code is disabled for the issuance profiles [${profiles.join(', ')}] and the invitations of other organizations for the templates [${lists.join(', ')}] (PLAT-MAIL-001)`
     )
   if (lists.length) {
-    const authentication = pack.identity.authentication?.[0]
-    const asks = !!authentication && (!authentication.attributes || authentication.attributes.includes('email'))
-    const stores = !!authentication?.store?.attributes.includes('email')
+    const methods = credentialMethodsOf(pack).map(([, m]) => m)
+    const asks = methods.some((m) => !m.attributes || m.attributes.includes('email'))
+    const stores = methods.some((m) => !!m.store?.attributes.includes('email'))
     if (!asks || !stores)
       warnings.push(
         `invitations: the templates [${lists.join(', ')}] keep lists, and identity.authentication does not both ask for and store email: a person already authenticated is asked again for their badge before an invitation binds (SPACE-INV-004)`

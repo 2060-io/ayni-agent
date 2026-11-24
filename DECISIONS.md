@@ -51,8 +51,8 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
 15. **Stub providers** (`stub`) exist for the model, embeddings, speech-to-text, vision and image
     generation so the whole pipeline runs offline; the stub model answers `/call <tool> {json}` with
     a tool call, which the tests use.
-16. **Interrupts.** Inline menus are delivered as activities and answered with `menu.select` (or a
-    `resume` entry carrying `menuId`/`itemId`); the run is not suspended with an interrupt outcome.
+16. **Interrupts.** Inline menus are delivered as activities and answered with `menu.select`; the run is not
+    suspended with an interrupt outcome, and no `resume` is read (decision 76).
     Mid-run inputs that must block the model are approvals, which end the model's tool call with a
     pending result instead.
 17. **One reaction per person per message** (INTX-REACT-004, PROF-RUN-010). The current reaction of
@@ -71,7 +71,7 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
 
 19. **Device pairing outlives sessions** (D51, IDENT-DEV). At every binding confirmed on the phone the
     agent mints a device secret beside the device handle, hands both to the client (bound event and
-    status) and keeps only an HMAC of the secret on the Principal's device entry. A session request
+    status, once: decision 75) and keeps only an HMAC of the secret on the Principal's device entry. A session request
     with `deviceHandle` + `deviceProof` binds at once when the hash matches, the pairing is within
     its window (`sessions.devicePairing`, 30 days sliding / 90 hard), the capability channel is live
     and the credential passes its liveness check; the secret rotates on every use and the superseded
@@ -536,7 +536,8 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       minutes, that ends accepted, not accepted with a reason, declined or unanswered. The agent decides on a
       presentation that verified before the flow closes: accepted, the flow completes; not accepted, it
       fails with the reason's code (`issuer-not-accepted`, `not-valid`, `incomplete`) and the caller asks
-      again. `another-identity` of the profile is not produced: an identified connection is asked nothing.
+      again. An identified connection asked again (to reveal its email) refuses another identity on the flow with
+      `another-identity` and asks nothing again (decision 75).
     - **At connection** (`establishPerson`): a decline refuses the peer when the credential is required
       (`authentication-declined`) and admits a guest when it is offered; no answer in time refuses in both
       (`authentication-unanswered`). No Principal exists before the outcome: a credential accepted then
@@ -1709,7 +1710,264 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       your phone, the answers' line), `notifyAuthorize.test.ts` (a non-attested rule reaches the phone with `attested:
       false`; an attested decision without authentication is refused), `connections.test.ts` (the owner's approval on
       the phone), `toolCatalog.test.ts` (each rule of TOOL-CALL-010).
-77. **The admin interface's roles, and who it lets in** (2026-11-23, Fabrice's answer B5 as revised to the clean spec,
+75. **The clean spec's fixes: a device secret handed once, the binding goal code, a `confirm` answered no, another
+    identity, the origin of a credential request, the reason `replaced`** (2026-11-23, Fabrice's answers to the clean
+    spec, ayni-spec PR #123: B2, B8.2, B8.3 b and c, F5, and the reason `replaced` of his second answers; the rows of
+    "Specified, not built" of its reference profile).
+    - **The device secret is handed once** (D51, IDENT-DEV-001, PROF-BIND-010). The session record kept the plaintext
+      `deviceSecret` until the client rotated it (on devnet 130 of 216 sessions held one). It is now handed once and
+      erased from the session as soon as the client collected it: by the status of the bound session
+      (`takeDeviceSecret`), by the `201` of a session bound from a grant or from a device proof, or by
+      `ayni.session.bound` written to a client on the session's stream. A client that was not listening picks it up
+      from the status. One never collected is not handed once five minutes have passed since it was minted
+      (`deviceSecretAt`), and the session reaper (every 30 seconds) erases it; a session that closes erases it too.
+      Migration 3.11.0 erases the secrets the sessions already hold. Only the hash on the Principal's device stays.
+      A client that missed both the event and the status within five minutes links again with the phone; the bound
+      event stays in the stream's replay buffer, in memory only, for a client that resumes the stream.
+    - **The binding goal code** (flow profile §4, FLOW-CONN-001): `BINDING_GOAL_CODE` is `ayni.link-session` in
+      `src/channels/didcomm/adapter.ts` and in the profile package (`INVITATION_GOAL_CODE.linkSession`); no client read
+      `ayni.bind-session`.
+    - **A `confirm` answered no closes `completed`** (flow profile §6, row `confirm`), as an `authorize` answered either
+      way does; the challenge it serves still fails, and only a carrier that failed closes the flow `failed`. The phone
+      shows the person's answer from `confirmed`.
+    - **Another identity** (FLOW-SIGNIN-004, IDENT-RES-014, IDENT-RES-019): `IdentityFlow.authenticate` takes the actor
+      identity of an identified connection (`boundTo`) and decides before the flow closes: a presentation of another
+      identity is answered with the problem report `another-identity` (`NotAcceptedCode`), so that the History shows
+      it refused, and the caller asks nothing again (`asksAgain`); nothing of it is stored. The one request on an
+      identified connection is the one that asks for the email an invitation compares (`IdentityRequests.reveal`,
+      SPACE-INV-004); a visitor's request names no identity.
+    - **The origin of a credential request** (INTX-FLOW-001): a `present` asked by the model's `request_presentation`
+      and an `issue` asked from a conversation name its AG-UI session as `origin`, and so get the flow card in that
+      conversation (the web UI's "Continue on your phone"); a request of the DIDComm chat or of the agent itself (the
+      entries asked on connect, an `authenticate`) keeps `origin: none` (`conversationOrigin`).
+    - **The reason `replaced`** (IDENT-SESS-014, AG-UI profile §3.6, §5): a device's newer session on a conversation
+      closes its earlier one with `replaced`; `supersede` names a new phone only (IDENT-SESS-003).
+    - **Not done here:** `features.visitors` (PROF-DESC-012), new in the spec's second answers, is not part of these
+      fixes.
+    - **Profile package 3.5.2:** `BINDING_GOAL_CODE` `ayni.link-session`; the closure reason `replaced`.
+    - **Tests:** `agui.test.ts` (the secret by the status once, by the stream, after a device proof's response, five
+      minutes, a closed session; `replaced`), `postgres.test.ts` (3.11.0 leaves no secret), `bindingInvitation.test.ts`
+      and the package's test (the goal code), `flows.test.ts` (a `confirm` answered no; another identity on the flow and
+      the same identity accepted), `identityOnDemand.test.ts` (`reveal` names the identity and asks once),
+      `presentationCatalog.test.ts` and `issuance.test.ts` (the origin of `present` and `issue`). Each fails with its
+      change reverted.
+76. **What the clean spec removed, removed from the code** (2026-11-23, Fabrice's answers to the clean spec, ayni-spec
+    PR #123: A1, A2, B4, B5 as revised, B11 d, F4, D13; "no backward compatibility": only the team's deployments exist).
+    - **The refusals of earlier pack keys** (A1): `crossSession` on a role (formerly RBAC-XSESS-005's refusal), the keys
+      `tools.sources` replaced (`mcp`, `tools.http`, `tools.bundled`, `tools.access`, `actions`, TOOL-CAT-011) and those
+      an account's fields replaced (`account.label`, `account.pattern`, `account.apply` as one header, TOOL-CAT-012) are no
+      longer refused in words before the schema: the schema refuses them as keys it does not know.
+    - **The sealing at start of what an earlier version kept in the clear** (A1, PRIV-ERASE-009's clause): the passes over
+      the conversations' titles and last texts, the attachments' texts and names, and the working-memory notes and
+      preferences are gone, with `listWithPlainAttachments` of the stores. Every row is written sealed.
+    - **The run-time tests of a client's profile version** (A2: PROF-SESS-016, PROF-TOOL-020, TOOL-CALL-005,
+      TOOL-CONN-011): `profileAtLeast`, `cardCapable`, `connectCapable`, an activity's `minProfile` and the mirror's
+      `only` are gone. A confirmation card and a Connect card go to every bound AG-UI session of the conversation;
+      `client.profileVersion` is no part of the session request (a client that still sends it is not refused).
+    - **The MCP keys `lazy` and `reconnect`** (B11 d), which nothing read: the agent connects on first need and again
+      after a drop (TOOL-MCP-003). The example pack no longer sets `lazy`.
+    - **The routed capability kind `authorization`** (F4): an approval of someone else's request is never in a
+      conversation (D114).
+    - **Interrupts and `resume`** (B4, PROF-RUN-006): the agent never ended a run with an interrupt; it no longer reads a
+      run's `resume` as a menu selection, and `INTERRUPT_REASON` leaves the profile package.
+    - **The role key `auditor`** (B5 as revised): the admin interface's roles are the roles named `auditor` and
+      `operator`, declared like any other and given in the directory (RBAC-XSESS-008), in their own pull request. The
+      example pack's role `auditor` keeps its name and loses the flag.
+    - **`visitors`** (D13): the authentication entry's key that lets a person in without the credential is `visitors`,
+      not `guests`; "guest" names a member of a space of another organization. The start-up notice says visitors.
+    - **Already absent from the code:** the device policy `sessions.devices` (B1), and the issuance profile's `format`,
+      `subjectKind: service` and the claim sources `attestation` and `declared` (B3).
+    - **Profile package 3.5.3:** no `client.profileVersion` in `ClientDescription` or the create-session schema, no
+      `authorization` in `CapabilityKind`, no `INTERRUPT_REASON`.
+    - **Deployments:** the Dev Agent's pack in `2060-io/ayni-deploy` (`charts/devnet/dev-ayni-agent.yaml`) names its
+      authentication `guests: true` and must say `visitors: true` before this agent starts with it; the Welcome pack and
+      the packs of this repository carry no removed key.
+    - **Tests:** `pack.test.ts` (`crossSession`, a role's `auditor`, `guests` refused by the schema, `visitors` offered),
+      `toolSources.test.ts` (the keys `tools.sources` replaced, `lazy`, `reconnect`), `toolCatalog.test.ts` (an
+      account's former keys), `sealedMemory.test.ts` and `postgres.test.ts` (no pass at start), `tools.test.ts` (a card
+      for a client that declares no version), `connections.test.ts` (a Connect card for a client of 3.4 or of none),
+      `agui.test.ts` (a run's `resume` is not read; no routed `authorization`), the profile package's test, and the
+      renamed key in the tests of identity, flows, peer status and the directory. Each new test fails with its removal
+      reverted.
+77. **Space governance: one owner, a successor, stewards, and an approval policy per tool of a space** (2026-11-24,
+    Fabrice's decisions of 2026-11-23, ayni-spec PR #125: D135 to D142; SPACE-DEF-008, SPACE-MEMB-008 to 012,
+    TOOL-SPACE-018 to 021, TOOL-CAT-009, TOOL-CAT-023, INTX-APPR-004, 005, 007, 011, 013, 017, 019 to 027; AG-UI profile
+    3.5 amended in place: PROF-SPACE-008/009, PROF-TOOL-003/009/024/036 to 038, §3.12; flow profile FLOW-AUTH-004).
+    - **One owner** (`core/spaces.ts`): `ownerIds` is gone; a space has `ownerPrincipalId`, or none, and
+      `successorPrincipalId`. Schema 3.12.0 keeps the first of a stored space's owners. Only the space's owner is
+      `owner`, whatever a row says. Handover, succession and a steward's naming go through one `changeOwner`, which
+      records `owner-changed` with `how` (and a steward's `reason`), clears the successor (`successor-cleared`) and tells
+      `onOwnerChanged`.
+    - **Successor and stewards** (`PUT`/`DELETE {sessions}/spaces/{id}/successor`, `GET {sessions}/stewardship`,
+      `GET {sessions}/spaces/{id}/owner/candidates`, a steward's `POST {sessions}/spaces/{id}/owner` with `reason`,
+      `403 not-steward`): the successor is anyone the space could be handed to but the owner, kept by Principal. A
+      template's `stewards` are declared roles (rule 2). A steward who is not the owner names an owner through the same
+      `POST …/owner`, answered with the space as the stewardship list gives it, since the steward reads nothing else of
+      it (every other read stays 404).
+    - **An entry that leaves the directory** (`PeopleService.release` → `SpaceService.onEntryLeft`): the person's active
+      rows in every space become `left` (recorded `left` by the directory), so that no policy names them; a space they
+      owned passes to its successor while eligible (`how: succession`), else has no owner; a space whose successor they
+      were has none. A successor who stops being eligible otherwise (removed, a rule that no longer matches) is cleared
+      when the space is reviewed.
+    - **The timeouts** (`rules.approvalTimeouts`, SPACE-DEF-008): per kind, `tool-call` only, from
+      `approvals.spaces.timeouts` (60, 5 to 10080 by default); `PATCH {sessions}/spaces/{id}` with
+      `rules.approvalTimeouts`, `422 out-of-bounds` with `field: rules.approvalTimeouts.tool-call`. A space made before
+      gets the defaults at start (`alignRules`). An approval takes the space's timeout when it is asked.
+    - **The policies** (`policy/spacePolicy.ts`, pure; `core/governance.ts`, whom the entries name): kept on the space's
+      tool record (`SpaceToolRecord.approvals`), the agent-pack's default until the owner sets one, dropped with the rule
+      `approval`, with the source, and never touched by a change of owner. `PATCH …/tools/{source}` takes `approvals`,
+      each policy whole: `400 bad-request` for a field or a value not of a policy (a `timeoutMinutes` included), and the
+      `422` codes in the order of TOOL-SPACE-018. A looser policy is held with the pending change and the phone's text
+      reads "Change who approves Post on X in Communication: from …, to …"; a stricter one applies at once. The answer's
+      `approval.warnings` are those of the policy sent, whether it applied or waits (a `202` keeps the rest of the item as
+      in force). `state`, `attention` and `warnings` are computed when read, from the people named then.
+    - **The workflow** (`ApprovalService`, `SpacePolicyPort`): a tool of a space's approval carries `spacePolicy`, the
+      policy it was asked under (TOOL-SPACE-019), and `progress`; `ownerApproval` is gone (schema 3.12.0 gives a waiting
+      owner's approval the default policy). Eligibility is "an entry names you now"; a decision records the entries that
+      named its maker (`satisfies`), which it keeps satisfying (INTX-APPR-025), and `self: true` for the requester's own
+      confirmation. Approved, rejected, or rejected as soon as the people who have not decided can no longer meet it.
+      At the request, for an attested decision only people with a flow-capable phone count; when they cannot meet the
+      policy the record is saved `REJECTED` with `reason: no-approver`, asked of nobody, its card written ended, the model
+      told "no other approver can decide it now", and the owner told. Afterwards, reviews count everyone named,
+      phone or not.
+    - **The owner's own card is gone** (`toolGate.ts`): no `ownerSelf` path. Untrusted content still asks its card first,
+      then the approval. An approver who asks, under `own-confirmation`, is asked on their own phone (flow title "Your
+      own request: …", always attested), listed in their Notifications with `own` and `canDecide`; on the card in the
+      conversation `canDecide` stays false.
+    - **A change of owner** (`Governance.ownerChanged`): every active member gets an `owner-changed` notice; each pending
+      approval with an `owner` entry closes the former owner's flow when they are named no more and opens the new owner's
+      (a new `ApprovalChange` `moved` updates the card and the Notifications without touching phones). With no owner, the
+      former owner's flows close and the approvals wait (an `owner` entry of an ownerless space counts as one who can).
+    - **Review** (`Governance.review`, after a reload of the directory, a member removed, a policy saved, a change of
+      owner, and at start): successors, `space-without-owner` notices to the stewards, `policy-attention` notices to the
+      owner (one per tool, resolved when the policy no longer needs attention or the owner changes), and the pending
+      approvals that can no longer be met, which expire.
+    - **Notices** (`governance_notices`, one row per person; `Notifications`): listed beside approvals, newest first,
+      `space-without-owner` in the agent's list, the others in the space's; `policy-attention` and `space-without-owner`
+      wait until resolved; `ayni.space.notifications.changed` with the notice's `kind`. An approval of a space's tool is
+      in the agent's Notifications for an approver who is not a member (INTX-APPR-022), its phone link too.
+    - **Not done here:** the `authorize` request's `approvals` (FLOW-AUTH-004) is not sent: the agent posts the request to
+      the DIDComm agent, whose flow plugin (credo-ts-ayni-flow) does not take the field yet; it is one field of
+      `openApprovalFlow` once the plugin is released with it. Conditions on arguments stay O30.
+    - **Profile package 3.5.4:** `owner: null`, `successor`, `approvalTimeouts`, the stewardship shapes, `tools[].approval`,
+      `SpaceToolPatch.approvals`, `progress` and `reason` on the card and its update, notices as `NotificationItem.notice`,
+      the new error codes.
+    - **Deployments:** nothing to change; the default policy is today's (the owner, required, attested), but the owner's
+      own request now goes to his phone instead of a card. `stewards` and `approvals.spaces` are optional.
+    - **Tests:** `spacePolicy.test.ts`, `governance.test.ts`, `stewardship.test.ts`, the migration in
+      `postgres.test.ts`, the start-up checks in `pack.test.ts`; `tools.test.ts`, `approvalsOnce.test.ts` and the
+      evaluation's `confirmation` case moved from the owner's card to his phone. The new integration tests fail on the
+      code before this change.
+
+78. **Authentication by combinations of methods, on the phone, over authenticate/1.0; enrolment; approvers on the
+    approval request** (2026-11-24, Fabrice's decisions of 2026-11-23, ayni-spec PR #127: D125 to D131; IDENT-AUTH-001
+    to 014 and 017, IDENT-RES-002, 010, 014, 019, 020, IDENT-DIR-003, 004, 010, IDENT-STAT-002, 005, PLAT-MAIL-001; flow
+    profile §4.1, §6.4, §6.14, §11, FLOW-SIGNIN-001 to 014, FLOW-STAT-001, 003; FLOW-AUTH-004, INTX-APPR-026; the Ayni
+    flow library 0.3.1, credo-ts-ayni-flow PRs #39, #40, #41, #47, #49; then ayni-spec PRs #128 and #129: D152 to D155,
+    IDENT-AUTH-002, 008, 011, 014, 015, IDENT-RES-019, 020, FLOW-SIGNIN-001, 005, 008, 011, 012, 014).
+    - **The agent-pack** (`identity.authentication`, rule 1): one object, `request`, `visitors`, `methods` (by name, each
+      with a `type`: `credential`, `email`, `document`, `face-match`, `authenticator-app`, `passkey`), `combinations`
+      and `obtain`. A `credential` method carries what the one entry carried (`credential`, `subjectKey`, `attributes`,
+      `issuers.organizations`, `store`, `modelVisible`); a `face-match` method its `reference` (`document`,
+      `directory`). The start is refused, naming the method or the combination, on an unknown type, a combination that
+      names a method not enabled, twice, or holds no identifying method, a combination listed twice, a field of a
+      credential on another type, an `email` or `document` method (or a face match by the directory's photo) without
+      `identity.directory`, a face match without `media.faceVerification` or without `biometric-matching` of lawful
+      basis `consent`, and an `email` method with no SMTP server (`buildAgent`). No fallback for the list of one entry
+      (no backward compatibility). The schema's `visitors` has no default any more: with the object, Ajv applied it and
+      refused every `on-demand` pack.
+    - **The peer status** (`peerStatus.ts`): `authentication.methods` (a credential method with its `issuers`),
+      `combinations`, `obtain`; to an identified person `enrol` (the enrollable types of the enabled methods) and
+      `enrolled`. The top-level `credential` and `issuers` are gone. A fresh status follows an enrolment and an
+      `unenrol` (it changed `enrolled`), and a credential that no longer holds drops `enrol`/`enrolled` with
+      `identified: false` (the library refuses them to an unidentified receiver).
+    - **The flow** (`channels/didcomm/authenticate.ts`, `Authenticator`): an `authenticate` flow of fifteen minutes,
+      the request through `POST /v2/didcomm/authenticate` with the combinations the phone can be offered (a face match
+      only to a phone that disclosed `calls/1.0` as `callee` and with a WebRTC server; an enrolment's without an
+      authenticator app or a passkey), a `409` from the plugin answered `pending`. The choice within five minutes, else
+      the flow closes `expired` and the request is unanswered. The steps run the identifying methods first in the order
+      of the choice, then the confirming ones; each `step` and `step-result` through the plugin's routes; the phone's
+      `choice` and `answer`s from `didcomm.authenticate.state-changed` (kept a minute when they come before the route
+      answered). Not accepted: the `step-result` with the reason, then the flow's problem report; the identity is
+      checked against the connection's before the flow closes, so `another-identity` never ends `completed`. The
+      library's constants are mirrored (the agent does not depend on Credo); `timings` shortens them in the tests.
+    - **A declined face-match consent** (D152, flow library 0.3.0): an `answer` with `consent: false` ends the face
+      step with the `step-result` `failed` `consent-declined`, the only result the library takes for it; no call is
+      offered, nothing is recorded, no problem report is sent, and the flow stays open. The agent then waits for a new
+      `choice-received` on the same request, five minutes from that step result and never past the flow's fifteen
+      minutes, which do not change (unanswered otherwise: the flow closes `expired`). Every step of the new
+      combination runs, a method that passed under the combination left included, and the step numbers follow those
+      already used in the flow (O91; the library would let them start at 1 again, the spec does not). What the earlier
+      attempt found and proved is dropped: the identity and the evidence are those of the combination that completes.
+      The Principal's `lastAuthentication.steps` keeps every step of the flow, the declined face step with
+      `reason: consent-declined`; `combination` and `types` are the last combination's. A new choice that holds the
+      declined method, and any exchange the plugin fails (a second `choice` that is not awaited, FLOW-SIGNIN-008), are
+      answered with the flow's problem report (`malformed`) whatever the agent was waiting for, and end as a decline.
+      The exchange's `earlierAttempts`, `awaitingChoice` and `declinedMethods` are typed on `AuthenticateExchange`;
+      the agent keeps its own list of the declined methods.
+    - **The methods.** `credential`: present-proof under the flow id; what a badge issued from the directory finds is
+      its entry. `email`: the address (ten minutes), the same answer for an address no entry holds, a code to an
+      entry's address only, in the background, kept as a keyed hash, ten minutes, five tries in all, three new codes
+      thirty seconds apart, each replacing the one before; the email in the language of the phone's locale
+      (`ServiceLanguage.renderIn`, the code replaced by a mark in what the model translates). `document`: mrtd under
+      the flow id, the read matched to exactly one entry (`no-match` otherwise); the passport alone is a combination.
+      `face-match`: the consent, then a call under the flow id (`purpose: face-match`) whose room the face-verification
+      service joins with the reference (the passport read in this flow, else the entry's `photo`), through the vision
+      callbacks keyed by the step's token (`FaceSteps`); evidence `face-match` with the reference used and no image.
+      `authenticator-app`: TOTP (RFC 6238, SHA-1, six digits, thirty seconds, one step either side), each code once,
+      five tries. `passkey`: a 32-byte challenge for the app-link domain's host (`APP_LINK_BASE`), an ES256, EdDSA or
+      RS256 assertion with user presence and verification and a counter that goes on (`core/authentication/webauthn.ts`,
+      a CBOR reader of its own: no new dependency).
+    - **Who is identified** (IDENT-RES-002, IDENT-AUTH-003): a person of the directory is
+      `<home key>|directory|<entry>`, whatever the methods; a badge this agent issued from an entry resolves to the entry,
+      its badge key kept as `legacyActorIdentity`, and a Principal that held the entry is re-keyed on first meeting,
+      so the conversations follow. A person of another organization keeps `<org>|<schema>|<subject>`. The Principal
+      keeps `lastAuthentication` (when, why, the combination, the steps, the entry). The address, the read and the face
+      match become evidence once the authentication is accepted (`VerifiedFacts.moreEvidence`), never before.
+    - **Enrolment** (`channels/didcomm/enrol.ts`, `core/authentication/enrolments.ts`): on `request-received` of an
+      `enrol` flow, a type the pack enables for an identified person (else `not-eligible`); authenticated within ten
+      minutes by a combination holding neither type, or first an `authenticate` flow of purpose `enrol` (`not-eligible`
+      when it does not complete). The authenticator app's secret is handed once, kept sealed in the key-value store and
+      held in memory until the code proves it (a restart drops a pending enrolment); three codes in all (D155,
+      `ENROL_AUTHENTICATOR_APP_ATTEMPTS`, the library's constant): a first and a second wrong code get a new challenge
+      with the same secret, `error: "wrong-code"` and the codes left (`triesLeft`, sent as `tries_left`: 2, then 1),
+      the third closes the flow with the problem report `not-valid`, and the agent never asks the plugin for a fourth
+      challenge (it refuses one; plugin 0.3.1 also refuses a later challenge without the two fields). A passkey's attestation is checked (challenge, relying party,
+      presence, verification), not its statement; its credential id is found by a keyed index. `unenrol` removes the
+      type and sends the status. Both are erased when the entry leaves the directory (`endAccess`).
+    - **The approvers on an approval request** (`Governance.approvalsFor`, `openApprovalFlow`): an approval of a tool of
+      a space carries `approvals`: the threshold, `own` for the requester, and every other entry of the policy, by the
+      person's name, else by a label ("The role manager", "The department Depot Rotterdam", "Any member of the space",
+      "The owner of the space"), each `required` or not; sent once, never again for a later progress.
+    - **Where the spec says nothing, the choice made here:** a `choice` that the plugin fails `malformed` is answered
+      `malformed` and ends as a decline (not asked again); `requires` is not sent on `open` (the library 0.3.0 removed
+      it, and the plugin answers `400` to a body that holds it); the purpose of a re-authentication that asks the badge again
+      to read its email (SPACE-INV-004) is `step-up`, with the credentials that ask for `email` as its combinations; a
+      person identified through the directory without a badge is named to the model as a badge holder is, only when a
+      `credential` method makes `name` visible (by default the model reads nothing, D67): a pack of `[email]` alone never
+      names the person to the model. The `call` kind and `face-match-failed` were never used by the agent: nothing to remove.
+    - **Not done here:** a tool's `stepUp.authentication` (IDENT-AUTH-015) and admin access from the card (D132 to
+      D134, RBAC-ADMIN): the engine takes `purpose: step-up | admin`, `combinations` and `bound` already; the badge
+      independent of the authentication (D130, IDENT-AUTH-016) and the end of the email check in a conversation
+      (`emailCheck.ts`, `email_check`), which still serve the badge's issuance profiles.
+    - **Deployments:** the VS Agent image must carry `@ayni.org/vs-agent-plugin-ayni-flow` 0.3.1 (the `authenticate`
+      routes, the new peer-status shape and `approvals` on `authorize`, which 0.1.10 refuses; a declined consent and a
+      new choice, which 0.2.1 refuses; the wrong code and codes left on an enrolment challenge, which 0.3.0 refuses),
+      and its calls route must
+      take `parentThreadId` (CC-VSA-006) before a pack enables `face-match`. Every agent-pack with
+      `identity.authentication` moves to the object (the dev agent's `- credential: …` becomes `methods.badge` and
+      `combinations: [[badge]]`).
+    - **Tests:** `authenticate.test.ts` (the request, the choice, the email, document, authenticator-app and passkey
+      steps, `different-identities`, `another-identity`, `409`), `authenticators.test.ts` (RFC 6238 vectors, passkey
+      creation and assertion), `enrol.test.ts`, `authenticationStart.test.ts` (the SMTP refusal, the photo), the new
+      rule 1 in `pack.test.ts`, the enrolments on PostgreSQL in `postgres.test.ts`, `approvals` in
+      `governance.test.ts`; the flows, peer-status and on-demand tests moved to authenticate/1.0 and the new shape. The
+      new tests fail on the code before this change (the modules they import do not exist there). For 0.3.0, in
+      `authenticate.test.ts`: the declined consent (no call, no refusal, the new combination in the same flow, step
+      numbers 3 on, the email that passed run again), the five minutes from the step result, the flow's expiry kept, a
+      new choice holding the declined method and a second choice that is not awaited refused `malformed`, and an
+      `open` without `requires`; they fail on the code before it.
+79. **The admin interface's roles, and who it lets in** (2026-11-23, Fabrice's answer B5 as revised to the clean spec,
     ayni-spec PR #123; D78, RBAC-XSESS-006 to 009, PRIV-ERASE-008, TOOL-PROV-005). Draft: the person's sign-in with the
     phone and the badge waits for his answers.
     - **Two roles of the directory.** `auditor` reads what the admin interface serves (entries, evidence, call records,

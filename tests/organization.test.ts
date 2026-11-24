@@ -10,6 +10,7 @@ import type { AgentPack } from '../src/config/packTypes.js'
 import { HomeOrganization, matchOrganization, organizationFrom, organizationKey } from '../src/core/organization.js'
 import { assignRoles, PrincipalService, recognize, type VerifiedFacts } from '../src/core/principals.js'
 import { MemoryStore } from '../src/store/memory.js'
+import { badgeAuthentication } from './helpers.js'
 
 const silent = { info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined }
 const BADGE = 'https://ecs.example/vt/schemas-badge-jsc.json'
@@ -37,7 +38,10 @@ function packWith(identity: Partial<AgentPack['identity']> = {}): AgentPack {
       homeBackingIdentity: 'did:webvh:x:agent',
       roleRules: [],
       userAgentGate: 'optional',
-      authentication: [{ credential: { jsonSchemaCredentialId: BADGE }, subjectKey: ['badgeNumber'] }],
+      authentication: badgeAuthentication({
+        credential: { jsonSchemaCredentialId: BADGE },
+        subjectKey: ['badgeNumber'],
+      }),
       ...identity,
     },
   } as unknown as AgentPack
@@ -158,21 +162,28 @@ describe('organization patterns and home (IDENT-ROLE-008..011)', () => {
     expect(assignRoles(pack, facts({ actorIdentity: 'did:example:auditor' }), partner)).toEqual(['auditor'])
   })
 
-  it('refuses a pack whose pattern sets home, that names two authentication schemas or hides the subject key', () => {
+  it('refuses a pack whose pattern sets home, a combination that names an unknown method, or a hidden subject key', () => {
     const dev = loadPack('agent-packs/dev', { ...process.env, HOME_BACKING_IDENTITY: 'did:webvh:x:home' })
     const base = structuredClone(dev.pack)
-    base.identity.authentication = [{ credential: { jsonSchemaCredentialId: BADGE }, subjectKey: ['badgeNumber'] }]
+    base.identity.authentication = badgeAuthentication({
+      credential: { jsonSchemaCredentialId: BADGE },
+      subjectKey: ['badgeNumber'],
+    })
     expect(crossFieldErrors(base)).toEqual([])
     const home = structuredClone(base)
     home.identity.organizations = [{ match: { countryCode: 'EE' }, relation: 'home' as never }]
     expect(crossFieldErrors(home).join('\n')).toMatch(/organizations\[0\].*home/)
     const two = structuredClone(base)
-    two.identity.authentication?.push({ credential: { jsonSchemaCredentialId: `${BADGE}2` }, subjectKey: ['id'] })
-    expect(crossFieldErrors(two).join('\n')).toMatch(/exactly one entry/)
+    two.identity.authentication?.combinations.push(['card'])
+    expect(crossFieldErrors(two).join('\n')).toMatch(
+      /combinations\[1\] \[card\] names \[card\], which no method enables/
+    )
     const hidden = structuredClone(base)
-    hidden.identity.authentication = [
-      { credential: { jsonSchemaCredentialId: BADGE }, subjectKey: ['badgeNumber'], attributes: ['name'] },
-    ]
+    hidden.identity.authentication = badgeAuthentication({
+      credential: { jsonSchemaCredentialId: BADGE },
+      subjectKey: ['badgeNumber'],
+      attributes: ['name'],
+    })
     expect(crossFieldErrors(hidden).join('\n')).toMatch(/subjectKey \[badgeNumber\]/)
     const ghost = structuredClone(base)
     ghost.identity.organizations = [{ match: { countryCode: 'EE' }, relation: 'partner', roles: ['ghost'] }]

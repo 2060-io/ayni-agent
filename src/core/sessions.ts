@@ -97,6 +97,11 @@ const UNREAD_CEILING = 99
 export const TRANSCRIPT_MESSAGE_TYPES = ['text', 'voice', 'media']
 const GRANT_PREFIX = 'session-grant:'
 const MAX_GRANT_SECONDS = 60
+/**
+ * How long a device secret waits in its session for a client that has not collected it (D51, IDENT-DEV-001,
+ * PROF-BIND-010): five minutes after it was minted, then it is erased and never handed.
+ */
+export const DEVICE_SECRET_HOLD_MS = 5 * 60_000
 
 export class SessionService {
   public readonly idleTimeoutSeconds: number
@@ -230,7 +235,10 @@ export class SessionService {
     return undefined
   }
 
-  /** Mints or rotates the device's secret; the session carries the plaintext until the client takes it. */
+  /**
+   * Mints or rotates the device's secret: the Principal's device keeps its hash, and the session carries the plaintext
+   * only until its client collects it, five minutes at most (D51, IDENT-DEV-001, `takeDeviceSecret`).
+   */
   private rotateDevice(session: Session, principal: Principal): void {
     const now = nowIso()
     let device = principal.devices?.find((d) => d.handle === session.deviceHandle)
@@ -244,6 +252,33 @@ export class SessionService {
     device.lastUsedAt = now
     device.client = session.client
     session.deviceSecret = secret
+    session.deviceSecretAt = now
+  }
+
+  /** The device secret the session still holds for its client, or nothing once five minutes have passed. */
+  public heldDeviceSecret(session: Session, now = Date.now()): string | undefined {
+    if (!session.deviceSecret) return undefined
+    const minted = Date.parse(session.deviceSecretAt ?? session.boundAt ?? session.createdAt)
+    return now - minted < DEVICE_SECRET_HOLD_MS ? session.deviceSecret : undefined
+  }
+
+  /**
+   * Hands the device secret to the client once (D51, IDENT-DEV-001, PROF-BIND-010): what the session still holds is
+   * returned and erased from it, so that only the hash on the Principal's device stays.
+   */
+  public async takeDeviceSecret(session: Session): Promise<string | undefined> {
+    if (!session.deviceSecret) return undefined
+    const secret = this.heldDeviceSecret(session)
+    await this.eraseDeviceSecret(session)
+    return secret
+  }
+
+  /** Erases the plaintext of the device secret from the session (IDENT-DEV-001). */
+  public async eraseDeviceSecret(session: Session): Promise<void> {
+    if (!session.deviceSecret && !session.deviceSecretAt) return
+    session.deviceSecret = undefined
+    session.deviceSecretAt = undefined
+    await this.store.sessions.save(session)
   }
 
   /** Binds a new session from a device proof, no phone round trip (IDENT-DEV-002/003). */
@@ -270,10 +305,7 @@ export class SessionService {
     this.rotateDevice(session, principal)
     // older sessions of this device must not hand out the superseded secret through their status
     for (const other of await this.store.sessions.listByPrincipal(principal.id, ['bound'])) {
-      if (other.deviceHandle === session.deviceHandle && other.deviceSecret) {
-        other.deviceSecret = undefined
-        await this.store.sessions.save(other)
-      }
+      if (other.deviceHandle === session.deviceHandle && other.deviceSecret) await this.eraseDeviceSecret(other)
     }
     await this.store.principals.save(principal)
     await this.store.sessions.save(session)
@@ -518,13 +550,13 @@ export class SessionService {
         spaceId: space,
       }
     }
-    // one open session per device per conversation (IDENT-SESS-014): the newer one supersedes the older
+    // one open session per device per conversation (IDENT-SESS-014): the newer one replaces the older, which closes
+    // `replaced`, never `supersede`, the reason of a new phone (IDENT-SESS-003)
     if (session.deviceHandle) {
       for (const id of conversation.sessionIds) {
         if (id === session.id) continue
         const other = await this.store.sessions.get(id)
-        if (other?.state === 'bound' && other.deviceHandle === session.deviceHandle)
-          await this.close(other, 'supersede')
+        if (other?.state === 'bound' && other.deviceHandle === session.deviceHandle) await this.close(other, 'replaced')
       }
     }
     session.conversationId = conversation.id
@@ -798,11 +830,6 @@ export class SessionService {
     await this.conversations.save(conversation)
   }
 
-  /** Seals the titles and last texts an earlier version kept in the clear (D77); run once at start. */
-  public async sealPlainConversations(): Promise<number> {
-    return this.conversations.sealPlain()
-  }
-
   /** The newest message the person wrote in the conversation. */
   private async lastWritten(conversation: Conversation) {
     const [row] = await this.store.entries.query(this.scopeOf(conversation), {
@@ -944,6 +971,9 @@ export class SessionService {
     session.state = 'closed'
     session.closedAt = nowIso()
     session.closedReason = reason
+    // a closed session hands nothing: a secret its client did not collect goes with it (IDENT-DEV-001)
+    session.deviceSecret = undefined
+    session.deviceSecretAt = undefined
     // the token stays known so that later calls answer 410 with the reason (PROF-SESS-004)
     await this.store.sessions.save(session)
     this.logger.info({ sessionId: session.id, reason }, 'session closed')
@@ -987,7 +1017,10 @@ export class SessionService {
       if (now - Date.parse(session.lastActivityAt) > this.idleTimeoutSeconds * 1000) {
         await this.close(session, 'idle-timeout')
         idle++
+        continue
       }
+      // a device secret its client never collected is erased five minutes after it was minted (IDENT-DEV-001)
+      if (session.deviceSecret && !this.heldDeviceSecret(session, now)) await this.eraseDeviceSecret(session)
     }
     for (const session of await this.store.sessions.listByState('provisional')) {
       // a provisional session never bound within its window closes with reason expired (IDENT-SESS, profile section 5)

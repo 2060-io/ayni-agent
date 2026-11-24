@@ -30,6 +30,7 @@ import {
 import { nowIso } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import type { EvidenceService } from './evidence.js'
+import { conversationOrigin } from './flows.js'
 import type { EvidenceRecord, Principal, Session } from './types.js'
 
 /** The entry under which the issuances of a profile are recorded: never the name of a catalog entry. */
@@ -107,6 +108,8 @@ export interface IssuanceDeps {
     title: string
     /** under a revocable definition: the registry and the index the credential takes */
     revocation?: RevocationSlot
+    /** the conversation session the issuance was asked from, which the flow names as its origin (INTX-FLOW-001) */
+    origin?: Session
   }): Promise<{
     outcome: 'issued' | 'declined' | 'unanswered' | 'refused' | 'failed'
     /** why the wallet refused, when it did: the code of its problem report */
@@ -420,12 +423,15 @@ export class IssuanceService {
         )
         return { outcome: 'not-ready' }
       }
+      // asked from a conversation, the `issue` flow names its session as its origin (INTX-FLOW-001)
+      const origin = conversationOrigin(session)
       const offer = await this.deps.offer({
         connectionId,
         credentialDefinitionId,
         claims,
         title: label,
         ...(revocation ? { revocation } : {}),
+        ...(origin ? { origin } : {}),
       })
       if (offer.outcome !== 'issued') return { outcome: offer.outcome, reason: offer.reason }
       // one record per issuance: audit fields always, the claims only when the profile keeps them (INTX-ISSUE-014); the

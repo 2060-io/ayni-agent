@@ -7,27 +7,39 @@
  * D54, D72); a holder that answers `unsupported-kind` to `identify-ua` is treated as having no such credential
  * (IDENT-RES-003).
  *
- * The authentication (D72): one request is one attempt, and it ends accepted, not accepted with a reason,
- * declined or unanswered. A credential that is not accepted is asked again; what a decline or a silence does
- * follows from the mode of the agent-pack.
+ * The authentication (D72, D125, D128): one request is one attempt, and it ends accepted, not accepted with a reason,
+ * declined or unanswered. On a phone that takes flows it is an `authenticate` flow run by `Authenticator`
+ * (authenticate/1.0); a wallet that takes none is asked a credential of a `credential` method only, as a presentation
+ * request (IDENT-AUTH-005, O69). An authentication that is not accepted is asked again; what a decline or a silence
+ * does follows from the mode of the agent-pack.
  */
 import {
   type AgentPack,
-  type AuthenticationEntry,
   authenticationModeOf,
+  type CredentialMethod,
   type CredentialRef,
+  credentialMethodsOf,
   type PresentationEntry,
 } from '../../config/packTypes.js'
 import { AUTHENTICATION_ENTRY, type EvidenceInput } from '../../core/evidence.js'
-import type { FlowService } from '../../core/flows.js'
+import { conversationOrigin, type FlowService } from '../../core/flows.js'
 import { type OrganizationFacts, organizationFrom } from '../../core/organization.js'
 import type { LivenessChecker, VerifiedFacts } from '../../core/principals.js'
-import type { BackingIdentity, ConnectionType, LivenessVerdict, Principal } from '../../core/types.js'
+import type { BackingIdentity, ConnectionType, LivenessVerdict, Principal, Session } from '../../core/types.js'
 import { Deferred } from '../../util/async.js'
 import { nowIso } from '../../util/ids.js'
 import type { Logger } from '../../util/logger.js'
+import {
+  type AuthenticateOptions,
+  type AuthenticationAttempt,
+  Authenticator,
+  asksAgain,
+  sameActor,
+} from './authenticate.js'
 import type { PeerStatusRefusalCode } from './peerStatus.js'
 import type { PresentationRecord, VsAgentClient } from './vsAgentClient.js'
+
+export { type AuthenticationAttempt, asksAgain, type NotAcceptedCode } from './authenticate.js'
 
 export interface ResolveResult {
   did: string
@@ -87,24 +99,18 @@ interface PendingProof {
   timer: NodeJS.Timeout
 }
 
-/** How long a request for the identity credential is valid (IDENT-RES-020). */
+/** How long a request for the identity credential of a wallet that takes no flows is valid (IDENT-RES-020). */
 export const AUTHENTICATION_VALID_MS = 5 * 60_000
 
-/** Why a verified presentation is not accepted as the identity of a person (flow profile §6.14). */
-export type NotAcceptedCode = 'issuer-not-accepted' | 'not-valid' | 'incomplete'
-
-const NOT_ACCEPTED: Record<NotAcceptedCode, string> = {
-  'issuer-not-accepted': 'This service does not accept credentials of this issuer.',
-  'not-valid': 'This credential could not be verified, or is no longer valid.',
-  incomplete: 'This service needs an attribute that was not shared.',
+/**
+ * A request carried as a flow: its kind, its title and, for a credential request made from a conversation, the
+ * session of that conversation as its origin (INTX-FLOW-001); none for the agent's own requests (`origin: none`).
+ */
+interface FlowRequest {
+  kind: string
+  title: string
+  origin?: Session
 }
-
-/** What one request for the identity credential ends in (D72). */
-export type AuthenticationAttempt =
-  | { outcome: 'accepted'; facts: VerifiedFacts }
-  | { outcome: 'not-accepted'; code: NotAcceptedCode }
-  | { outcome: 'declined' }
-  | { outcome: 'unanswered' }
 
 /** A presentation record, with how the holder closed its flow when the holder closed it first. */
 type FlowPresentation = PresentationRecord & { flowClosed?: string }
@@ -119,9 +125,14 @@ export function declinedByHolder(record: Pick<PresentationRecord, 'state' | 'err
   return record.state === 'declined' || /declin/i.test(record.errorMessage ?? '')
 }
 
+/** How an authentication is asked: why, and of whom (flow profile §6.14). */
+export type AuthenticateAsk = Pick<AuthenticateOptions, 'purpose' | 'bound' | 'combinations' | 'text' | 'origin'>
+
 export class IdentityFlow {
   private readonly pending = new Map<string, PendingProof>()
   private flows?: FlowService
+  /** the authentication on a phone that takes flows (authenticate/1.0) */
+  public readonly authenticator: Authenticator
 
   public constructor(
     private readonly pack: AgentPack,
@@ -129,10 +140,26 @@ export class IdentityFlow {
     private readonly resolver: TrustResolver,
     private readonly devAllowUnidentified: boolean,
     private readonly logger: Logger
-  ) {}
+  ) {
+    this.authenticator = new Authenticator(
+      pack,
+      {
+        client,
+        flows: undefined as unknown as FlowService,
+        awaitPresentation: (id, ms) => this.awaitPresentation(id, ms),
+        credentialFacts: (peerId, record, method, ua) => this.factsFromIdentityCredential(peerId, record, method, ua),
+        home: async () => null,
+        principals: { get: async () => undefined, findByActor: async () => undefined },
+        blindIndex: (value) => value,
+        rpId: 'app.ayni.org',
+      },
+      logger
+    )
+  }
 
   public setFlows(flows: FlowService): void {
     this.flows = flows
+    this.authenticator.extend({ flows })
   }
 
   /** Called by the webhook when a presentation record reaches a final state. */
@@ -150,14 +177,14 @@ export class IdentityFlow {
     connectionId: string,
     credentials: CredentialRef[],
     timeoutMs = 120_000,
-    flow?: { kind: string; title: string }
+    flow?: FlowRequest
   ): Promise<PresentationRecord> {
     if (flow && this.flows) return this.requestInFlow(connectionId, credentials, timeoutMs, flow)
     const { proofExchangeId } = await this.client.requestPresentation(connectionId, credentials)
     return this.awaitPresentation(proofExchangeId, timeoutMs)
   }
 
-  private awaitPresentation(proofExchangeId: string, timeoutMs: number): Promise<PresentationRecord> {
+  public awaitPresentation(proofExchangeId: string, timeoutMs: number): Promise<PresentationRecord> {
     const deferred = new Deferred<PresentationRecord>()
     const timer = setTimeout(() => {
       this.pending.delete(proofExchangeId)
@@ -176,15 +203,16 @@ export class IdentityFlow {
     connectionId: string,
     credentials: CredentialRef[],
     timeoutMs: number,
-    flow: { kind: string; title: string },
-    /**
-     * the agent's own decision on a presentation that verified: a reason not to accept it, or nothing. With it
-     * the flow fails with that reason's code, and a presentation that does not verify fails with `not-valid`
-     */
-    decide?: (record: PresentationRecord) => Promise<NotAcceptedCode | undefined>
+    flow: FlowRequest
   ): Promise<FlowPresentation> {
     const flows = this.flows as FlowService
-    const handle = await flows.open({ connectionId, kind: flow.kind, title: flow.title, expiresInMs: timeoutMs })
+    const handle = await flows.open({
+      connectionId,
+      kind: flow.kind,
+      title: flow.title,
+      expiresInMs: timeoutMs,
+      ...(flow.origin ? { origin: flow.origin } : {}),
+    })
     let proofExchangeId: string
     try {
       proofExchangeId = (await this.client.requestPresentation(connectionId, credentials, true, handle.flowId))
@@ -199,15 +227,10 @@ export class IdentityFlow {
     if ('record' in first) {
       const record = first.record
       const ok = record.verified && record.state !== 'declined' && record.state !== 'abandoned'
-      // a presentation that came and does not verify is not a silence: the holder is told why
-      const came = !ok && !declinedByHolder(record) && record.errorMessage !== 'timeout'
-      const code = ok ? await decide?.(record) : decide && came ? ('not-valid' as const) : undefined
-      if (code) await flows.problemReport(handle.flowId, code, NOT_ACCEPTED[code])
-      else
-        await flows.close(handle.flowId, ok ? 'completed' : 'failed', {
-          reason: ok ? undefined : (record.errorMessage ?? 'The presentation was not verified.'),
-          references: ok ? [{ type: 'presentation', id: proofExchangeId }] : undefined,
-        })
+      await flows.close(handle.flowId, ok ? 'completed' : 'failed', {
+        reason: ok ? undefined : (record.errorMessage ?? 'The presentation was not verified.'),
+        references: ok ? [{ type: 'presentation', id: proofExchangeId }] : undefined,
+      })
       return record
     }
     // the holder closed first: declined, expired, or a problem report (unsupported-kind for a deferred kind)
@@ -301,12 +324,14 @@ export class IdentityFlow {
     }
     // asked at connection (D72): required, a person is authenticated or refused; offered, authenticated or a
     // guest. A credential that is not accepted is asked again, as long as the person presents one
-    const mode = authenticationModeOf(this.pack.identity.authentication?.[0])
+    const mode = authenticationModeOf(this.pack.identity.authentication)
     while (mode === 'required' || mode === 'offered') {
-      const attempt = await this.authenticate(connectionId, peerId, flowMode, userAgentVerified)
+      const attempt = await this.authenticate(connectionId, peerId, flowMode, userAgentVerified, {
+        purpose: 'connection',
+      })
       if (attempt.outcome === 'accepted') return attempt.facts
       // a wallet without flows cannot be told why: it is asked once
-      if (attempt.outcome === 'not-accepted' && flowMode) continue
+      if (asksAgain(attempt) && flowMode) continue
       // no answer in time ends the connection in both modes (IDENT-RES-020)
       if (attempt.outcome !== 'unanswered' && mode === 'offered') break
       if (this.devAllowUnidentified) {
@@ -329,62 +354,87 @@ export class IdentityFlow {
   }
 
   /**
-   * One request for the credential of the authentication schema, as one credential by its ecosystem schema
-   * (IDENT-RES-010), in an `authenticate` flow for a wallet that speaks flows (FLOW-SIGNIN-001), and what it ends
-   * in. Used at connection, and later when a guest asks or the model does (IDENT-RES-015).
+   * One authentication (IDENT-RES-010, FLOW-SIGNIN-001), and what it ends in. On a phone that takes flows, an
+   * `authenticate` flow of the purpose given (D128); on a wallet that takes none, a presentation request of the
+   * `credential` method that is a combination by itself, and nothing else (IDENT-AUTH-005, O69). Used at connection,
+   * when a visitor asks or the model does (IDENT-RES-015), and to reveal an attribute. `bound` is the Principal of an
+   * identified connection: an authentication of another identity is refused on the flow with `another-identity`,
+   * before the flow closes, so that it never ends `completed` (IDENT-RES-014, IDENT-RES-019).
    */
   public async authenticate(
     connectionId: string,
     peerId: string,
     flowMode: boolean,
-    userAgentVerified: boolean
+    userAgentVerified: boolean,
+    ask: AuthenticateAsk = { purpose: 'connection' }
   ): Promise<AuthenticationAttempt> {
-    const authentication = this.pack.identity.authentication?.[0]
-    if (!authentication) return { outcome: 'declined' }
-    const name = this.pack.metadata?.displayName ?? 'The agent'
+    if (!this.pack.identity.authentication?.combinations?.length) return { outcome: 'declined' }
+    if (flowMode && this.flows) {
+      try {
+        return await this.authenticator.run({ connectionId, peerId, userAgentVerified, ...ask })
+      } catch (err) {
+        this.logger.warn({ err, connectionId }, 'the authentication could not be asked')
+        return { outcome: 'unanswered' }
+      }
+    }
+    return this.authenticateWithoutFlows(connectionId, peerId, userAgentVerified, ask)
+  }
+
+  /** The one `credential` method a wallet that takes no flows is asked: the first combination that is one by itself. */
+  private credentialAlone(combinations?: string[][]): CredentialMethod | undefined {
+    const methods = new Map(credentialMethodsOf(this.pack))
+    for (const combination of combinations ?? this.pack.identity.authentication?.combinations ?? []) {
+      if (combination.length !== 1) continue
+      const method = methods.get(combination[0])
+      if (method) return method
+    }
+    return undefined
+  }
+
+  private async authenticateWithoutFlows(
+    connectionId: string,
+    peerId: string,
+    userAgentVerified: boolean,
+    ask: AuthenticateAsk
+  ): Promise<AuthenticationAttempt> {
+    const method = this.credentialAlone(ask.combinations)
+    if (!method) {
+      this.logger.info(
+        { connectionId },
+        'no credential alone is an accepted combination: a wallet without flows is asked nothing'
+      )
+      return { outcome: 'declined' }
+    }
     const credentials: CredentialRef[] = [
       {
-        jsonSchemaCredentialId: authentication.credential.jsonSchemaCredentialId,
-        ...(authentication.attributes ? { attributes: authentication.attributes } : {}),
+        jsonSchemaCredentialId: method.credential.jsonSchemaCredentialId,
+        ...(method.attributes ? { attributes: method.attributes } : {}),
       },
     ]
-    let verdict: VerifiedFacts | NotAcceptedCode | undefined
-    const decide = async (verified: PresentationRecord) => {
-      verdict = await this.factsFromIdentityCredential(peerId, verified, authentication, userAgentVerified)
-      return typeof verdict === 'string' ? verdict : undefined
-    }
-    let record: FlowPresentation
+    let record: PresentationRecord
     try {
-      if (flowMode && this.flows) {
-        record = await this.requestInFlow(
-          connectionId,
-          credentials,
-          AUTHENTICATION_VALID_MS,
-          { kind: 'authenticate', title: `Authenticate to ${name}` },
-          decide
-        )
-      } else {
-        record = await this.request(connectionId, credentials, AUTHENTICATION_VALID_MS)
-        if (record.verified) await decide(record)
-      }
+      record = await this.request(connectionId, credentials, AUTHENTICATION_VALID_MS)
     } catch (err) {
       this.logger.warn({ err, connectionId }, 'identity presentation request failed')
       return { outcome: 'unanswered' }
     }
-    if (verdict !== undefined)
-      return typeof verdict === 'string'
-        ? { outcome: 'not-accepted', code: verdict }
-        : { outcome: 'accepted', facts: verdict }
-    this.logger.warn(
-      { connectionId, state: record.state, error: record.errorMessage, flow: record.flowClosed },
-      'identity credential not presented'
-    )
-    // the holder closed the flow first: its time ran out, or the person, or the wallet, would not answer
-    if (record.flowClosed) return { outcome: record.flowClosed === 'expired' ? 'unanswered' : 'declined' }
-    if (declinedByHolder(record)) return { outcome: 'declined' }
-    if (record.errorMessage === 'timeout') return { outcome: 'unanswered' }
-    // a presentation that came and did not verify
-    return { outcome: 'not-accepted', code: 'not-valid' }
+    if (!record.verified) {
+      this.logger.warn(
+        { connectionId, state: record.state, error: record.errorMessage },
+        'identity credential not presented'
+      )
+      if (declinedByHolder(record)) return { outcome: 'declined' }
+      if (record.errorMessage === 'timeout') return { outcome: 'unanswered' }
+      return { outcome: 'not-accepted', code: 'not-valid' }
+    }
+    const verdict = await this.factsFromIdentityCredential(peerId, record, method, userAgentVerified)
+    if (typeof verdict === 'string') return { outcome: 'not-accepted', code: verdict }
+    const facts = await this.authenticator.credentialIdentity(verdict, userAgentVerified, ask.purpose)
+    if (ask.bound?.identityCredentialRef && !sameActor(ask.bound, facts)) {
+      this.logger.warn({ connectionId }, 'another identity presented on an identified connection: refused')
+      return { outcome: 'not-accepted', code: 'another-identity' }
+    }
+    return { outcome: 'accepted', facts }
   }
 
   /**
@@ -396,7 +446,9 @@ export class IdentityFlow {
     connectionId: string,
     name: string,
     entry: PresentationEntry,
-    flowMode: boolean
+    flowMode: boolean,
+    /** the conversation session that asked: the flow names it as its origin (INTX-FLOW-001) */
+    origin?: Session
   ): Promise<EvidenceInput | undefined> {
     const record = await this.request(
       connectionId,
@@ -407,8 +459,9 @@ export class IdentityFlow {
         },
       ],
       undefined,
-      // the purpose of the entry is what the person reads before answering (INTX-PRES-008)
-      flowMode ? { kind: 'present', title: entry.purpose } : undefined
+      // the purpose of the entry is what the person reads before answering (INTX-PRES-008); a request made from a
+      // conversation names its session as the flow's origin (INTX-FLOW-001)
+      flowMode ? { kind: 'present', title: entry.purpose, origin: conversationOrigin(origin) } : undefined
     ).catch((err) => {
       this.logger.warn({ err, connectionId, entry: name }, 'presentation request failed')
       return undefined
@@ -443,12 +496,12 @@ export class IdentityFlow {
    * (IDENT-RES-002/008/011/012): the issuer is the one the DIDComm agent verified in the proof, the
    * organization is the issuer's, and the subject key must be revealed.
    */
-  private async factsFromIdentityCredential(
+  public async factsFromIdentityCredential(
     peerId: string,
     record: PresentationRecord,
-    authentication: AuthenticationEntry,
+    authentication: CredentialMethod,
     userAgentVerified: boolean
-  ): Promise<VerifiedFacts | NotAcceptedCode> {
+  ): Promise<VerifiedFacts | 'issuer-not-accepted' | 'not-valid' | 'incomplete'> {
     const where = { proofExchangeId: record.proofExchangeId }
     const presented = record.credentials?.[0]
     if (!presented?.issuerDid) {

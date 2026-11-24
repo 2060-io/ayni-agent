@@ -20,6 +20,7 @@ import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { buildAgent } from '../src/app.js'
 import { loadPack } from '../src/config/pack.js'
+import { EnrolmentStore } from '../src/core/authentication/enrolments.js'
 import { sealedConversations } from '../src/core/conversationSeal.js'
 import { TRANSLATION_INSTRUCTION_HEAD } from '../src/core/serviceLanguage.js'
 import { personalSpaceId, SpaceService, sealedMembers } from '../src/core/spaces.js'
@@ -173,7 +174,7 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
       await store.close()
     })
 
-    it('keeps no plaintext of a note or a preference, and seals what an earlier version kept in the clear', async () => {
+    it('keeps no plaintext of a note or a preference', async () => {
       const { pack } = loadPack('agent-packs/dev', { ...process.env })
       const memory = new MemoryService(
         store,
@@ -185,26 +186,6 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
       const ana = principal('p9')
       await memory.addNote(ana, 'CANARY-NOTE-4412', ['msg_1'])
       await memory.setPreference(ana, 'CANARY-PREF-NAME-3021', 'CANARY-PREF-VALUE-8830')
-      // rows as the previous version wrote them, in the clear
-      await store.notes.save({
-        id: 'note_legacy',
-        principalId: 'p9',
-        content: 'CANARY-LEGACY-NOTE-5517',
-        visibility: 'principal-private',
-        state: 'active',
-        backingIdentity: null,
-        lineageRefs: [],
-        needsRevision: false,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      })
-      await store.preferences.set({
-        principalId: 'p9',
-        key: 'CANARY-LEGACY-PREF-NAME-6604',
-        value: 'CANARY-LEGACY-PREF-VALUE-7190',
-        updatedAt: new Date().toISOString(),
-      })
-      expect(await memory.sealPlainNotesAndPreferences()).toEqual({ notes: 1, preferences: 1 })
 
       const client = new pg.Client({ connectionString: url })
       await client.connect()
@@ -213,18 +194,14 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
         ...(await client.query('SELECT p::text AS row FROM preferences p')).rows,
         ...(await client.query('SELECT l::text AS row FROM memory_access_log l')).rows,
       ]
-      expect(rows.length).toBeGreaterThanOrEqual(4)
+      expect(rows.length).toBeGreaterThanOrEqual(2)
       for (const { row } of rows) expect(row).not.toMatch(/CANARY/)
-      expect((await client.query('SELECT count(*)::int AS n FROM preferences')).rows[0].n).toBe(2)
+      expect((await client.query('SELECT count(*)::int AS n FROM preferences')).rows[0].n).toBe(1)
       await client.end()
 
       const scopeSession = session('s9', 'p9', 'conv_9')
-      expect((await memory.notes(ana, scopeSession)).map((n) => n.content).sort()).toEqual([
-        'CANARY-LEGACY-NOTE-5517',
-        'CANARY-NOTE-4412',
-      ])
-      expect((await memory.preferences(ana, scopeSession)).map((p) => `${p.key}=${p.value}`).sort()).toEqual([
-        'CANARY-LEGACY-PREF-NAME-6604=CANARY-LEGACY-PREF-VALUE-7190',
+      expect((await memory.notes(ana, scopeSession)).map((n) => n.content)).toEqual(['CANARY-NOTE-4412'])
+      expect((await memory.preferences(ana, scopeSession)).map((p) => `${p.key}=${p.value}`)).toEqual([
         'CANARY-PREF-NAME-3021=CANARY-PREF-VALUE-8830',
       ])
       // the access log of those reads names neither
@@ -233,7 +210,6 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
       for (const { row } of (await log.query('SELECT l::text AS row FROM memory_access_log l')).rows)
         expect(row).not.toMatch(/CANARY/)
       await log.end()
-      expect(await memory.sealPlainNotesAndPreferences()).toEqual({ notes: 0, preferences: 0 })
     })
   })
 
@@ -360,36 +336,6 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
           },
         ],
       })
-      // an entry an earlier version wrote: the attachment's text in the clear beside the ciphertext
-      const legacy = await memory.append({
-        sessionId: 's1',
-        principalId: 'p1',
-        role: 'principal',
-        sourceType: 'media',
-        text: 'an older file',
-        backingIdentity: null,
-        attachments: [
-          {
-            id: 'att_2',
-            type: 'file',
-            bucketKey: 'b2',
-            mimeType: 'text/plain',
-            textRepr: 'x',
-            objectKeyRef: 'w',
-            refDigest: 'd',
-          },
-        ],
-      })
-      const raw = new pg.Client({ connectionString: url })
-      await raw.connect()
-      // the earlier format: the ciphertext held the text and the payload only
-      const old = sealJson(crypto, legacy.encKeyRef as string, { text: 'an older file' })
-      await raw.query(
-        `UPDATE entries SET cipher = $2, data = jsonb_set(data, '{attachments,0,textRepr}', '"CANARY-LEGACY-TEXT-2240"') WHERE id = $1`,
-        [legacy.id, old.cipher]
-      )
-      await raw.end()
-      expect(await memory.sealPlainAttachments()).toBe(1)
       const conversations = sealedConversations(store.conversations, crypto)
       await conversations.save({
         id: 'conv_secret',
@@ -406,12 +352,11 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
       await client.connect()
       const entries = (await client.query("SELECT e::text AS row FROM entries e WHERE conversation_id = 'conv_secret'"))
         .rows
-      expect(entries).toHaveLength(3)
+      expect(entries).toHaveLength(2)
       for (const { row } of entries) {
         expect(row).not.toContain('CANARY-MESSAGE-7781')
         expect(row).not.toContain('CANARY-ATTACHMENT-TEXT-1187')
         expect(row).not.toContain('CANARY-FILENAME-6620')
-        expect(row).not.toContain('CANARY-LEGACY-TEXT-2240')
       }
       const kept = (await client.query("SELECT c::text AS row FROM conversations c WHERE id = 'conv_secret'")).rows[0]
       expect(kept.row).not.toContain('CANARY-TITLE-5521')
@@ -426,7 +371,6 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
         textRepr: 'CANARY-ATTACHMENT-TEXT-1187',
         filename: 'CANARY-FILENAME-6620.pdf',
       })
-      expect(history.find((e) => e.id === legacy.id)?.attachments[0]?.textRepr).toBe('CANARY-LEGACY-TEXT-2240')
     })
 
     it('reads a conversation in order, between two places, whatever its sessions (MEM-ENTRY-004)', async () => {
@@ -1499,5 +1443,182 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
       })
       expect((await store.oauthClients.get('dynamic|https://crm.2060.io'))?.clientId).toBe('client_1')
     })
+  })
+
+  describe('the device secrets an earlier version kept are erased (D51, IDENT-DEV-001, schema 3.11.0)', () => {
+    it('leaves no plaintext device secret on any session record, and the rest of the record as it was', async () => {
+      const url = await freshDatabase()
+      // a store of the previous version, whose sessions kept the secret their client had collected
+      const client = new pg.Client({ connectionString: url })
+      await client.connect()
+      await client.query(
+        'CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())'
+      )
+      for (const m of MIGRATIONS.filter((m) => olderThan(m.version, '3.11.0'))) {
+        await client.query(m.sql)
+        await client.query('INSERT INTO schema_migrations (version) VALUES ($1)', [m.version])
+      }
+      const session = (id: string, over: Partial<Session> = {}) =>
+        ({
+          id,
+          principalId: 'p-ana',
+          channelType: 'ag-ui',
+          externalRef: id,
+          state: 'bound',
+          client: { name: 'ayni-ui', version: '0.22.0', platform: 'web' },
+          deviceHandle: 'dev_1',
+          lastActivityAt: '2026-11-22T10:00:00.000Z',
+          createdAt: '2026-11-22T10:00:00.000Z',
+          streamCursor: 0,
+          ...over,
+        }) as Session
+      for (const s of [session('ses_kept', { deviceSecret: 'dsk_canary0001' }), session('ses_none')])
+        await client.query(
+          `INSERT INTO sessions (id, principal_id, channel_type, external_ref, state, last_activity_at, data)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [s.id, s.principalId, s.channelType, s.externalRef, s.state, s.lastActivityAt, JSON.stringify(s)]
+        )
+      await client.end()
+      const store = new PostgresStore(url)
+      await store.init()
+      const raw = new pg.Client({ connectionString: url })
+      await raw.connect()
+      const rows = (await raw.query('SELECT id, data::text AS data FROM sessions ORDER BY id')).rows
+      const versions = (await raw.query('SELECT version FROM schema_migrations')).rows.map((r) => r.version)
+      await raw.end()
+      expect(versions).toContain('3.11.0')
+      expect(rows.map((r) => r.id)).toEqual(['ses_kept', 'ses_none'])
+      expect(rows.map((r) => r.data).join('')).not.toContain('dsk_canary0001')
+      expect(rows.map((r) => r.data).join('')).not.toContain('deviceSecret')
+      expect(await store.sessions.get('ses_kept')).toMatchObject({ deviceHandle: 'dev_1', state: 'bound' })
+      await store.close()
+    })
+  })
+
+  describe('one owner of a space, approval policies and the notices of governance (D135 to D142, schema 3.12.0)', () => {
+    it('keeps the first owner of a space and gives a waiting approval of the owner the policy it was asked under', async () => {
+      const url = await freshDatabase()
+      const client = new pg.Client({ connectionString: url })
+      await client.connect()
+      await client.query(
+        'CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())'
+      )
+      for (const m of MIGRATIONS.filter((m) => olderThan(m.version, '3.12.0'))) {
+        await client.query(m.sql)
+        await client.query('INSERT INTO schema_migrations (version) VALUES ($1)', [m.version])
+      }
+      const at = '2026-11-23T10:00:00.000Z'
+      const space = {
+        id: 'spc_1',
+        agentId: 'ayni-dev',
+        kind: 'team',
+        templateId: 'comms',
+        title: '',
+        purpose: '',
+        brief: '',
+        language: null,
+        rules: { retentionDays: 365, lawfulBasis: 'contract', allowedProviders: ['stub'], handover: false },
+        membership: { mode: 'list' },
+        ownerIds: ['p-jonas', 'p-ana'],
+        createdAt: at,
+        updatedAt: at,
+      }
+      await client.query(
+        `INSERT INTO spaces (id, agent_id, kind, template_id, membership_mode, created_at, updated_at, data)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [space.id, space.agentId, space.kind, space.templateId, 'list', at, at, JSON.stringify(space)]
+      )
+      const approval = (id: string, ownerApproval: boolean) => ({
+        id,
+        kind: 'sensitivity',
+        toolName: 'post_to_x',
+        requesterId: 'p-ana',
+        requesterName: 'ana',
+        requesterRole: 'comms',
+        originSessionId: 'ses_1',
+        policy: { type: 'count', value: 1, vetoOnRefusal: false },
+        eligibleRoles: [],
+        decisions: [],
+        status: 'PENDING',
+        vetoed: false,
+        expiresAt: at,
+        createdAt: at,
+        updatedAt: at,
+        ...(ownerApproval ? { ownerApproval: true, spaceId: 'spc_1' } : {}),
+      })
+      for (const [id, owner] of [
+        ['apr_owner', true],
+        ['apr_roles', false],
+      ] as const)
+        await client.query(
+          'INSERT INTO approvals (id, status, requester_id, eligible_roles, data) VALUES ($1,$2,$3,$4,$5)',
+          [id, 'PENDING', 'p-ana', [], JSON.stringify(approval(id, owner))]
+        )
+      await client.end()
+      const store = new PostgresStore(url)
+      await store.init()
+      const migrated = await store.spaces.get('spc_1')
+      expect(migrated?.ownerPrincipalId).toBe('p-jonas')
+      expect(migrated).not.toHaveProperty('ownerIds')
+      expect(await store.approvals.get('apr_owner')).toMatchObject({
+        spaceId: 'spc_1',
+        spacePolicy: {
+          approvers: [{ kind: 'owner', required: true }],
+          threshold: 1,
+          refusal: 'any',
+          attested: true,
+          whenApproverAsks: 'own-confirmation',
+        },
+      })
+      expect(await store.approvals.get('apr_owner')).not.toHaveProperty('ownerApproval')
+      expect(await store.approvals.get('apr_roles')).not.toHaveProperty('spacePolicy')
+      // a notice of governance: one person's, open until resolved
+      const notice = {
+        id: 'ntc_1',
+        principalId: 'p-jonas',
+        spaceId: 'spc_1',
+        kind: 'policy-attention' as const,
+        at,
+        subject: { space: { id: 'spc_1', title: 'Communication' } },
+      }
+      await store.governanceNotices.save(notice)
+      expect(await store.governanceNotices.list({ principalId: 'p-jonas', open: true })).toEqual([notice])
+      await store.governanceNotices.save({ ...notice, resolvedAt: '2026-11-23T11:00:00.000Z' })
+      expect(await store.governanceNotices.list({ spaceId: 'spc_1', open: true })).toEqual([])
+      expect((await store.governanceNotices.get('ntc_1'))?.resolvedAt).toBe('2026-11-23T11:00:00.000Z')
+      await store.close()
+    })
+  })
+
+  it('keeps what a person enrolled sealed, a passkey found by a keyed index of its id (IDENT-AUTH-014)', async () => {
+    const url = await freshDatabase()
+    const store = new PostgresStore(url)
+    await store.init()
+    const enrolments = new EnrolmentStore(store.kv, crypto)
+    await enrolments.setAuthenticatorApp('prn-ana', 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ')
+    const passkey = {
+      credentialId: 'cred-1',
+      publicKey: { kty: 'EC', crv: 'P-256', x: 'x', y: 'y' },
+      alg: -7,
+      signCount: 0,
+    }
+    await enrolments.setPasskey('prn-ana', passkey)
+    expect(await enrolments.principalOfPasskey('cred-1')).toBe('prn-ana')
+    expect((await enrolments.types('prn-ana')).map((e) => e.type)).toEqual(['authenticator-app', 'passkey'])
+    // neither the secret nor the credential id is in the clear
+    const pool = new pg.Client({ connectionString: url })
+    await pool.connect()
+    const rows = (await pool.query('SELECT key, value FROM kv')).rows as { key: string; value: string }[]
+    await pool.end()
+    expect(JSON.stringify(rows)).not.toContain('GEZDGNBVGY3TQOJQ')
+    expect(JSON.stringify(rows)).not.toContain('cred-1')
+    // a new passkey replaces the earlier one; unenrol and erase remove them
+    await enrolments.setPasskey('prn-ana', { ...passkey, credentialId: 'cred-2' })
+    expect(await enrolments.principalOfPasskey('cred-1')).toBeUndefined()
+    expect(await enrolments.remove('prn-ana', 'authenticator-app')).toBe(true)
+    await enrolments.erase('prn-ana')
+    expect(await enrolments.types('prn-ana')).toEqual([])
+    expect(await enrolments.principalOfPasskey('cred-2')).toBeUndefined()
+    await store.close()
   })
 })
