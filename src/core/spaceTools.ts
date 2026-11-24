@@ -105,7 +105,7 @@ export interface SpaceToolView {
     effect: string | null
     rule: SpaceCallRule
     packRule?: CallRule
-    stepUp: string | null
+    stepUp: 'device' | string[] | null
     /** a tool whose rule is `approval`: its approval policy in this space (TOOL-SPACE-018, PROF-TOOL-036) */
     approval?: PolicyView
   }[]

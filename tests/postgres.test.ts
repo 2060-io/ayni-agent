@@ -8,9 +8,9 @@
  * decision 60 (spaces: the migration to 3.6.0, the stores, no plaintext of a space, the agent served from PostgreSQL),
  * decision 61 (the user directory: the migration to 3.7.0, the issuances of an entry and of a holder, the members of an
  * entry, the changes newest first, nothing of a person of the directory in the clear but its id and audited name),
- * decision 62 (a badge by email code and an invitation of another organization: the invitations of a person found by
- * their keyed index, and neither the address, the code nor the invited email in the clear in any table), decision 64
- * (the service's sentences translated and kept: the migration to 3.8.0, reused by a new process, no address or code),
+ * decision 62 (an invitation of another organization: the invitations of a person found by their keyed index, and the
+ * invited email in the clear in no table), decision 64 (the service's sentences translated and kept: the migration to
+ * 3.8.0, reused by a new process),
  * tools phase 1 (ayni-spec D97 to D100: the migration to 3.9.0, a space's account only as ciphertext and destroyed with its
  * row, the allowances of a conversation, the record of each call by space, source and period, the action of an approval
  * sealed).
@@ -20,13 +20,14 @@ import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { buildAgent } from '../src/app.js'
 import { loadPack } from '../src/config/pack.js'
+import type { AgentPack } from '../src/config/packTypes.js'
 import { EnrolmentStore } from '../src/core/authentication/enrolments.js'
 import { sealedConversations } from '../src/core/conversationSeal.js'
-import { TRANSLATION_INSTRUCTION_HEAD } from '../src/core/serviceLanguage.js'
+import { ServiceLanguage } from '../src/core/serviceLanguage.js'
 import { personalSpaceId, SpaceService, sealedMembers } from '../src/core/spaces.js'
 import type { PersonalAccountRecord, Principal, RagChunk, Session } from '../src/core/types.js'
 import { createEmbeddings } from '../src/llm/embeddings.js'
-import type { StubChatModel } from '../src/llm/stub.js'
+import type { ChatDelta, ChatModel, ChatRequest } from '../src/llm/types.js'
 import { createEntryCrypto, newKeyUnder, openJson, openUnder, sealJson, sealUnder } from '../src/memory/crypto.js'
 import { buildScope } from '../src/memory/scope.js'
 import { MemoryService } from '../src/memory/service.js'
@@ -37,16 +38,7 @@ import { sealedApprovals } from '../src/policy/approvals.js'
 import { MIGRATIONS } from '../src/store/migrations.js'
 import { PostgresStore } from '../src/store/postgres.js'
 import { createLogger } from '../src/util/logger.js'
-import {
-  directoryPack,
-  guest,
-  mintLocally,
-  mockServices,
-  present,
-  runText,
-  textOf,
-  until,
-} from './directoryFixtures.js'
+import { directoryPack, mintLocally, mockServices, present } from './directoryFixtures.js'
 import { parseSse, testEnv } from './helpers.js'
 
 const serverUrl = process.env.PG_TEST_URL
@@ -937,8 +929,8 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
     }, 30_000)
   })
 
-  describe('a badge by email code and an invitation, served from PostgreSQL (decision 62)', () => {
-    it('finds the invitations of a person by their keyed index, and keeps no address, code or invited email in the clear', async () => {
+  describe('an invitation, served from PostgreSQL (decision 62)', () => {
+    it('finds the invitations of a person by their keyed index, and keeps no invited email in the clear', async () => {
       const services = await mockServices()
       services.organizations.push({ name: 'Acme Freight', countryCode: 'FR', registryId: '111' })
       const canary = {
@@ -949,7 +941,7 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
         department: 'Depot',
         roles: ['manager'],
       }
-      const fixture = directoryPack([canary], { badge: 'email', authenticationStores: ['name', 'email'] })
+      const fixture = directoryPack([canary], { authenticationStores: ['name', 'email'] })
       const url = await freshDatabase()
       const sent: MailMessage[] = []
       const running = await buildAgent(
@@ -976,14 +968,6 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
       )
       try {
         mintLocally(running)
-        // a guest proves the address of the directory with the code sent to it
-        const ana = await guest(running, 'canary-wallet')
-        await runText(running, ana, '/call issue_credential {"credential":"badge"}')
-        await runText(running, ana, canary.email)
-        await until(() => sent.length === 1)
-        const code = /\b(\d{6})\b/.exec(sent[0]?.text ?? '')?.[1] as string
-        expect(textOf(await runText(running, ana, code))).toMatch(/^Your email address is verified\./)
-        await until(() => services.calls.some((c) => c.url === '/v2/didcomm/credential-offer'))
         // a manager of the directory invites a person of another organization
         const jonas = await present(running, 'BN-CANARY', 'Ana Ríos', { entry: 'p-canary' })
         const space = (
@@ -1019,9 +1003,8 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
         for (const table of tables) {
           for (const { row } of (await raw.query(`SELECT t::text AS row FROM ${table} t`)).rows) {
             rows++
-            // the address, the code and the invited email, in no table, in no form but sealed or keyed (INTX-AUTH-014)
-            expect(row, table).not.toMatch(/canary\.code|6631@|canary\.invite|7720@/)
-            expect(row, table).not.toContain(code)
+            // the invited email, in no table, in no form but sealed or keyed
+            expect(row, table).not.toMatch(/canary\.invite|7720@/)
           }
         }
         expect(rows).toBeGreaterThan(20)
@@ -1035,79 +1018,59 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
   })
 
   describe('the sentences of the service, translated and kept in PostgreSQL (decision 64, schema 3.8.0)', () => {
-    it('keeps a translation for the next process, in an agent whose default language is Spanish, with no address or code', async () => {
-      const services = await mockServices()
-      const canary = { id: 'p-canary', firstName: 'Ana', lastName: 'Ríos', email: 'canary.lang.4417@northwind.example' }
-      const fixture = directoryPack([canary], { badge: 'email', language: 'es' })
+    it('keeps a translation for the next process, which reuses it with no call', async () => {
       const url = await freshDatabase()
-      const sent: MailMessage[] = []
-      const start = () =>
-        buildAgent(
-          testEnv({
-            store: 'postgres',
-            databaseUrl: url,
-            agentPackPath: fixture.pack,
-            vsAgentAdminUrl: services.url,
-            veranaApiUrl: services.url,
-            directoryPollSeconds: 0,
-          }),
+      const sentence = { text: 'Your code for Fleet support is ######.', keep: ['Fleet support', '######'] }
+      const person = { id: 'prn-lang' } as Principal
+      const session = { id: 'ses-lang', locale: 'es' } as Session
+      const translator = () => {
+        const requests: ChatRequest[] = []
+        const llm: ChatModel = {
+          id: 'fake/translator',
+          multimodal: false,
+          async *stream(req: ChatRequest): AsyncIterable<ChatDelta> {
+            requests.push(req)
+            yield { type: 'text', text: `[es] ${String(req.messages[1]?.content)}` }
+          },
+        }
+        return { llm, requests }
+      }
+      const start = async () => {
+        const store = new PostgresStore(url)
+        await store.init()
+        const { llm, requests } = translator()
+        const language = new ServiceLanguage({
+          store,
+          llm,
+          pack: { language: { agent: 'en' }, metadata: { id: 'agent-test' } } as AgentPack,
+          stats: { emit: () => undefined },
           logger,
-          {
-            drainMs: 200,
-            mailer: {
-              from: 'Fleet <fleet@northwind.example>',
-              send: async (message) => {
-                sent.push(message)
-                return 'id'
-              },
-            },
-          }
-        )
-      const translations = (running: Awaited<ReturnType<typeof start>>) =>
-        (running.agent.llm as unknown as StubChatModel).requests.filter((r) =>
-          String(r.messages[0]?.content).startsWith(TRANSLATION_INSTRUCTION_HEAD)
-        )
-      let running = await start()
+          preferredLanguage: async () => undefined,
+          modelAllowed: async () => true,
+        })
+        return { store, language, requests }
+      }
+      const first = await start()
       try {
-        mintLocally(running)
-        // no locale: the agent's default language
-        const ana = await guest(running, 'lang-wallet', '')
-        expect(textOf(await runText(running, ana, '/call issue_credential {"credential":"badge"}'))).toMatch(
-          /^\[es\] To issue your Northwind badge/
-        )
-        await runText(running, ana, canary.email)
-        await until(() => sent.length === 1)
-        const code = /\b(\d{6})\b/.exec(sent[0]?.text ?? '')?.[1] as string
-        const wrong = code === '000000' ? '111111' : '000000'
-        expect(textOf(await runText(running, ana, wrong))).toBe('[es] That code is not right. 4 tries are left.')
-        expect(translations(running)).toHaveLength(3)
-        await running.stop()
-
-        // a new process: the question it asks again is kept, and costs no call
-        running = await start()
-        mintLocally(running)
-        const jonas = await guest(running, 'lang-wallet-2', '')
-        expect(textOf(await runText(running, jonas, '/call issue_credential {"credential":"badge"}'))).toMatch(
-          /^\[es\] To issue your Northwind badge/
-        )
-        expect(translations(running)).toHaveLength(0)
-
+        expect(await first.language.render(sentence, person, session)).toBe(`[es] ${sentence.text}`)
+        expect(first.requests).toHaveLength(1)
+      } finally {
+        await first.store.close()
+      }
+      // a new process over the same database: the sentence is kept, and costs no call
+      const again = await start()
+      try {
+        expect(await again.language.render(sentence, person, session)).toBe(`[es] ${sentence.text}`)
+        expect(again.requests).toHaveLength(0)
         const raw = new pg.Client({ connectionString: url })
         await raw.connect()
         const rows = (await raw.query('SELECT t::text AS row FROM translations t')).rows.map((r) => String(r.row))
-        expect(rows).toHaveLength(3)
-        for (const row of rows) {
-          expect(row).not.toMatch(/canary\.lang|4417@/)
-          expect(row).not.toContain(code)
-          expect(row).not.toContain(wrong)
-        }
+        expect(rows).toHaveLength(1)
         await raw.end()
       } finally {
-        await running.stop()
-        await services.app.close()
-        rmSync(fixture.root, { recursive: true, force: true })
+        await again.store.close()
       }
-    }, 30_000)
+    })
   })
 
   describe('tools, phase 1, in the store (ayni-spec D97 to D100, schema 3.9.0)', () => {

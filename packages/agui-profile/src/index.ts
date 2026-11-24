@@ -7,6 +7,13 @@
  * with `field: 'q'` for an empty `q`). The admin grant of the phone holds across its sessions made through a session
  * grant: nothing on the wire changes for it. Additive.
  *
+ * 3.5, package 3.5.6 (authentication, ayni-spec PR #127, agent D127, D128, D130): a step-up's re-authentication is
+ * routed as `kind: 'authentication'` with no `challengeType` (PROF-MAP-003); `ChallengeType` is `device` or `document`
+ * (a face match is a method of the authentication, never a challenge); a tool's `stepUp` in the settings of a space is
+ * `device`, the list of the method types a re-authentication asks, or null (PROF-TOOL-001); the email check in a
+ * conversation is gone, and `ayni.messages.withheld` is for a credential only, `reason: 'credential'` always
+ * (PROF-STREAM-011). Not additive for a client that still reads `face-match` or `email-check`.
+ *
  * 3.5, package 3.5.5 (admin access, ayni-spec PRs #127 to #129, agent D132 to D134): `features.admin` (PROF-DESC-013);
  * the admin state, Show Admin and Hide Admin (`GET {sessions}/admin`, `POST` and `DELETE {sessions}/admin/grant`,
  * PROF-ADMIN-001 to 003); `ayni.admin.changed` (PROF-ADMIN-004); the pages Audit and Operations (§3.14, PROF-ADMIN-005,
@@ -330,7 +337,7 @@ export const CUSTOM_EVENT = {
   conversationChanged: 'ayni.conversation.changed',
   /** messages of a conversation were erased for good: a UI removes them (PROF-STREAM-008) */
   messagesErased: 'ayni.messages.erased',
-  /** messages of the person the model never received, taken by an email check: a UI draws them apart (PROF-STREAM-011) */
+  /** messages of the person the model never received, held back because they carried a credential (PROF-STREAM-011) */
   messagesWithheld: 'ayni.messages.withheld',
   /** the agent added, changed or removed one of the person's memories in a conversation (3.3) */
   memoryUpdated: 'ayni.memory.updated',
@@ -374,12 +381,12 @@ export interface MessagesErasedValue {
   clientIds?: string[]
 }
 
-/** Why the model never received a message of the person (PROF-STREAM-011): an email check took it, or a credential (3.5). */
-export type WithheldReason = 'email-check' | 'credential'
+/** Why the model never received a message of the person (PROF-STREAM-011): it carried a credential (3.5). */
+export type WithheldReason = 'credential'
 
 /**
  * `ayni.messages.withheld` (PROF-STREAM-011, 3.3 amended, 3.5): messages of the person that the model never received,
- * what the code of an email check took, or a message that carried a credential (`reason: 'credential'`). Sent in the run
+ * a message that carried a credential, or whose attachment was held back for one (`reason: 'credential'`). Sent in the run
  * that carried them; the same messages carry `metadata.modelVisible: false` in history (PROF-HIST-013).
  */
 export interface MessagesWithheldValue {
@@ -391,8 +398,7 @@ export interface MessagesWithheldValue {
    * for an entry the client did not send
    */
   clientIds?: string[]
-  /** absent means `email-check` */
-  reason?: WithheldReason
+  reason: WithheldReason
   /**
    * with `reason: 'credential'`: the text the agent kept of each message, by the agent's id, each credential replaced by its
    * first four characters and `…`; a UI puts it in place of the text it holds, in the transcript, its cache and its outbox
@@ -425,7 +431,8 @@ export type CapabilityKind =
   | 'confirmation'
   | 'signature'
   | 'link-session'
-export type ChallengeType = 'device' | 'face-match' | 'document'
+/** The challenge of a routed `auth-challenge`: a device confirmation, or a document read; a re-authentication has none */
+export type ChallengeType = 'device' | 'document'
 export type CapabilityStatus = 'pending' | 'completed' | 'failed' | 'expired' | 'unavailable' | 'degraded'
 
 export interface SessionStateValue {
@@ -1642,7 +1649,8 @@ export interface SpaceTool {
     rule: SpaceCallRule
     /** the owner's: the agent-pack's rule, the loosest the owner may choose */
     packRule?: Exclude<SpaceCallRule, 'off'>
-    stepUp: 'device' | 'face-match' | 'document' | null
+    /** `device`, the method types a re-authentication asks (`["face-match"]`, agent D127), or null (PROF-TOOL-001) */
+    stepUp: 'device' | string[] | null
     /** a rule `approval`: its policy in this space, whole to the owner, its approvers and threshold to a member */
     approval?: SpaceApprovalPolicyView
   }[]

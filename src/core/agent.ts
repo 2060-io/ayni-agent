@@ -28,7 +28,7 @@ import { attestedFor } from '../policy/spacePolicy.js'
 import type { Store } from '../store/types.js'
 import type { ToolCatalog } from '../tools/catalog.js'
 import type { ToolRegistry } from '../tools/registry.js'
-import { nowIso, prefixedId } from '../util/ids.js'
+import { nowIso } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import type { ChallengeService } from './challenges.js'
 import type { CapabilityRouter } from './channel.js'
@@ -36,13 +36,12 @@ import type { ConnectionService } from './connections.js'
 import type { ContextAssembler } from './context.js'
 import { conversationOf } from './conversationOf.js'
 import { CREDENTIAL_WITHHELD, CredentialScanner } from './credentials.js'
-import { EMAIL_CHECK_KIND, type EmailChecks } from './emailCheck.js'
 import type { EvidenceService } from './evidence.js'
 import type { FlowService } from './flows.js'
 import type { Governance } from './governance.js'
 import { contextualMenuFor, describeDevices, describeSessions, greetingFor, PLATFORM_MENU } from './interaction.js'
 import { DEFAULT_APP_LINK_BASE, type InvitationService } from './invitations.js'
-import { type IssuanceService, type IssuanceTrigger, issuanceOutcomeForPerson } from './issuance.js'
+import { type IssuanceService, issuanceOutcomeForPerson } from './issuance.js'
 import { Notifications } from './notifications.js'
 import {
   conversationKey,
@@ -62,7 +61,6 @@ import { approvalStateText, type ToolGate } from './toolGate.js'
 import { TurnLock } from './turnLock.js'
 import {
   type ApprovalRecord,
-  type AuthChallengeRecord,
   CARD_STATE,
   type ClientDescription,
   type ClosureReason,
@@ -169,8 +167,6 @@ export class AyniAgent {
    * declares `auditor` or `operator`
    */
   public adminGrants?: AdminGrants
-  /** the email code of a badge from the directory, served by the code in the conversation (decision 62, D89) */
-  public emailChecks?: EmailChecks
   /** the service's own sentences in the person's language (decision 64) */
   public serviceLanguage?: ServiceLanguage
   /** the invitations of people of other organizations, bound when their badge is presented (decision 62, D90) */
@@ -784,25 +780,13 @@ export class AyniAgent {
    */
   public async turn(session: Session, given: TurnInput, sink: TurnSink, caller: AbortSignal): Promise<TurnResult> {
     this.sessions.requireBound(session)
-    // a credential is masked before the message is recorded, mirrored, queued or taken by an email check (D109)
+    // a credential is masked before the message is recorded, mirrored or queued (D109)
     const input = this.withoutCredentials(given)
     const principal = await this.principalOf(session)
     if (!principal) throw new Error('principal missing')
     await this.sessions.touch(session)
     const key = conversationKey(session)
     const signal = this.untilCut(caller)
-    // while an email check waits in this conversation, the message is the code's: it starts no turn and never reaches
-    // the model (INTX-AUTH-013, PROF-RUN-015)
-    if (this.emailChecks?.waitsFor(principal.id)) {
-      await this.orchestrator.live(principal)
-      const taken = await this.emailChecks.take(session, principal, input, sink)
-      if (taken) {
-        await this.sessions
-          .readAfterTurn(session, taken.inbound?.id)
-          .catch((err) => this.logger.warn({ err, sessionId: session.id }, 'read state not updated'))
-        return taken
-      }
-    }
     // while the process ends, as during a turn: the message waits, and the next process answers it. A confirmation card
     // that waits in the conversation ends as cancelled: the person wrote instead of answering it (TOOL-CALL-004)
     if (input.mayWait && (this.ending || this.turns.busy(key))) {
@@ -1182,15 +1166,6 @@ export class AyniAgent {
       // the person asks for a credential the pack issues on request (INTX-ISSUE-008)
       const name = itemId.slice(PLATFORM_MENU.issuePrefix.length)
       const result = await this.issuance?.issue(principal, session, name, 'person')
-      // an email check now waits in this conversation: the code asks its question here (INTX-AUTH-012)
-      if (result?.ask) {
-        await this.codeSays(session, principal, result.ask.text, sink, {
-          kind: EMAIL_CHECK_KIND,
-          challengeId: result.ask.challengeId,
-          step: 'question',
-        })
-        return { cancelled: false }
-      }
       return {
         text: issuanceOutcomeForPerson(result?.outcome ?? 'unavailable', result?.requirements, result?.reason),
       }
@@ -1710,7 +1685,8 @@ export class AyniAgent {
     // a flow-capable wallet gets no welcome text and no menu on its connection (D54, CHAN-PROF-006)
     if (!existing && options.welcome !== false) await this.welcome(session)
     this.stats.emit('peer-connected', 1, { connectionType: facts.connectionType })
-    if (facts.evidence) this.issueAutomatically(principal)
+    // what the agent issues by itself is offered right after an authentication that identified the person (IDENT-AUTH-016)
+    if (facts.identityCredentialRef) this.issueAutomatically(principal)
     return { principal, session }
   }
 
@@ -1800,42 +1776,6 @@ export class AyniAgent {
   }
 
   /**
-   * The issuance an email check started goes on by itself once the code is right (INTX-AUTH-015): its claims resolve and
-   * the credential is offered with no turn of the model. What became of it is told in the conversation by the code.
-   */
-  public async continueIssuance(record: AuthChallengeRecord): Promise<void> {
-    const details = (record.details ?? {}) as {
-      profile?: string
-      by?: IssuanceTrigger
-      conversationId?: string
-      lastSessionId?: string
-    }
-    const principal = await this.principals.get(record.principalId)
-    if (!principal || !details.profile || !this.issuance) return
-    const session =
-      (details.lastSessionId ? await this.sessions.get(details.lastSessionId) : undefined) ??
-      (await this.sessions.get(record.originSessionId))
-    if (!session) return
-    const result = await this.issuance.issue(principal, session, details.profile, details.by ?? 'model')
-    this.logger.info(
-      { principalId: principal.id, profile: details.profile, outcome: result.outcome },
-      'issuance after the email check'
-    )
-    const text = issuanceOutcomeForPerson(result.outcome, result.requirements, result.reason)
-    const entry = await this.memory.append({
-      sessionId: session.id,
-      ...(details.conversationId ? { conversationId: details.conversationId } : {}),
-      principalId: principal.id,
-      role: 'agent',
-      sourceType: 'text',
-      text,
-      backingIdentity: principal.backingIdentity,
-      payload: { kind: 'issuance-outcome', profile: details.profile, usedMemories: [], usedPreferences: [] },
-    })
-    await this.deliverToConversation(session, entry)
-  }
-
-  /**
    * A message the agent adds outside a turn, shown in the conversation of a session: on that session when it is open,
    * else on an open session of the same conversation; history has it in any case.
    */
@@ -1849,30 +1789,6 @@ export class AyniAgent {
     if (target) await this.router.deliver(target, { kind: 'text', entry })
   }
 
-  /** A message the code writes in a run (a question of an email check): an `auth-challenge` entry, streamed by the sink. */
-  private async codeSays(
-    session: Session,
-    principal: Principal,
-    text: string,
-    sink: TurnSink,
-    payload: Record<string, unknown>
-  ): Promise<MessageEntry> {
-    const id = prefixedId('msg')
-    await sink.emit({ type: 'text-start', messageId: id })
-    await sink.emit({ type: 'text-delta', messageId: id, delta: text })
-    await sink.emit({ type: 'text-end', messageId: id })
-    return this.memory.append({
-      id,
-      sessionId: session.id,
-      principalId: principal.id,
-      role: 'agent',
-      sourceType: 'auth-challenge',
-      text,
-      backingIdentity: principal.backingIdentity,
-      payload,
-    })
-  }
-
   /** The invitations of other organizations an identity credential binds to its Principal (SPACE-INV-003). */
   private async bindInvitations(principal: Principal, facts: VerifiedFacts): Promise<void> {
     await this.invitations
@@ -1880,7 +1796,10 @@ export class AyniAgent {
       .catch((err) => this.logger.error({ err, principalId: principal.id }, 'invitations not bound'))
   }
 
-  /** The credentials the agent issues by itself are issued as soon as their evidence is complete (INTX-ISSUE-008). */
+  /**
+   * The credentials the agent issues by itself are offered as soon as their claims resolve: right after an authentication,
+   * on a connection to which none still valid was issued (INTX-ISSUE-008, IDENT-AUTH-016).
+   */
   public issueAutomatically(principal: Principal): void {
     const issuance = this.issuance
     const connectionId = principal.capabilityChannelId

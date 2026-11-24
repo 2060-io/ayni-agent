@@ -836,7 +836,7 @@
           }
         },
         "email": {
-          "description": "What is kept of an address verified by an email code (D89, INTX-AUTH-015): its one attribute is address. A profile with an email challenge needs it stored, since the badge number and the directory entry are found from it; the model never reads it, so modelVisible is refused.",
+          "description": "What is kept of an address an email method verified (IDENT-AUTH-009): its one attribute is address. A profile that takes a claim from a verified address (emailId) needs it stored; the model never reads it, so modelVisible is refused.",
           "type": "object",
           "additionalProperties": false,
           "properties": {
@@ -899,13 +899,13 @@
             "$ref": "#/$defs/roleList"
           },
           "authChallenge": {
-            "description": "The challenges enforced before the issuance, in order (INTX-ISSUE-010): one, or a list. A profile that takes claims from the user directory declares [document], [email] or [document, email] (IDENT-DIR-002); email belongs to such a profile and to no other action (INTX-AUTH-011).",
+            "description": "The challenge enforced before the issuance (INTX-ISSUE-010): one, written alone or as a list of one. A badge from the user directory needs none: its claims come from the entry the authentication identified (D130).",
             "oneOf": [
               { "$ref": "#/$defs/issuanceChallenge" },
               {
                 "type": "array",
                 "minItems": 1,
-                "maxItems": 2,
+                "maxItems": 1,
                 "items": { "$ref": "#/$defs/issuanceChallenge" }
               }
             ]
@@ -1937,10 +1937,31 @@
       }
     },
     "stepUp": {
-      "description": "A tool's step-up (D101, TOOL-CAT-010): the auth challenge and the credential's freshness asked before the call, for this tool of this source only.",
+      "description": "A tool's step-up (D101, TOOL-CAT-010): the re-authentication, the auth challenge and the credential's freshness asked before the call, for this tool of this source only.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "authentication": {
+          "description": "A re-authentication on the phone before the call (D127, IDENT-AUTH-015): an authenticate flow of purpose step-up asking the one set of enabled methods named here, which may hold confirming methods only (face-match, authenticator-app). Not asked again while an authentication of the person that held every method of the set completed within maxAgeMinutes.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["methods"],
+          "properties": {
+            "methods": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1 },
+              "description": "Names of identity.authentication.methods."
+            },
+            "maxAgeMinutes": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "description": "0 (the default) asks before each run."
+            }
+          }
+        },
         "authChallenge": {
           "$ref": "#/$defs/authChallenge"
         },
@@ -1952,25 +1973,19 @@
       }
     },
     "authChallenge": {
-      "description": "The auth challenge a step-up asks before the call (D28, INTX-AUTH-002).",
+      "description": "The auth challenge a step-up asks before the call (D28, INTX-AUTH-002, TOOL-CAT-010): a device confirmation on the phone. An email code, a face match and a document read are asked as methods, in stepUp.authentication.",
       "type": "object",
       "additionalProperties": false,
       "required": ["type"],
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["device", "face-match", "document"]
+          "enum": ["device"]
         },
         "onChannelUnavailable": {
           "type": "string",
           "enum": ["fail", "degrade"],
           "default": "fail"
-        },
-        "referenceImage": {
-          "type": "string",
-          "enum": ["badge-photo"],
-          "default": "badge-photo",
-          "description": "face-match only: which credential photo is the reference (INTX-AUTH-007)."
         },
         "timeoutSeconds": {
           "type": "integer",
@@ -2238,23 +2253,19 @@
       }
     },
     "issuanceChallenge": {
-      "description": "One challenge of an issuance profile (INTX-ISSUE-010): device, face-match or document as for any action; email, the email code of a badge from the user directory (D89, INTX-AUTH-011).",
+      "description": "The challenge of an issuance profile (INTX-ISSUE-010, architecture 11.5): a device confirmation, or the NFC read of a document. An email code and a face match are methods of the authentication (D126).",
       "type": "object",
       "additionalProperties": false,
       "required": ["type"],
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["device", "face-match", "document", "email"]
+          "enum": ["device", "document"]
         },
         "onChannelUnavailable": {
           "type": "string",
           "enum": ["fail", "degrade"],
           "default": "fail"
-        },
-        "referenceImage": {
-          "type": "string",
-          "enum": ["badge-photo"]
         },
         "timeoutSeconds": {
           "type": "integer",

@@ -5,7 +5,7 @@
 import type { Features } from '../config/packTypes.js'
 import { estimateTokens } from '../util/tokens.js'
 
-export const PROMPT_ADDON_VERSION = '3.8.0'
+export const PROMPT_ADDON_VERSION = '3.9.0'
 export const PROMPT_ADDON_TOKEN_BUDGET = 500
 
 export interface AddonContext {
@@ -18,11 +18,6 @@ export interface AddonContext {
   issuance?: boolean
   /** when set, the model may send the person to places in the app with links on this base (PROF-LINK-001) */
   appLinkBase?: string
-  /**
-   * a credential is obtained with an email code, which the system runs in the conversation and the model follows with
-   * email_check (D89, INTX-AUTH-012, INTX-AUTH-019)
-   */
-  emailChecks?: boolean
   /**
    * a tool's rule is not `none`, or untrusted content can make one ask: the person or an approver may be asked before an
    * action runs (TOOL-CALL-010)
@@ -103,11 +98,7 @@ export function renderPromptAddon(ctx: AddonContext): string {
   )
   if (ctx.challengesConfigured)
     lines.push(
-      "Identity checks (device confirmation, face check, document read) are triggered by the system on the person's phone; never ask the person to perform one yourself."
-    )
-  if (ctx.emailChecks)
-    lines.push(
-      'An email check is run by the system in the conversation: never ask the person for an email address or a code yourself, and never repeat one; you are told only whether the check passed. While one waits, email_check tells its step, sends a new code or cancels it.'
+      "Identity checks (a confirmation, or authenticating again: a code, a passkey, a face check, a document read) are asked by the system on the person's phone before some actions; never ask the person for a code, an address or a check yourself: you are told only whether it passed."
     )
   if (ctx.features.reactions)
     lines.push(

@@ -6,7 +6,7 @@
 import { ACTIVITY, CUSTOM_EVENT } from '@ayni.org/ayni-agui-profile'
 import { hasPersonalSource } from '../config/pack.js'
 import type { AgentPack } from '../config/packTypes.js'
-import { challengeTypesOf, featuresOf } from '../config/packTypes.js'
+import { featuresOf } from '../config/packTypes.js'
 import { type CallMeasure, callLogFields, measured } from '../llm/timing.js'
 import type { ChatDelta, ChatMessage, ChatModel, ContentPart, ToolCallRequest } from '../llm/types.js'
 import type { ObjectStore } from '../media/objectStore.js'
@@ -15,7 +15,7 @@ import type { StatsSink } from '../platform/stats.js'
 import type { ApprovalService } from '../policy/approvals.js'
 import { ToolCatalog } from '../tools/catalog.js'
 import type { ToolRegistry } from '../tools/registry.js'
-import type { EndTurnMessage, MemoryChange, ToolContext } from '../tools/types.js'
+import type { MemoryChange, ToolContext } from '../tools/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import { estimateRequestTokens } from '../util/tokens.js'
@@ -23,8 +23,7 @@ import type { ChallengeService } from './challenges.js'
 import { ConnectionService, type ToConnect } from './connections.js'
 import type { ContextAssembler } from './context.js'
 import { conversationOf } from './conversationOf.js'
-import { credentialRecordText, isCredentialWithheld } from './credentials.js'
-import { isEmailCheckMessage, withheldRecordText } from './emailCheck.js'
+import { credentialRecordText, isCredentialWithheld, isLegacyEmailCheck } from './credentials.js'
 import { nameForModel } from './evidence.js'
 import type { PrincipalService } from './principals.js'
 import { addonTokenCount, renderPromptAddon } from './promptAddon.js'
@@ -310,13 +309,12 @@ export class Orchestrator {
       agentLanguage: pack.language.agent,
       hasTools: true,
       hasRequestableTools: Object.values(pack.tools?.sources ?? {}).some((s) => (s.access?.elevation?.length ?? 0) > 0),
-      // a tool of some source declares a step-up (TOOL-CAT-010)
+      // a tool of some source declares a step-up: a confirmation or a re-authentication on the phone (TOOL-CAT-010)
       challengesConfigured: Object.values(pack.tools?.sources ?? {}).some((s) =>
-        Object.values(s.tools ?? {}).some((t) => t.stepUp?.authChallenge)
+        Object.values(s.tools ?? {}).some((t) => t.stepUp?.authChallenge || t.stepUp?.authentication)
       ),
       issuance: Object.keys(pack.issuance ?? {}).length > 0,
       appLinkBase: pack.channels?.agui?.appLinkBase,
-      emailChecks: Object.values(pack.issuance ?? {}).some((p) => challengeTypesOf(p).includes('email')),
       // the person or an approver may be asked before an action runs (TOOL-CALL-010)
       toolsMayAsk: new ToolCatalog(pack).mayAsk(),
       // each person's own accounts: never a credential in a conversation, the Connect card instead (TOOL-CONN-012)
@@ -413,15 +411,9 @@ export class Orchestrator {
     if (entry.sourceType === 'state-update' || entry.sourceType === 'reaction') return []
     // a message held back because it carried a credential: a record in its place, nothing of it (D109, MEM-RET-006)
     if (isCredentialWithheld(entry)) return [{ role: 'user', content: this.credentialRecord(entry) }]
-    // an email check (decision 65, INTX-AUTH-013, MEM-RET-006): the code's messages are the agent's, in the language
-    // they were shown in; what the person typed for it never reaches the model, a record of the system stands in its
-    // place, so that the model reads the order of what happened
-    if (isEmailCheckMessage(entry)) {
-      if (entry.role === 'agent') return [{ role: 'assistant', content: entry.text }]
-      return [
-        { role: 'user', content: systemRecord({ sourceType: 'auth-challenge', text: withheldRecordText(entry) }) },
-      ]
-    }
+    // what an email check in a conversation recorded before the check moved to the phone (D128): what the person typed
+    // for it never reaches the model
+    if (isLegacyEmailCheck(entry)) return []
     if (
       entry.sourceType === 'approval' ||
       entry.sourceType === 'refusal' ||
@@ -643,8 +635,6 @@ export class Orchestrator {
       signal,
     }
     const turnSources = (): TurnSource[] => [...toolState.sources.values()]
-    /** a tool ended the turn with a message of the code (INTX-AUTH-012) */
-    let ended: EndTurnMessage | undefined
     const toolCtx: ToolContext = {
       principal,
       session,
@@ -656,9 +646,6 @@ export class Orchestrator {
       spaceId,
       memoryChanged: async (change) => {
         changes.push(change)
-      },
-      turnEnded: (message) => {
-        ended ??= message
       },
       // the Connect card the model offers: recorded in the conversation, shown in the reply to the sessions of profile 3.5
       // or later (TOOL-CONN-011, PROF-TOOL-020)
@@ -808,7 +795,7 @@ export class Orchestrator {
           if (outcome !== 'completed') closes = false
         }
         // the code takes the conversation over: no model call after it in this turn (INTX-AUTH-012)
-        if (ended || closes) break
+        if (closes) break
       }
     } catch (error) {
       if (error instanceof TurnCancelled || signal.aborted) cancelled = true
@@ -820,17 +807,14 @@ export class Orchestrator {
     }
     if (started) await sink.emit({ type: 'text-end', messageId })
 
-    // a reply that said nothing after its pause is the messages before it, and no empty one is added; a turn a tool ended
-    // ends with the code's message, and with no empty message of the model before it
-    let reply =
-      text.trim() || (!written.length && !ended)
+    // a reply that said nothing after its pause is the messages before it, and no empty one is added
+    const reply =
+      text.trim() || !written.length
         ? await save(
             cancelled ? 'interrupted' : 'complete',
             text.trim() || (cancelled ? '(stopped before any text)' : '(no reply)')
           )
         : (written[written.length - 1] as MessageEntry | undefined)
-    if (ended)
-      reply = await this.codeMessage(session, principal, ended, sink, { after: reply?.initiatedAt, inboundIds })
     if (!reply) throw new Error('a turn ended with no message')
     // every message of the reply records the sources of its turn, those written before its tools ran included
     // (TOOL-PROV-002)
@@ -860,39 +844,6 @@ export class Orchestrator {
     this.reactionPolicies.delete(session.id)
     this.stats.emit('message-out', 1, { channel: session.channelType, cancelled: String(cancelled) })
     return { inbound, reply, replies: written, cancelled, inbounds }
-  }
-
-  /**
-   * The message the code ends a turn with (INTX-AUTH-012): an `auth-challenge` entry that names the messages of the turn,
-   * streamed as its last message. The model never reads it (MEM-RET-006).
-   */
-  private async codeMessage(
-    session: Session,
-    principal: Principal,
-    message: EndTurnMessage,
-    sink: TurnSink,
-    place: { after?: string; inboundIds: string[] }
-  ): Promise<MessageEntry> {
-    const id = prefixedId('msg')
-    await sink.emit({ type: 'text-start', messageId: id })
-    await sink.emit({ type: 'text-delta', messageId: id, delta: message.text })
-    await sink.emit({ type: 'text-end', messageId: id })
-    const at = place.after ? Math.max(Date.now(), Date.parse(place.after) + 1) : Date.now()
-    return this.memory.append({
-      id,
-      initiatedAt: new Date(at).toISOString(),
-      sessionId: session.id,
-      principalId: principal.id,
-      role: 'agent',
-      sourceType: 'auth-challenge',
-      text: message.text,
-      backingIdentity: principal.backingIdentity,
-      payload: {
-        ...(message.payload ?? {}),
-        inboundId: place.inboundIds.at(-1),
-        inboundIds: place.inboundIds,
-      },
-    })
   }
 
   /**

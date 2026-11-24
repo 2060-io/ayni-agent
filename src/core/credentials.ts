@@ -127,3 +127,13 @@ export function isCredentialWithheld(entry: Pick<MessageEntry, 'payload' | 'role
 export function credentialRecordText(sourceTitle: string | undefined): string {
   return `the person sent a message here that the code of the service held back because it carried a credential${sourceTitle ? ` of ${sourceTitle}` : ''}; nothing of it is shown to you. Never ask for a password, a token or a key: offer the Connect card of the source instead`
 }
+
+/**
+ * An entry an email check in a conversation recorded before the check moved to the phone (ayni-spec D128): the person's
+ * message the check took, or the check's own words. Shown to no client and given to no model.
+ */
+export function isLegacyEmailCheck(entry: Pick<MessageEntry, 'sourceType' | 'payload'>): boolean {
+  return (
+    entry.sourceType === 'auth-challenge' && (entry.payload?.kind === 'email-check' || entry.payload?.type === 'email')
+  )
+}

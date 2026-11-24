@@ -783,7 +783,7 @@ export interface ElevationGrant {
   expiresAt: string
 }
 
-export type ChallengeType = 'device' | 'face-match' | 'document' | 'email'
+export type ChallengeType = 'device' | 'document'
 export type ChallengeOutcome = 'pending' | 'completed' | 'failed' | 'expired' | 'unavailable' | 'degraded'
 
 /**
@@ -1172,6 +1172,11 @@ export interface ToolCallRecord {
     | { allowanceApprovalId: string }
   approval?: { approvalId: string; status: ApprovalStatus; decidedBy: string[] }
   stepUp?: { type: string; outcome: string }
+  /**
+   * a step-up's re-authentication (IDENT-AUTH-015): the methods of its set and what it ended in, `recent` when an
+   * authentication within its `maxAgeMinutes` stood for it
+   */
+  reauthentication?: { methods: string[]; outcome: string }
   outcome: ToolCallOutcome
   updatedAt: string
 }

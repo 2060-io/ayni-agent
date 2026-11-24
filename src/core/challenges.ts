@@ -4,7 +4,7 @@
  * flow-capable wallet the device challenge is a `confirm` flow and the routed status carries its flow id
  * (D54, D58, INTX-FLOW-003).
  */
-import type { AgentPack, AuthChallengePolicy } from '../config/packTypes.js'
+import type { AgentPack, IssuanceChallenge } from '../config/packTypes.js'
 import type { Store } from '../store/types.js'
 import { Deferred } from '../util/async.js'
 import { nowIso, prefixedId } from '../util/ids.js'
@@ -30,8 +30,6 @@ export interface CapabilityChannelOps {
   ): Promise<{ threadId: string; flowId?: string }>
   /** Closes the flow of a confirmation the agent withdrew (TOOL-SPACE-009). */
   cancelConfirmation?(flowId: string): Promise<void>
-  /** call offer whose room the face-verification service joins (INTX-AUTH-007); returns the call thread id */
-  offerFaceMatchCall(connectionId: string, challenge: AuthChallengeRecord, description: string): Promise<string>
   /**
    * The document read: an `nfc-read` flow with one request for the data of the chip, of a peer that said it can
    * read one (INTX-AUTH-010); returns the request thread id and the flow id, and throws when the peer cannot.
@@ -86,7 +84,8 @@ export interface ChallengeRequest {
   principal: Principal
   originSession: Session
   toolName: string
-  policy: AuthChallengePolicy
+  /** a tool's `stepUp.authChallenge` (a device confirmation) or an issuance profile's challenge (also a document read) */
+  policy: IssuanceChallenge
   purpose: string
 }
 
@@ -231,9 +230,6 @@ export class ChallengeService {
         record.details = { threadId: sent.threadId, connectionId, ...(sent.flowId ? { flowId: sent.flowId } : {}) }
         // the routed status names the flow once it exists (INTX-FLOW-003)
         if (sent.flowId) await this.router.notifyOrigin(req.originSession.id, routed(record, 'pending'))
-      } else if (req.policy.type === 'face-match') {
-        const threadId = await this.ops.offerFaceMatchCall(connectionId, record, `Face check for: ${req.purpose}`)
-        record.details = { ...(record.details ?? {}), threadId, connectionId }
       } else {
         const sent = await this.ops.requestDocument(connectionId, record, req.purpose, req.originSession)
         record.details = { threadId: sent.threadId, connectionId, flowId: sent.flowId }
@@ -276,18 +272,10 @@ export class ChallengeService {
     )
   }
 
-  public async findByToken(token: string): Promise<AuthChallengeRecord | undefined> {
-    return this.store.challenges.findByToken(token)
-  }
-
   public async findPendingByThread(connectionId: string, threadId: string): Promise<AuthChallengeRecord | undefined> {
     return (await this.store.challenges.listPending()).find(
       (c) => c.details?.connectionId === connectionId && c.details?.threadId === threadId
     )
-  }
-
-  public async findPendingByPeer(peerId: string): Promise<AuthChallengeRecord | undefined> {
-    return (await this.store.challenges.listPending()).find((c) => c.details?.peerId === peerId)
   }
 }
 

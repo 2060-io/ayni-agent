@@ -1,9 +1,10 @@
 /**
- * A badge from the user directory (decision 62; ayni-spec D88): the claims of the person's entry found from a passport,
- * from a verified address or from both (IDENT-DIR-002..005, INTX-ISSUE-007/020/021), `as: dateint`, `emailId`, and what
- * the agent-pack may say of it (IDENT-DIR-002, INTX-AUTH-011/015). The issuance runs on the in-memory store with a
- * document read and an email check that the test makes pass; their own mechanics are tested elsewhere
- * (tests/issuance.test.ts, tests/emailCode.test.ts).
+ * A badge from the user directory, issued apart from the authentication (ayni-spec D130; IDENT-AUTH-016,
+ * IDENT-DIR-005/006, INTX-ISSUE-007/008/020/021): its claims come from the entry the Principal's authentication
+ * identified, `pending` before one; the birth date and the portrait from a passport of that entry read when the person
+ * authenticated, empty without one; a badge is held by the wallet it was issued to, and the automatic trigger offers it
+ * on a connection that holds none. Then what the agent-pack may say of it. The issuance runs on the in-memory store; the
+ * authentication itself is tested in tests/authenticate.test.ts.
  */
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -15,7 +16,7 @@ import type { AgentPack, IssuanceProfile } from '../src/config/packTypes.js'
 import { UserDirectory } from '../src/core/directory.js'
 import { DirectoryClaims } from '../src/core/directoryClaims.js'
 import { type EvidenceInput, EvidenceService } from '../src/core/evidence.js'
-import { dateInt, documentId, emailId, type IssuanceDeps, IssuanceService, subjectIdKey } from '../src/core/issuance.js'
+import { dateInt, type IssuanceDeps, IssuanceService, subjectId, subjectIdKey } from '../src/core/issuance.js'
 import type { Principal, Session } from '../src/core/types.js'
 import { createEntryCrypto } from '../src/memory/crypto.js'
 import { MemoryStore } from '../src/store/memory.js'
@@ -30,7 +31,7 @@ const BADGE = 'https://ecs.example/vt/schemas-badge-jsc.json'
 const root = mkdtempSync(join(tmpdir(), 'ayni-badge-'))
 afterAll(() => rmSync(root, { recursive: true, force: true }))
 
-/** A logger that keeps what it is given: the reasons go to the log, never a value (IDENT-DIR-003/007). */
+/** A logger that keeps what it is given: the reasons go to the log, never a value (IDENT-DIR-007). */
 function recorder() {
   const lines: { level: string; obj: Record<string, unknown>; msg?: string }[] = []
   const at = (level: string) => (obj: Record<string, unknown>, msg?: string) => void lines.push({ level, obj, msg })
@@ -54,23 +55,6 @@ const PEOPLE = [
     email: 'jurgen.muller@northwind.example',
     birthDate: '19800101',
     nationality: 'D',
-  },
-  // two people a passport cannot tell apart
-  {
-    id: 'p-0050',
-    firstName: 'Li',
-    lastName: 'Wang',
-    email: 'li.wang.1@northwind.example',
-    birthDate: '19950303',
-    nationality: 'CHN',
-  },
-  {
-    id: 'p-0051',
-    firstName: 'Li',
-    lastName: 'Wang',
-    email: 'li.wang.2@northwind.example',
-    birthDate: '19950303',
-    nationality: 'CHN',
   },
 ]
 
@@ -96,34 +80,43 @@ const document = {
     attributes: ['documentNumber', 'issuingState', 'nationality', 'lastName', 'firstName', 'dateOfBirth', 'portrait'],
   },
 }
-const fromDirectory = (challenges: IssuanceProfile['authChallenge']): IssuanceProfile => {
-  const reads = ([] as { type: string }[]).concat(challenges ?? []).some((c) => c.type === 'document')
-  return {
-    credential: { credentialDefinitionId: 'def-badge' },
-    label: 'Northwind badge',
-    authChallenge: challenges,
-    claims: {
-      badgeNumber: reads ? { from: 'computed', fn: 'documentId' } : { from: 'computed', fn: 'emailId' },
-      name: { from: 'record', record: 'directory', field: 'name' },
-      email: { from: 'record', record: 'directory', field: 'email' },
-      department: { from: 'record', record: 'directory', field: 'department' },
-      birthDate: reads
-        ? { from: 'evidence', entry: 'document', attribute: 'dateOfBirth', as: 'dateint' }
-        : { from: 'computed', fn: 'constant', value: '' },
-      phoneNumber: { from: 'computed', fn: 'constant', value: '' },
-    },
-  }
-}
 
-const person = {
-  id: 'prn_1',
+/** The badge of the spec's example (architecture §11.10): no challenge, its claims from the entry (D130). */
+const badgeProfile = (trigger: IssuanceProfile['trigger'] = 'model'): IssuanceProfile => ({
+  credential: { credentialDefinitionId: 'def-badge' },
+  label: 'Northwind badge',
+  trigger,
+  claims: {
+    badgeNumber: { from: 'computed', fn: 'subjectId' },
+    name: { from: 'record', record: 'directory', field: 'name' },
+    email: { from: 'record', record: 'directory', field: 'email' },
+    department: { from: 'record', record: 'directory', field: 'department' },
+    birthDate: { from: 'evidence', entry: 'document', attribute: 'dateOfBirth', as: 'dateint' },
+    photo: { from: 'evidence', entry: 'document', attribute: 'portrait' },
+    phoneNumber: { from: 'computed', fn: 'constant', value: '' },
+  },
+})
+
+/** A person the authentication identified as the entry, on the connection of a wallet. */
+const identified = (entry = 'p-0042', connection = 'conn-1'): Principal =>
+  ({
+    id: `prn-${entry}`,
+    connectionType: 'verifiable-user-agent',
+    capabilityChannelId: connection,
+    identityCredentialRef: `entry:${entry}`,
+    directoryEntryId: entry,
+    roles: [],
+  }) as unknown as Principal
+const visitor = {
+  id: 'prn-visitor',
   connectionType: 'verifiable-user-agent',
-  capabilityChannelId: 'conn-1',
+  capabilityChannelId: 'conn-9',
+  identityCredentialRef: null,
   roles: [],
 } as unknown as Principal
 const session = { id: 'ses_1', channelType: 'ag-ui' } as Session
 
-/** A passport of the person read on the phone, as the event handler records it (PRIV-EVID-012). */
+/** A passport read on the phone during an authentication, as the agent records it once accepted (PRIV-EVID-012). */
 const passport = (over: Record<string, string> = {}): EvidenceInput => ({
   kind: 'document',
   entry: 'document',
@@ -139,209 +132,135 @@ const passport = (over: Record<string, string> = {}): EvidenceInput => ({
   },
 })
 
-async function setup(
-  profile: IssuanceProfile,
-  opts: { read?: EvidenceInput; address?: string; people?: Record<string, unknown>[] } = {}
-) {
+async function setup(profile: IssuanceProfile) {
   const pack = {
     identity: { roleRules: [] },
-    evidence: { document, email: { store: { attributes: ['address'] } } },
+    evidence: { document },
     issuance: { badge: profile },
   } as unknown as AgentPack
   const store = new MemoryStore()
   const { lines, logger } = recorder()
   const evidence = new EvidenceService(store, pack, crypto, logger as never)
-  const directory = await directoryOf(opts.people ?? PEOPLE)
-  const emailCheck = {
-    available: () => true,
-    start: async (principal: Principal) => {
-      // the person types the address and the right code: the check records its evidence (INTX-AUTH-015)
-      if (opts.address)
-        await evidence.record(principal, { kind: 'email', entry: 'email', values: { address: opts.address } })
-      return { started: true as const, question: 'Which address?', challengeId: 'chl_1' }
-    },
-  }
-  const claims = new DirectoryClaims(directory, evidence, logger as never, emailCheck)
-  const asked: string[] = []
-  const offers: Record<string, string>[] = []
+  const directory = await directoryOf(PEOPLE)
+  const claims = new DirectoryClaims(directory, evidence, logger as never)
+  const challenges: string[] = []
+  const offers: { connectionId: string; claims: Record<string, string> }[] = []
   const deps: IssuanceDeps = {
     offer: async (input) => {
-      offers.push(input.claims)
+      offers.push({ connectionId: input.connectionId, claims: input.claims })
       return { outcome: 'issued', exchangeId: `cex-${offers.length}` }
     },
-    challenge: async (principal, _session, policy) => {
-      asked.push(policy.type)
-      if (opts.read) await evidence.record(principal, opts.read)
+    challenge: async (_principal, _session, policy) => {
+      challenges.push(policy.type)
       return { passed: true }
     },
-    emailCheck,
     record: (principal, name, p, source) => claims.resolve(principal, name, p, source),
+    entryDocument: (principal, p) => claims.entryDocument(principal, p),
     allocateRevocation: async () => ({ registryDefinitionId: 'def-badge/revreg-1', index: offers.length }),
     holderOf: async () => 'holder-1',
   }
   const service = new IssuanceService(pack, evidence, deps, logger as never, key)
-  return { service, evidence, offers, asked, lines }
+  return { service, evidence, offers, challenges, lines }
 }
 
-describe('with a passport (IDENT-DIR-003, IDENT-DIR-005)', () => {
-  const profile = fromDirectory([{ type: 'document' }])
-
-  it('reports the claims of the directory pending until the read, which the issuance starts with (INTX-ISSUE-007/021)', async () => {
-    const { service } = await setup(profile)
-    const [badge] = await service.requirements(person)
-    expect(badge?.state).toBe('ready')
-    const byReading = { type: 'issue_credential', profile: 'badge', challenge: 'document', note: expect.any(String) }
-    expect(badge?.claims).toEqual([
-      { name: 'badgeNumber', status: 'missing', action: byReading },
-      { name: 'name', status: 'pending', action: byReading },
-      { name: 'email', status: 'pending', action: byReading },
-      { name: 'department', status: 'pending', action: byReading },
-      { name: 'birthDate', status: 'missing', action: byReading },
-      { name: 'phoneNumber', status: 'available' },
+describe('the claims of the entry the authentication identified (D130, INTX-ISSUE-021, IDENT-DIR-005)', () => {
+  it('reports the claims of the directory pending before an authentication, which is their action (INTX-ISSUE-006/007)', async () => {
+    const { service } = await setup(badgeProfile())
+    const [badge] = await service.requirements(visitor)
+    expect(badge?.state).toBe('incomplete')
+    const authenticate = { type: 'request_presentation', entry: 'authentication' }
+    expect(badge?.claims.filter((c) => c.status !== 'available')).toEqual([
+      { name: 'name', status: 'pending', action: authenticate },
+      { name: 'email', status: 'pending', action: authenticate },
+      { name: 'department', status: 'pending', action: authenticate },
     ])
+    expect((await service.issue(visitor, session, 'badge', 'model')).outcome).toBe('incomplete')
   })
 
-  it('issues from the one entry the passport matches: its name, address and department, the birth date as YYYYMMDD', async () => {
-    const { service, offers, asked, evidence } = await setup(profile, { read: passport() })
-    expect((await service.issue(person, session, 'badge', 'model')).outcome).toBe('issued')
-    expect(asked).toEqual(['document'])
-    expect(offers).toEqual([
-      {
-        badgeNumber: documentId(key, 'badge', 'ESP', 'X1234567'),
+  it('issues from the entry with no challenge, the claims of the passport empty when none was read (IDENT-DIR-005)', async () => {
+    const { service, offers, challenges, evidence } = await setup(badgeProfile())
+    const ana = identified()
+    expect((await service.requirements(ana))[0]?.state).toBe('ready')
+    expect((await service.issue(ana, session, 'badge', 'model')).outcome).toBe('issued')
+    // issuing a badge asks nothing of the phone: it is independent of the authentication (IDENT-AUTH-016)
+    expect(challenges).toEqual([])
+    expect(offers[0]).toEqual({
+      connectionId: 'conn-1',
+      claims: {
+        badgeNumber: subjectId(key, 'badge', ana.id),
         name: 'Ana María Ríos',
         email: 'ana.rios@northwind.example',
         department: 'Depot Rotterdam',
-        birthDate: '19910521',
+        birthDate: '',
+        photo: '',
         phoneNumber: '',
       },
-    ])
-    const record = (await evidence.list(person.id)).find((r) => r.kind === 'issuance')
-    expect(record?.directoryEntryId).toBe('p-0042')
+    })
+    // the record keeps the entry it came from, by which a presented badge finds it again (IDENT-DIR-006)
+    const record = (await evidence.list(ana.id)).find((r) => r.kind === 'issuance')
+    expect(record).toMatchObject({ kind: 'issuance', directoryEntryId: 'p-0042', connectionRef: 'conn-1' })
   })
 
-  it('matches a name the zone writes with either form of the table, and a one-letter nationality', async () => {
-    for (const lastName of ['MUELLER', 'MULLER']) {
-      const read = passport({
-        lastName,
-        firstName: 'JUERGEN',
-        dateOfBirth: '1980-01-01',
-        nationality: 'D',
-        issuingState: 'D',
-      })
-      const { service, offers } = await setup(profile, { read })
-      expect((await service.issue(person, session, 'badge', 'model')).outcome).toBe('issued')
-      expect(offers[0]).toMatchObject({ name: 'Jürgen Müller', department: '' })
-    }
+  it('takes the birth date as YYYYMMDD and the portrait from the passport of the entry read when the person authenticated', async () => {
+    const { service, offers, evidence } = await setup(badgeProfile())
+    const ana = identified()
+    await evidence.record(ana, passport())
+    expect((await service.issue(ana, session, 'badge', 'model')).outcome).toBe('issued')
+    expect(offers[0]?.claims).toMatchObject({ birthDate: '19910521', photo: 'data:image/jpeg;base64,AAAA' })
   })
 
-  it('issues nothing from a passport that matches no entry, or several, and logs why without a value', async () => {
-    const stranger = passport({ lastName: 'RIOS', firstName: 'ANA MARIA', dateOfBirth: '1991-05-22' })
-    const none = await setup(profile, { read: stranger })
-    const result = await none.service.issue(person, session, 'badge', 'model')
-    expect(result.outcome).toBe('incomplete')
-    expect(result.requirements?.claims.find((c) => c.name === 'name')).toMatchObject({
-      status: 'missing',
+  it("leaves them empty for a passport that is not the entry's, and logs why without a value", async () => {
+    const { service, offers, evidence, lines } = await setup(badgeProfile())
+    const jurgen = identified('p-0043')
+    // Ana's passport on Jürgen's connection: it gives his badge nothing of hers
+    await evidence.record(jurgen, passport())
+    expect((await service.issue(jurgen, session, 'badge', 'model')).outcome).toBe('issued')
+    expect(offers[0]?.claims).toMatchObject({ name: 'Jürgen Müller', birthDate: '', photo: '' })
+    expect(JSON.stringify(lines)).not.toMatch(/RIOS|1991|X1234567/)
+  })
+
+  it('gives a person who is not on the list no badge of the directory: unavailable, with nothing to do', async () => {
+    const { service } = await setup(badgeProfile())
+    const partner = {
+      ...identified(),
+      id: 'prn-partner',
+      directoryEntryId: undefined,
+      identityCredentialRef: 'badge:pex-1',
+    } as Principal
+    const [badge] = await service.requirements(partner)
+    expect(badge?.claims.find((c) => c.name === 'name')).toMatchObject({
+      status: 'unavailable',
       action: { type: 'none' },
     })
-    expect(none.offers).toEqual([])
-    const why = none.lines.find((l) => l.msg === 'no single directory entry for the badge')
-    expect(why?.obj).toMatchObject({ reason: 'document-matches-no-entry', entries: 0 })
-    const logged = JSON.stringify(none.lines)
-    for (const value of ['1991-05-22', '1991-05-21', '19910521', 'ESP', 'RIOS', 'Ríos'])
-      expect(logged).not.toContain(value)
-
-    const twins = await setup(profile, {
-      read: passport({
-        lastName: 'WANG',
-        firstName: 'LI',
-        dateOfBirth: '1995-03-03',
-        nationality: 'CHN',
-        issuingState: 'CHN',
-      }),
-    })
-    expect((await twins.service.issue(person, session, 'badge', 'model')).outcome).toBe('incomplete')
-    expect(twins.lines.find((l) => l.msg === 'no single directory entry for the badge')?.obj).toMatchObject({
-      reason: 'document-matches-several',
-      entries: 2,
-    })
+    expect((await service.issue(partner, session, 'badge', 'model')).outcome).toBe('incomplete')
   })
 })
 
-describe('with an email code (IDENT-DIR-004, INTX-ISSUE-020)', () => {
-  const profile = fromDirectory([{ type: 'email' }])
+describe('held by the wallet it was issued to, and the automatic trigger (D130, IDENT-AUTH-016)', () => {
+  it('is held on the connection it was issued to, and issued again, with the same number, to a new wallet', async () => {
+    const { service, offers } = await setup(badgeProfile())
+    expect((await service.issue(identified(), session, 'badge', 'model')).outcome).toBe('issued')
+    expect((await service.issue(identified(), session, 'badge', 'model')).outcome).toBe('held')
+    // a new phone: another connection of the same Principal holds no badge yet
+    const onNewPhone = identified('p-0042', 'conn-2')
+    expect((await service.requirements(onNewPhone))[0]?.state).toBe('ready')
+    expect((await service.issue(onNewPhone, session, 'badge', 'model')).outcome).toBe('issued')
+    expect(offers.map((o) => o.connectionId)).toEqual(['conn-1', 'conn-2'])
+    expect(offers[1]?.claims.badgeNumber).toBe(offers[0]?.claims.badgeNumber)
+  })
 
-  it('starts the check, and issues once the address is verified, numbered by the address', async () => {
-    const { service, offers, evidence } = await setup(profile, { address: 'Ana.Rios@Northwind.example' })
-    const first = await service.issue(person, session, 'badge', 'model')
-    expect(first).toMatchObject({ outcome: 'challenge-started', ask: { text: 'Which address?', challengeId: 'chl_1' } })
+  it('offers an automatic badge once an authentication identified an entry, and once per connection', async () => {
+    const { service, offers } = await setup(badgeProfile('automatic'))
+    // a visitor: nothing is offered, the claims of the directory are pending
+    await service.automatic(visitor, session)
     expect(offers).toEqual([])
-    // the check passed: the issuance goes on, asking nothing again
-    expect((await service.issue(person, session, 'badge', 'model')).outcome).toBe('issued')
-    expect(offers[0]).toEqual({
-      badgeNumber: emailId(key, 'badge', 'ana.rios@northwind.example'),
-      name: 'Ana María Ríos',
-      email: 'ana.rios@northwind.example',
-      department: 'Depot Rotterdam',
-      birthDate: '',
-      phoneNumber: '',
-    })
-    const record = (await evidence.list(person.id)).find((r) => r.kind === 'issuance')
-    expect(record?.directoryEntryId).toBe('p-0042')
-  })
-
-  it('reports the claims missing for an address that left the directory, and offers the check again', async () => {
-    const { service } = await setup(profile, { address: 'gone@northwind.example' })
-    await service.issue(person, session, 'badge', 'model')
-    const [badge] = await service.requirements(person)
-    expect(badge?.claims.find((c) => c.name === 'name')).toEqual({
-      name: 'name',
-      status: 'missing',
-      action: { type: 'issue_credential', profile: 'badge', challenge: 'email', note: expect.any(String) },
-    })
-  })
-
-  it('numbers an address the same for whoever proves it, two addresses apart, two profiles unlinked, the address unreadable', () => {
-    const a = emailId(key, 'badge', 'ana.rios@northwind.example')
-    expect(emailId(key, 'badge', ' ANA.RIOS@northwind.example ')).toBe(a)
-    expect(emailId(key, 'badge', 'jonas@northwind.example')).not.toBe(a)
-    expect(emailId(key, 'other', 'ana.rios@northwind.example')).not.toBe(a)
-    expect(emailId(subjectIdKey(Buffer.alloc(32, 6)), 'badge', 'ana.rios@northwind.example')).not.toBe(a)
-    expect(a).toMatch(/^[0-9A-HJKMNP-TV-Z]{16}$/)
-    expect(a.toLowerCase()).not.toContain('ana')
-  })
-})
-
-describe('with both (IDENT-DIR-004)', () => {
-  const profile = fromDirectory([{ type: 'document' }, { type: 'email' }])
-
-  it('reads the passport first, then checks the address, and issues from the entry both find', async () => {
-    const { service, offers, asked } = await setup(profile, { read: passport(), address: 'ana.rios@northwind.example' })
-    expect((await service.issue(person, session, 'badge', 'model')).outcome).toBe('challenge-started')
-    expect(asked).toEqual(['document'])
-    expect((await service.issue(person, session, 'badge', 'model')).outcome).toBe('issued')
-    // the passport is not read again
-    expect(asked).toEqual(['document'])
-    expect(offers[0]).toMatchObject({ name: 'Ana María Ríos', birthDate: '19910521' })
-  })
-
-  it('issues nothing when the passport and the address find two people', async () => {
-    const { service, offers, lines } = await setup(profile, {
-      read: passport(),
-      address: 'jurgen.muller@northwind.example',
-    })
-    await service.issue(person, session, 'badge', 'model')
-    const result = await service.issue(person, session, 'badge', 'model')
-    expect(result.outcome).toBe('incomplete')
-    expect(offers).toEqual([])
-    expect(lines.some((l) => l.obj.reason === 'entries-differ')).toBe(true)
-  })
-
-  it('stops after a passport that matches nobody: no email is asked', async () => {
-    const { service } = await setup(profile, {
-      read: passport({ dateOfBirth: '2000-01-01' }),
-      address: 'ana.rios@northwind.example',
-    })
-    expect((await service.issue(person, session, 'badge', 'model')).outcome).toBe('incomplete')
+    await service.automatic(identified(), session)
+    expect(offers).toHaveLength(1)
+    // a later authentication on the same connection offers nothing: the badge issued there is still valid
+    await service.automatic(identified(), session)
+    expect(offers).toHaveLength(1)
+    // nor may the model or the person start it (INTX-ISSUE-008)
+    expect((await service.issue(identified('p-0042', 'conn-3'), session, 'badge', 'model')).outcome).toBe('not-offered')
   })
 })
 
@@ -353,22 +272,25 @@ describe('as: dateint (IDENT-DIR-005)', () => {
   })
 })
 
-describe('what the agent-pack may say of a badge from the directory (IDENT-DIR-002, INTX-AUTH-011/015)', () => {
+describe('what the agent-pack may say of a badge from the directory (D130, INTX-ISSUE-010/020/021)', () => {
   const env = { HOME_BACKING_IDENTITY: 'did:webvh:x:home' }
-  /** the dev pack with a directory and a badge profile, changed by `edit` */
+  /** the dev pack with a directory, an email method and the badge of the spec's example, changed by `edit` */
   function packWith(edit: (doc: Doc) => void): () => AgentPack {
     const doc = parseYaml(readFileSync('agent-packs/dev/agent-pack.yaml', 'utf8')) as Doc
     doc.identity.directory = { file: '/var/run/secrets/directory.yaml' }
-    doc.identity.authentication = badgeAuthentication({
+    const authentication = badgeAuthentication({
       credential: { jsonSchemaCredentialId: BADGE },
       subjectKey: ['badgeNumber'],
       request: 'on-demand',
       visitors: true,
     })
-    doc.evidence = { document, email: { store: { attributes: ['address'] } } }
-    doc.issuance = {
-      badge: { ...fromDirectory([{ type: 'email' }]), credential: { jsonSchemaCredentialId: BADGE } },
+    doc.identity.authentication = {
+      ...authentication,
+      methods: { ...authentication.methods, email: { type: 'email' } },
+      combinations: [['badge'], ['email']],
     }
+    doc.evidence = { document, email: { store: { attributes: ['address'] } } }
+    doc.issuance = { badge: { ...badgeProfile('automatic'), credential: { jsonSchemaCredentialId: BADGE } } }
     edit(doc)
     return () => validatePackDocument(doc, env)
   }
@@ -383,21 +305,8 @@ describe('what the agent-pack may say of a badge from the directory (IDENT-DIR-0
     expect((error as Error).message).toContain(words)
   }
 
-  it('accepts [email], [document], [document, email], and a single challenge as before', () => {
-    expect(packWith(() => undefined)()).toBeTruthy()
-    expect(
-      packWith((doc) => {
-        doc.issuance.badge = { ...fromDirectory([{ type: 'document' }]), credential: { jsonSchemaCredentialId: BADGE } }
-      })()
-    ).toBeTruthy()
-    expect(
-      packWith((doc) => {
-        doc.issuance.badge = {
-          ...fromDirectory([{ type: 'document' }, { type: 'email' }]),
-          credential: { jsonSchemaCredentialId: BADGE },
-        }
-      })()
-    ).toBeTruthy()
+  it('accepts the badge with no challenge, and a single challenge of another profile', () => {
+    expect(packWith(() => undefined)().issuance?.badge?.authChallenge).toBeUndefined()
     const single = packWith((doc) => {
       doc.issuance.pass = {
         credential: { credentialDefinitionId: 'def-pass' },
@@ -405,93 +314,72 @@ describe('what the agent-pack may say of a badge from the directory (IDENT-DIR-0
         claims: { validUntil: { from: 'computed', fn: 'addDays', days: 7 } },
       }
     })()
-    // one challenge, as an object: the fallback is `fail` when it names none (INTX-AUTH-005)
     expect(single.issuance?.pass?.authChallenge).toEqual({ type: 'device' })
   })
 
-  it('refuses another order, no challenge, or another challenge for a badge from the directory (IDENT-DIR-002)', () => {
+  it('refuses an email code or a face match as a challenge, in words: they are methods (INTX-ISSUE-010, TOOL-CAT-010)', () => {
     refused(
       packWith((doc) => {
-        doc.issuance.badge.authChallenge = [{ type: 'email' }, { type: 'document' }]
+        doc.issuance.badge.authChallenge = [{ type: 'email' }]
       }),
-      'IDENT-DIR-002: issuance.badge takes claims from the user directory'
+      'INTX-ISSUE-010: issuance.badge.authChallenge has the type email'
     )
     refused(
       packWith((doc) => {
-        Reflect.deleteProperty(doc.issuance.badge, 'authChallenge')
+        doc.issuance.badge.authChallenge = { type: 'face-match' }
       }),
-      'IDENT-DIR-002'
+      'INTX-ISSUE-010: issuance.badge.authChallenge has the type face-match'
     )
     refused(
       packWith((doc) => {
-        doc.issuance.badge.authChallenge = [{ type: 'device' }]
+        doc.issuance.badge.authChallenge = [{ type: 'device' }, { type: 'document' }]
       }),
-      'IDENT-DIR-002'
+      'fails schema validation'
     )
+  })
+
+  it('needs a directory, and what the matching of the passport and the claims read stored (INTX-ISSUE-021, IDENT-DIR-005)', () => {
     refused(
       packWith((doc) => {
         Reflect.deleteProperty(doc.identity, 'directory')
       }),
-      'identity.directory names no file'
-    )
-  })
-
-  it('refuses the email code anywhere else, in words (INTX-AUTH-011)', () => {
-    refused(
-      packWith((doc) => {
-        doc.tools.sources.echo.tools = { echo: { stepUp: { authChallenge: { type: 'email' } } } }
-      }),
-      'tools.sources.echo.tools.echo.stepUp.authChallenge: the email code is the challenge of an issuance profile that takes claims from the user directory'
+      'INTX-ISSUE-021: issuance.badge takes claims from the user directory, and identity.directory names no file'
     )
     refused(
       packWith((doc) => {
-        doc.issuance.pass = {
-          credential: { credentialDefinitionId: 'def-pass' },
-          authChallenge: [{ type: 'email' }],
-          claims: { validUntil: { from: 'computed', fn: 'addDays', days: 7 } },
+        doc.evidence.document = {
+          store: { attributes: ['documentNumber', 'issuingState', 'lastName', 'firstName', 'dateOfBirth'] },
         }
       }),
-      'INTX-AUTH-011: issuance.pass declares an email challenge and takes no claim from the user directory'
+      'IDENT-DIR-005: issuance.badge takes claims from the passport read when the person authenticated: evidence.document must store [nationality, portrait]'
     )
   })
 
-  it('needs the address stored, never shown to the model, and an email challenge for emailId (INTX-AUTH-015, INTX-ISSUE-020)', () => {
+  it('needs an email method and the address stored for emailId, never shown to the model (INTX-ISSUE-020, IDENT-AUTH-009)', () => {
+    const byAddress = (doc: Doc) => {
+      doc.issuance.badge.claims.badgeNumber = { from: 'computed', fn: 'emailId' }
+    }
+    expect(packWith(byAddress)()).toBeTruthy()
     refused(
       packWith((doc) => {
+        byAddress(doc)
+        doc.identity.authentication.methods = { badge: doc.identity.authentication.methods.badge }
+        doc.identity.authentication.combinations = [['badge']]
+      }),
+      'INTX-ISSUE-020: issuance.badge takes a claim from a verified address, and identity.authentication enables no email method'
+    )
+    refused(
+      packWith((doc) => {
+        byAddress(doc)
         Reflect.deleteProperty(doc.evidence, 'email')
       }),
-      'evidence.email must store [address]'
+      'INTX-ISSUE-020: issuance.badge takes a claim from a verified address: evidence.email must store [address]'
     )
     refused(
       packWith((doc) => {
         doc.evidence.email = { store: { attributes: ['address'] }, modelVisible: ['address'] }
       }),
-      'INTX-AUTH-015: evidence.email.modelVisible'
-    )
-    refused(
-      packWith((doc) => {
-        doc.issuance.badge.authChallenge = [{ type: 'document' }]
-        doc.issuance.badge.claims.badgeNumber = { from: 'computed', fn: 'emailId' }
-      }),
-      'INTX-ISSUE-020: issuance.badge takes a claim from a verified address and declares no email challenge'
-    )
-    refused(
-      packWith((doc) => {
-        doc.issuance.badge.trigger = 'automatic'
-      }),
-      'INTX-AUTH-012: issuance.badge declares an email challenge and is automatic'
-    )
-  })
-
-  it('needs what the matching of a passport reads stored (IDENT-DIR-003)', () => {
-    refused(
-      packWith((doc) => {
-        doc.issuance.badge = { ...fromDirectory([{ type: 'document' }]), credential: { jsonSchemaCredentialId: BADGE } }
-        doc.evidence.document = {
-          store: { attributes: ['documentNumber', 'issuingState', 'lastName', 'firstName', 'dateOfBirth'] },
-        }
-      }),
-      'IDENT-DIR-003: issuance.badge finds the entry of a passport: evidence.document must store [nationality]'
+      'IDENT-AUTH-009: evidence.email.modelVisible'
     )
   })
 
