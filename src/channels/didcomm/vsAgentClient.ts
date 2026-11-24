@@ -221,6 +221,9 @@ export interface EnrolChallengeBody {
   otpauthUri?: string
   digits?: number
   period?: number
+  /** on an authenticator app's challenge after a wrong code (plugin 0.3.1): `wrong-code` and the codes left */
+  error?: 'wrong-code'
+  triesLeft?: number
 }
 
 /** `EnrolExchangeDto` of the plugin: one enrolment; an authenticator app's secret is never on it. */

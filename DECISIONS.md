@@ -1863,7 +1863,7 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     approval request** (2026-11-24, Fabrice's decisions of 2026-11-23, ayni-spec PR #127: D125 to D131; IDENT-AUTH-001
     to 014 and 017, IDENT-RES-002, 010, 014, 019, 020, IDENT-DIR-003, 004, 010, IDENT-STAT-002, 005, PLAT-MAIL-001; flow
     profile §4.1, §6.4, §6.14, §11, FLOW-SIGNIN-001 to 014, FLOW-STAT-001, 003; FLOW-AUTH-004, INTX-APPR-026; the Ayni
-    flow library 0.3.0, credo-ts-ayni-flow PRs #39, #40, #41, #47; then ayni-spec PR #128: D152 to D155, O91, O92,
+    flow library 0.3.1, credo-ts-ayni-flow PRs #39, #40, #41, #47, #49; then ayni-spec PRs #128 and #129: D152 to D155,
     IDENT-AUTH-002, 008, 011, 014, 015, IDENT-RES-019, 020, FLOW-SIGNIN-001, 005, 008, 011, 012, 014).
     - **The agent-pack** (`identity.authentication`, rule 1): one object, `request`, `visitors`, `methods` (by name, each
       with a `type`: `credential`, `email`, `document`, `face-match`, `authenticator-app`, `passkey`), `combinations`
@@ -1930,10 +1930,9 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       when it does not complete). The authenticator app's secret is handed once, kept sealed in the key-value store and
       held in memory until the code proves it (a restart drops a pending enrolment); three codes in all (D155,
       `ENROL_AUTHENTICATOR_APP_ATTEMPTS`, the library's constant): a first and a second wrong code get a new challenge
-      with the same secret, the third closes the flow with the problem report `not-valid`, and the agent never asks
-      the plugin for a fourth challenge (it refuses one). The `error: "wrong-code"` and `tries_left` the spec puts on
-      that challenge (O92) are not sent: the plugin 0.3.0's challenge declares neither and its route refuses a field it
-      does not declare (`400`); they wait for the library. A passkey's attestation is checked (challenge, relying party,
+      with the same secret, `error: "wrong-code"` and the codes left (`triesLeft`, sent as `tries_left`: 2, then 1),
+      the third closes the flow with the problem report `not-valid`, and the agent never asks the plugin for a fourth
+      challenge (it refuses one; plugin 0.3.1 also refuses a later challenge without the two fields). A passkey's attestation is checked (challenge, relying party,
       presence, verification), not its statement; its credential id is found by a keyed index. `unenrol` removes the
       type and sends the status. Both are erased when the entry leaves the directory (`endAccess`).
     - **The approvers on an approval request** (`Governance.approvalsFor`, `openApprovalFlow`): an approval of a tool of
@@ -1951,9 +1950,10 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       D134, RBAC-ADMIN): the engine takes `purpose: step-up | admin`, `combinations` and `bound` already; the badge
       independent of the authentication (D130, IDENT-AUTH-016) and the end of the email check in a conversation
       (`emailCheck.ts`, `email_check`), which still serve the badge's issuance profiles.
-    - **Deployments:** the VS Agent image must carry `@ayni.org/vs-agent-plugin-ayni-flow` 0.3.0 (the `authenticate`
+    - **Deployments:** the VS Agent image must carry `@ayni.org/vs-agent-plugin-ayni-flow` 0.3.1 (the `authenticate`
       routes, the new peer-status shape and `approvals` on `authorize`, which 0.1.10 refuses; a declined consent and a
-      new choice, which 0.2.1 refuses), and its calls route must
+      new choice, which 0.2.1 refuses; the wrong code and codes left on an enrolment challenge, which 0.3.0 refuses),
+      and its calls route must
       take `parentThreadId` (CC-VSA-006) before a pack enables `face-match`. Every agent-pack with
       `identity.authentication` moves to the object (the dev agent's `- credential: …` becomes `methods.badge` and
       `combinations: [[badge]]`).

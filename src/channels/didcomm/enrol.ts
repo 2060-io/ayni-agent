@@ -9,9 +9,8 @@
  *
  * - **Authenticator app:** a new secret, handed to the phone once (`secret`, `otpauth_uri`, 6 digits, 30 seconds) and
  *   kept sealed once the person types a code it gives. Three codes in all (D155, FLOW-SIGNIN-014): a first and a second
- *   wrong code are answered with a new challenge carrying the same secret, the third fails the enrolment `not-valid`.
- *   The spec's `error: "wrong-code"` and `tries_left` on that challenge wait for the plugin to take them: 0.3.0
- *   refuses a field its challenge does not declare.
+ *   wrong code are answered with a new challenge carrying the same secret, `error: "wrong-code"` and the codes left
+ *   (`tries_left`: 2, then 1; plugin 0.3.1), the third fails the enrolment `not-valid`.
  * - **Passkey:** the creation options for the relying party of the network's app-link domain; the attestation's key is
  *   kept, never a private key; one that does not verify fails the enrolment `not-valid`.
  *
@@ -168,7 +167,9 @@ export class EnrolService {
     }
   }
 
-  private challengeOf(pending: Pending, principal: Principal): EnrolChallengeBody {
+  /** `previous`: the challenges already sent; after the first, the challenge says the code was wrong and how many
+   * codes are left, this one's included (D155, FLOW-SIGNIN-014; the plugin refuses a later challenge without them) */
+  private challengeOf(pending: Pending, principal: Principal, previous = 0): EnrolChallengeBody {
     const agent = this.deps.pack.metadata?.displayName ?? 'Ayni agent'
     const account = String(principal.identityAttributes.userName ?? 'you')
     if (pending.type === 'authenticator-app') {
@@ -180,6 +181,7 @@ export class EnrolService {
         otpauthUri: otpauthUri(secret, agent, account),
         digits: TOTP_DIGITS,
         period: TOTP_PERIOD_SECONDS,
+        ...(previous > 0 ? { error: 'wrong-code', triesLeft: ENROL_AUTHENTICATOR_APP_ATTEMPTS - previous } : {}),
       }
     }
     pending.challenge = randomBytes(32).toString('base64url')
@@ -218,7 +220,10 @@ export class EnrolService {
           this.pending.delete(exchange.threadId)
           return this.refuse(pending.flowId, 'not-valid', 'The code was not right.')
         }
-        await this.deps.client.sendEnrolChallenge(exchange.threadId, this.challengeOf(pending, principal))
+        await this.deps.client.sendEnrolChallenge(
+          exchange.threadId,
+          this.challengeOf(pending, principal, exchange.challenges)
+        )
         return
       }
       this.pending.delete(exchange.threadId)

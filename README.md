@@ -189,7 +189,7 @@ docker run --rm -p 3010:3010 --env-file .env io2060/ayni-agent:local
   passkey is enrolled in an `enrol` flow the phone opens (`didcomm.authenticate.enrol-state-changed`, `POST
   /v2/didcomm/authenticate-enrol/{threadId}/challenge`) and removed by an `unenrol`
   (`didcomm.authenticate.unenrol-received`). A person who declines the consent of a face match chooses another combination in
-  the same flow (the step ends `consent-declined`). It needs `@ayni.org/vs-agent-plugin-ayni-flow` 0.3.0. A wallet that takes
+  the same flow (the step ends `consent-declined`). It needs `@ayni.org/vs-agent-plugin-ayni-flow` 0.3.1. A wallet that takes
   no flows is asked a `credential` method that is a combination by itself, as a presentation request, and nothing else.
 - The agent tells each peer where it stands with it (`peer-status/1.0`, `POST /v2/didcomm/peer-status`; ayni-spec
   D71, IDENT-STAT): the rule by which it identifies the peer, following from `identity.authentication` (`none`
