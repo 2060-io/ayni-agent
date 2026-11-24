@@ -247,9 +247,15 @@ export class ToolCatalog {
     return source.tools[tool]?.stepUp
   }
 
-  /** The type of a tool's step-up, for the settings of a space (PROF-TOOL-001). */
-  public stepUpTypeOf(source: CatalogSource, tool: string): 'device' | 'face-match' | 'document' | null {
-    return this.stepUpOf(source, tool)?.authChallenge?.type ?? null
+  /**
+   * A tool's step-up, for the settings of a space (PROF-TOOL-001): the types of the methods a re-authentication asks
+   * (`["face-match"]`, D127), else `device` for a device confirmation, else null.
+   */
+  public stepUpTypeOf(source: CatalogSource, tool: string): 'device' | string[] | null {
+    const stepUp = this.stepUpOf(source, tool)
+    const methods = this.pack.identity.authentication?.methods ?? {}
+    if (stepUp?.authentication) return stepUp.authentication.methods.map((name) => methods[name]?.type ?? name)
+    return stepUp?.authChallenge?.type ?? null
   }
 
   /** Whether some tool may ask before it runs: what the platform rules then tell the model (TOOL-CALL-010). */

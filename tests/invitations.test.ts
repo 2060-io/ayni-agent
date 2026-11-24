@@ -386,14 +386,13 @@ describe('a person the agent knows already (SPACE-INV-004)', () => {
 })
 
 describe('what the agent says at start (PLAT-MAIL-001, SPACE-INV-004)', () => {
-  it('names the profiles and templates without SMTP, an authentication that keeps no email, a missing trust graph', () => {
-    const fixture = directoryPack([JONAS], { badge: 'email' })
+  it('names the templates without SMTP, an authentication that keeps no email, a missing trust graph', () => {
+    const fixture = directoryPack([JONAS])
     try {
       const { pack } = loadPack(fixture.pack)
       const warnings = mailWarnings(pack, false, false)
       expect(warnings).toHaveLength(3)
-      expect(warnings[0]).toContain('the email code is disabled for the issuance profiles [badge]')
-      expect(warnings[0]).toContain('the invitations of other organizations for the templates [project]')
+      expect(warnings[0]).toContain('the invitations of other organizations are disabled for the templates [project]')
       expect(warnings[1]).toContain('does not both ask for and store email')
       expect(warnings[2]).toContain('VERANA_GRAPH_URL is not set')
       expect(mailWarnings(pack, true, true)).toHaveLength(1)

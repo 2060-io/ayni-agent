@@ -16,7 +16,7 @@ import { EnrolmentStore } from '../src/core/authentication/enrolments.js'
 import { base32Encode, hotp, newTotpSecret, totpCounter } from '../src/core/authentication/totp.js'
 import { verifyRegistration } from '../src/core/authentication/webauthn.js'
 import { FlowService } from '../src/core/flows.js'
-import type { Principal } from '../src/core/types.js'
+import type { Principal, Session } from '../src/core/types.js'
 import { createEntryCrypto } from '../src/memory/crypto.js'
 import type { KvRepo } from '../src/store/types.js'
 import { createLogger } from '../src/util/logger.js'
@@ -568,6 +568,72 @@ describe('the authenticator app and the passkey (IDENT-AUTH-012, IDENT-AUTH-013)
     await p.chooses(['key'])
     await p.answers('1', { assertion: makePasskey().assertion(String(stepsSent(w)[0].challenge)) })
     expect(await asking).toEqual({ outcome: 'not-accepted', code: 'no-match' })
+  })
+})
+
+describe("a step-up's re-authentication (D127, IDENT-AUTH-015, flow profile §6.14)", () => {
+  let w: World
+  beforeEach(() => {
+    w = world()
+    w.principals.set('prn-ana', ana())
+  })
+  const web = {
+    id: 'ses-web',
+    state: 'bound',
+    channelType: 'ag-ui',
+    principalId: 'prn-ana',
+    conversationId: 'cnv-1',
+    client: { name: 'ayni-ui', version: '0.23.0', platform: 'web', description: 'Firefox on macOS' },
+  } as unknown as Session
+
+  it('asks the set alone, confirming methods only, with the action named, from the session that asked, and tells it the flow', async () => {
+    const secret = newTotpSecret()
+    await w.enrolments.setAuthenticatorApp('prn-ana', base32Encode(secret))
+    const opened: { flowId: string; expiresAt: string }[] = []
+    const p = phone(w)
+    const asking = ask(w, {
+      purpose: 'step-up',
+      combinations: [['otp']],
+      bound: ana(),
+      text: "Confirm it's you: Send a payment",
+      origin: web,
+      onOpened: (flowId, expiresAt) => void opened.push({ flowId, expiresAt }),
+    })
+    await settle()
+    // the flow's origin is the session that asked, and the flow leaves no card in its conversation (D127)
+    const open = w.calls.find((c) => c.method === 'openFlow')?.args[0] as { origin: Record<string, unknown> }
+    expect(open.origin).toMatchObject({ channel: 'ag-ui', sessionId: 'ses-web', conversationId: 'cnv-1' })
+    expect(opened).toEqual([{ flowId: expect.stringMatching(/^flow-/), expiresAt: expect.any(String) }])
+    expect(Date.parse(opened[0]?.expiresAt ?? '') - Date.now()).toBeGreaterThan(14 * 60_000)
+    expect(exchangeOf(w).request).toEqual({
+      purpose: 'step-up',
+      methods: { otp: { type: 'authenticator-app' } },
+      combinations: [['otp']],
+      text: "Confirm it's you: Send a payment",
+    })
+    await p.chooses(['otp'])
+    await p.answers('1', { code: hotp(secret, totpCounter(Date.now())) })
+    // a confirming method alone confirms the Principal of the connection (D127)
+    expect(await asking).toMatchObject({
+      outcome: 'accepted',
+      facts: {
+        actorIdentity: 'org:EE:1|directory|p-1',
+        authentication: { purpose: 'step-up', combination: ['otp'], types: ['authenticator-app'] },
+      },
+    })
+    expect(closes(w)).toEqual(['completed'])
+  })
+
+  it('refuses a set whose identifying method finds another person (IDENT-RES-014): no flow ends completed', async () => {
+    const p = phone(w)
+    const asking = ask(w, { purpose: 'step-up', combinations: [['email']], bound: ana(), text: 't' })
+    await settle()
+    await p.chooses(['email'])
+    await p.answers('1', { address: 'ben.okafor@northwind.example', locale: 'en' })
+    await p.answers('1', { code: codeIn(w.mails[0] as { text: string }) })
+    expect(await asking).toEqual({ outcome: 'not-accepted', code: 'another-identity' })
+    expect(problems(w)).toEqual(['another-identity'])
+    expect(closes(w)).toEqual([])
   })
 })
 

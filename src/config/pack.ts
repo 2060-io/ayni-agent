@@ -24,6 +24,7 @@ import type {
   PackAuthentication,
   SourceAccount,
   SpaceTemplate,
+  StepUpAuthentication,
   ToolAccess,
   ToolApprovalBounds,
   ToolSourceDef,
@@ -392,62 +393,47 @@ export function inlineDirectoryErrors(doc: unknown): string[] {
 }
 
 /**
- * What an issuance profile may say of its challenges and of the user directory (IDENT-DIR-002, INTX-AUTH-011,
- * INTX-ISSUE-019/020/021, D88, D89).
+ * What an issuance profile may say of its challenge, of the user directory and of a verified address (INTX-ISSUE-010,
+ * INTX-ISSUE-020/021, IDENT-DIR-005, D130).
  */
 export function issuanceChallengeErrors(pack: AgentPack): string[] {
   const errors: string[] = []
   const document = pack.evidence?.document
   const email = pack.evidence?.email
+  const emailMethod = Object.values(pack.identity.authentication?.methods ?? {}).some((m) => m.type === 'email')
   for (const [name, profile] of Object.entries(pack.issuance ?? {})) {
     const where = `issuance.${name}`
     const types = challengeTypesOf(profile)
-    const fromDirectory = takesClaimsFromDirectory(profile)
     const sources = Object.values(profile.claims)
-    if (fromDirectory) {
-      // IDENT-DIR-002: a document read, an email code, or both, in this order
-      const allowed = ['document', 'email', 'document,email']
-      if (!allowed.includes(types.join(',')))
-        errors.push(
-          `IDENT-DIR-002: ${where} takes claims from the user directory: its challenges are [document], [email] or [document, email], in this order (it declares [${types.join(', ')}])`
-        )
+    if (types.length > 1) errors.push(`INTX-ISSUE-010: ${where} declares several challenges: a profile declares one`)
+    if (takesClaimsFromDirectory(profile)) {
       if (!pack.identity.directory)
         errors.push(
-          `IDENT-DIR-002: ${where} takes claims from the user directory, and identity.directory names no file`
+          `INTX-ISSUE-021: ${where} takes claims from the user directory, and identity.directory names no file`
         )
-      if (types.includes('document')) {
-        const unkept = DIRECTORY_MATCH_ATTRIBUTES.filter((a) => !document?.store?.attributes.includes(a))
+      // a claim of the document comes from the passport of the entry read when the person authenticated, which the
+      // matching finds to be the entry's (IDENT-DIR-003, IDENT-DIR-005)
+      const read = sources.flatMap((s) => (s.from === 'evidence' && s.entry === DOCUMENT_ENTRY ? [s.attribute] : []))
+      if (read.length) {
+        const unkept = [...new Set([...DIRECTORY_MATCH_ATTRIBUTES, ...read])].filter(
+          (a) => !document?.store?.attributes.includes(a)
+        )
         if (unkept.length)
           errors.push(
-            `IDENT-DIR-003: ${where} finds the entry of a passport: evidence.document must store [${unkept.join(', ')}]`
+            `IDENT-DIR-005: ${where} takes claims from the passport read when the person authenticated: evidence.document must store [${unkept.join(', ')}]`
           )
       }
-    } else {
-      if (types.includes('email'))
-        errors.push(
-          `INTX-AUTH-011: ${where} declares an email challenge and takes no claim from the user directory: the email code belongs to a badge from the directory only`
-        )
-      if (types.length > 1)
-        errors.push(`INTX-ISSUE-010: ${where} declares several challenges: only a badge from the directory does`)
     }
-    if (types.includes('email')) {
-      if (!email?.store?.attributes.includes('address'))
-        errors.push(
-          `INTX-AUTH-015: ${where} declares an email challenge: evidence.email must store [address], from which the entry and the badge number are found`
-        )
-      // the model is told the outcome of the check, never the address (INTX-AUTH-015)
-      if (profile.trigger === 'automatic')
-        errors.push(
-          `INTX-AUTH-012: ${where} declares an email challenge and is automatic: the email check is served in a conversation the person started`
-        )
-    }
+    // the address an `email` method of the authentication verified (INTX-ISSUE-020, IDENT-AUTH-009)
     const usesEmail = sources.some(
       (s) => (s.from === 'computed' && s.fn === 'emailId') || (s.from === 'evidence' && s.entry === EMAIL_ENTRY)
     )
-    if (usesEmail && !types.includes('email'))
+    if (usesEmail && !emailMethod)
       errors.push(
-        `INTX-ISSUE-020: ${where} takes a claim from a verified address and declares no email challenge: nothing would verify it`
+        `INTX-ISSUE-020: ${where} takes a claim from a verified address, and identity.authentication enables no email method: nothing would verify it`
       )
+    if (usesEmail && !email?.store?.attributes.includes('address'))
+      errors.push(`INTX-ISSUE-020: ${where} takes a claim from a verified address: evidence.email must store [address]`)
     for (const [claim, source] of Object.entries(profile.claims)) {
       if (source.from === 'evidence' && source.as === 'dateint' && source.entry === DOCUMENT_ENTRY) {
         if (!['dateOfBirth', 'dateOfExpiry'].includes(source.attribute))
@@ -458,12 +444,12 @@ export function issuanceChallengeErrors(pack: AgentPack): string[] {
     }
   }
   if (email?.modelVisible?.length)
-    errors.push('INTX-AUTH-015: evidence.email.modelVisible: the model is never told the verified address')
+    errors.push('IDENT-AUTH-009: evidence.email.modelVisible: the model is never told the verified address')
   if (email) {
     const outside = (email.store?.attributes ?? []).filter((a) => !(EMAIL_ATTRIBUTES as readonly string[]).includes(a))
     if (outside.length)
       errors.push(
-        `INTX-AUTH-015: evidence.email stores [${outside.join(', ')}]: an email check has one attribute, address`
+        `IDENT-AUTH-009: evidence.email stores [${outside.join(', ')}]: an email method's evidence has one attribute, address`
       )
   }
   return errors
@@ -484,21 +470,66 @@ function docSources(doc: unknown): { where: string; name: string; type: unknown;
 }
 
 /**
- * The email code belongs to the issuance profiles that take claims from the user directory and to no tool
- * (INTX-AUTH-011): a step-up that declares it is refused in words, before the schema, which would only name the value.
+ * The challenges an action may declare, refused in words before the schema, which would only name the value: a tool's
+ * step-up asks a device confirmation (`stepUp.authChallenge`, TOOL-CAT-010), an issuance profile a device confirmation or
+ * a document read (INTX-ISSUE-010). An email code, a face match and a passport that identifies a person are methods of
+ * the authentication, asked in a re-authentication (`stepUp.authentication`, D126, D127), never as challenges.
  */
-export function emailChallengeStepUpErrors(doc: unknown): string[] {
+export function challengeTypeErrors(doc: unknown): string[] {
   const errors: string[] = []
+  const asMethod = 'an email code, a face match or a document read is asked as a method: stepUp.authentication'
   for (const { where, body } of docSources(doc)) {
     if (!isObject(body.tools)) continue
     for (const [tool, decl] of Object.entries(body.tools)) {
       const challenge = isObject(decl) && isObject(decl.stepUp) ? decl.stepUp.authChallenge : undefined
-      if (isObject(challenge) && challenge.type === 'email')
+      if (isObject(challenge) && challenge.type !== undefined && challenge.type !== 'device')
         errors.push(
-          `${where}.tools.${tool}.stepUp.authChallenge: the email code is the challenge of an issuance profile that takes claims from the user directory, and of no tool (INTX-AUTH-011)`
+          `TOOL-CAT-010: ${where}.tools.${tool}.stepUp.authChallenge has the type ${String(challenge.type)}: a tool's challenge is a device confirmation; ${asMethod}`
         )
     }
   }
+  const issuance = isObject(doc) && isObject(doc.issuance) ? doc.issuance : {}
+  for (const [name, profile] of Object.entries(issuance)) {
+    const declared = isObject(profile) ? profile.authChallenge : undefined
+    for (const challenge of ([] as unknown[]).concat(declared ?? []))
+      if (
+        isObject(challenge) &&
+        challenge.type !== undefined &&
+        !['device', 'document'].includes(String(challenge.type))
+      )
+        errors.push(
+          `INTX-ISSUE-010: issuance.${name}.authChallenge has the type ${String(challenge.type)}: an issuance's challenge is a device confirmation or a document read; a badge from the user directory takes its claims from the entry the authentication identified (D130)`
+        )
+  }
+  return errors
+}
+
+/**
+ * The set of methods a step-up's re-authentication names (TOOL-CAT-010, IDENT-AUTH-015, D127): enabled methods, each once.
+ * Unlike a combination it may hold confirming methods only, since it confirms the Principal of an identified connection;
+ * a pack that identifies nobody (no accepted combination) can never confirm one.
+ */
+export function stepUpAuthenticationErrors(
+  pack: Pick<AgentPack, 'identity'>,
+  where: string,
+  authentication: StepUpAuthentication | undefined
+): string[] {
+  if (!authentication) return []
+  const errors: string[] = []
+  const at = `${where}.stepUp.authentication`
+  const enabled = pack.identity.authentication?.methods ?? {}
+  const methods = authentication.methods ?? []
+  if (!methods.length) errors.push(`TOOL-CAT-010: ${at} names no method`)
+  const unknown = methods.filter((name) => !enabled[name])
+  if (unknown.length)
+    errors.push(
+      `TOOL-CAT-010: ${at} names [${unknown.join(', ')}], which identity.authentication.methods does not enable`
+    )
+  if (new Set(methods).size !== methods.length) errors.push(`TOOL-CAT-010: ${at} names a method twice`)
+  if (!pack.identity.authentication?.combinations?.length)
+    errors.push(
+      `IDENT-AUTH-015: ${at} re-authenticates an identified person, and identity.authentication lists no combination: nobody is ever identified`
+    )
   return errors
 }
 
@@ -1099,9 +1130,13 @@ export function crossFieldErrors(pack: AgentPack): string[] {
     errors.push(...evidencePolicyErrors('evidence.email', pack.evidence.email, [...EMAIL_ATTRIBUTES]))
   // every claim of an issued credential has a source the agent can resolve (INTX-ISSUE-001/002)
   for (const [name, profile] of Object.entries(pack.issuance ?? {})) {
-    // what a profile takes from a document is read by its own challenge, or by nothing (INTX-AUTH-010)
+    // what a profile takes from a document is read by its own challenge, or by nothing (INTX-AUTH-010); a badge from the
+    // directory takes it from the passport read when the person authenticated, empty without one (IDENT-DIR-005)
+    const fromAuthentication = takesClaimsFromDirectory(profile)
     const readsDocument = Object.values(profile.claims).some((s) =>
-      s.from === 'computed' ? s.fn === 'documentId' : s.from === 'evidence' && s.entry === DOCUMENT_ENTRY
+      s.from === 'computed'
+        ? s.fn === 'documentId'
+        : s.from === 'evidence' && s.entry === DOCUMENT_ENTRY && !fromAuthentication
     )
     if (readsDocument && profile.trigger === 'automatic')
       errors.push(
@@ -1216,12 +1251,9 @@ export function crossFieldErrors(pack: AgentPack): string[] {
   }
   for (const [id, source] of sources) {
     checkAccess(source.access, `tools.sources.${id}.access`, declaredToolsOf(id, source))
-    // a tool's step-up (TOOL-CAT-010): a face match needs the face-verification service
+    // a tool's step-up (TOOL-CAT-010, IDENT-AUTH-015): the set of a re-authentication names enabled methods
     for (const [tool, decl] of Object.entries(source.tools ?? {}))
-      if (decl.stepUp?.authChallenge?.type === 'face-match' && !pack.media?.faceVerification)
-        errors.push(
-          `rule 6: tools.sources.${id}.tools.${tool}.stepUp.authChallenge face-match requires media.faceVerification`
-        )
+      errors.push(...stepUpAuthenticationErrors(pack, `tools.sources.${id}.tools.${tool}`, decl.stepUp?.authentication))
   }
 
   const hasMcp = sources.some(([, s]) => s.type === 'mcp')
@@ -1366,10 +1398,10 @@ export function validatePackDocument(doc: unknown, env: Record<string, string | 
   // IDENT-ROLE-012: the people of the user directory are refused in words, before the schema names the key
   const inline = inlineDirectoryErrors(coerced)
   if (inline.length) throw new PackError('agent-pack writes the people of the user directory inline', inline)
-  // INTX-AUTH-011: a step-up that declares the email code is refused in words, before the schema names the value
-  const email = emailChallengeStepUpErrors(coerced)
-  if (email.length)
-    throw new PackError('agent-pack declares an email challenge outside a badge from the directory', email)
+  // TOOL-CAT-010, INTX-ISSUE-010: a challenge of a type that is a method of the authentication, refused in words
+  const challenges = challengeTypeErrors(coerced)
+  if (challenges.length)
+    throw new PackError('agent-pack declares as a challenge what is a method of the authentication', challenges)
   // TOOL-CAT-002: the kinds of account of the later phases are refused in words, before the schema names the value
   const reserved = reservedAccountErrors(coerced)
   if (reserved.length)

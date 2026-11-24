@@ -191,6 +191,11 @@ docker run --rm -p 3010:3010 --env-file .env io2060/ayni-agent:local
   (`didcomm.authenticate.unenrol-received`). A person who declines the consent of a face match chooses another combination in
   the same flow (the step ends `consent-declined`). It needs `@ayni.org/vs-agent-plugin-ayni-flow` 0.3.1. A wallet that takes
   no flows is asked a `credential` method that is a combination by itself, as a presentation request, and nothing else.
+  A tool's step-up (`stepUp.authentication`, ayni-spec D127) asks the same flow with purpose `step-up` before the call:
+  the one set of methods the tool names, the action named in its `text`, the session the call came from as origin, and
+  the Principal of the connection as the identity every method must find or confirm; the session gets
+  `ayni.capability.routed` of kind `authentication`, the model the outcome only. A badge from the user directory is
+  issued apart from the authentication (D130), from the entry it identified, offered automatically or on demand.
 - The agent tells each peer where it stands with it (`peer-status/1.0`, `POST /v2/didcomm/peer-status`; ayni-spec
   D71, IDENT-STAT): the rule by which it identifies the peer, following from `identity.authentication` (`none`
   with no combination, `optional` with visitors let in, `required` without), its methods and accepted combinations,
@@ -212,11 +217,11 @@ docker run --rm -p 3010:3010 --env-file .env io2060/ayni-agent:local
   uses them in its menu and prompt (CC-WEL-003). A holder's `reissue` request after a restore is answered
   `unknown-reference` (this agent issues no credential; an issuing agent plugs its policy into
   `DidcommEvents.onReissueStateChanged`), and revocation notifications come with issuance (INTX-FLOW-006/007).
-- Email (ayni-spec D89, PLAT-MAIL-001): the email code of a badge from the user directory and the invitations of people
+- Email (ayni-spec D89, PLAT-MAIL-001): the code of an `email` method of the authentication and the invitations of people
   of other organizations go through the SMTP server of the deployment, named by the variables of the 2060.io website:
   `MAIL_HOST`, `MAIL_PORT` (587, STARTTLS when the server offers it; 465 or `MAIL_ENCRYPTION=ssl`: TLS from the start),
   `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_FROM_ADDRESS`, `MAIL_FROM_NAME`. Without `MAIL_HOST` and `MAIL_FROM_ADDRESS`
-  both are disabled and the agent says so at start. `pnpm test:mail` runs the email tests against a throwaway Mailpit in Docker.
+  the agent refuses to start with an `email` method, and the invitations are disabled, which it says at start. `pnpm test:mail` runs the email tests against a throwaway Mailpit in Docker.
 - The Verana Graph (`VERANA_GRAPH_URL`, `https://graph.devnet.verana.network` on devnet): its search
   (`POST /v4/graph/search`, the `Did` surface, operators of kind `Organization`) finds the organizations a list space
   invites people from (`GET {sessions}/organizations`, ayni-spec D90, PROF-DIR-002); an invitation is refused for an

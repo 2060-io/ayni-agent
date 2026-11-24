@@ -1,158 +1,102 @@
 /**
- * The claims of a badge taken from the user directory (decision 62; ayni-spec D88, IDENT-DIR-003/004/005/007,
- * INTX-ISSUE-007, INTX-ISSUE-021). The directory is a system of record: the code finds the person's entry with a key
- * that comes from their evidence, and never before that evidence exists.
+ * The claims of a badge taken from the user directory (ayni-spec D130, IDENT-DIR-005/007, INTX-ISSUE-007, INTX-ISSUE-021).
+ * The directory is a system of record, and its key is the entry the Principal's authentication identified
+ * (IDENT-AUTH-003): issuing the badge neither authenticates nor finds the entry by itself.
  *
- * - **With a document read** (the passport of D73): the one entry whose date of birth, nationality and last name equal
- *   the document's, and whose first names are among its given names, after the transliteration of ICAO Doc 9303.
- * - **With an email code** (D89): the entry that holds the verified address, compared in lower case.
- * - **With both**: the entry both find; none when they differ or one finds none.
- *
- * A claim is `pending` while its evidence does not exist (the action that obtains it is the profile's own challenge,
- * run by the issuance), `missing` when no single entry is found (the reason goes to the log, without any value), and
- * `available` with the entry's field otherwise; the resolution names the entry, which the issuance record keeps
- * (IDENT-DIR-006). A field the entry lacks is an empty value.
+ * - A claim of the directory is `pending` while the Principal is not identified, the action that obtains it being the
+ *   authentication; `unavailable` for a person identified otherwise than by an entry (a credential of another
+ *   organization) or whose entry left the directory; and the entry's field otherwise, the resolution naming the entry,
+ *   which the issuance record keeps (IDENT-DIR-006). A field the entry lacks is an empty value.
+ * - A claim of the document (the birth date, the portrait) comes from a passport of that entry read when the person
+ *   authenticated: the newest read still good for the profile, which the matching of IDENT-DIR-003 finds to be the
+ *   entry's and nobody else's. Without one the claim is empty (IDENT-DIR-005).
  */
-import { DOCUMENT_ENTRY, EMAIL_ENTRY } from '../config/pack.js'
-import { challengeTypesOf, type IssuanceProfile } from '../config/packTypes.js'
+import { AUTHENTICATION_ENTRY, DOCUMENT_ENTRY } from '../config/pack.js'
+import type { IssuanceProfile } from '../config/packTypes.js'
 import type { Logger } from '../util/logger.js'
 import { type DirectoryEntry, nameOf, type UserDirectory } from './directory.js'
 import type { EvidenceService } from './evidence.js'
-import {
-  documentAction,
-  type EmailCheckPort,
-  emailAction,
-  evidenceTooOld,
-  type RecordSource,
-  type Resolution,
-} from './issuance.js'
+import { evidenceTooOld, type RecordSource, type Resolution } from './issuance.js'
 import type { Principal } from './types.js'
-
-/** Why no single entry was found: a word for the log, never a value (IDENT-DIR-003/004, IDENT-DIR-007). */
-export type NoEntryReason =
-  | 'document-matches-no-entry'
-  | 'document-matches-several'
-  | 'address-in-no-entry'
-  | 'entries-differ'
 
 export class DirectoryClaims {
   public constructor(
-    private readonly directory: Pick<UserDirectory, 'matchDocument' | 'byEmail' | 'entry'>,
+    private readonly directory: Pick<UserDirectory, 'matchDocument' | 'entry'>,
     private readonly evidence: Pick<EvidenceService, 'latest' | 'values'>,
-    private readonly logger: Logger,
-    /** whether the email check can be served: without an SMTP server it cannot (INTX-AUTH-011) */
-    private readonly emailCheck?: Pick<EmailCheckPort, 'available'>
+    private readonly logger: Logger
   ) {}
 
   /** The value of one claim of the directory for a Principal and a profile (INTX-ISSUE-021). */
   public async resolve(
     principal: Principal,
     profileName: string,
-    profile: IssuanceProfile,
+    _profile: IssuanceProfile,
     source: RecordSource
   ): Promise<Resolution> {
     if (source.record !== 'directory')
       return { status: 'unavailable', action: { type: 'none', note: `this agent reads no ${source.record}` } }
-    const found = await this.entryOf(principal, profileName, profile)
-    if ('status' in found) return found
-    const { entry, evidenceRef } = found
-    return {
-      status: 'available',
-      value: fieldOf(entry, source.field),
-      evidenceRef,
-      directoryEntryId: entry.id,
-    }
+    const entry = this.entryOf(principal, profileName)
+    if ('status' in entry) return entry
+    return { status: 'available', value: fieldOf(entry, source.field), directoryEntryId: entry.id }
   }
 
   /**
-   * The entry of the person, found from the evidence the profile's challenges obtain; or the status of every claim of
-   * the directory while it cannot be: `pending` without that evidence, `missing` when no single entry is found.
+   * The passport of the Principal's entry read when the person authenticated, still good for the profile (IDENT-DIR-005):
+   * the newest read, when it matches that entry and no other (IDENT-DIR-003). Its values are read by the code, never by
+   * the model.
    */
-  private async entryOf(
+  public async entryDocument(
     principal: Principal,
-    profileName: string,
     profile: IssuanceProfile
-  ): Promise<{ entry: DirectoryEntry; evidenceRef?: string } | Resolution> {
-    const challenges = challengeTypesOf(profile)
-    let byDocument: string | undefined
-    let byEmail: string | undefined
-    let evidenceRef: string | undefined
-    if (challenges.includes('document')) {
-      const read = await this.usable(principal, profile, DOCUMENT_ENTRY)
-      // nothing is looked up before the evidence that holds the key exists (INTX-ISSUE-007)
-      if (!read) return { status: 'pending', action: documentAction(profileName, profile) }
-      const { ids, nearest } = this.directory.matchDocument({
-        lastName: read.values.lastName ?? '',
-        firstName: read.values.firstName ?? '',
-        dateOfBirth: read.values.dateOfBirth ?? '',
-        nationality: read.values.nationality ?? '',
-      })
-      if (ids.length !== 1)
-        return this.noEntry(
-          principal,
-          profileName,
-          ids.length ? 'document-matches-several' : 'document-matches-no-entry',
-          {
-            entries: ids.length,
-            nearest,
-          }
-        )
-      byDocument = ids[0]
-      evidenceRef = read.id
-    }
-    if (challenges.includes('email')) {
-      const proved = await this.usable(principal, profile, EMAIL_ENTRY)
-      if (!proved) {
-        // an email check this agent cannot serve: the claims it serves are unavailable (INTX-AUTH-011)
-        if (!this.emailCheck?.available())
-          return {
-            status: 'unavailable',
-            action: { type: 'none', note: 'this agent sends no email: it cannot check an address' },
-          }
-        return { status: 'pending', action: emailAction(profileName, profile) }
-      }
-      const entry = this.directory.byEmail(proved.values.address ?? '')
-      // an address that left the directory since it was proved: the person may prove another
-      if (!entry)
-        return this.noEntry(principal, profileName, 'address-in-no-entry', {}, emailAction(profileName, profile))
-      byEmail = entry.id
-      evidenceRef ??= proved.id
-    }
-    if (byDocument && byEmail && byDocument !== byEmail)
-      return this.noEntry(principal, profileName, 'entries-differ', {})
-    const id = byDocument ?? byEmail
-    const entry = id ? this.directory.entry(id) : undefined
-    if (!entry) return this.noEntry(principal, profileName, 'document-matches-no-entry', {})
-    return { entry, evidenceRef }
-  }
-
-  /** The newest usable evidence of an entry for the profile, with its stored values: the code reads them, never the model. */
-  private async usable(
-    principal: Principal,
-    profile: IssuanceProfile,
-    entry: string
   ): Promise<{ id: string; values: Record<string, string> } | undefined> {
-    const record = await this.evidence.latest(principal.id, entry)
+    const entry = this.entryOf(principal)
+    if ('status' in entry) return undefined
+    const record = await this.evidence.latest(principal.id, DOCUMENT_ENTRY)
     if (record?.state !== 'active' || evidenceTooOld(record, profile)) return undefined
-    const values = await this.evidence.values(principal.id, entry)
-    return values ? { id: record.id, values } : undefined
+    const values = await this.evidence.values(principal.id, DOCUMENT_ENTRY)
+    if (!values) return undefined
+    const { ids } = this.directory.matchDocument({
+      lastName: values.lastName ?? '',
+      firstName: values.firstName ?? '',
+      dateOfBirth: values.dateOfBirth ?? '',
+      nationality: values.nationality ?? '',
+    })
+    if (ids.length !== 1 || ids[0] !== entry.id) {
+      // a read of someone else, or of nobody single: the claims of the document stay empty; the reason, never a value
+      this.logger.info(
+        { principalId: principal.id, entries: ids.length },
+        'the document read is not the passport of the entry: the claims of the document are empty'
+      )
+      return undefined
+    }
+    return { id: record.id, values }
   }
 
-  private noEntry(
-    principal: Principal,
-    profile: string,
-    reason: NoEntryReason,
-    detail: Record<string, unknown>,
-    action: Resolution['action'] = {
-      type: 'none',
-      note: 'what the person proved matches no single person of the list of their organization; the organization corrects its list',
+  /**
+   * The entry the Principal's authentication identified (IDENT-AUTH-003), or the status of every claim of the directory
+   * while there is none: `pending` before an authentication, `unavailable` for a person who is not on the list.
+   */
+  private entryOf(principal: Principal, profileName?: string): DirectoryEntry | Resolution {
+    // nothing is looked up before an authentication identified an entry (INTX-ISSUE-007, INTX-ISSUE-021)
+    if (!principal.identityCredentialRef)
+      return { status: 'pending', action: { type: 'request_presentation', entry: AUTHENTICATION_ENTRY } }
+    const id = principal.directoryEntryId
+    const entry = id ? this.directory.entry(id) : undefined
+    if (!entry) {
+      if (profileName)
+        this.logger.info(
+          { principalId: principal.id, profile: profileName, entry: !!id },
+          'the Principal holds no entry of the directory: no badge from it'
+        )
+      return {
+        status: 'unavailable',
+        action: {
+          type: 'none',
+          note: 'the person is not on the list of the organization: they authenticated otherwise than as one of its people',
+        },
+      }
     }
-  ): Resolution {
-    this.logger.info(
-      { principalId: principal.id, profile, reason, ...detail },
-      'no single directory entry for the badge'
-    )
-    return { status: 'missing', action }
+    return entry
   }
 }
 

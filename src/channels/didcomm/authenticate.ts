@@ -212,6 +212,8 @@ export interface AuthenticateOptions {
   text?: string
   /** the session a step-up or admin access was asked from: the flow's origin; none at connection and for a visitor */
   origin?: Session
+  /** told once the flow is open, with its id and expiry: a step-up's origin is sent the routed status (INTX-AUTH-004) */
+  onOpened?: (flowId: string, expiresAt: string) => void
 }
 
 /** The events of one exchange, as the DIDComm agent reports them, kept until they are read. */
@@ -406,6 +408,7 @@ export class Authenticator {
       throw error
     }
     const expiresAt = Date.now() + this.timings.flowMs
+    options.onOpened?.(flowId, new Date(expiresAt).toISOString())
     const closed = this.ports.flows.waitForClose(flowId)
     let exchange: AuthenticateExchange
     try {

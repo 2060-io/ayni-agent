@@ -9,6 +9,7 @@ import pino from 'pino'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { buildAgent, type RunningAgent } from '../src/app.js'
 import { personalSpaceId } from '../src/core/spaces.js'
+import type { Reauthenticate, ReauthenticationOutcome } from '../src/core/stepUp.js'
 import { ONE_CALL } from '../src/core/toolGate.js'
 import type { ApprovalRecord, MessageEntry, Principal } from '../src/core/types.js'
 import { createEntryCrypto, openJson, sealJson } from '../src/memory/crypto.js'
@@ -1406,6 +1407,125 @@ describe('the life of the tools of a space (TOOL-SPACE-007/011, TOOL-CALL-001)',
     const [record] = await running.agent.store.toolCalls.list({ conversationId: id, limit: 1 })
     expect(record).toMatchObject({ outcome: 'completed', stepUp: { type: 'device', outcome: 'completed' } })
     note.stepUp = undefined
+  })
+
+  describe("a step-up's re-authentication on the phone (D127, IDENT-AUTH-015, TOOL-CALL-001)", () => {
+    const asked: Parameters<Reauthenticate>[0][] = []
+    let answer: ReauthenticationOutcome = 'completed'
+    let original: Reauthenticate | undefined
+    const gate = () => {
+      if (!running.agent.gate) throw new Error('no tool gate')
+      return running.agent.gate
+    }
+    const note = () => {
+      const declared = running.agent.pack.tools?.sources?.relaticle?.tools?.['create-note']
+      if (!declared) throw new Error('create-note is not declared')
+      return declared
+    }
+    beforeAll(() => {
+      original = gate().hooks.reauthenticate
+      // the phone, as the DIDComm side would report it: the flow opens, then ends in what the test says
+      gate().hooks.reauthenticate = async (input) => {
+        asked.push(input)
+        input.onOpened?.('flow-step-up-1', '2026-11-24T12:15:00.000Z')
+        return answer
+      }
+    })
+    afterAll(() => {
+      gate().hooks.reauthenticate = original
+      note().stepUp = undefined
+    })
+    const routed = (sessionId: string) =>
+      received(sessionId)
+        .filter((e) => e.type === 'CUSTOM' && e.name === CUSTOM_EVENT.capabilityRouted)
+        .map((e) => e.value as Record<string, unknown>)
+    async function noteOnce(text: string, decision: 'approve' | 'reject' = 'approve') {
+      const fresh = await open(ana, { spaceId: salesEu.id })
+      const id = await conversationOf(fresh.sessionId)
+      model.script = [{ calls: [{ name: 'create-note', arguments: { company: 'Acme', note: text } }] }, { text: 'ok' }]
+      const turn = start(fresh, 'note')
+      await decide(fresh, (await pendingConfirmation(id)).id, decision)
+      await turn
+      const [record] = await running.agent.store.toolCalls.list({ conversationId: id, limit: 1 })
+      return { fresh, id, record }
+    }
+
+    it('asks the card, then the set on the phone with the action named, then runs; the UI gets the routed status', async () => {
+      note().stepUp = { authentication: { methods: ['badge'], maxAgeMinutes: 0 } }
+      answer = 'completed'
+      asked.length = 0
+      const { fresh, id, record } = await noteOnce('re-authenticated')
+      expect(asked).toHaveLength(1)
+      expect(asked[0]).toMatchObject({
+        principal: { id: ana.principal.id },
+        methods: ['badge'],
+        text: "Confirm it's you: Add a note",
+        origin: { id: fresh.sessionId },
+      })
+      expect(crm.calls.at(-1)).toMatchObject({ name: 'create-note', args: { note: 're-authenticated' } })
+      expect(record).toMatchObject({
+        outcome: 'completed',
+        reauthentication: { methods: ['badge'], outcome: 'completed' },
+      })
+      // the session the call was asked from: pending with the flow, then its end, and nothing of a method (PROF-MAP-003)
+      expect(routed(fresh.sessionId)).toEqual([
+        {
+          kind: 'authentication',
+          status: 'pending',
+          originSessionId: fresh.sessionId,
+          flowId: 'flow-step-up-1',
+          expiresAt: '2026-11-24T12:15:00.000Z',
+        },
+        { kind: 'authentication', status: 'completed', originSessionId: fresh.sessionId, flowId: 'flow-step-up-1' },
+      ])
+      // the conversation records the outcome only (INTX-AUTH-006)
+      const challenge = (await entries(id)).find((e) => e.sourceType === 'auth-challenge')
+      expect(challenge?.payload).toMatchObject({
+        kind: 'authentication',
+        outcome: 'completed',
+        flowId: 'flow-step-up-1',
+      })
+      expect(challenge?.text).not.toContain('badge')
+    })
+
+    it('runs nothing when the person declines, and tells the model the step and its outcome only', async () => {
+      note().stepUp = { authentication: { methods: ['badge'] } }
+      answer = 'declined'
+      const calls = crm.calls.length
+      const { fresh, record } = await noteOnce('declined')
+      expect(crm.calls.length).toBe(calls)
+      expect(record).toMatchObject({ outcome: 'failed', reauthentication: { methods: ['badge'], outcome: 'declined' } })
+      expect(toolAnswers().at(-1)).toBe(
+        `Add a note did not run: it needs the person to confirm who they are on their phone first, and they declined. Do not try it again unless they ask.\n\n${ONE_CALL}`
+      )
+      expect(routed(fresh.sessionId).at(-1)).toMatchObject({ kind: 'authentication', status: 'failed' })
+    })
+
+    it('does not ask again within maxAgeMinutes of an authentication that held the set, and asks again after it', async () => {
+      const principal = (await running.agent.principals.get(ana.principal.id)) as Principal
+      principal.lastAuthentication = {
+        at: new Date().toISOString(),
+        purpose: 'step-up',
+        combination: ['badge'],
+        types: ['credential'],
+        steps: [{ method: 'badge', type: 'credential', outcome: 'passed' }],
+      }
+      await running.agent.principals.save(principal)
+      note().stepUp = { authentication: { methods: ['badge'], maxAgeMinutes: 10 } }
+      answer = 'failed'
+      asked.length = 0
+      const recent = await noteOnce('recent')
+      expect(asked).toHaveLength(0)
+      expect(recent.record).toMatchObject({
+        outcome: 'completed',
+        reauthentication: { methods: ['badge'], outcome: 'recent' },
+      })
+      // 0, the default: before each run, however recent the last authentication
+      note().stepUp = { authentication: { methods: ['badge'] } }
+      const each = await noteOnce('each time')
+      expect(asked).toHaveLength(1)
+      expect(each.record).toMatchObject({ outcome: 'failed', reauthentication: { outcome: 'failed' } })
+    })
   })
 })
 

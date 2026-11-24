@@ -9,12 +9,12 @@
  * record keeps; a credential whose claims came from the user directory must be revocable, and its record names the
  * entry (IDENT-DIR-006) and a keyed index of the actor it will identify once presented (IDENT-ROLE-012).
  *
- * Decision 62 (ayni-spec D88, D89): a badge from the user directory. A claim may come from the person's entry
- * (`record: directory`, INTX-ISSUE-021), found from their evidence, `pending` while it does not exist; the challenges
- * of a profile are a list, a document read and an email code among them (IDENT-DIR-002). The email code is served in
- * the conversation by the code (INTX-AUTH-012): the issuing call ends the turn with the code's question, and the
- * issuance goes on by itself once the code is right (INTX-AUTH-015). `emailId` numbers a badge by the verified address
- * (INTX-ISSUE-020); `as: dateint` writes a date as the integer `YYYYMMDD` (IDENT-DIR-005).
+ * A badge from the user directory (ayni-spec D130, IDENT-AUTH-016): issuing it is independent of the authentication. A
+ * claim may come from the entry the Principal's authentication identified (`record: directory`, INTX-ISSUE-021),
+ * `pending` while it identified none; a claim of the document comes from a passport of that entry read when the person
+ * authenticated, and is empty without one (IDENT-DIR-005). `emailId` numbers a credential by the address an `email`
+ * method verified (INTX-ISSUE-020); `as: dateint` writes a date as the integer `YYYYMMDD`. A credential is held by the
+ * wallet it was issued to: on another connection of the same person it is issued again (D130).
  */
 import { createHmac, hkdfSync } from 'node:crypto'
 import { AUTHENTICATION_ENTRY, DOCUMENT_ENTRY, EMAIL_ENTRY } from '../config/pack.js'
@@ -26,6 +26,7 @@ import {
   type IssuanceChallenge,
   type IssuanceProfile,
   mustBeRevocable,
+  takesClaimsFromDirectory,
 } from '../config/packTypes.js'
 import { nowIso } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
@@ -46,10 +47,10 @@ export type ClaimStatus = 'available' | 'missing' | 'expired' | 'not-revealed' |
 export type ClaimAction =
   | { type: 'request_presentation'; entry: string }
   /**
-   * what the issuance itself obtains: the document read (INTX-AUTH-010) or the email code (INTX-AUTH-012) that a
-   * challenge of the profile runs; the action names the issuing tool, the profile and the challenge
+   * what the issuance itself obtains: the document read that a challenge of the profile runs (INTX-AUTH-010); the action
+   * names the issuing tool, the profile and the challenge
    */
-  | { type: 'issue_credential'; profile: string; challenge: 'document' | 'email'; note: string }
+  | { type: 'issue_credential'; profile: string; challenge: 'document'; note: string }
   | { type: 'none'; note: string }
 
 export interface ClaimRequirement {
@@ -73,10 +74,6 @@ export type IssuanceOutcome =
   | 'incomplete'
   | 'not-offered'
   | 'challenge-failed'
-  /** an email check now waits in the conversation: the code asks the person, and issues once the code is right */
-  | 'challenge-started'
-  /** an email check of the person already waits, in this conversation or another: it is answered there */
-  | 'challenge-waiting'
   | 'declined'
   | 'unanswered'
   | 'refused'
@@ -84,13 +81,11 @@ export type IssuanceOutcome =
   | 'not-ready'
   | 'failed'
 
-/** What an issuance ended in; with an email check started, the question the code asks in the conversation (INTX-AUTH-012). */
+/** What an issuance ended in. */
 export interface IssuanceResult {
   outcome: IssuanceOutcome
   requirements?: CredentialRequirements
   reason?: string
-  /** the email check waits in the conversation: the code's question, which ends the turn that started it */
-  ask?: { text: string; challengeId: string }
 }
 
 /** Where an issued credential's status is kept, for its revocation (D91): a registry and an index in it. */
@@ -120,14 +115,9 @@ export interface IssuanceDeps {
   challenge(
     principal: Principal,
     session: Session,
-    policy: IssuanceChallenge & { type: 'device' | 'face-match' | 'document' },
+    policy: IssuanceChallenge,
     purpose: string
   ): Promise<{ passed: boolean; reason?: string }>
-  /**
-   * the email code (D89): served by the code in the conversation of the session (INTX-AUTH-012). Without it, or when it
-   * is not available, the claims it serves are `unavailable` (INTX-AUTH-011)
-   */
-  emailCheck?: EmailCheckPort
   /**
    * the credential definition of this agent for a schema, found or created, with revocation when `revocable` asks for
    * it; undefined while it cannot be established (INTX-ISSUE-017, decision 61)
@@ -147,8 +137,8 @@ export interface IssuanceDeps {
   issued?(principal: Principal, record: EvidenceRecord, holder: string | undefined): Promise<void>
   /**
    * a claim of a system of record (`{ from: record, record, field }`, INTX-ISSUE-002): the user directory, whose entry
-   * is found from the Principal's evidence (INTX-ISSUE-021, IDENT-DIR-003/004; agent phase 2b). Its resolution names
-   * the entry, which the record of the issuance keeps (IDENT-DIR-006). Without it such a claim is `unavailable`
+   * is the one the Principal's authentication identified (INTX-ISSUE-021, IDENT-AUTH-003). Its resolution names the
+   * entry, which the record of the issuance keeps (IDENT-DIR-006). Without it such a claim is `unavailable`
    */
   record?(
     principal: Principal,
@@ -156,20 +146,14 @@ export interface IssuanceDeps {
     profile: IssuanceProfile,
     source: RecordSource
   ): Promise<Resolution>
-}
-
-/** How an issuance asks for an email code (D89, INTX-AUTH-011/012). */
-export interface EmailCheckPort {
-  /** whether the check can be served now: an SMTP server is configured, and in this session's conversation */
-  available(session?: Session): boolean
-  /** starts the check in the conversation of the session: the question the code asks, or why it did not start */
-  start(
+  /**
+   * in a profile that takes claims from the directory, the passport of the Principal's entry read when the person
+   * authenticated, still good for the profile: what its claims of the document are taken from (IDENT-DIR-005)
+   */
+  entryDocument?(
     principal: Principal,
-    session: Session,
-    input: { profile: string; by: IssuanceTrigger; label: string }
-  ): Promise<
-    { started: true; question: string; challengeId: string } | { started: false; reason: 'waiting' | 'unavailable' }
-  >
+    profile: IssuanceProfile
+  ): Promise<{ id: string; values: Record<string, string> } | undefined>
 }
 
 /** Who started an issuance: the model's tool, the person's menu item, or the agent by itself. */
@@ -290,12 +274,17 @@ export class IssuanceService {
     const out: CredentialRequirements[] = []
     for (const [name, profile] of this.offered(principal)) {
       if (only && name !== only) continue
-      // a credential revoked since (its entry left the directory) is held no more (D91)
+      // held by the wallet it was issued to: a credential revoked since (its entry left the directory) is held no more
+      // (D91), and a connection of another wallet holds none (D130)
       const latest = await this.evidence.latest(principal.id, issuanceEntry(name))
-      const held = !!latest && !latest.revocation?.revokedAt
+      const connectionId = principal.capabilityChannelId
+      const held =
+        !!latest &&
+        !latest.revocation?.revokedAt &&
+        (!connectionId || !latest.connectionRef || latest.connectionRef === connectionId)
       const claims: ClaimRequirement[] = []
       for (const [claim, source] of Object.entries(profile.claims)) {
-        const { status, action } = await this.resolve(principal, name, profile, source)
+        const { status, action } = await this.resolveClaim(principal, name, profile, source)
         claims.push({ name: claim, status, ...(action ? { action } : {}) })
       }
       out.push({
@@ -343,36 +332,15 @@ export class IssuanceService {
       // a profile that names a schema issues under the definition of this agent for it, or not at all
       const credentialDefinitionId = await this.definitionOf(profile)
       if (!credentialDefinitionId) return { outcome: 'not-ready' }
-      // the challenges in their order (IDENT-DIR-002). What a challenge obtains and is still good is not asked again: a
-      // person who declined the offer, or let it pass, is not sent back to their chip or their mailbox
+      // the challenge of the profile (INTX-ISSUE-010). What a document read obtains and is still good is not asked again:
+      // a person who declined the offer, or let it pass, is not sent back to their chip
       for (const policy of challengesOf(profile)) {
         const obtains = (c: ClaimRequirement) =>
           c.status !== 'available' && c.action?.type === 'issue_credential' && c.action.challenge === policy.type
-        if (policy.type === 'email') {
-          if (!requirements.claims.some(obtains)) continue
-          // served in the conversation by the code, never by the model (INTX-AUTH-012): the turn ends with its question
-          const check = this.deps.emailCheck
-          const started = check?.available(session)
-            ? await check.start(principal, session, { profile: name, by, label })
-            : ({ started: false, reason: 'unavailable' } as const)
-          if (started.started)
-            return { outcome: 'challenge-started', ask: { text: started.question, challengeId: started.challengeId } }
-          if (started.reason === 'waiting') return { outcome: 'challenge-waiting' }
-          return {
-            outcome: 'challenge-failed',
-            reason:
-              'the email check cannot be served here: this agent sends no email, or the check runs in a conversation of the Ayni app or the web, not in the wallet',
-          }
-        }
         if (policy.type === 'document' && !requirements.claims.some(obtains)) continue
-        const challenge = await this.deps.challenge(
-          principal,
-          session,
-          policy as IssuanceChallenge & { type: 'device' | 'face-match' | 'document' },
-          label
-        )
+        const challenge = await this.deps.challenge(principal, session, policy, label)
         if (!challenge.passed) return { outcome: 'challenge-failed', reason: challenge.reason }
-        // what the read gave: a passport that matches no single person of the directory goes no further (IDENT-DIR-003)
+        // what the read gave: the claims it resolves, or what is still missing
         if (policy.type === 'document') {
           ;[requirements] = await this.requirements(principal, name)
           if (requirements.state !== 'ready') return { outcome: 'incomplete', requirements }
@@ -383,7 +351,7 @@ export class IssuanceService {
       const evidenceRefs = new Set<string>()
       const entries = new Set<string>()
       for (const [claim, source] of Object.entries(profile.claims)) {
-        const resolved = await this.resolve(principal, name, profile, source)
+        const resolved = await this.resolveClaim(principal, name, profile, source)
         if (resolved.status !== 'available' || resolved.value === undefined) {
           return { outcome: 'incomplete', requirements: (await this.requirements(principal, name))[0] }
         }
@@ -473,7 +441,10 @@ export class IssuanceService {
     }
   }
 
-  /** The profiles the agent issues by itself, as soon as every claim resolves (trigger `automatic`). */
+  /**
+   * The profiles the agent issues by itself (trigger `automatic`): right after an authentication, once every claim
+   * resolves, on a connection to which it issued none that is still valid (IDENT-AUTH-016, INTX-ISSUE-008).
+   */
   public async automatic(principal: Principal, session: Session): Promise<void> {
     for (const [name, profile] of this.offered(principal)) {
       if (profile.trigger !== 'automatic') continue
@@ -482,6 +453,26 @@ export class IssuanceService {
       const { outcome } = await this.issue(principal, session, name, 'agent')
       this.logger.info({ principalId: principal.id, profile: name, outcome }, 'automatic issuance')
     }
+  }
+
+  /**
+   * A claim of the profile: as `resolve` gives it, but for a claim of the document in a profile that takes claims from
+   * the directory, which is the passport of the entry read when the person authenticated, and empty without one
+   * (IDENT-DIR-005, D130).
+   */
+  private async resolveClaim(
+    principal: Principal,
+    name: string,
+    profile: IssuanceProfile,
+    source: ClaimSource
+  ): Promise<Resolution> {
+    if (source.from !== 'evidence' || source.entry !== DOCUMENT_ENTRY || !takesClaimsFromDirectory(profile))
+      return this.resolve(principal, name, profile, source)
+    const read = await this.deps.entryDocument?.(principal, profile)
+    const value = read?.values[source.attribute]
+    if (!read || value === undefined) return { status: 'available', value: '' }
+    if (source.as === 'dateint') return { status: 'available', value: dateInt(value) ?? '', evidenceRef: read.id }
+    return { status: 'available', value, evidenceRef: read.id }
   }
 
   private async resolve(
@@ -535,17 +526,9 @@ export class IssuanceService {
     }
     const action = this.actionFor(principal, source.entry, name, profile)
     const record = await this.evidence.latest(principal.id, source.entry)
-    // an email check this agent cannot serve leaves what it would verify unavailable (INTX-AUTH-011)
-    const unservable =
-      source.entry === EMAIL_ENTRY && !this.deps.emailCheck?.available()
-        ? ({
-            status: 'unavailable',
-            action: { type: 'none', note: 'this agent sends no email: it cannot check an address' },
-          } as const)
-        : undefined
-    if (!record) return unservable ?? { status: 'missing', action }
+    if (!record) return { status: 'missing', action }
     if (record.unrevealed.includes(source.attribute)) return { status: 'not-revealed', action }
-    if (evidenceTooOld(record, profile) || record.state !== 'active') return unservable ?? { status: 'expired', action }
+    if (evidenceTooOld(record, profile) || record.state !== 'active') return { status: 'expired', action }
     const values = await this.evidence.values(principal.id, source.entry)
     const value = values?.[source.attribute]
     if (value === undefined) {
@@ -584,7 +567,7 @@ export class IssuanceService {
   /** What obtains the evidence of an entry: the request tool when the entry is asked on demand, else nothing to do. */
   private actionFor(principal: Principal, entry: string, name: string, profile: IssuanceProfile): ClaimAction {
     if (entry === DOCUMENT_ENTRY) return documentAction(name, profile)
-    if (entry === EMAIL_ENTRY) return emailAction(name, profile)
+    if (entry === EMAIL_ENTRY) return emailAction(principal)
     if (entry === AUTHENTICATION_ENTRY) {
       return principal.identityCredentialRef
         ? { type: 'none', note: 'the identity credential is asked when the connection is established' }
@@ -608,16 +591,14 @@ export function documentAction(name: string, profile: Pick<IssuanceProfile, 'aut
     : { type: 'none', note: 'nothing reads a document for this credential' }
 }
 
-/** What obtains a verified address for a profile: its own email challenge, when it declares one (INTX-AUTH-012). */
-export function emailAction(name: string, profile: Pick<IssuanceProfile, 'authChallenge'>): ClaimAction {
-  return challengeTypesOf(profile).includes('email')
-    ? {
-        type: 'issue_credential',
-        profile: name,
-        challenge: 'email',
-        note: 'when the issuance starts, the system asks the person in this conversation for the email address their organization knows them by, and for the code it sends there; you never see either',
-      }
-    : { type: 'none', note: 'nothing checks an email address for this credential' }
+/**
+ * What obtains a verified address (INTX-ISSUE-020): an `email` method of the authentication, asked of a person who is not
+ * identified yet; an identified person verified none when they authenticated, and nothing asks them again.
+ */
+export function emailAction(principal: Pick<Principal, 'identityCredentialRef'>): ClaimAction {
+  return principal.identityCredentialRef
+    ? { type: 'none', note: 'the person did not verify an email address when they authenticated' }
+    : { type: 'request_presentation', entry: AUTHENTICATION_ENTRY }
 }
 
 /** What the model is told of an issuance: a status, and what is missing when something is. */
@@ -638,10 +619,6 @@ export function issuanceOutcomeForModel(
       return reason
         ? `not issued, and nothing is on the phone of the person now: ${reason}. Tell them this; do not say that their phone will ask them.`
         : 'not issued: the identity check before the issuance did not pass.'
-    case 'challenge-started':
-      return 'not issued yet: the system now asks the person, in this conversation, for the email address their organization knows them by, then for the code it sends there; it issues the credential by itself once the code is right. You will not see the address or the code. Your turn ends here.'
-    case 'challenge-waiting':
-      return 'not issued: an email check of this person is already waiting, in this conversation or another of theirs with this agent. email_check tells where and at which step, sends a new code, or cancels it; do not call again while it waits.'
     case 'declined':
       return 'not issued: the person declined the offer in their wallet.'
     case 'unanswered':
@@ -676,8 +653,6 @@ export function issuanceOutcomeForPerson(
     }
     case 'challenge-failed':
       return reason ? `Nothing was issued: ${reason}.` : 'The identity check did not pass. Nothing was issued.'
-    case 'challenge-waiting':
-      return 'An email check is already waiting in one of your conversations with this agent: answer it there.'
     case 'declined':
       return 'You declined the offer. Nothing was issued.'
     case 'unanswered':
