@@ -57,6 +57,11 @@ export interface PeopleDeps {
    * (IDENT-ROLE-013, TOOL-CONN-008)
    */
   endAccounts?(principal: Principal): Promise<void>
+  /**
+   * the governance of the spaces (D136, D139): a person whose entry left is no member of any space, a space they owned
+   * passes to its successor or has no owner; then the spaces are brought in line with their people
+   */
+  governance?: { review(): Promise<void> }
   logger: Logger
 }
 
@@ -166,7 +171,7 @@ export class PeopleService implements DirectoryLink {
       )
       for (const p of holders) {
         const entryId = p.directoryEntryId as string
-        if (space.ownerIds.includes(p.id) || byRow.has(p.id)) continue
+        if (p.id === space.ownerPrincipalId || byRow.has(p.id)) continue
         const was = ruleMatches(rule, facts(reload.before.get(entryId)))
         const is = ruleMatches(rule, facts(reload.after.get(entryId)))
         if (was === is) continue
@@ -218,6 +223,10 @@ export class PeopleService implements DirectoryLink {
     }
     out.invitationsRemoved = await this.removeStaleInvitations()
     out.revoked = await this.revokeIssued(channels)
+    // who the approval policies name, the successors, the spaces with no owner: in line with the people now
+    await this.deps.governance
+      ?.review()
+      .catch((err) => this.deps.logger.error({ err }, 'the governance of the spaces was not brought in line'))
     if (out.released || out.rolesChanged || out.invitationsRemoved || out.revoked)
       this.deps.logger.info(out, 'the agent is in line with the user directory')
     return out
@@ -233,6 +242,15 @@ export class PeopleService implements DirectoryLink {
   /** The access of a person whose entry left the directory ends at once (IDENT-ROLE-013, IDENT-LIVE-005). */
   private async release(principal: Principal, entryId: string): Promise<void> {
     await this.deps.principals.releaseEntry(principal)
+    // no member of any space any more; a space they owned passes to its successor, or waits for a steward (D136)
+    try {
+      await this.deps.spaces.onEntryLeft(principal, entryId)
+    } catch (error) {
+      this.deps.logger.error(
+        { err: error, principalId: principal.id },
+        'the spaces of a removed person were not all brought in line'
+      )
+    }
     // their own accounts end first: no call of theirs runs once the entry is gone (TOOL-CONN-008)
     try {
       await this.deps.endAccounts?.(principal)

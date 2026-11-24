@@ -16,20 +16,28 @@
  */
 import { type AgentPack, PERSONAL_RETENTION_DAYS, providerNameOf, type SpaceTemplate } from '../config/packTypes.js'
 import { type EntryCrypto, openJson, sealJson } from '../memory/crypto.js'
+import {
+  APPROVAL_TIMEOUT_KINDS,
+  type ApprovalTimeoutKind,
+  defaultTimeouts,
+  timeoutBoundsOf,
+} from '../policy/spacePolicy.js'
 import type { SpaceMemberRepo, SpaceRepo, Store } from '../store/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import type { DirectoryView } from './directory.js'
-import type {
-  Conversation,
-  LawfulBasis,
-  Principal,
-  Space,
-  SpaceActivity,
-  SpaceMember,
-  SpaceMembership,
-  SpaceRole,
-  SpaceRules,
+import {
+  type Conversation,
+  DIRECTORY_ACTOR,
+  type LawfulBasis,
+  type OwnerChange,
+  type Principal,
+  type Space,
+  type SpaceActivity,
+  type SpaceMember,
+  type SpaceMembership,
+  type SpaceRole,
+  type SpaceRules,
 } from './types.js'
 
 export const PERSONAL_PREFIX = 'personal:'
@@ -50,6 +58,8 @@ export type SpaceErrorCode =
   | 'bad-request'
   | 'not-creator'
   | 'not-owner'
+  /** a steward's request of a Principal who holds no steward role of the space's template (SPACE-MEMB-011) */
+  | 'not-steward'
   | 'personal-space'
   | 'out-of-bounds'
   | 'rule-membership'
@@ -84,6 +94,13 @@ export type SpaceErrorCode =
   | 'source-unavailable'
   /** an approval that ended, or that the person decided, is sent to the phone no more (profile §3.12, D114) */
   | 'not-pending'
+  // the approval policies of a space's tools (TOOL-SPACE-018)
+  | 'not-approval'
+  | 'approver-not-allowed'
+  | 'repeated-entry'
+  | 'below-pack-minimum'
+  | 'threshold-below-required'
+  | 'attestation-required'
 
 /** The status of each refusal (profile 3.3 §9); `ERROR_STATUS` of the profile package lists the same. */
 export const SPACE_ERROR_STATUS: Record<SpaceErrorCode, number> = {
@@ -91,6 +108,7 @@ export const SPACE_ERROR_STATUS: Record<SpaceErrorCode, number> = {
   'bad-request': 400,
   'not-creator': 403,
   'not-owner': 403,
+  'not-steward': 403,
   'personal-space': 409,
   'out-of-bounds': 422,
   'rule-membership': 409,
@@ -122,6 +140,12 @@ export const SPACE_ERROR_STATUS: Record<SpaceErrorCode, number> = {
   'wrong-person': 422,
   'source-unavailable': 502,
   'not-pending': 409,
+  'not-approval': 422,
+  'approver-not-allowed': 422,
+  'repeated-entry': 422,
+  'below-pack-minimum': 422,
+  'threshold-below-required': 422,
+  'attestation-required': 422,
 }
 
 export class SpaceError extends Error {
@@ -260,7 +284,27 @@ export interface ResolvedTemplate {
   lawfulBasis: { default: LawfulBasis; allowed: LawfulBasis[] }
   allowedProviders: { default: string[]; allowed: string[] }
   handover: { default: boolean; allowed: boolean[] }
+  /** per kind of approval, in minutes (SPACE-DEF-008): the agent-pack's, for every template */
+  approvalTimeouts: Record<string, { default: number; min: number; max: number }>
 }
+
+/** A change of a space's owner, as its listeners hear it (SPACE-MEMB-012). */
+export interface OwnerChanged {
+  formerId?: string
+  newId?: string
+  how: OwnerChange | 'left'
+  reason?: string
+  actorId: string
+}
+
+/** Whom a request names: a member of a list space by `memberId`, a person of the directory of a rule space by `directoryId`. */
+export interface PersonTarget {
+  memberId?: unknown
+  directoryId?: unknown
+}
+
+/** The longest reason a steward gives (SPACE-MEMB-011). */
+export const STEWARD_REASON_MAX = 500
 
 /** `POST {sessions}/spaces` (PROF-SPACE-002). */
 export interface CreateSpaceInput {
@@ -293,8 +337,13 @@ export class SpaceService {
   public outsiders?: OutsiderInvitations
   /** a space was created: the sources its template adds by itself come with it (TOOL-SPACE-001) */
   public onCreated?: (space: Space) => Promise<void>
-  /** a space passed to another owner: its tools stay, its pending changes are dropped (TOOL-SPACE-011) */
-  public onOwnerChanged?: (space: Space) => Promise<void>
+  /**
+   * the owner of a space changed, or it has none any more (SPACE-MEMB-012): its tools stay and its pending changes are
+   * dropped (TOOL-SPACE-011), its members are told, the approvals that wait for its owner move
+   */
+  public onOwnerChanged?: (space: Space, change: OwnerChanged) => Promise<void>
+  /** the people of a space changed (a member removed, a successor cleared): what its policies name is read again */
+  public onMembersChanged?: (space: Space) => Promise<void>
 
   public constructor(
     private readonly store: Store,
@@ -335,7 +384,29 @@ export class SpaceService {
       lawfulBasis: { default: lawful, allowed: rules.lawfulBasis?.allowed ?? [lawful] },
       allowedProviders: { default: providers, allowed: rules.allowedProviders?.allowed ?? providers },
       handover: { default: handover, allowed: rules.handover?.allowed ?? [handover] },
+      approvalTimeouts: Object.fromEntries(APPROVAL_TIMEOUT_KINDS.map((k) => [k, timeoutBoundsOf(this.pack, k)])),
     }
+  }
+
+  /**
+   * At start: every space holds its approval timeouts among its rules (SPACE-DEF-008); a space made before them takes
+   * the agent-pack's defaults.
+   */
+  public async alignRules(): Promise<number> {
+    let n = 0
+    for (const space of await this.all()) {
+      const timeouts = { ...defaultTimeouts(this.pack), ...(space.rules.approvalTimeouts ?? {}) }
+      if (JSON.stringify(timeouts) === JSON.stringify(space.rules.approvalTimeouts)) continue
+      await this.spaces.save({ ...space, rules: { ...space.rules, approvalTimeouts: timeouts } })
+      n++
+    }
+    if (n) this.logger.info({ spaces: n }, 'the approval timeouts of the spaces made before them set to the defaults')
+    return n
+  }
+
+  /** The minutes an approval of a kind waits in a space (SPACE-DEF-008): its rule, else the agent-pack's default. */
+  public approvalTimeout(space: Pick<Space, 'rules'>, kind: ApprovalTimeoutKind): number {
+    return space.rules.approvalTimeouts?.[kind] ?? timeoutBoundsOf(this.pack, kind).default
   }
 
   /** The templates a Principal may create a space from: those naming one of its roles (SPACE-DEF-004). */
@@ -378,7 +449,7 @@ export class SpaceService {
       language: null,
       rules: this.personalRules(),
       membership: { mode: 'list' },
-      ownerIds: [principal.id],
+      ownerPrincipalId: principal.id,
       createdAt: principal.createdAt,
       updatedAt: principal.createdAt,
     }
@@ -405,9 +476,11 @@ export class SpaceService {
     hasConversations: boolean
   ): SpaceAccess | undefined {
     const row = rows.find((m) => m.spaceId === space.id && this.isRowOf(principal, m))
-    if (row?.state === 'active') return { space, role: row.role, left: false, member: row }
-    if (space.ownerIds.includes(principal.id))
-      return { space, role: 'owner', left: false, ...(row ? { member: row } : {}) }
+    const owner = space.ownerPrincipalId === principal.id
+    // the space's one owner is the one it names (D135): a row that was the owner's is a member's
+    if (row?.state === 'active')
+      return { space, role: owner ? 'owner' : row.role === 'owner' ? 'member' : row.role, left: false, member: row }
+    if (owner) return { space, role: 'owner', left: false, ...(row ? { member: row } : {}) }
     if (
       space.membership.mode === 'rule' &&
       ruleMatches(space.membership.rule, membershipFacts(principal, this.directory))
@@ -561,12 +634,13 @@ export class SpaceService {
         lawfulBasis: resolved.lawfulBasis.default,
         allowedProviders: [...resolved.allowedProviders.default],
         handover: resolved.handover.default,
+        approvalTimeouts: defaultTimeouts(this.pack),
       },
       membership:
         template.membership.mode === 'list'
           ? { mode: 'list' }
           : { mode: 'rule', rule: { ...template.membership.rule } },
-      ownerIds: [principal.id],
+      ownerPrincipalId: principal.id,
       createdAt: now,
       updatedAt: now,
     }
@@ -647,7 +721,27 @@ export class SpaceService {
         if (!bounds?.handover.allowed.includes(rules.handover)) throw outside('handover')
         next.rules.handover = rules.handover
       }
-      for (const key of ['retentionDays', 'lawfulBasis', 'allowedProviders', 'handover'] as const)
+      // the approval timeouts, per kind, within the agent-pack's bounds; a change applies to the approvals asked after it
+      // (SPACE-DEF-008)
+      if (rules.approvalTimeouts !== undefined) {
+        const given = rules.approvalTimeouts as unknown
+        if (!given || typeof given !== 'object' || Array.isArray(given))
+          throw new SpaceError('approvalTimeouts is an object of minutes by kind of approval', 'bad-request')
+        const timeouts = { ...defaultTimeouts(this.pack), ...(space.rules.approvalTimeouts ?? {}) }
+        for (const [kind, minutes] of Object.entries(given as Record<string, unknown>)) {
+          const field = `rules.approvalTimeouts.${kind}`
+          if (!APPROVAL_TIMEOUT_KINDS.includes(kind as ApprovalTimeoutKind))
+            throw new SpaceError(`${kind} is no kind of approval`, 'bad-request', field)
+          if (typeof minutes !== 'number' || !Number.isInteger(minutes))
+            throw new SpaceError(`${field} is a whole number of minutes`, 'bad-request', field)
+          const b = timeoutBoundsOf(this.pack, kind as ApprovalTimeoutKind)
+          if (minutes < b.min || minutes > b.max)
+            throw new SpaceError(`${field} is outside ${b.min} to ${b.max} minutes`, 'out-of-bounds', field)
+          timeouts[kind] = minutes
+        }
+        next.rules.approvalTimeouts = timeouts
+      }
+      for (const key of ['retentionDays', 'lawfulBasis', 'allowedProviders', 'handover', 'approvalTimeouts'] as const)
         if (JSON.stringify(next.rules[key]) !== JSON.stringify(space.rules[key])) fields.push(`rules.${key}`)
     }
     if (!fields.length) return space
@@ -702,7 +796,7 @@ export class SpaceService {
   private async addFromDirectory(principal: Principal, space: Space, directoryId: string): Promise<SpaceMember> {
     if (!this.people?.view(directoryId)) throw new SpaceError('person not found', 'not-found')
     const holders = await this.holdersOf(directoryId)
-    if (holders.some((h) => space.ownerIds.includes(h.id)))
+    if (holders.some((h) => h.id === space.ownerPrincipalId))
       throw new SpaceError('this person owns the space', 'already-member')
     const rows = await this.members.listBySpace(space.id)
     const existing = rows.find(
@@ -754,7 +848,7 @@ export class SpaceService {
       this.templates().some((t) => t.membership.mode === 'list' && t.creators.some((r) => principal.roles.includes(r)))
     )
       return true
-    return (await this.all()).some((s) => s.membership.mode === 'list' && s.ownerIds.includes(principal.id))
+    return (await this.all()).some((s) => s.membership.mode === 'list' && s.ownerPrincipalId === principal.id)
   }
 
   /**
@@ -768,7 +862,7 @@ export class SpaceService {
       throw new SpaceError('the members of this space are given by its rule', 'rule-membership')
     const row = await this.members.get(memberId)
     if (!row || row.spaceId !== spaceId || row.state === 'left') throw new SpaceError('member not found', 'not-found')
-    if (row.role === 'owner' || (row.principalId && space.ownerIds.includes(row.principalId)))
+    if (row.principalId && row.principalId === space.ownerPrincipalId)
       throw new SpaceError('the owner stays: give the space to a member first', 'owner')
     const detail = {
       memberId,
@@ -780,10 +874,73 @@ export class SpaceService {
       await this.record(spaceId, principal.id, 'removed', detail)
       return row
     }
-    const left: SpaceMember = { ...row, state: 'left', updatedAt: nowIso() }
+    const left: SpaceMember = { ...row, state: 'left', role: 'member', updatedAt: nowIso() }
     await this.members.save(left)
     await this.record(spaceId, principal.id, 'removed', detail)
+    // a successor who left the space is one no more (SPACE-MEMB-010)
+    const fresh = (await this.find(spaceId)) ?? space
+    if (row.principalId && fresh.successorPrincipalId === row.principalId)
+      await this.clearSuccessor(fresh, principal.id)
+    await this.onMembersChanged?.((await this.find(spaceId)) ?? fresh)
     return left
+  }
+
+  // ---- the owner, the successor and the stewards (D135, D136; SPACE-MEMB-007, SPACE-MEMB-009 to 012) ----------------
+
+  /**
+   * The people of a space who may approve and own it (SPACE-MEMB-007, INTX-APPR-021): its active members who are not
+   * guests, the owner among them. In a rule space, those its rule matches and those a row keeps a member (a former
+   * owner); in a list space, its active rows.
+   */
+  public async activeMemberIds(space: Space, principals?: Principal[]): Promise<string[]> {
+    const ids = new Set<string>()
+    if (space.ownerPrincipalId) ids.add(space.ownerPrincipalId)
+    for (const row of await this.members.listBySpace(space.id))
+      if (row.state === 'active' && row.principalId && row.role !== 'guest') ids.add(row.principalId)
+    if (space.membership.mode === 'rule') {
+      const rule = space.membership.rule
+      for (const p of principals ?? (await this.store.principals.list()))
+        if (ruleMatches(rule, membershipFacts(p, this.directory))) ids.add(p.id)
+    }
+    return [...ids]
+  }
+
+  /**
+   * The person a request names, if the space could be handed to them (SPACE-MEMB-007): in a list space an active member
+   * who is not a guest, by `memberId`; in a rule space a person the rule matches who holds a Principal, by `directoryId`.
+   */
+  private async eligibleTarget(
+    space: Space,
+    target: PersonTarget
+  ): Promise<{ principalId: string; memberId?: string; directoryId?: string }> {
+    if (space.membership.mode === 'rule') {
+      if (typeof target.directoryId !== 'string' || !target.directoryId)
+        throw new SpaceError('in a rule space, a person of the directory the rule matches', 'not-eligible')
+      const rule = space.membership.rule
+      const holder = (await this.holdersOf(target.directoryId)).find((p) =>
+        ruleMatches(rule, membershipFacts(p, this.directory))
+      )
+      if (!holder)
+        throw new SpaceError('a person the rule matches who holds a badge from the directory', 'not-eligible')
+      return { principalId: holder.id, directoryId: target.directoryId }
+    }
+    if (typeof target.memberId !== 'string' || !target.memberId)
+      throw new SpaceError('in a list space, one of its active members', 'not-eligible')
+    const row = await this.members.get(target.memberId)
+    if (!row || row.spaceId !== space.id || row.state !== 'active' || !row.principalId || row.role === 'guest')
+      throw new SpaceError('an active member of the organization only', 'not-eligible')
+    return { principalId: row.principalId, memberId: row.id }
+  }
+
+  /** Whether a person could still be handed the space: the successor stays eligible while this holds (SPACE-MEMB-010). */
+  public async stillEligible(space: Space, principalId: string): Promise<boolean> {
+    if (space.membership.mode === 'rule') {
+      const p = await this.store.principals.get(principalId)
+      return !!p && !!p.directoryEntryId && ruleMatches(space.membership.rule, membershipFacts(p, this.directory))
+    }
+    return (await this.members.listBySpace(space.id)).some(
+      (m) => m.principalId === principalId && m.state === 'active' && m.role !== 'guest'
+    )
   }
 
   /**
@@ -791,85 +948,226 @@ export class SpaceService {
    * not a guest, by `memberId`; in a rule space a person the rule matches who holds a Principal, by `directoryId`. The
    * former owner stays a member; any other target is not eligible.
    */
-  public async transferOwner(
-    principal: Principal,
-    spaceId: string,
-    target: { memberId?: unknown; directoryId?: unknown }
-  ): Promise<Space> {
+  public async transferOwner(principal: Principal, spaceId: string, target: PersonTarget): Promise<Space> {
     const { space } = await this.owned(principal, spaceId)
-    if (space.membership.mode === 'rule') {
-      if (typeof target.directoryId !== 'string' || !target.directoryId)
-        throw new SpaceError('a rule space is given to a person of the directory the rule matches', 'not-eligible')
-      return this.transferToEntry(principal, space, target.directoryId)
-    }
-    if (typeof target.memberId !== 'string' || !target.memberId)
-      throw new SpaceError('a list space is given to one of its active members', 'not-eligible')
-    return this.transferToMember(principal, space, target.memberId)
+    const to = await this.eligibleTarget(space, target)
+    if (to.principalId === principal.id) return space
+    return this.changeOwner(space, to, 'handover', principal.id)
   }
 
-  private async transferToEntry(principal: Principal, space: Space, directoryId: string): Promise<Space> {
-    const rule = (space.membership as Extract<SpaceMembership, { mode: 'rule' }>).rule
-    const target = (await this.holdersOf(directoryId)).find((p) =>
-      ruleMatches(rule, membershipFacts(p, this.directory))
-    )
-    if (!target)
-      throw new SpaceError(
-        'the space can be given to a person the rule matches who holds a badge from the directory',
-        'not-eligible'
-      )
-    if (space.ownerIds.includes(target.id)) return space
+  /**
+   * The owner changes (SPACE-MEMB-012): the new owner's row says so, the former owner stays a member by theirs, the
+   * successor is cleared, and the change is recorded with how and a steward's reason; its listeners move what waits.
+   */
+  private async changeOwner(
+    space: Space,
+    to: { principalId: string; memberId?: string; directoryId?: string },
+    how: OwnerChange,
+    actorId: string,
+    reason?: string
+  ): Promise<Space> {
     const rows = await this.members.listBySpace(space.id)
-    const mine = rows.find((m) => m.principalId === principal.id && m.state === 'active')
-    const theirs = rows.find((m) => m.principalId === target.id)
     const now = nowIso()
+    const formerId = space.ownerPrincipalId
+    const former = formerId ? rows.find((m) => m.principalId === formerId && m.state === 'active') : undefined
+    if (former) await this.members.save({ ...former, role: 'member', updatedAt: now })
+    const theirs = rows.find((m) => m.id === to.memberId) ?? rows.find((m) => m.principalId === to.principalId)
     const row: SpaceMember = {
       ...(theirs ?? { id: prefixedId('mem'), spaceId: space.id, createdAt: now }),
-      principalId: target.id,
-      directoryId,
+      principalId: to.principalId,
+      ...(to.directoryId ? { directoryId: to.directoryId } : {}),
       state: 'active',
       role: 'owner',
       updatedAt: now,
     }
     await this.members.save(row)
-    if (mine) await this.members.save({ ...mine, role: 'member', updatedAt: now })
-    const next: Space = {
-      ...space,
-      ownerIds: [...space.ownerIds.filter((id) => id !== principal.id && id !== target.id), target.id],
-      updatedAt: now,
-    }
+    const { successorPrincipalId, ...rest } = space
+    const next: Space = { ...rest, ownerPrincipalId: to.principalId, updatedAt: now }
     await this.spaces.save(next)
-    await this.record(space.id, principal.id, 'owner-changed', { memberId: row.id, directoryId })
-    await this.onOwnerChanged?.(next)
+    await this.record(space.id, actorId, 'owner-changed', {
+      memberId: row.id,
+      ...(to.directoryId ? { directoryId: to.directoryId } : {}),
+      how,
+      ...(reason ? { reason } : {}),
+    })
+    // every change of owner clears the successor (SPACE-MEMB-010)
+    if (successorPrincipalId)
+      await this.record(space.id, actorId, 'successor-cleared', { principalId: successorPrincipalId })
+    this.logger.info({ spaceId: space.id, how }, 'the owner of a space changed')
+    await this.onOwnerChanged?.(next, { formerId, newId: to.principalId, how, ...(reason ? { reason } : {}), actorId })
     return next
   }
 
-  private async transferToMember(principal: Principal, space: Space, memberId: string): Promise<Space> {
-    const spaceId = space.id
-    const mine = (await this.members.listBySpace(spaceId)).find(
-      (m) => m.principalId === principal.id && m.state === 'active'
-    )
-    const target = await this.members.get(memberId)
-    if (
-      !target ||
-      target.spaceId !== spaceId ||
-      target.state !== 'active' ||
-      !target.principalId ||
-      target.role === 'guest'
-    )
-      throw new SpaceError('the space can be given to an active member of the organization only', 'not-eligible')
-    if (target.principalId === principal.id) return space
-    const now = nowIso()
-    await this.members.save({ ...target, role: 'owner', updatedAt: now })
-    if (mine) await this.members.save({ ...mine, role: 'member', updatedAt: now })
-    const ownerIds = [
-      ...space.ownerIds.filter((id) => id !== principal.id && id !== target.principalId),
-      target.principalId,
-    ]
-    const next: Space = { ...space, ownerIds, updatedAt: now }
+  /**
+   * `PUT {sessions}/spaces/{id}/successor` (SPACE-MEMB-010, PROF-SPACE-008): the owner names the person who becomes the
+   * owner when the owner's entry leaves the directory; anyone the space could be handed to, the owner excepted.
+   */
+  public async setSuccessor(principal: Principal, spaceId: string, target: PersonTarget): Promise<Space> {
+    const { space } = await this.owned(principal, spaceId)
+    const to = await this.eligibleTarget(space, target)
+    if (to.principalId === principal.id) throw new SpaceError('the owner is not their own successor', 'not-eligible')
+    if (space.successorPrincipalId === to.principalId) return space
+    const next: Space = { ...space, successorPrincipalId: to.principalId, updatedAt: nowIso() }
     await this.spaces.save(next)
-    await this.record(spaceId, principal.id, 'owner-changed', { memberId })
-    await this.onOwnerChanged?.(next)
+    await this.record(space.id, principal.id, 'successor-set', {
+      principalId: to.principalId,
+      ...(to.memberId ? { memberId: to.memberId } : {}),
+      ...(to.directoryId ? { directoryId: to.directoryId } : {}),
+    })
     return next
+  }
+
+  /** `DELETE {sessions}/spaces/{id}/successor` (SPACE-MEMB-010): the owner clears it. */
+  public async removeSuccessor(principal: Principal, spaceId: string): Promise<Space> {
+    const { space } = await this.owned(principal, spaceId)
+    return this.clearSuccessor(space, principal.id)
+  }
+
+  private async clearSuccessor(space: Space, actorId: string): Promise<Space> {
+    if (!space.successorPrincipalId) return space
+    const { successorPrincipalId, ...rest } = space
+    const next: Space = { ...rest, updatedAt: nowIso() }
+    await this.spaces.save(next)
+    await this.record(space.id, actorId, 'successor-cleared', { principalId: successorPrincipalId })
+    return next
+  }
+
+  /** A successor who stopped being eligible is cleared (SPACE-MEMB-010); true when one was. */
+  public async dropIneligibleSuccessor(space: Space): Promise<boolean> {
+    if (!space.successorPrincipalId || (await this.stillEligible(space, space.successorPrincipalId))) return false
+    await this.clearSuccessor(space, DIRECTORY_ACTOR)
+    return true
+  }
+
+  /**
+   * A person's entry left the directory (D91, D136): they are no member of any space any more, each by their row, and a
+   * space they owned passes to its successor while the successor is eligible (SPACE-MEMB-010), or has no owner until a
+   * steward names one (SPACE-MEMB-011); a space whose successor they were has none.
+   */
+  public async onEntryLeft(principal: Principal, entryId: string): Promise<void> {
+    for (const space of await this.all()) {
+      const now = nowIso()
+      for (const row of await this.members.listBySpace(space.id)) {
+        const theirs = row.principalId === principal.id || row.directoryId === entryId
+        if (!theirs || row.state !== 'active') continue
+        await this.members.save({ ...row, state: 'left', role: 'member', updatedAt: now })
+        await this.record(space.id, DIRECTORY_ACTOR, 'left', {
+          memberId: row.id,
+          ...(row.principalId ? { principalId: row.principalId } : {}),
+          ...(row.directoryId ? { directoryId: row.directoryId } : {}),
+        })
+      }
+      let current = (await this.find(space.id)) ?? space
+      if (current.successorPrincipalId === principal.id) current = await this.clearSuccessor(current, DIRECTORY_ACTOR)
+      if (current.ownerPrincipalId !== principal.id) continue
+      const successor = current.successorPrincipalId
+      if (successor && (await this.stillEligible(current, successor))) {
+        const holder = await this.store.principals.get(successor)
+        await this.changeOwner(
+          current,
+          {
+            principalId: successor,
+            ...(current.membership.mode === 'rule' && holder?.directoryEntryId
+              ? { directoryId: holder.directoryEntryId }
+              : {}),
+          },
+          'succession',
+          DIRECTORY_ACTOR
+        )
+        continue
+      }
+      // no successor, or none eligible: the space has no owner, and what only an owner does waits (SPACE-MEMB-011)
+      const { ownerPrincipalId: _gone, successorPrincipalId: _none, ...rest } = current
+      const next: Space = { ...rest, updatedAt: now }
+      await this.spaces.save(next)
+      this.logger.info({ spaceId: space.id }, 'the owner of a space left the directory: it has no owner')
+      await this.onOwnerChanged?.(next, { formerId: principal.id, how: 'left', actorId: DIRECTORY_ACTOR })
+    }
+  }
+
+  /** The templates whose `stewards` roles a Principal holds (SPACE-MEMB-011). */
+  public stewardTemplates(principal: Principal): SpaceTemplate[] {
+    return this.templates().filter((t) => (t.stewards ?? []).some((r) => principal.roles.includes(r)))
+  }
+
+  /** Whether a Principal holds a steward role of the template of a space. */
+  public isSteward(principal: Principal, space: Pick<Space, 'templateId'>): boolean {
+    return this.stewardTemplates(principal).some((t) => t.id === space.templateId)
+  }
+
+  /** The holders of a steward role of a template: told when a space of it has no owner (SPACE-MEMB-012). */
+  public async stewardsOf(templateId: string): Promise<Principal[]> {
+    const roles = this.templates().find((t) => t.id === templateId)?.stewards ?? []
+    if (!roles.length) return []
+    return (await this.store.principals.list()).filter((p) => p.roles.some((r) => roles.includes(r)))
+  }
+
+  /** `GET {sessions}/stewardship` (SPACE-MEMB-011): the spaces of the templates a Principal stewards. */
+  public async stewarded(principal: Principal): Promise<Space[]> {
+    const templates = new Set(this.stewardTemplates(principal).map((t) => t.id))
+    if (!templates.size) throw new SpaceError('you hold no steward role of a template of spaces', 'not-steward')
+    return (await this.all()).filter((s) => templates.has(s.templateId))
+  }
+
+  /** A space a steward may act on: of a template they steward; any other Principal gets 403 `not-steward`. */
+  private async stewardOf(principal: Principal, spaceId: string): Promise<Space> {
+    const space = isPersonalSpace(spaceId) ? undefined : await this.find(spaceId)
+    if (!space) {
+      if (!this.stewardTemplates(principal).length)
+        throw new SpaceError('you hold no steward role of a template of spaces', 'not-steward')
+      throw new SpaceError('space not found', 'not-found')
+    }
+    if (!this.isSteward(principal, space))
+      throw new SpaceError('you hold no steward role of the template of this space', 'not-steward')
+    return space
+  }
+
+  /**
+   * `GET {sessions}/spaces/{id}/owner/candidates` (SPACE-MEMB-011): who could own a space, by name and department, to a
+   * steward of its template: its active members who are not guests (`memberId`) in a list space, the people its rule
+   * matches who hold a Principal (`directoryId`) in a rule space.
+   */
+  public async candidates(
+    principal: Principal,
+    spaceId: string,
+    nameOf: (p: Principal) => string
+  ): Promise<{ memberId?: string; directoryId?: string; name: string; department: string | null }[]> {
+    const space = await this.stewardOf(principal, spaceId)
+    const department = (p: Principal) => membershipFacts(p, this.directory).department ?? null
+    if (space.membership.mode === 'rule') {
+      const rule = space.membership.rule
+      const out: { directoryId: string; name: string; department: string | null }[] = []
+      for (const p of await this.store.principals.list())
+        if (p.directoryEntryId && ruleMatches(rule, membershipFacts(p, this.directory)))
+          out.push({ directoryId: p.directoryEntryId, name: nameOf(p), department: department(p) })
+      return out
+    }
+    const out: { memberId: string; name: string; department: string | null }[] = []
+    for (const row of await this.members.listBySpace(space.id)) {
+      if (row.state !== 'active' || !row.principalId || row.role === 'guest') continue
+      const p = await this.store.principals.get(row.principalId)
+      if (p) out.push({ memberId: row.id, name: nameOf(p), department: department(p) })
+    }
+    return out
+  }
+
+  /**
+   * A steward names the owner of a space of their template (SPACE-MEMB-011, PROF-SPACE-009): when it has none, or on
+   * request when it has one, the former owner staying a member; always with a reason of 1 to 500 characters.
+   */
+  public async stewardNames(
+    principal: Principal,
+    spaceId: string,
+    target: PersonTarget,
+    reason: unknown
+  ): Promise<Space> {
+    const space = await this.stewardOf(principal, spaceId)
+    const text = typeof reason === 'string' ? reason.trim() : ''
+    if (!text || text.length > STEWARD_REASON_MAX)
+      throw new SpaceError(`a reason of 1 to ${STEWARD_REASON_MAX} characters is required`, 'bad-request', 'reason')
+    const to = await this.eligibleTarget(space, target)
+    if (to.principalId === space.ownerPrincipalId) return space
+    return this.changeOwner(space, to, 'steward', principal.id, text)
   }
 
   /** What was done in a space, newest first, a page at a time (`before` an activity id): for its owner. */
@@ -891,7 +1189,10 @@ export class SpaceService {
     spaceId: string,
     actorId: string,
     action: SpaceActivity['action'],
-    detail: Pick<SpaceActivity, 'fields' | 'memberId' | 'conversationId' | 'principalId' | 'directoryId' | 'sourceId'>
+    detail: Pick<
+      SpaceActivity,
+      'fields' | 'memberId' | 'conversationId' | 'principalId' | 'directoryId' | 'sourceId' | 'how' | 'reason'
+    >
   ): Promise<void> {
     await this.store.spaceActivity.insert({ id: prefixedId('act'), spaceId, at: nowIso(), actorId, action, ...detail })
   }
@@ -903,7 +1204,7 @@ export class SpaceService {
       const rule = space.membership.rule
       // the owner is a member whatever the rule says (SPACE-MEMB-001)
       return principals.filter(
-        (p) => space.ownerIds.includes(p.id) || ruleMatches(rule, membershipFacts(p, this.directory))
+        (p) => p.id === space.ownerPrincipalId || ruleMatches(rule, membershipFacts(p, this.directory))
       ).length
     }
     return rows.filter((m) => m.spaceId === space.id && m.state !== 'left').length

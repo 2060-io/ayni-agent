@@ -744,7 +744,8 @@ lists it; else the rule the pack declares (`tools.<name>.call`); else the defaul
 A call then goes through, in order: the person's **confirmation** (a card in the conversation with the exact action,
 every argument whole, Allow, Refuse and "Allow for this conversation"); the **approval** (a tool of the whole agent or
 of Personal: the roles of its source's `access.approval` entry, else `approvals.approvers`, else the call is refused as
-`no-approver`; a tool of a space: the space's owner, on the phone as an attested `authorize` flow and in a card); the
+`no-approver`; a tool of a space: the people its approval policy in the space names, below, each on the phone as an
+`authorize` flow and in the Notifications); the
 credential's **liveness** (`stepUp.maxCredentialAge`); the **step-up** (`stepUp.authChallenge`); the **call**, with the
 pinned arguments set by the code and the account opened for it.
 
@@ -1023,6 +1024,40 @@ grant duration; `approvers`, the roles that approve a tool of the whole agent or
 and that no `access.approval` entry of its source lists (TOOL-CAT-009); `confirmation.timeoutSeconds`, how long a
 confirmation card waits (300 by default, TOOL-CALL-004).
 
+**The tools of spaces** (D137 to D140, TOOL-CAT-023). A tool of a space whose rule is `approval` is approved as its
+**approval policy** in that space says, which the space's owner sets within the bounds of `approvals.spaces`; until the
+owner sets one, the tool takes `default`:
+
+```yaml
+approvals:
+  spaces:
+    default:                           # none: the owner, required, 1 approval, any refusal, attested, own confirmation
+      approvers: [{ kind: owner, required: true }]   # owner, member, role (with role), department (with department)
+      threshold: 1                     # approvals in total, required ones included
+      refusal: any                     # any: one refusal rejects; required: only a required approver's
+      attested: true                   # each decision on the phone
+      whenApproverAsks: own-confirmation   # or another-approver: the default with two approvers or more
+    minApprovals: 1                    # the least threshold an owner may set
+    allowedApprovers: { kinds: [owner, person, member, role, department], roles: [manager] }
+    attested: optional                 # required: no policy turns attestation off
+    timeouts:                          # minutes, per kind of approval; each space's owner sets its own within
+      tool-call: { default: 60, min: 5, max: 10080 }
+tools:
+  sources:
+    x:
+      tools:
+        post_to_x:
+          approval:                    # tighter for this tool; `default` gives the fields it changes
+            minApprovals: 2
+            default: { approvers: [{ kind: owner, required: true }, { kind: role, role: manager, required: false }], threshold: 2 }
+```
+
+An agent-pack names no person: an owner names people of the space (`person`). A requester never counts toward their own
+request; with `own-confirmation` an approver who asks confirms on their own phone, always attested. A looser policy waits
+for the owner's phone, a stricter one applies at once. Refused at start, naming the field: a default outside its bounds
+(as `minApprovals: 2` with a threshold of 1), a `person` entry, a role not declared or without `canApprove`, and a
+timeout's `default` outside its `min` and `max`.
+
 ## sessions, channels
 
 `sessions.devicePairing` sets how long a browser the phone confirmed once keeps binding new sessions
@@ -1074,6 +1109,7 @@ spaces:
       title: Project
       kind: team                        # team or organization
       creators: [employee]              # the roles of who may create one
+      stewards: [admin]                 # the roles that name an owner of a space with none, or on request
       membership: { mode: list }        # a list kept by the owner
       rules:
         retentionDays: { default: 365, min: 30, max: 1825 }
@@ -1097,6 +1133,10 @@ spaces:
   `organization`. A member list is a share, never a role: no role makes anyone a member (SPACE-MEMB-003). The owner
   is always a member. Someone a rule no longer matches, or the owner removes from a list, is `left`: they keep
   reading their own conversations of the space, and run nothing in it (`409 space-left`).
+- **One owner** controls a space (D135). The owner may name a successor, who becomes the owner when the owner's entry
+  leaves the directory; with none, the space has no owner until a holder of one of its template's `stewards` roles
+  names one, with a reason (D136). A steward reads nothing else of the space. No `stewards`: nobody can name an owner of
+  a space whose owner left without a successor.
 - **Rules** have a default and the bounds an owner may change them within: `min` and `max` days for the retention,
   the `allowed` values of the others. A rule with no bounds keeps its default. `retentionDays` (365 by default): the
   entries of the space's conversations older than this are archived, never an entry on legal hold (PRIV-RETN-008).
@@ -1168,7 +1208,7 @@ enables crypto-erasure with its lineage cascade.
 9. `channels.agui.walletLinkTemplate` starts with `https://` and contains `{oob}`.
 10. `memory.contextWindowTokens` plus `llm.maxOutputTokens` fits in `llm.maxInputTokens` when it is set (MEM-CTX-006).
 11. A `partner-shared` RAG source names its `partner`, and only a `partner-shared` source names one (MEM-RAG-005).
-12. A space template is declared once; its `creators` are declared in `identity.roles` (rule 2); the default of
+12. A space template is declared once; its `creators` and `stewards` are declared in `identity.roles` (rule 2); the default of
     each of its rules lies within its bounds; a template of kind `organization` has the rule `organization: true`
     (SPACE-DEF-003).
 13. A badge from the user directory: see `issuance`, "Refused by the loader" (IDENT-DIR-002/003, INTX-AUTH-011/012/015,

@@ -15,6 +15,14 @@ import { randomInt } from 'node:crypto'
 import type { AccountField, AgentPack, CallRule, SpaceCallRule, TemplateTool } from '../config/packTypes.js'
 import { SPACE_CALL_RULES } from '../config/packTypes.js'
 import { type EntryCrypto, openJson, sealJson } from '../memory/crypto.js'
+import {
+  boundsOf,
+  defaultPolicyOf,
+  isLooser,
+  type PolicyBounds,
+  policyWords,
+  samePolicy,
+} from '../policy/spacePolicy.js'
 import type { Store } from '../store/types.js'
 import { accountSecrets, buildAccountHeaders, fitsFields } from '../tools/accountValues.js'
 import { type CatalogSource, looser, strictest, type ToolCatalog } from '../tools/catalog.js'
@@ -24,6 +32,7 @@ import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import { type ChallengeService, ConfirmationUnavailable, SPACE_TOOL_CHANGE } from './challenges.js'
 import type { ConnectionService } from './connections.js'
+import type { Governance, PolicyInForce, PolicyView, PolicyWarning } from './governance.js'
 import { isPersonalSpace, SpaceError, type SpaceService } from './spaces.js'
 import type {
   AuthChallengeRecord,
@@ -32,6 +41,7 @@ import type {
   Session,
   Space,
   SpaceAccountRecord,
+  SpaceApprovalPolicy,
   SpaceToolRecord,
 } from './types.js'
 
@@ -96,6 +106,8 @@ export interface SpaceToolView {
     rule: SpaceCallRule
     packRule?: CallRule
     stepUp: string | null
+    /** a tool whose rule is `approval`: its approval policy in this space (TOOL-SPACE-018, PROF-TOOL-036) */
+    approval?: PolicyView
   }[]
   pending?: { changeId: string; summary: string; code: string; expiresAt: string } | null
 }
@@ -139,10 +151,12 @@ export class SpaceToolService {
   public hooks: SpaceToolsHooks = {}
   /** each person's own accounts (D104): whether a reader's is connected, the owner's choices of a binding (D110) */
   public connections?: ConnectionService
+  /** the approval policies of the tools (D137): whom they name, their checks, warnings and attention */
+  public governance?: Governance
 
   public constructor(
     private readonly store: Store,
-    _pack: AgentPack,
+    private readonly pack: AgentPack,
     private readonly catalog: ToolCatalog,
     private readonly crypto: EntryCrypto,
     private readonly spaces: SpaceService,
@@ -257,10 +271,17 @@ export class SpaceToolService {
 
   // ---- what the settings show (PROF-TOOL-001) ---------------------------------------------------------------------
 
-  /** The tools a source offers, with what the pack and its server say of them. */
-  private async toolsOf(source: CatalogSource, spaceId?: string): Promise<{ name: string; spec?: ToolSpec }[]> {
+  /**
+   * The tools a source offers, with what the pack and its server say of them; with `discover` false, from what the
+   * registry knows and the agent-pack only, with no connection.
+   */
+  private async toolsOf(
+    source: CatalogSource,
+    spaceId?: string,
+    discover = true
+  ): Promise<{ name: string; spec?: ToolSpec }[]> {
     let specs = (await this.registry.all()).filter((s) => s.source === source.name)
-    if (!specs.length && source.kind === 'mcp' && source.account.kind === 'space' && spaceId) {
+    if (discover && !specs.length && source.kind === 'mcp' && source.account.kind === 'space' && spaceId) {
       const account = await this.openAccount(spaceId, source.name)
       if (account?.headers) {
         await this.registry.discover(source.name, account)
@@ -271,11 +292,63 @@ export class SpaceToolService {
     return (source.offer ?? Object.keys(source.tools)).map((name) => ({ name }))
   }
 
+  // ---- the approval policies of its tools (TOOL-SPACE-018 to 021, TOOL-CAT-023) ------------------------------------
+
+  /** The policy in force of a tool whose rule is `approval`: the owner's, else the agent-pack's default (TOOL-SPACE-018). */
+  public policyOf(
+    source: CatalogSource,
+    record: Pick<SpaceToolRecord, 'approvals'>,
+    tool: string
+  ): SpaceApprovalPolicy {
+    return record.approvals?.[tool] ?? defaultPolicyOf(this.pack, source.tools[tool]?.approval)
+  }
+
+  /** The agent-pack's bounds of a tool's policy (TOOL-CAT-023). */
+  public boundsFor(source: CatalogSource, tool: string): PolicyBounds {
+    return boundsOf(this.pack, source.tools[tool]?.approval)
+  }
+
+  /** The policies in force of a space's tools whose rule is `approval`, of every source added to it; no connection made. */
+  public async policiesOf(space: Space): Promise<PolicyInForce[]> {
+    const out: PolicyInForce[] = []
+    for (const entry of this.entriesOf(space)) {
+      const source = this.catalog.source(entry.source)
+      const record = source ? await this.store.spaceTools.get(space.id, entry.source) : undefined
+      if (!source || !record?.added) continue
+      for (const { name, spec } of await this.toolsOf(source, space.id, false)) {
+        const packRule = this.catalog.packRuleOf(source, name, spec?.annotations).rule
+        const owner = record.calls[name]
+        const rule = owner ? strictest<SpaceCallRule>(packRule, owner) : packRule
+        if (rule !== 'approval') continue
+        out.push({
+          sourceId: source.name,
+          tool: name,
+          title: this.catalog.toolTitle(source, name, spec?.annotations),
+          policy: this.policyOf(source, record, name),
+          bounds: this.boundsFor(source, name),
+        })
+      }
+    }
+    return out
+  }
+
+  /** The policies of tools whose rule is no longer `approval` are dropped with it (TOOL-SPACE-018). */
+  private async withoutStalePolicies(space: Space, source: CatalogSource, record: SpaceToolRecord) {
+    if (!record.approvals) return record
+    const kept: Record<string, SpaceApprovalPolicy> = {}
+    for (const [tool, policy] of Object.entries(record.approvals))
+      if ((await this.ruleInForce(space, source, record, tool)) === 'approval') kept[tool] = policy
+    const { approvals: _all, ...rest } = record
+    return Object.keys(kept).length ? { ...rest, approvals: kept } : rest
+  }
+
   private async view(
     space: Space,
     entry: TemplateTool,
     owner: boolean,
-    reader?: Principal
+    reader?: Principal,
+    /** the warnings of the policies a request sent, for the answer of that request (TOOL-SPACE-020) */
+    warningsFor?: Record<string, PolicyWarning[]>
   ): Promise<SpaceToolView | undefined> {
     const source = this.catalog.source(entry.source)
     if (!source) return undefined
@@ -290,6 +363,16 @@ export class SpaceToolService {
       const rule: SpaceCallRule = ownerRule ? strictest<SpaceCallRule>(packRule, ownerRule) : packRule
       // a member reads the tools members can use: one set `off` is not listed to them (PROF-TOOL-001)
       if (!owner && rule === 'off') continue
+      const approval =
+        rule === 'approval' && this.governance
+          ? await this.governance.view(
+              space,
+              this.policyOf(source, record, name),
+              this.boundsFor(source, name),
+              owner,
+              warningsFor?.[name]
+            )
+          : undefined
       tools.push({
         ...(owner ? { name } : {}),
         title: this.catalog.toolTitle(source, name, spec?.annotations),
@@ -297,6 +380,7 @@ export class SpaceToolService {
         rule,
         ...(owner ? { packRule } : {}),
         stepUp: this.catalog.stepUpTypeOf(source, name),
+        ...(approval ? { approval } : {}),
       })
     }
     const values = this.bindingValues(source, record)
@@ -379,9 +463,14 @@ export class SpaceToolService {
   }
 
   /** One source of a space, as its owner reads it. */
-  public async ownerView(space: Space, sourceId: string, reader?: Principal): Promise<SpaceToolView> {
+  public async ownerView(
+    space: Space,
+    sourceId: string,
+    reader?: Principal,
+    warningsFor?: Record<string, PolicyWarning[]>
+  ): Promise<SpaceToolView> {
     const { entry } = this.entryOf(space, sourceId)
-    return (await this.view(space, entry, true, reader)) as SpaceToolView
+    return (await this.view(space, entry, true, reader, warningsFor)) as SpaceToolView
   }
 
   // ---- what the owner changes -------------------------------------------------------------------------------------
@@ -485,18 +574,37 @@ export class SpaceToolService {
       calls?: Record<string, SpaceCallRule>
       /** the names of the values of a binding a personal account is for: what the phone shows (D110) */
       labels?: Record<string, string>
+      /** the policies a change sets, with those in force (TOOL-SPACE-019) */
+      approvals?: Record<string, { before: SpaceApprovalPolicy; after: SpaceApprovalPolicy }>
     }
   ): Promise<string> {
     const parts: string[] = []
     for (const [name, value] of Object.entries(change.bindings ?? {}))
       parts.push(`${source.bindings.find((b) => b.name === name)?.label ?? name}: ${change.labels?.[name] ?? value}`)
     const tools = await this.toolsOf(source, space.id)
-    for (const [name, rule] of Object.entries(change.calls ?? {}))
-      parts.push(
-        `${this.catalog.toolTitle(source, name, tools.find((t) => t.name === name)?.spec?.annotations)}: ${RULE_WORDS[rule]}`
-      )
-    void space
+    const title = (name: string) =>
+      this.catalog.toolTitle(source, name, tools.find((t) => t.name === name)?.spec?.annotations)
+    for (const [name, rule] of Object.entries(change.calls ?? {})) parts.push(`${title(name)}: ${RULE_WORDS[rule]}`)
+    // a policy as people read it, before and after (TOOL-SPACE-019)
+    const policies: { name: string; text: string }[] = []
+    for (const [name, { before, after }] of Object.entries(change.approvals ?? {}))
+      policies.push({
+        name,
+        text: `from ${await this.policyText(space, before)}, to ${await this.policyText(space, after)}`,
+      })
+    const [only] = policies
+    if (only && policies.length === 1 && !parts.length)
+      return `Change who approves ${title(only.name)} in ${space.title}: ${only.text}`
+    for (const p of policies) parts.push(`who approves ${title(p.name)}: ${p.text}`)
     return parts.length ? `${head}: ${parts.join('; ')}` : head
+  }
+
+  /** "Jonas Weber (required), Marta Kova, 2 approvals" (TOOL-SPACE-019). */
+  private async policyText(space: Space, policy: SpaceApprovalPolicy): Promise<string> {
+    const names = new Map<number, string>()
+    for (const [i, entry] of policy.approvers.entries())
+      names.set(i, (await this.governance?.entryText(space, entry)) ?? entry.kind)
+    return policyWords(policy, (entry) => names.get(policy.approvers.indexOf(entry)) ?? entry.kind)
   }
 
   /**
@@ -597,7 +705,7 @@ export class SpaceToolService {
     session: Session,
     spaceId: string,
     sourceId: string,
-    body: { bindings?: unknown; calls?: unknown }
+    body: { bindings?: unknown; calls?: unknown; approvals?: unknown }
   ): Promise<{ status: 200 | 202; tool: SpaceToolView }> {
     const { space, entry, source } = await this.owned(principal, spaceId, sourceId)
     const record = await this.recordOf(space, entry)
@@ -613,8 +721,25 @@ export class SpaceToolService {
       changedCalls[tool] = rule
       if (looser(rule, inForce)) grants = true
     }
-    if (!Object.keys(changedBindings).length && !Object.keys(changedCalls).length)
-      return { status: 200, tool: await this.ownerView(space, source.name, principal) }
+    // the approval policies, each whole (TOOL-SPACE-018); a looser one grants, a stricter one narrows (TOOL-SPACE-019)
+    const policies = await this.checkPolicies(space, source, record, calls, body.approvals)
+    const changedApprovals: Record<string, SpaceApprovalPolicy> = {}
+    const policyChanges: Record<string, { before: SpaceApprovalPolicy; after: SpaceApprovalPolicy }> = {}
+    const warningsFor: Record<string, PolicyWarning[]> = {}
+    for (const [tool, after] of Object.entries(policies)) {
+      if (this.governance) warningsFor[tool] = await this.governance.warnings(space, after)
+      const before = this.policyOf(source, record, tool)
+      if (samePolicy(before, after)) continue
+      changedApprovals[tool] = after
+      policyChanges[tool] = { before, after }
+      if (isLooser(before, after)) grants = true
+    }
+    if (
+      !Object.keys(changedBindings).length &&
+      !Object.keys(changedCalls).length &&
+      !Object.keys(changedApprovals).length
+    )
+      return { status: 200, tool: await this.ownerView(space, source.name, principal, warningsFor) }
     if (grants) {
       // one granting change at a time; one that only narrows applies whatever waits (TOOL-SPACE-009)
       if (record.pendingChange) throw new SpaceError('a change of this source waits for the phone', 'change-pending')
@@ -623,29 +748,64 @@ export class SpaceToolService {
         bindings: changedBindings,
         calls: changedCalls,
         labels: changedLabels,
+        approvals: policyChanges,
       })
       await this.hold(principal, session, space, record, {
         kind: 'patch',
         bindings: changedBindings,
         calls: changedCalls,
+        ...(Object.keys(changedApprovals).length ? { approvals: changedApprovals } : {}),
         summary,
         ...(Object.keys(changedLabels).length ? { bindingLabels: changedLabels } : {}),
       })
-      return { status: 202, tool: await this.ownerView(space, source.name, principal) }
+      return { status: 202, tool: await this.ownerView(space, source.name, principal, warningsFor) }
     }
     // only stricter: at once, with no challenge, a change that waits for the phone kept as it is (TOOL-SPACE-008)
     const current = (await this.store.spaceTools.get(space.id, source.name)) ?? record
-    await this.store.spaceTools.save({
-      ...current,
-      calls: { ...current.calls, ...changedCalls },
-      updatedAt: nowIso(),
-      updatedBy: principal.id,
-    })
+    const approvals = { ...(current.approvals ?? {}), ...changedApprovals }
+    await this.store.spaceTools.save(
+      await this.withoutStalePolicies(space, source, {
+        ...current,
+        calls: { ...current.calls, ...changedCalls },
+        ...(Object.keys(approvals).length ? { approvals } : {}),
+        updatedAt: nowIso(),
+        updatedBy: principal.id,
+      })
+    )
     await this.hooks.endAllowances?.(space.id, source.name)
     await this.spaces.record(space.id, principal.id, 'tool-changed', { sourceId: source.name })
-    const tool = await this.ownerView(space, source.name, principal)
+    await this.governance?.review(space)
+    const tool = await this.ownerView(space, source.name, principal, warningsFor)
     await this.announce(space, { spaceId: space.id, source: source.name, state: tool.state, outcome: 'applied' })
     return { status: 200, tool }
+  }
+
+  /**
+   * The policies a request sets (TOOL-SPACE-018): for tools the source offers (`400 bad-request` otherwise), whose rule
+   * is `approval` once the request applies (`422 not-approval`), each whole and within the agent-pack's bounds.
+   */
+  private async checkPolicies(
+    space: Space,
+    source: CatalogSource,
+    record: SpaceToolRecord,
+    calls: Record<string, SpaceCallRule>,
+    approvals: unknown
+  ): Promise<Record<string, SpaceApprovalPolicy>> {
+    if (approvals === undefined || approvals === null) return {}
+    if (typeof approvals !== 'object' || Array.isArray(approvals))
+      throw new SpaceError('approvals is an object of policies by tool', 'bad-request', 'approvals')
+    if (!this.governance) throw new SpaceError('this agent sets no approval policy', 'bad-request', 'approvals')
+    const tools = await this.toolsOf(source, space.id)
+    const out: Record<string, SpaceApprovalPolicy> = {}
+    for (const [name, raw] of Object.entries(approvals as Record<string, unknown>)) {
+      const field = `approvals.${name}`
+      if (!tools.some((t) => t.name === name))
+        throw new SpaceError(`the source offers no tool ${name}`, 'bad-request', field)
+      const rule = calls[name] ?? (await this.ruleInForce(space, source, record, name))
+      if (rule !== 'approval') throw new SpaceError(`the rule of ${name} is not approval`, 'not-approval', field)
+      out[name] = await this.governance.parsePolicy(space, name, raw, this.boundsFor(source, name))
+    }
+    return out
   }
 
   /**
@@ -751,6 +911,8 @@ export class SpaceToolService {
     await this.destroyAccount(space.id, source.name)
     await this.hooks.endAllowances?.(space.id, source.name)
     if (wasAdded) await this.spaces.record(space.id, principal.id, 'tool-removed', { sourceId: source.name })
+    // its policies left with it: a notice of one that needed attention ends (TOOL-SPACE-018)
+    await this.governance?.review(space)
     const tool = await this.ownerView(space, source.name, principal)
     await this.announce(space, { spaceId: space.id, source: source.name, state: tool.state, outcome: 'applied' })
     return tool
@@ -824,6 +986,7 @@ export class SpaceToolService {
     } else if (change.kind === 'patch') {
       next.bindings = { ...record.bindings, ...(change.bindings ?? {}) }
       next.calls = { ...record.calls, ...(change.calls ?? {}) }
+      if (change.approvals) next.approvals = { ...(record.approvals ?? {}), ...change.approvals }
       // the name of a value the change sets comes with it; a value set otherwise has none
       const changed = new Set(Object.keys(change.bindings ?? {}))
       const labels = {
@@ -844,8 +1007,9 @@ export class SpaceToolService {
         setByPrincipalId: change.requestedBy,
       })
     }
-    await this.store.spaceTools.save(next)
+    await this.store.spaceTools.save(await this.withoutStalePolicies(space, source, next))
     if (change.kind !== 'add') await this.hooks.endAllowances?.(space.id, record.sourceId)
+    await this.governance?.review(space)
     await this.spaces.record(
       space.id,
       change.requestedBy,

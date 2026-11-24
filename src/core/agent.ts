@@ -21,13 +21,8 @@ import type { MediaService } from '../media/service.js'
 import type { RagService } from '../memory/rag.js'
 import { MemoryService, type NewEntry } from '../memory/service.js'
 import type { StatsSink } from '../platform/stats.js'
-import {
-  type ApprovalChange,
-  ApprovalError,
-  type ApprovalService,
-  displayName,
-  needsAttestation,
-} from '../policy/approvals.js'
+import { type ApprovalChange, ApprovalError, type ApprovalService, displayName } from '../policy/approvals.js'
+import { attestedFor } from '../policy/spacePolicy.js'
 import type { Store } from '../store/types.js'
 import type { ToolCatalog } from '../tools/catalog.js'
 import type { ToolRegistry } from '../tools/registry.js'
@@ -42,10 +37,11 @@ import { CREDENTIAL_WITHHELD, CredentialScanner } from './credentials.js'
 import { EMAIL_CHECK_KIND, type EmailChecks } from './emailCheck.js'
 import type { EvidenceService } from './evidence.js'
 import type { FlowService } from './flows.js'
+import type { Governance } from './governance.js'
 import { contextualMenuFor, describeDevices, describeSessions, greetingFor, PLATFORM_MENU } from './interaction.js'
 import { DEFAULT_APP_LINK_BASE, type InvitationService } from './invitations.js'
 import { type IssuanceService, type IssuanceTrigger, issuanceOutcomeForPerson } from './issuance.js'
-import { Notifications, placeOf } from './notifications.js'
+import { Notifications } from './notifications.js'
 import {
   conversationKey,
   type Orchestrator,
@@ -176,6 +172,8 @@ export class AyniAgent {
   public catalog?: ToolCatalog
   /** the tools of each space (ayni-spec D98); set by the composition root */
   public spaceTools?: SpaceToolService
+  /** the governance of the spaces: who their policies name, the notices (D135 to D142) */
+  public governance?: Governance
   /** each person's own accounts (ayni-spec D104 to D110); set by the composition root */
   public connections?: ConnectionService
   /** the credentials a message of the person may carry, found as it arrives (D109, TOOL-ACCESS-013) */
@@ -223,6 +221,11 @@ export class AyniAgent {
         (place ? (await parts.spaces.find(place))?.rules.retentionDays : undefined) ??
         parts.spaces.personalRules().retentionDays,
       purposeLabel: (id) => parts.pack.purposes?.find((p) => p.id === id)?.label,
+      // a space's Notifications are its active members' (INTX-APPR-022)
+      isMember: async (viewer, spaceId) => {
+        const access = await parts.spaces.access(viewer, spaceId)
+        return !!access && !access.left
+      },
     })
     // an approval to attest is asked only of approvers whose phone takes its `authorize` flow (INTX-APPR-019)
     parts.approvals.askable = async (principal) => !!(await this.router.approvalPhone(principal))
@@ -322,7 +325,10 @@ export class AyniAgent {
     const waiting = principal && this.features.approvals ? await this.approvals.pendingFor(principal) : []
     const pending = waiting.length
     // a DIDComm peer in chat mode decides from its menu only what needs no attestation (INTX-APPR-019)
-    const menuPending = session.channelType === 'didcomm' ? waiting.filter((r) => !needsAttestation(r)).length : pending
+    const menuPending =
+      session.channelType === 'didcomm' && principal
+        ? waiting.filter((r) => !attestedFor(r, principal.id)).length
+        : pending
     // the context figure of the conversation's latest turn, the same on every device (D74, PROF-STREAM-007)
     const context = session.state === 'bound' ? await this.context.figure(conversationOf(session)) : undefined
     // the space of the conversation, as its header names it (SPACE-CONV-003, PROF-STREAM-009)
@@ -1148,7 +1154,7 @@ export class AyniAgent {
       if (session.channelType !== 'didcomm') return { text: 'Your approvals are in the Notifications.' }
       // a DIDComm peer in chat mode: the questions it answers, and no entry in any conversation (INTX-APPR-006); one to
       // attest is decided on a phone that takes flows only (INTX-APPR-019)
-      const pending = (await this.approvals.pendingFor(principal)).filter((r) => !needsAttestation(r))
+      const pending = (await this.approvals.pendingFor(principal)).filter((r) => !attestedFor(r, principal.id))
       // a confirmation is the person's own card in its conversation, never a pending approval (INTX-APPR-012)
       const own = (await this.approvals.ownRequests(principal)).filter(
         (r) => r.status === 'PENDING' && r.kind !== 'confirmation'
@@ -1343,7 +1349,7 @@ export class AyniAgent {
     if (decided || (record.status !== 'PENDING' && (await this.approvals.isEligible(principal, record))))
       return { decision: { approvalId, status: record.status } }
     if (!(await this.approvals.isEligible(principal, record))) return notEligible
-    if (needsAttestation(record))
+    if (attestedFor(record, principal.id))
       return { refused: { code: 'decide-on-phone', message: 'the decision of this approval is made on the phone' } }
     try {
       const after = await this.approvals.decide(approvalId, principal, decision, note)
@@ -1408,7 +1414,12 @@ export class AyniAgent {
         record.approverIds = [...(record.approverIds ?? []), principal.id]
         await this.approvals.save(record)
       }
-      await phone.adapter.openApprovalFlow(phone.session, record, this.notificationsLinkOf(record))
+      await phone.adapter.openApprovalFlow(
+        phone.session,
+        record,
+        await this.notificationsLinkFor(record, principal),
+        principal.id
+      )
       const now = Date.now()
       for (const [k, at] of this.resentAt) if (now - at >= APPROVAL_RESEND_INTERVAL_MS) this.resentAt.delete(k)
       this.resentAt.set(key, now)
@@ -1419,12 +1430,13 @@ export class AyniAgent {
   }
 
   /**
-   * The app link of the Notifications that list an approval (PROF-LINK-005), the `link` of its `authorize` flow: those of
-   * the space for a tool of a space, the agent's for any other.
+   * The app link of the Notifications that list an approval for an approver (PROF-LINK-005), the `link` of its
+   * `authorize` flow: those of the space for a tool of a space and a member of it, the agent's for any other
+   * (INTX-APPR-022).
    */
-  public notificationsLinkOf(record: ApprovalRecord): string {
+  public async notificationsLinkFor(record: ApprovalRecord, approver: Principal): Promise<string> {
     const base = (this.pack.channels?.agui?.appLinkBase ?? DEFAULT_APP_LINK_BASE).replace(/\/*$/, '/')
-    const place = placeOf(record)
+    const place = await this.notifications.placeOf(record, approver)
     const path = place ? `service/${this.did}/spaces/${place}/notifications` : `service/${this.did}/notifications`
     return `${base}${path}?approval=${encodeURIComponent(record.id)}`
   }
@@ -1440,14 +1452,21 @@ export class AyniAgent {
       viewer.id !== record.requesterId &&
       !record.decisions.some((d) => d.approverId === viewer.id) &&
       (await this.approvals.isEligible(viewer, record))
-    const space = record.ownerApproval && record.spaceId ? await this.spaces.find(record.spaceId) : undefined
+    const space = record.spacePolicy && record.spaceId ? await this.spaces.find(record.spaceId) : undefined
     const purpose = record.purpose ? this.pack.purposes?.find((p) => p.id === record.purpose) : undefined
+    // a tool of a space's: its policy as a member reads it, and where it stands (PROF-TOOL-037, §3.12)
+    const policy =
+      record.spacePolicy && space && this.governance
+        ? await this.governance.memberView(space, record.spacePolicy)
+        : record.spacePolicy
+          ? { approvers: record.spacePolicy.approvers.map((e) => ({ ...e })), threshold: record.spacePolicy.threshold }
+          : { type: record.policy.type, value: record.policy.value, vetoOnRefusal: record.policy.vetoOnRefusal }
     return {
       approvalId: record.id,
       kind: record.kind,
       tool: record.toolName,
       requester: { displayName: record.requesterName, role: record.requesterRole },
-      policy: { type: record.policy.type, value: record.policy.value, vetoOnRefusal: record.policy.vetoOnRefusal },
+      policy,
       expiresAt: record.expiresAt,
       status: record.status,
       own: record.requesterId === viewer?.id,
@@ -1462,6 +1481,8 @@ export class AyniAgent {
       ...(record.grantExpiresAt ? { grantExpiresAt: record.grantExpiresAt } : {}),
       ...(record.action ? { action: await this.actionFor(record, viewer) } : {}),
       ...(space ? { space: { id: space.id, title: space.title } } : {}),
+      ...(record.progress ? { progress: record.progress } : {}),
+      ...(record.reason ? { reason: record.reason } : {}),
     }
   }
 
@@ -1491,15 +1512,17 @@ export class AyniAgent {
       if (change !== 'created') await this.gate?.onConfirmationChanged(record)
       return
     }
-    await this.approvalPhones(record, change).catch((err) =>
-      this.logger.warn({ err, approvalId: record.id }, 'the phones of the approvers were not told')
-    )
+    // an approval that moved to a new owner: its phones were told where it moved (SPACE-MEMB-012)
+    if (change !== 'moved')
+      await this.approvalPhones(record, change).catch((err) =>
+        this.logger.warn({ err, approvalId: record.id }, 'the phones of the approvers were not told')
+      )
     if (change !== 'created') await this.requesterCardChanged(record, change)
     await this.notifications
       .changed(record)
       .catch((err) => this.logger.warn({ err, approvalId: record.id }, 'the notifications were not told'))
     await this.approvalMarks(record)
-    if (change === 'created' || change === 'decision') return
+    if (change === 'created' || change === 'decision' || change === 'moved') return
     // a tool call's approval decided, cancelled or expired: it runs, or its record says what became of it (TOOL-CALL-009)
     if (record.sourceId && record.kind === 'sensitivity') {
       await this.gate?.onApprovalDecided(record, (session) => new RouterSink(this, session))
@@ -1516,12 +1539,7 @@ export class AyniAgent {
    */
   private async approvalPhones(record: ApprovalRecord, change: ApprovalChange): Promise<void> {
     if (change === 'created') {
-      const link = this.notificationsLinkOf(record)
-      for (const id of record.approverIds ?? []) {
-        const approver = await this.principals.get(id)
-        const phone = approver ? await this.router.approvalPhone(approver) : undefined
-        if (phone) await phone.adapter.openApprovalFlow(phone.session, record, link)
-      }
+      for (const id of record.approverIds ?? []) await this.approvalPhoneOpen(record, id)
       return
     }
     const ended = record.status !== 'PENDING'
@@ -1540,6 +1558,27 @@ export class AyniAgent {
       const phone = approver ? await this.router.approvalPhone(approver) : undefined
       if (phone) await phone.adapter.closeApprovalFlow(phone.session, record, outcome, reason)
     }
+  }
+
+  /** An approver's phone takes the `authorize` flow of an approval, linked to the Notifications that list it for them. */
+  public async approvalPhoneOpen(record: ApprovalRecord, approverId: string): Promise<void> {
+    const approver = await this.principals.get(approverId)
+    const phone = approver ? await this.router.approvalPhone(approver) : undefined
+    if (approver && phone)
+      await phone.adapter.openApprovalFlow(
+        phone.session,
+        record,
+        await this.notificationsLinkFor(record, approver),
+        approverId
+      )
+  }
+
+  /** An approver's phone holds the flow of an approval no more: it moved to another approver (SPACE-MEMB-012). */
+  public async approvalPhoneClose(record: ApprovalRecord, approverId: string): Promise<void> {
+    const approver = await this.principals.get(approverId)
+    const phone = approver ? await this.router.approvalPhone(approver) : undefined
+    if (phone)
+      await phone.adapter.closeApprovalFlow(phone.session, record, 'cancelled', 'The request moved to the new owner.')
   }
 
   /**

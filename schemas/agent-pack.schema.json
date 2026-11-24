@@ -1033,6 +1033,35 @@
               "description": "How long a confirmation card waits (TOOL-CALL-004)."
             }
           }
+        },
+        "spaces": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The approval policies of the tools of spaces (TOOL-CAT-023, D140): the default a tool takes until the owner sets one, the bounds the owner works within, and the timeouts of a space per kind of approval (SPACE-DEF-008).",
+          "properties": {
+            "default": { "$ref": "#/$defs/packApprovalPolicy" },
+            "minApprovals": { "type": "integer", "minimum": 1, "default": 1 },
+            "allowedApprovers": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "kinds": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": { "type": "string", "enum": ["owner", "person", "member", "role", "department"] }
+                },
+                "roles": { "$ref": "#/$defs/roleList" }
+              }
+            },
+            "attested": { "type": "string", "enum": ["optional", "required"], "default": "optional" },
+            "timeouts": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "tool-call": { "$ref": "#/$defs/timeoutBounds" }
+              }
+            }
+          }
         }
       }
     },
@@ -1523,6 +1552,11 @@
                 "items": { "type": "string" },
                 "description": "The roles of the people who may create a space from the template."
               },
+              "stewards": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "The roles of the stewards of the template's spaces, who name an owner of a space that has none, or on request (SPACE-MEMB-011)."
+              },
               "membership": {
                 "description": "A list the owner keeps, or a rule with exactly one of department, group or organization: true; a template of kind organization has the rule organization: true.",
                 "oneOf": [
@@ -1778,7 +1812,53 @@
         },
         "stepUp": {
           "$ref": "#/$defs/stepUp"
+        },
+        "approval": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The bounds and default of the tool's approval policy in a space, tighter than approvals.spaces (TOOL-CAT-023).",
+          "properties": {
+            "minApprovals": { "type": "integer", "minimum": 1 },
+            "attested": { "type": "string", "enum": ["optional", "required"] },
+            "default": { "$ref": "#/$defs/packApprovalPolicy" }
+          }
         }
+      }
+    },
+    "packApprovalPolicy": {
+      "description": "An approval policy of a tool of a space as the agent-pack writes it (INTX-APPR-020); it names no person and holds no timeout.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "approvers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "required"],
+            "properties": {
+              "kind": { "type": "string", "enum": ["owner", "person", "member", "role", "department"] },
+              "role": { "type": "string", "minLength": 1 },
+              "department": { "type": "string", "minLength": 1 },
+              "required": { "type": "boolean" }
+            }
+          }
+        },
+        "threshold": { "type": "integer", "minimum": 1 },
+        "refusal": { "type": "string", "enum": ["any", "required"] },
+        "attested": { "type": "boolean" },
+        "whenApproverAsks": { "type": "string", "enum": ["another-approver", "own-confirmation"] }
+      }
+    },
+    "timeoutBounds": {
+      "description": "The default and the bounds, in minutes, of a kind of approval's timeout in a space (SPACE-DEF-008).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default": { "type": "integer", "minimum": 1 },
+        "min": { "type": "integer", "minimum": 1 },
+        "max": { "type": "integer", "minimum": 1 }
       }
     },
     "stepUp": {

@@ -465,14 +465,20 @@ async function play(w: World, id: CaseId): Promise<{ who: Person; last: string }
     for (const r of await w.running.agent.store.approvals.list({})) known.add(r.id)
   }
   if (id === 'confirmation') {
-    // the owner's own post in his space is his confirmation (INTX-APPR-005): allowed, it runs
+    // the owner's own post in his space, its one approver: his own confirmation on his phone, attested, a self-approval
+    // (INTX-APPR-023); confirmed, it runs
     const who = await conversationIn(w, w.owner)
     await approvals()
-    w.scripted.script = [call(FIRST_POST), { text: 'It is posted.' }]
-    const turn = say(w, who, `Please post this on X: ${FIRST_POST}`)
-    const card = await pendingOf(w, known)
-    await say(w, who, '', { kind: 'approval.decide', approvalId: card.id, decision: 'approve', scope: 'once' })
-    await turn
+    w.scripted.script = [call(FIRST_POST), { text: 'Confirm it on your phone and it is posted.' }]
+    await say(w, who, `Please post this on X: ${FIRST_POST}`)
+    const own = await pendingOf(w, known)
+    await w.phone.authorize(w.owner.connectionId, 'approved', { approvalId: own.id })
+    await until(async () => {
+      const done = own.callId ? await w.running.agent.store.toolCalls.get(own.callId) : undefined
+      return !!done && done.outcome !== 'pending'
+    }, 10_000)
+    w.scripted.script = [{ text: 'Yes: it is posted on X.' }]
+    await say(w, who, 'Is it posted?')
     return { who, last: `Now post this one too: ${NEW_POST}` }
   }
   const who = await conversationIn(w, w.member)

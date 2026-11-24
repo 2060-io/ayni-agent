@@ -506,6 +506,49 @@ export interface ToolDeclaration {
   call?: CallRule
   untrusted?: boolean
   stepUp?: StepUp
+  /** the bounds and the default of its approval policy in a space, tighter than `approvals.spaces` (TOOL-CAT-023) */
+  approval?: ToolApprovalBounds
+}
+
+/** An entry of an approval policy as the agent-pack may write it: never a `person` (TOOL-CAT-023). */
+export interface PackApproverEntry {
+  kind: 'owner' | 'person' | 'member' | 'role' | 'department'
+  role?: string
+  department?: string
+  required: boolean
+}
+
+/** An approval policy of a tool of a space as the agent-pack writes it (INTX-APPR-020). */
+export interface PackApprovalPolicy {
+  approvers?: PackApproverEntry[]
+  threshold?: number
+  refusal?: 'any' | 'required'
+  attested?: boolean
+  whenApproverAsks?: 'another-approver' | 'own-confirmation'
+}
+
+/** One tool's bounds of its approval policy in a space (TOOL-CAT-023, D140). */
+export interface ToolApprovalBounds {
+  minApprovals?: number
+  attested?: 'optional' | 'required'
+  /** the fields it changes of `approvals.spaces.default` */
+  default?: PackApprovalPolicy
+}
+
+/** The defaults and bounds of a kind of approval's timeout, in minutes (SPACE-DEF-008, D138). */
+export interface TimeoutBounds {
+  default?: number
+  min?: number
+  max?: number
+}
+
+/** `approvals.spaces` (TOOL-CAT-023, D140): the policies of the tools of spaces, their bounds, the timeouts. */
+export interface SpaceApprovalBounds {
+  default?: PackApprovalPolicy
+  minApprovals?: number
+  allowedApprovers?: { kinds?: PackApproverEntry['kind'][]; roles?: string[] }
+  attested?: 'optional' | 'required'
+  timeouts?: Record<string, TimeoutBounds>
 }
 
 /** What every source of `tools.sources` may declare (D101, TOOL-CAT-001), whatever its type. */
@@ -646,6 +689,8 @@ export interface SpaceTemplate {
   kind: 'team' | 'organization'
   /** the roles of the people who may create a space from it */
   creators: string[]
+  /** the roles of its stewards, who name an owner of a space of it that has none, or on request (SPACE-MEMB-011) */
+  stewards?: string[]
   /** by a list the owner keeps, or by a rule over verified facts of the people of the home organization */
   membership: { mode: 'list' } | { mode: 'rule'; rule: { department?: string; group?: string; organization?: true } }
   rules?: {
@@ -733,6 +778,8 @@ export interface AgentPack {
     approvers?: string[]
     /** how long a confirmation card waits for the person (TOOL-CALL-004): 300 seconds by default */
     confirmation?: { timeoutSeconds?: number }
+    /** the policies of the tools of spaces: a default, its bounds, the timeouts of a space (TOOL-CAT-023) */
+    spaces?: SpaceApprovalBounds
   }
   sessions?: {
     idleTimeoutSeconds?: number

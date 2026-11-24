@@ -380,6 +380,11 @@ export interface SpaceRules {
   allowedProviders: string[]
   /** its members may read the conversations their authors share with it */
   handover: boolean
+  /**
+   * how many minutes an approval of the space waits, per kind of approval (SPACE-DEF-008, D138): in this version
+   * `tool-call`, the approval of a call of one of its tools; none for Personal
+   */
+  approvalTimeouts?: Record<string, number>
 }
 
 /** Membership by rule over verified facts, or by a list the owners keep. */
@@ -401,8 +406,13 @@ export interface Space {
   language: string | null
   rules: SpaceRules
   membership: SpaceMembership
-  /** the Principals who own it */
-  ownerIds: string[]
+  /**
+   * the one Principal who owns it and controls it (D135, SPACE-MEMB-009); none once the owner's entry left the directory
+   * with no successor, until a steward names one (SPACE-MEMB-011)
+   */
+  ownerPrincipalId?: string
+  /** the person the owner named to become the owner when the owner's entry leaves the directory (SPACE-MEMB-010) */
+  successorPrincipalId?: string
   createdAt: string
   updatedAt: string
   /** in the store only: title, purpose and brief under a key of the space */
@@ -454,6 +464,8 @@ export type SpaceActivityAction =
   | 'invited'
   | 'removed'
   | 'owner-changed'
+  | 'successor-set'
+  | 'successor-cleared'
   | 'shared'
   | 'unshared'
 
@@ -474,6 +486,77 @@ export interface SpaceActivity {
   conversationId?: string
   /** the tool source a change of the space's tools concerns (TOOL-SPACE-010); never a value of its account */
   sourceId?: string
+  /** an `owner-changed`: how (SPACE-MEMB-012), and the reason a steward gave */
+  how?: OwnerChange
+  reason?: string
+}
+
+/** How the owner of a space changed (SPACE-MEMB-012): handed over, by succession, or named by a steward. */
+export type OwnerChange = 'handover' | 'succession' | 'steward'
+
+// ---- approval policies of the tools of a space (ayni-spec D137 to D142) -------------------------------------------------
+
+export type ApproverKind = 'owner' | 'person' | 'member' | 'role' | 'department'
+
+/**
+ * One approver of a policy (INTX-APPR-020): the space's owner, one member (`memberId` in a list space, `directoryId` in a
+ * rule space), every active member, the holders of a role, the people of a department; required or optional.
+ */
+export interface ApproverEntry {
+  kind: ApproverKind
+  memberId?: string
+  directoryId?: string
+  role?: string
+  department?: string
+  required: boolean
+}
+
+/** The approval policy of a tool of a space whose rule is `approval` (D137, D139, INTX-APPR-020); it holds no timeout. */
+export interface SpaceApprovalPolicy {
+  approvers: ApproverEntry[]
+  /** the number of approvals in total, required ones included */
+  threshold: number
+  /** `any`: one refusal rejects; `required`: only the refusal of a person a required entry names */
+  refusal: 'any' | 'required'
+  /** each decision is made on the phone, under its OS authentication */
+  attested: boolean
+  /** whether an approver who makes the request may count by their own confirmation (INTX-APPR-023) */
+  whenApproverAsks: 'another-approver' | 'own-confirmation'
+}
+
+/** Where an approval of a tool of a space stands (INTX-APPR-026, D142): the approvals counted, the entries not satisfied. */
+export interface ApprovalProgress {
+  threshold: number
+  approvals: number
+  waitingFor: { kind: ApproverKind; name?: string; role?: string; department?: string; required: boolean }[]
+}
+
+export type GovernanceNoticeKind = 'owner-changed' | 'policy-attention' | 'no-approver' | 'space-without-owner'
+
+/**
+ * A notice of a space's governance in a person's Notifications (INTX-APPR-027, D142): read-only, carrying no content of
+ * any conversation. `policy-attention` and `space-without-owner` wait for the person until `resolvedAt`.
+ */
+export interface GovernanceNotice {
+  id: string
+  principalId: string
+  spaceId: string
+  kind: GovernanceNoticeKind
+  at: string
+  /** what the kind needs, by name: never a value of a conversation */
+  subject: {
+    space: { id: string; title: string }
+    how?: OwnerChange
+    from?: { name: string } | null
+    to?: { name: string }
+    reason?: string
+    tool?: { source: string; name: string; title: string }
+    entries?: ApprovalProgress['waitingFor']
+    requester?: { displayName: string }
+    template?: { id: string; title: string }
+    formerOwner?: { name: string } | null
+  }
+  resolvedAt?: string
 }
 
 /** The actor of what a reload of the user directory does in a space (SPACE-MEMB-008). */
@@ -592,6 +675,13 @@ export interface ApprovalDecision {
   ts: string
   /** how the approver authenticated on the device when the decision came through an `authorize` flow (D58) */
   attestation?: { method: 'biometric' | 'passcode' | 'none'; at: string }
+  /** a requester's own confirmation of their own request (INTX-APPR-023) */
+  self?: boolean
+  /**
+   * an approval of a tool of a space: the indexes of its policy's entries that named the approver when they decided, which
+   * it keeps satisfying whatever becomes of that person (INTX-APPR-021, INTX-APPR-025)
+   */
+  satisfies?: number[]
 }
 
 export interface ApprovalRecord {
@@ -629,8 +719,12 @@ export interface ApprovalRecord {
   /** a tool call's: its source, and the action as its card shows it, sealed in the store (INTX-APPR-014) */
   sourceId?: string
   action?: ToolAction
-  /** the space's owner approves it, whatever the roles (INTX-APPR-004) */
-  ownerApproval?: boolean
+  /** a tool of a space's: the policy it was asked under (D137, INTX-APPR-026); its approvers are the people it names */
+  spacePolicy?: SpaceApprovalPolicy
+  /** a tool of a space's: where it stands, updated at each decision (INTX-APPR-026) */
+  progress?: ApprovalProgress
+  /** `no-approver`: refused at once, nobody else could decide it (INTX-APPR-024) */
+  reason?: 'no-approver'
   /** a confirmation: whether its card offers "Allow for this conversation" (PROF-TOOL-007) */
   allowForConversation?: boolean
   /** a confirmation allowed: for this call, or for the conversation (INTX-APPR-012) */
@@ -819,6 +913,8 @@ export interface PendingToolChange {
   /** what the change sets: bindings, rules; never a value of the account, which is sealed apart */
   bindings?: Record<string, string>
   calls?: Record<string, 'none' | 'confirm' | 'approval' | 'off'>
+  /** the approval policies the change sets, each whole, by tool (TOOL-SPACE-018, TOOL-SPACE-019) */
+  approvals?: Record<string, SpaceApprovalPolicy>
   /**
    * the values of the fields of the account the change sets, sealed together under a key of their own, destroyed when the
    * change is dropped (D102)
@@ -853,6 +949,8 @@ export interface SpaceToolRecord {
   bindingLabels?: Record<string, string>
   /** the owner's rules, never looser than the pack's (TOOL-SPACE-006) */
   calls: Record<string, 'none' | 'confirm' | 'approval' | 'off'>
+  /** the owner's approval policies, by tool, for a tool whose rule is `approval`; none: the pack's default (TOOL-SPACE-018) */
+  approvals?: Record<string, SpaceApprovalPolicy>
   pendingChange?: PendingToolChange
   updatedAt: string
   updatedBy?: string

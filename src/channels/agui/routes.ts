@@ -788,7 +788,15 @@ export class AgUiRoutes {
         ...(space.membership.mode === 'rule' ? { rule: space.membership.rule } : {}),
         memberCount: this.agent.spaces.memberCount(space, members, ctx.principals),
       },
-      owner: { name: this.nameOf(ctx.principals, space.ownerIds[0] ?? '') },
+      // null while it has no owner (SPACE-MEMB-011); its successor to its owner alone (PROF-SPACE-008)
+      owner: space.ownerPrincipalId ? { name: this.nameOf(ctx.principals, space.ownerPrincipalId) } : null,
+      ...(access.role === 'owner' && !personal
+        ? {
+            successor: space.successorPrincipalId
+              ? { name: this.nameOf(ctx.principals, space.successorPrincipalId) }
+              : null,
+          }
+        : {}),
       role: access.role ?? access.member?.role ?? 'member',
       state: access.left ? 'left' : 'active',
       unread: mine.reduce((sum, c) => sum + (c.unread ?? 0), 0),
@@ -826,6 +834,7 @@ export class AgUiRoutes {
         lawfulBasis: resolved.lawfulBasis,
         allowedProviders: resolved.allowedProviders,
         handover: resolved.handover,
+        approvalTimeouts: resolved.approvalTimeouts,
       },
     }
   }
@@ -850,6 +859,23 @@ export class AgUiRoutes {
       ...(a.conversationId ? { conversationId: a.conversationId } : {}),
       // the source of a change of the space's tools, never a value of its account (PROF-TOOL-006)
       ...(a.sourceId ? { tool: { source: a.sourceId, title: this.titleOf(a.sourceId) } } : {}),
+      // how the owner changed, and a steward's reason (SPACE-MEMB-008, PROF-SPACE-009)
+      ...(a.how ? { how: a.how } : {}),
+      ...(a.reason ? { reason: a.reason } : {}),
+    }
+  }
+
+  /** A space as a steward reads it (PROF-SPACE-009): its title, template, kind, owner, successor and size; nothing else. */
+  private async stewardedInfo(space: Space, principals: Principal[]) {
+    const rows = await this.agent.spaces.memberRows(space.id)
+    return {
+      id: space.id,
+      title: space.title,
+      templateId: space.templateId,
+      kind: space.kind,
+      owner: space.ownerPrincipalId ? { name: this.nameOf(principals, space.ownerPrincipalId) } : null,
+      successor: space.successorPrincipalId ? { name: this.nameOf(principals, space.successorPrincipalId) } : null,
+      memberCount: this.agent.spaces.memberCount(space, rows, principals),
     }
   }
 
@@ -980,16 +1006,62 @@ export class AgUiRoutes {
     )
 
     // PROF-SPACE-006, SPACE-MEMB-007: a member of a list space by `memberId`; a person the rule of a rule space matches,
-    // who holds a Principal, by `directoryId`
+    // who holds a Principal, by `directoryId`. From a steward of the space's template who is not its owner, with a reason
+    // (SPACE-MEMB-011, PROF-SPACE-009)
     app.post(
       `${base}/spaces/:spaceId/owner`,
       handle(async ({ principal }, request) => {
         const { spaceId } = request.params as { spaceId: string }
-        const { memberId, directoryId } = (request.body ?? {}) as { memberId?: unknown; directoryId?: unknown }
+        const body = (request.body ?? {}) as { memberId?: unknown; directoryId?: unknown; reason?: unknown }
+        const { memberId, directoryId } = body
+        const space = await this.agent.spaces.find(spaceId)
+        const owner = !!space && space.ownerPrincipalId === principal.id
+        if (space && !owner && (this.agent.spaces.isSteward(principal, space) || body.reason !== undefined)) {
+          const named = await this.agent.spaces.stewardNames(principal, spaceId, { memberId, directoryId }, body.reason)
+          return this.stewardedInfo(named, await this.agent.store.principals.list())
+        }
         if (memberId === undefined && directoryId === undefined)
           throw new SpaceError('memberId or directoryId is required', 'bad-request')
         await this.agent.spaces.transferOwner(principal, spaceId, { memberId, directoryId })
         return this.spaceDetail(await visible(principal, spaceId), await this.spaceViewContext(principal))
+      })
+    )
+
+    // PROF-SPACE-008, SPACE-MEMB-010: the owner names the successor, or clears it
+    app.put(
+      `${base}/spaces/:spaceId/successor`,
+      handle(async ({ principal }, request) => {
+        const { spaceId } = request.params as { spaceId: string }
+        const { memberId, directoryId } = (request.body ?? {}) as { memberId?: unknown; directoryId?: unknown }
+        await this.agent.spaces.setSuccessor(principal, spaceId, { memberId, directoryId })
+        return this.spaceDetail(await visible(principal, spaceId), await this.spaceViewContext(principal))
+      })
+    )
+    app.delete(
+      `${base}/spaces/:spaceId/successor`,
+      handle(async ({ principal }, request) => {
+        const { spaceId } = request.params as { spaceId: string }
+        await this.agent.spaces.removeSuccessor(principal, spaceId)
+        return this.spaceDetail(await visible(principal, spaceId), await this.spaceViewContext(principal))
+      })
+    )
+
+    // PROF-SPACE-009, SPACE-MEMB-011: the spaces of the templates a steward stewards, and who could own one
+    app.get(
+      `${base}/stewardship`,
+      handle(async ({ principal }) => {
+        const principals = await this.agent.store.principals.list()
+        const spaces = []
+        for (const space of await this.agent.spaces.stewarded(principal))
+          spaces.push(await this.stewardedInfo(space, principals))
+        return { spaces }
+      })
+    )
+    app.get(
+      `${base}/spaces/:spaceId/owner/candidates`,
+      handle(async ({ principal }, request) => {
+        const { spaceId } = request.params as { spaceId: string }
+        return { candidates: await this.agent.spaces.candidates(principal, spaceId, (p) => this.personName(p)) }
       })
     )
 
@@ -1434,12 +1506,12 @@ export class AgUiRoutes {
         await this.streams.publish(session.id, ev.custom(CUSTOM_EVENT.connectionsChanged, { ...value }))
   }
 
-  /** A change of a space's tools applied or was dropped: every bound session of its owners hears it (PROF-TOOL-006). */
+  /** A change of a space's tools applied or was dropped: every bound session of its owner hears it (PROF-TOOL-006). */
   public async announceSpaceTools(space: Space, value: SpaceToolsChanged): Promise<void> {
-    for (const ownerId of space.ownerIds)
-      for (const session of await this.agent.store.sessions.listByPrincipal(ownerId, ['bound']))
-        if (session.channelType === 'ag-ui')
-          await this.streams.publish(session.id, ev.custom(CUSTOM_EVENT.spaceToolsChanged, { ...value }))
+    if (!space.ownerPrincipalId) return
+    for (const session of await this.agent.store.sessions.listByPrincipal(space.ownerPrincipalId, ['bound']))
+      if (session.channelType === 'ag-ui')
+        await this.streams.publish(session.id, ev.custom(CUSTOM_EVENT.spaceToolsChanged, { ...value }))
   }
 
   /** Events to every bound session of a conversation, outside a turn: an allowance ended, a card expired. */
