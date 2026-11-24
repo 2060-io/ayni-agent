@@ -163,7 +163,17 @@ function world(options: { takesCalls?: boolean; faces?: boolean } = {}): World {
         findByActor: async (actor) => [...w.principals.values()].find((p) => p.actorIdentity === actor),
       },
       enrolments: w.enrolments,
-      ...(options.faces ? { faceSteps: { available: true } as never } : {}),
+      // a call is never offered in these tests: one would be recorded, and fail the step
+      ...(options.faces
+        ? {
+            faceSteps: {
+              available: true,
+              start: rec('startFaceCall', () => {
+                throw new Error('no call in the tests')
+              }),
+            } as never,
+          }
+        : {}),
       mailer: {
         send: async (message: { to: string; subject: string; text: string }) => void w.mails.push(message),
       } as never,
@@ -255,6 +265,8 @@ describe('the request (FLOW-SIGNIN-001, IDENT-AUTH-010, IDENT-RES-020)', () => {
     }
     expect(open.kind).toBe('authenticate')
     expect(open.origin).toEqual({ channel: 'none' })
+    // an open carries no requires: the plugin 0.3.0 answers 400 to a body that holds it
+    expect(open).not.toHaveProperty('requires')
     expect(Date.parse(open.expiresTime) - Date.now()).toBeGreaterThan(14.9 * 60_000)
     const request = exchangeOf(w).request
     // a face match only to a phone that takes calls (IDENT-AUTH-010): [email, face] is not offered, nor the face method
@@ -556,6 +568,151 @@ describe('the authenticator app and the passkey (IDENT-AUTH-012, IDENT-AUTH-013)
     await p.chooses(['key'])
     await p.answers('1', { assertion: makePasskey().assertion(String(stepsSent(w)[0].challenge)) })
     expect(await asking).toEqual({ outcome: 'not-accepted', code: 'no-match' })
+  })
+})
+
+describe('a declined face-match consent (D152, IDENT-AUTH-011, FLOW-SIGNIN-008/012, O91)', () => {
+  /** Ana chooses [email, face], passes the email step, and declines the consent of the face step (step 2). */
+  const declineFace = async (w: World, p: ReturnType<typeof phone>) => {
+    await p.chooses(['email', 'face'])
+    await p.answers('1', { address: 'ana.rios@northwind.example', locale: 'en' })
+    await p.answers('1', { code: codeIn(w.mails[0]) })
+    expect(stepsSent(w).at(-1)).toMatchObject({ step: '2', method: 'face', type: 'face-match', ask: 'consent' })
+    await p.answers('2', { consent: false })
+  }
+
+  it('ends the face step consent-declined with no call and no refusal, and runs the new combination in the same flow', async () => {
+    const w = world({ takesCalls: true, faces: true })
+    const p = phone(w)
+    const asking = ask(w)
+    await settle()
+    await declineFace(w, p)
+    // the only result of a declined consent: failed, consent-declined; no call offered, no problem report, open flow
+    expect(resultsSent(w)).toEqual([
+      { step: '1', outcome: 'passed' },
+      { step: '2', outcome: 'failed', reason: 'consent-declined' },
+    ])
+    expect(w.calls.filter((c) => c.method === 'startFaceCall')).toEqual([])
+    expect(problems(w)).toEqual([])
+    expect(closes(w)).toEqual([])
+    // the new choice on the same request: every step runs again, the email that passed included, numbered on from 3
+    await p.chooses(['email'])
+    expect(stepsSent(w).at(-1)).toEqual({ step: '3', method: 'email', type: 'email', ask: 'address' })
+    await p.answers('3', { address: 'ana.rios@northwind.example', locale: 'en' })
+    expect(w.mails).toHaveLength(2)
+    expect(stepsSent(w).at(-1)).toMatchObject({ step: '3', ask: 'code' })
+    await p.answers('3', { code: codeIn(w.mails[1]) })
+    const attempt = await asking
+    expect(attempt).toMatchObject({
+      outcome: 'accepted',
+      facts: {
+        actorIdentity: 'org:EE:1|directory|p-1',
+        authentication: {
+          combination: ['email'],
+          types: ['email'],
+          // the combination left stays in the steps, its face step failed consent-declined (agent §5.10)
+          steps: [
+            { method: 'email', type: 'email', outcome: 'passed' },
+            { method: 'face', type: 'face-match', outcome: 'failed', reason: 'consent-declined' },
+            { method: 'email', type: 'email', outcome: 'passed' },
+          ],
+        },
+      },
+    })
+    // what the new combination proved, once: nothing of the face, the address of the step that ran last
+    if (attempt.outcome !== 'accepted') throw new Error(attempt.outcome)
+    expect(attempt.facts.moreEvidence).toHaveLength(1)
+    expect(attempt.facts.moreEvidence?.[0]).toMatchObject({ kind: 'email', requestRef: exchangeOf(w).threadId })
+    expect(resultsSent(w).at(-1)).toEqual({ step: '3', outcome: 'passed' })
+    expect(closes(w)).toEqual(['completed'])
+    expect(problems(w)).toEqual([])
+  })
+
+  it('gives the new choice five minutes of its own from the step result that ended the declined step', async () => {
+    const w = world({ takesCalls: true, faces: true })
+    w.authenticator.timings.choiceMs = 400
+    const p = phone(w)
+    const started = Date.now()
+    const asking = ask(w)
+    await settle()
+    // the choice comes in time, and the steps take longer than the choice's time from the request
+    await p.chooses(['email', 'face'])
+    await p.answers('1', { address: 'ana.rios@northwind.example', locale: 'en' })
+    await settle(300)
+    await p.answers('1', { code: codeIn(w.mails[0]) })
+    await settle(150)
+    await p.answers('2', { consent: false })
+    expect(Date.now() - started).toBeGreaterThan(400)
+    // within the choice's time from the decline, but after it from the request: taken
+    await settle(150)
+    await p.chooses(['email'])
+    expect(stepsSent(w).at(-1)).toMatchObject({ step: '3', method: 'email', ask: 'address' })
+    expect(closes(w)).toEqual([])
+    await p.answers('3', { address: 'ana.rios@northwind.example', locale: 'en' })
+    await p.answers('3', { code: codeIn(w.mails[1]) })
+    expect(await asking).toMatchObject({ outcome: 'accepted' })
+  })
+
+  it('leaves the request unanswered when no new choice comes in time, and closes the flow expired', async () => {
+    const w = world({ takesCalls: true, faces: true })
+    w.authenticator.timings.choiceMs = 150
+    const p = phone(w)
+    const asking = ask(w)
+    await settle()
+    await declineFace(w, p)
+    const declinedAt = Date.now()
+    expect(await asking).toEqual({ outcome: 'unanswered' })
+    // the time counts from the step result, not from the request
+    expect(Date.now() - declinedAt).toBeGreaterThanOrEqual(100)
+    expect(closes(w)).toEqual(['expired'])
+    expect(problems(w)).toEqual([])
+  })
+
+  it('keeps the fifteen minutes of the flow: a new choice gets no more than the flow has left', async () => {
+    const w = world({ takesCalls: true, faces: true })
+    w.authenticator.timings.flowMs = 500
+    w.authenticator.timings.choiceMs = 60_000
+    const p = phone(w)
+    const started = Date.now()
+    const asking = ask(w)
+    await settle()
+    await declineFace(w, p)
+    expect(await asking).toEqual({ outcome: 'unanswered' })
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(closes(w)).toEqual(['expired'])
+  })
+
+  it('refuses with malformed a new choice that holds the declined method', async () => {
+    const w = world({ takesCalls: true, faces: true })
+    const p = phone(w)
+    const asking = ask(w)
+    await settle()
+    await declineFace(w, p)
+    // the DIDComm agent fails such a choice; the agent refuses it too when it is reported as chosen
+    await p.chooses(['email', 'face'])
+    expect(await asking).toEqual({ outcome: 'declined' })
+    expect(problems(w)).toEqual(['malformed'])
+    expect(stepsSent(w)).toHaveLength(3)
+  })
+
+  it('answers malformed to an exchange the DIDComm agent failed on a second choice that is not awaited (FLOW-SIGNIN-008)', async () => {
+    const w = world({ takesCalls: true, faces: true })
+    const p = phone(w)
+    const asking = ask(w)
+    await settle()
+    await p.chooses(['email'])
+    expect(stepsSent(w)).toEqual([{ step: '1', method: 'email', type: 'email', ask: 'address' }])
+    // a second choice while the email step runs: the plugin fails the exchange malformed
+    w.authenticator.onExchange({
+      ...exchangeOf(w),
+      state: 'failed',
+      errorCode: 'malformed',
+      errorDescription: 'the choice [email] comes while no choice is awaited',
+    })
+    expect(await asking).toEqual({ outcome: 'declined' })
+    expect(problems(w)).toEqual(['malformed'])
+    // the step is not ended on an exchange that failed: the problem report ends the flow
+    expect(resultsSent(w)).toEqual([])
   })
 })
 

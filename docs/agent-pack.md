@@ -159,7 +159,10 @@ identity:
   the current thirty seconds or the ones around them, each once, five tries. A passkey's step signs a challenge of 32
   bytes for the network's app-link domain (`channels.agui.appLinkBase`, `APP_LINK_BASE`), the person verified, its
   counter going on. A face step asks the consent, then offers a call under the flow id that the face-verification
-  service joins with the reference; nothing of the face is kept, only the audit fields of its evidence.
+  service joins with the reference; nothing of the face is kept, only the audit fields of its evidence. A person who
+  declines the consent ends the step `consent-declined`, with no call and nothing recorded, and chooses on the phone,
+  in the same flow, another accepted combination that does not hold that method, within five minutes (D152); all its
+  steps run, a method that passed before included.
 - **Enrolling an authenticator app or a passkey** (D129). A pack that enables a method of either type lets an
   identified person add one from the service's menu on the phone (an `enrol` flow); the status of an identified person
   lists the types they may enrol and those they enrolled. The agent enrols only on a connection authenticated within

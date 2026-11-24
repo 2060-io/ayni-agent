@@ -8,8 +8,9 @@
  * combinations that hold neither, and refuses the enrolment `not-eligible` when that does not complete. Then:
  *
  * - **Authenticator app:** a new secret, handed to the phone once (`secret`, `otpauth_uri`, 6 digits, 30 seconds) and
- *   kept sealed once the person types a code it gives; a wrong code is answered with the challenge again, three
- *   challenges in all, then the enrolment fails `not-valid`.
+ *   kept sealed once the person types a code it gives. Three codes in all (D155, FLOW-SIGNIN-014): a first and a second
+ *   wrong code are answered with a new challenge carrying the same secret, `error: "wrong-code"` and the codes left
+ *   (`tries_left`: 2, then 1; plugin 0.3.1), the third fails the enrolment `not-valid`.
  * - **Passkey:** the creation options for the relying party of the network's app-link domain; the attestation's key is
  *   kept, never a private key; one that does not verify fails the enrolment `not-valid`.
  *
@@ -39,8 +40,12 @@ import type { Logger } from '../../util/logger.js'
 import { type Authenticator, ENROL_RECENT_MS } from './authenticate.js'
 import type { EnrolChallengeBody, EnrolExchange, VsAgentClient } from './vsAgentClient.js'
 
-/** How many challenges an authenticator app's enrolment sends in all: the first, then one after each wrong code. */
-export const ENROL_CHALLENGES = 3
+/**
+ * The codes an authenticator app's enrolment takes in all (D155; the library's `ENROL_AUTHENTICATOR_APP_ATTEMPTS`,
+ * mirrored: the agent does not depend on Credo): a challenge for each, the first then one after each wrong code; the
+ * plugin refuses a fourth challenge.
+ */
+export const ENROL_AUTHENTICATOR_APP_ATTEMPTS = 3
 
 export interface EnrolDeps {
   pack: AgentPack
@@ -162,7 +167,9 @@ export class EnrolService {
     }
   }
 
-  private challengeOf(pending: Pending, principal: Principal): EnrolChallengeBody {
+  /** `previous`: the challenges already sent; after the first, the challenge says the code was wrong and how many
+   * codes are left, this one's included (D155, FLOW-SIGNIN-014; the plugin refuses a later challenge without them) */
+  private challengeOf(pending: Pending, principal: Principal, previous = 0): EnrolChallengeBody {
     const agent = this.deps.pack.metadata?.displayName ?? 'Ayni agent'
     const account = String(principal.identityAttributes.userName ?? 'you')
     if (pending.type === 'authenticator-app') {
@@ -174,6 +181,7 @@ export class EnrolService {
         otpauthUri: otpauthUri(secret, agent, account),
         digits: TOTP_DIGITS,
         period: TOTP_PERIOD_SECONDS,
+        ...(previous > 0 ? { error: 'wrong-code', triesLeft: ENROL_AUTHENTICATOR_APP_ATTEMPTS - previous } : {}),
       }
     }
     pending.challenge = randomBytes(32).toString('base64url')
@@ -206,12 +214,16 @@ export class EnrolService {
       const secret = Buffer.from(pending.secret ?? '', 'base64url')
       const counter = matchTotp(secret, String(exchange.answer?.code ?? ''), Date.now())
       if (counter === undefined) {
-        // a wrong code: the challenge again, three in all, then the enrolment fails (flow profile §6.4)
-        if (exchange.challenges >= ENROL_CHALLENGES) {
+        // a wrong code: a new challenge with the same secret, three codes in all, the third failing the enrolment
+        // `not-valid` (flow profile §6.4, FLOW-SIGNIN-014)
+        if (exchange.challenges >= ENROL_AUTHENTICATOR_APP_ATTEMPTS) {
           this.pending.delete(exchange.threadId)
           return this.refuse(pending.flowId, 'not-valid', 'The code was not right.')
         }
-        await this.deps.client.sendEnrolChallenge(exchange.threadId, this.challengeOf(pending, principal))
+        await this.deps.client.sendEnrolChallenge(
+          exchange.threadId,
+          this.challengeOf(pending, principal, exchange.challenges)
+        )
         return
       }
       this.pending.delete(exchange.threadId)

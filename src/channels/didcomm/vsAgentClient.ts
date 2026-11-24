@@ -98,7 +98,6 @@ export interface FlowRecord {
   description?: string
   origin: FlowOrigin
   expiresTime: string
-  requires?: string[]
   reason?: string
   references?: { type: string; id: string }[]
   errorCode?: string
@@ -121,7 +120,7 @@ export interface CarrierExchange {
   createdAt: string
 }
 
-// ---- authenticate/1.0 (flow profile §6.14, §6.4; the plugin's authenticate routes, credo-ts-ayni-flow 0.2.1) -------------
+// ---- authenticate/1.0 (flow profile §6.14, §6.4; the plugin's authenticate routes, credo-ts-ayni-flow 0.3.0) -------------
 
 /** Why the service asks a person to authenticate (flow profile §6.14). */
 export type AuthenticatePurpose = 'connection' | 'visitor' | 'step-up' | 'admin' | 'enrol'
@@ -174,7 +173,7 @@ export interface AuthenticateAnswerBody {
   }
 }
 
-/** One step of the combination chosen, as it stands on the DIDComm agent's record. */
+/** One step of a combination chosen, as it stands on the DIDComm agent's record. */
 export interface AuthenticateStepEntry {
   step: string
   method: string
@@ -193,8 +192,16 @@ export interface AuthenticateExchange {
   role: string
   state: string
   request: AuthenticateRequestBody
+  /** the combination chosen last: after a declined consent and a new choice, the new one (D152) */
   combination?: string[]
+  /** the steps of `combination`; a step id names a step within its attempt on the DIDComm agent's record */
   steps: AuthenticateStepEntry[]
+  /** the attempts before the current one, oldest first, each ended by a step `consent-declined` (plugin 0.3.0) */
+  earlierAttempts?: { combination: string[]; steps: AuthenticateStepEntry[] }[]
+  /** whether a choice is awaited: none was made yet, or the current step ended `consent-declined` */
+  awaitingChoice?: boolean
+  /** the methods whose consent the person declined: a new choice holds none of them */
+  declinedMethods?: string[]
   errorCode?: string
   errorDescription?: string
   createdAt: string
@@ -214,6 +221,9 @@ export interface EnrolChallengeBody {
   otpauthUri?: string
   digits?: number
   period?: number
+  /** on an authenticator app's challenge after a wrong code (plugin 0.3.1): `wrong-code` and the codes left */
+  error?: 'wrong-code'
+  triesLeft?: number
 }
 
 /** `EnrolExchangeDto` of the plugin: one enrolment; an authenticator app's secret is never on it. */
@@ -539,7 +549,6 @@ export class VsAgentClient {
     description?: string
     origin: FlowOrigin
     expiresTime: string
-    requires?: string[]
     /** the `open`'s app link, offered on the holder's sheet (flow profile §5.1, FLOW-CORE-011) */
     link?: string
   }): Promise<FlowRecord> {

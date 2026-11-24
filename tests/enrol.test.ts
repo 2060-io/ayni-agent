@@ -159,6 +159,12 @@ describe('an authenticator app (IDENT-AUTH-012, IDENT-AUTH-014)', () => {
     // the same secret each time: the person added it to their app already
     expect(new Set(challenges().map((c) => c.secret)).size).toBe(1)
     expect(challenges()).toHaveLength(3)
+    // the first says nothing of codes; each after a wrong code says so and how many are left (D155, plugin 0.3.1)
+    expect(challenges().map((c) => [c.error, c.triesLeft])).toEqual([
+      [undefined, undefined],
+      ['wrong-code', 2],
+      ['wrong-code', 1],
+    ])
     expect(problems()).toEqual(['not-valid'])
     expect(await enrolments.types('prn-ana')).toEqual([])
   })
