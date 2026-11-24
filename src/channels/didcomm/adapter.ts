@@ -416,6 +416,9 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
       ref: { type: 'approval', id: a.id },
     })
     try {
+      // an approval of a tool of a space is one of several decisions: the threshold, the approver's own request, the
+      // other entries as they are now; never sent again to show a later progress (FLOW-AUTH-004, INTX-APPR-026)
+      const approvals = await this.agent?.governance?.approvalsFor(a, approverId)
       await this.client.sendAuthorizeRequest({
         connectionId,
         flowId: flow.flowId,
@@ -426,6 +429,7 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
           scope: call?.scope ?? [`tool:${a.serverName ? `${a.serverName}.` : ''}${a.toolName}`],
           expiresAt: a.expiresAt,
           attested: attestedFor(a, approverId),
+          ...(approvals ? { approvals } : {}),
         },
       })
       await kv.set(key, flow.flowId)

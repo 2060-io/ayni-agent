@@ -29,7 +29,7 @@ Relative paths (`rag.sources[].path`) resolve from the pack directory.
 |---------|----------|---------------|------|
 | `schemaVersion` | yes | `"3.x"`; the loader refuses another major | CORE-PACK-004 |
 | `metadata` | yes | id, display name, description, tags | |
-| `identity` | yes | the agent's DID, user-agent gate, the authentication schema, organization patterns, roles, role rules, per-actor overrides, the file of the user directory | D30, D34, D37, D38, D79 |
+| `identity` | yes | the agent's DID, user-agent gate, the authentication (methods and combinations), organization patterns, roles, role rules, per-actor overrides, the file of the user directory | D30, D34, D37, D38, D79 |
 | `language` | yes | the one agent language; `language.agent` is also the language of the messages the agent's code writes itself (the email check's) for a person whose language is not known, and their fallback (decision 64) | D21, D94 |
 | `persona` | yes | system prompt, greeting, contextual menu | D46, CORE-PROMPT |
 | `llm` | yes | model provider and model | LLM-PROV |
@@ -58,16 +58,29 @@ Relative paths (`rag.sources[].path`) resolve from the pack directory.
 identity:
   homeBackingIdentity: did:webvh:...          # the DID of this agent, the service its operator runs
   userAgentGate: required                     # required | optional
-  authentication:                             # the one schema that authenticates a person (D65)
-    - credential: { jsonSchemaCredentialId: https://.../vt/schemas-badge-jsc.json }
-      subjectKey: [badgeNumber]
-      request: on-connect                     # or on-demand: nothing is asked at connection
-      visitors: false                         # true: the person may continue as a visitor (with on-connect)
-      issuers: { organizations: ["org:EE:14000000"] }   # whose credentials are accepted; any issuer when absent
-      obtain: { text: "Ask your front desk for your badge.", url: https://.../badge }   # how to obtain it
-      attributes: [badgeNumber, name, title, department]
-      store: { attributes: [name, title, department], retention: { days: 365, onExpiry: erase } }
-      modelVisible: [name]
+  authentication:                             # how a person authenticates, on the phone only (D125, D128)
+    request: on-connect                       # or on-demand: nothing is asked at connection
+    visitors: false                           # true: the person may continue as a visitor (with on-connect)
+    methods:                                  # by a name the operator chooses; the type says what it is (D126)
+      badge:
+        type: credential
+        credential: { jsonSchemaCredentialId: https://.../vt/schemas-badge-jsc.json }
+        subjectKey: [badgeNumber]
+        issuers: { organizations: ["org:EE:14000000"] }   # whose credentials are accepted; any issuer when absent
+        attributes: [badgeNumber, name, title, department]
+        store: { attributes: [name, title, department], retention: { days: 365, onExpiry: erase } }
+        modelVisible: [name]
+      email:    { type: email }               # a code sent to an address of the user directory
+      passport: { type: document }            # the chip of a passport or an identity card, matched to an entry
+      face:     { type: face-match, reference: [document, directory] }   # confirms; consent is its lawful basis
+      otp:      { type: authenticator-app }   # confirms; enrolled on the phone
+      passkey:  { type: passkey }             # enrolled on the phone
+    combinations:                             # the accepted combinations; each holds an identifying method
+      - [badge]
+      - [passport]
+      - [email, otp]
+      - [passkey]
+    obtain: { text: "Ask your front desk for your badge.", url: https://.../badge }   # how to obtain what is lacking
   organizations:                              # patterns over the verified Organization credential (D64)
     - match: { countryCode: EE, registryId: "14000000" }
       relation: partner
@@ -104,15 +117,57 @@ identity:
   wins. A pattern sets the relation (`partner` or `unrecognized`) and may add `roles`. Naming
   `registryId` designates one organization; naming a country alone admits every accredited organization
   of that country, which belongs with low-privilege roles. No match: `unrecognized`, no added role.
-- **`authentication`** names the one credential schema that authenticates a person, by its ecosystem
-  schema, so that a credential of any accredited issuer satisfies the request; it is a list validated to
-  exactly one entry. The agent takes the issuer from what the DIDComm agent verified in the proof, never
-  from an attribute, and resolves the issuer's organization. The person is then
-  `<organization key>|<schema>|<subject key>`: the same badge number from another organization is another
-  person, and a badge re-issued by the same organization is the same person, whichever of its services
-  issued it. A presentation that leaves a `subjectKey` attribute unrevealed identifies nobody, so the
-  subject key must be among the `attributes` asked. An agent that authenticates nobody omits
-  `authentication`: everyone then enters unidentified.
+- **`authentication`** (D125 to D131, IDENT-AUTH-001) enables **methods**, each keyed by a name the operator
+  chooses and given a `type`, and lists the **accepted combinations**, each a list of method names. A person is
+  identified once every method of one accepted combination, which they choose on the phone, completed in one
+  `authenticate` flow and the methods found one identity. Nothing of an authentication runs in a browser or in a
+  conversation (D128): a wallet that takes no flows is asked a `credential` method that is a combination by itself, as a
+  presentation request, and nothing else. An agent that authenticates nobody omits `authentication`, or lists no
+  combination: everyone then enters unidentified. The types:
+
+  | Type | What the phone does | Finds or confirms | Needs |
+  |---|---|---|---|
+  | `credential` | presents a credential of the method's schema (`credential.jsonSchemaCredentialId`) | finds the entry a badge this agent issued from its directory was issued from, else the person of the credential | `subjectKey` among the `attributes` asked |
+  | `email` | the person types an address, then the code sent to it | finds the entry that holds the address | `identity.directory`, an SMTP server (`MAIL_HOST`, `MAIL_FROM_ADDRESS`) |
+  | `document` | reads the chip of a passport or an identity card | finds the one entry whose names, birthdate and nationality it carries | `identity.directory` (its entries then carry `birthDate` and `nationality`) |
+  | `face-match` | films the live face, after the person consents on the step | confirms the identity found, against `reference`: the passport read in the same flow, the entry's `photo` | `media.faceVerification`; the processing activity `biometric-matching` with the lawful basis `consent` |
+  | `authenticator-app` | the person types the code of their authenticator app (TOTP) | confirms the Principal that enrolled it | an enrolment on the phone |
+  | `passkey` | signs the agent's challenge with the passkey | finds the Principal that enrolled it | an enrolment on the phone |
+
+  `credential`, `email`, `document` and `passkey` find an identity (**identifying**); `face-match` and
+  `authenticator-app` only confirm one (**confirming**). The agent refuses to start on an unknown type, naming the
+  method; on a combination that names a method not enabled, names one twice, is listed twice, or holds no identifying
+  method; on a `credential` method without its schema or subject key; on a field of a credential (`credential`,
+  `subjectKey`, `attributes`, `issuers`, `store`, `modelVisible`) on another type; on an `email` or `document` method,
+  or a face match with the `directory` reference, without `identity.directory`; on a `face-match` method without
+  `media.faceVerification` or with a basis of `biometric-matching` other than consent; and on an `email` method with no
+  SMTP server. The passport alone (`[document]`) is accepted without a face match in this version (D127). A face match is
+  offered only to a phone that disclosed `calls/1.0` as `callee`.
+- **Who a person is** (IDENT-RES-002, IDENT-AUTH-003). A person of the user directory is
+  `<home organization key>|directory|<entry id>`, whichever methods identified them; a Principal held before under the
+  key of its badge, or that held the entry, keeps its conversations under the entry's key. A person identified by a
+  credential of another organization is `<organization key>|<schema>|<subject key>`, the issuer taken from what the
+  DIDComm agent verified in the proof, never from an attribute: the same badge number from another organization is
+  another person, and a badge re-issued by the same organization is the same person, whichever of its services issued
+  it. A presentation that leaves a `subjectKey` attribute unrevealed identifies nobody (`incomplete`). The Principal
+  keeps the last authentication: when, why, the combination, each step's outcome, the entry found.
+- **The steps** (flow profile §6.14). The identifying methods run first, in the order the combination lists them,
+  then the confirming ones; each is announced by a `step` and ended by a `step-result`. An email step asks the address
+  (ten minutes), answers the same whether or not an entry holds it, sends a code of six digits only to an address an
+  entry holds, in the language of the phone's locale, kept as a keyed hash, valid ten minutes, five tries in all, up
+  to three new codes thirty seconds apart, each replacing the one before. An authenticator app's step takes a code of
+  the current thirty seconds or the ones around them, each once, five tries. A passkey's step signs a challenge of 32
+  bytes for the network's app-link domain (`channels.agui.appLinkBase`, `APP_LINK_BASE`), the person verified, its
+  counter going on. A face step asks the consent, then offers a call under the flow id that the face-verification
+  service joins with the reference; nothing of the face is kept, only the audit fields of its evidence.
+- **Enrolling an authenticator app or a passkey** (D129). A pack that enables a method of either type lets an
+  identified person add one from the service's menu on the phone (an `enrol` flow); the status of an identified person
+  lists the types they may enrol and those they enrolled. The agent enrols only on a connection authenticated within
+  the last ten minutes by a combination that holds neither, and otherwise first asks an authentication of purpose
+  `enrol` with the combinations that hold neither; a visitor is refused. The authenticator app's secret is handed to
+  the phone once and kept sealed; of a passkey the agent keeps its credential id and public key. One of each per
+  Principal, the new one replacing the earlier; the person removes one from the phone; both are erased with the
+  Principal's directory entry.
 - **What is kept of a presented credential, and what the model reads of it** (D67, D68). Each verification
   leaves one **evidence** record. Its audit fields are in the clear and hold no attribute value: when, which
   Principal, which schema, the issuer and its organization, the outcome, the names of the attributes
@@ -128,8 +183,11 @@ identity:
   model-visible attribute is kept for less time than conversation memory, since what the model reads stays in
   the conversation. The person's name reaches the model, the greeting and the lists shown to other people
   only when `name` (or `userName`) is stored, and the model only when it is also visible; `photo` must be
-  stored to serve as the reference of a face-match challenge. The `principal_credentials` tool lists the
-  records with the visible attributes.
+  stored to serve as the reference of a tool's face-match challenge (never of a `face-match` method, whose reference
+  is a passport read in the same flow or the directory entry's `photo`). The `principal_credentials` tool lists the
+  records with the visible attributes. An address verified by an email step, a document read and a face match of an
+  accepted authentication are evidence too (`evidence.email`, `evidence.document` say what is kept of them; a face
+  match keeps its audit fields only); nothing of an authentication that is not accepted is kept.
 
 - **Role assignment is rules over verified facts and, with a user directory, the roles its entries give by hand**
   (D34, D87; below). The directory is the only list of people. A rule's `when` matches on the
@@ -147,58 +205,61 @@ identity:
   interface. `canApprove` marks roles that may appear in `approvers`. `admin` lets the role read the admin view of
   roles and changes (IDENT-DIR-008, with the user directory).
 - **Who enters unidentified follows from `authentication`, and from nothing else** (D53, D72). A pack that
-  names no authentication schema lets every wallet in, unidentified. One that names a schema is in one of
-  three modes:
+  accepts no combination lets every wallet in, unidentified. One that accepts some is in one of three modes:
 
   | Mode | Pack | At connection |
   |---|---|---|
-  | required | `request: on-connect` | the credential is asked; nothing opens without it |
-  | offered | `request: on-connect`, `visitors: true` | the credential is asked; the person may continue as a visitor |
+  | required | `request: on-connect` | the authentication is asked; nothing opens without it |
+  | offered | `request: on-connect`, `visitors: true` | the authentication is asked; the person may continue as a visitor |
   | on request | `request: on-demand` | nothing is asked; the person enters as a visitor and authenticates when they ask |
 
   `on-demand` lets visitors in by itself: `visitors: false` with it is refused at start-up.
-- **The request at connection** (D72). It is valid five minutes. A credential that is not accepted is
-  answered with its reason and asked again, with no limit: the person ends it by declining. A decline ends
-  the connection when the credential is required and lets the person in as a visitor when it is offered. No
-  answer in time ends the connection in both. Nothing is open before the outcome, so no conversation
-  exists before it; a person who authenticates finds their conversations.
-- **Whose credentials are accepted** (D72). With no `issuers`, the credential of any accredited issuer of
-  the schema that an organization backs. With `issuers.organizations`, only the credentials whose issuer
-  is one of those organizations, by organization key (`org:<country>:<register id>`). The agent decides
-  this when it verifies the presentation; the wallet is told the list so that it offers no other.
-- **How the credential is obtained** (D72). `obtain` is the operator's own text, with a link when there is
-  one. The wallet shows it to a person who holds no such credential, or whose credential was not accepted.
+- **The request at connection** (D72, IDENT-RES-019/020). The `authenticate` flow is valid fifteen minutes, the time
+  of every step; a choice that does not come within five minutes leaves it unanswered. An authentication that is not
+  accepted is answered with its reason (`issuer-not-accepted`, `not-valid`, `incomplete` for a credential;
+  `step-failed`, `step-expired`, `no-match` for another method; `different-identities` when the methods found different
+  people) and asked again, with no limit: the person ends it by declining. A decline ends the connection when the
+  authentication is required and lets the person in as a visitor when it is offered. No answer in time ends the
+  connection in both. Nothing is open before the outcome, so no conversation exists before it; a person who
+  authenticates finds their conversations.
+- **Whose credentials are accepted** (D72). With no `issuers` on a `credential` method, the credential of any
+  accredited issuer of the schema that an organization backs. With `issuers.organizations`, only the credentials whose
+  issuer is one of those organizations, by organization key (`org:<country>:<register id>`). The agent decides this
+  when it verifies the presentation; the phone is told the list, with the method, so that it offers no other.
+- **How what is lacking is obtained** (D72). `obtain` is the operator's own text, with a link when there is one. The
+  phone shows it to a person who can complete no combination, or whose authentication was not accepted.
 - An unidentified person, a visitor, is a Principal
   without backing identity: relation `unrecognized`, `public` visibility only, the role rules decide the
   rest. The agent says at start-up that it admits unidentified peers. There is no separate setting: the
   earlier `unidentifiedPeers` and the `UNIDENTIFIED_PEERS` variable are gone (the variable is ignored, with
   a warning). `DEV_ALLOW_UNIDENTIFIED_PRINCIPALS` stays, for development only.
-- **The wallet is told where it stands** (D71, D72). The same entry gives the status message the agent sends
-  on each connection: the rule, `none` with no authentication schema, `optional` when visitors are let in,
-  `required` when they are not; the schema asked for; the organizations accepted, when the pack lists any;
-  and how the credential is obtained, when the pack says it. The message also says whether the person is
-  identified and what is open to them, so the app knows whether to wait for the request, and when it may
-  open the conversation. Nothing else is configured for it.
-- **Authenticating later** (D65, D66, D72). While a connection is unidentified, the credential is asked when
+- **The wallet is told where it stands** (D71, D72). The same object gives the status message the agent sends
+  on each connection: the rule, `none` with no accepted combination, `optional` when visitors are let in,
+  `required` when they are not; the methods, a `credential` method with its schema and the organizations it accepts
+  when it lists any; the accepted combinations; how what is lacking is obtained, when the pack says it; and, to an
+  identified person, the types they may enrol and those they enrolled. The message also says whether the person is
+  identified and what is open to them, so the app knows whether to wait for the request, and when it may open the
+  conversation. Nothing else is configured for it.
+- **Authenticating later** (D65, D66, D72). While a connection is unidentified, the authentication is asked when
   the person asks from their wallet (the Ayni app's **Authenticate**, in the service's menu, which needs no
   conversation), when the person picks **Authenticate** in the agent's own menu (sent to the web UI and to
   other clients, not to the Ayni app), or when the model calls `request_presentation` with the entry
   `authentication` (the tool exists for an unidentified person only, takes nothing else, and answers with
   a status). A request made this way, declined or left unanswered, changes nothing: the person stays a
-  guest. The agent does not insist: one request at a time on a connection, and after a
-  request that was declined or left unanswered the model waits ten minutes; the person's own request is
-  always served. A valid credential upgrades the connection to the Principal it identifies, and the
-  conversations held before, with their sessions and entries, move to it; working memory and preferences
-  of the visitor are not merged. A connection that is already identified accepts the credential of the same
-  person only: another identity is refused and nothing of it is kept. Issuing a credential never
-  identifies: the person presents it.
+  guest. The agent does not insist: one request at a time on a connection (the DIDComm agent keeps one
+  `authenticate` flow open at a time), and after a request that was declined or left unanswered the model waits ten
+  minutes; the person's own request is always served. An accepted authentication upgrades the connection to the
+  Principal it identifies, and the conversations held before, with their sessions and entries, move to it; working
+  memory and preferences of the visitor are not merged. A connection that is already identified accepts an
+  authentication of the same person only: another identity is refused on the flow (`another-identity`), nothing of it
+  is kept and nothing is asked again. Issuing a credential never identifies: the person authenticates.
 - `userAgentGate: optional` lets wallets that do not present an ECS-UserAgent credential connect; the
   Principal is then marked `userAgentVerified: false`, which `roleRules` may use.
 - `credentials` names the other credentials the agent requests on DIDComm connect (IDENT-RES-001/003):
   `userAgent` (the ECS-UserAgent credential of the gate) and `service` (credentials accepted from a
   verifiable-service peer). Each entry is a `jsonSchemaCredentialId` or a `credentialDefinitionId`
-  the DIDComm agent can resolve, with optional `attributes`. The credential that authenticates a person
-  is `authentication`, above; `credentials.badge` no longer exists.
+  the DIDComm agent can resolve, with optional `attributes`. The credentials that authenticate a person are the
+  `credential` methods of `authentication`, above; `credentials.badge` no longer exists.
 
 ### The user directory (`identity.directory`)
 
@@ -224,16 +285,19 @@ people:
     firstName: Ana
     lastName: Ríos
     email: ana.rios@northwind.example        # unique, compared in lower case
-    birthDate: 19910521           # YYYYMMDD; only when badges are obtained with a passport
+    birthDate: 19910521           # YYYYMMDD; only when a passport is read: a document method, or badges from a passport
     nationality: ESP              # the code of ICAO Doc 9303; idem
+    photo: p-0042.jpg             # optional: the reference of a face-match method, a JPEG or PNG file beside this one
     department: Depot Rotterdam   # optional: rule spaces only
     groups: [fleet-safety, night-shift]      # optional, several: rule spaces only
     roles: [dispatcher]           # typed by hand, roles of identity.roles
 ```
 
 - **Validation.** Every scalar is read as text (an id `0042` keeps its zeros). Ids and emails are unique, roles are
-  declared, no other field is allowed, and a birthdate and a nationality are required on every entry when an issuance
-  profile obtains badges from the directory with a passport. At start a file that does not validate stops the agent,
+  declared, no other field is allowed, and a birthdate and a nationality are required on every entry when the
+  authentication has a `document` method or an issuance profile obtains badges from the directory with a passport. A
+  `photo` names a file in the folder of the directory file by its name alone, read when a face match needs it and at no
+  other time (IDENT-DIR-010); it is never served, logged or given to a model. At start a file that does not validate stops the agent,
   naming each entry and field at fault; the message never carries a birthdate or a nationality.
 - **Reload.** The agent watches the directory of the file (a Kubernetes Secret is updated by swapping the `..data`
   symlink in it, whatever the mount) and reads the file again every `DIRECTORY_POLL_SECONDS` (10; 0 watches only),
@@ -349,14 +413,14 @@ presentations:
   service. Under Verifiable Trust v4 the pack declares it; under v5 the schema does.
 - `purpose` is what the person reads in the wallet before answering.
 - What comes back is **evidence** of the Principal of the connection, kept and shown to the model by the
-  three lists `attributes`, `store` and `modelVisible`, exactly as for `identity.authentication`. It never
+  three lists `attributes`, `store` and `modelVisible`, exactly as for a `credential` method of the authentication. It never
   binds a Principal: only the authentication does. The issuer is the one the DIDComm agent verified in the
   proof; a presentation whose record reports no issuer is not evidence.
 - The model gets a status: `verified`, or `not presented` when the request was declined or left
   unanswered, which says nothing about whether the credential is held. After that the model waits ten
   minutes before the same entry can be asked again; one request is pending on a connection at a time.
-- The name `authentication` is reserved: it is the entry of `identity.authentication`, which the same tool
-  offers to an unidentified person.
+- The name `authentication` is reserved: it is the entry of the authentication, which the same tool offers to an
+  unidentified person (on the phone, in an `authenticate` flow); `face-match` is the entry of a face match's evidence.
 
 ## issuance
 
@@ -1151,7 +1215,7 @@ spaces:
   graph (`GET {sessions}/organizations?q=`, the Verana Graph of `VERANA_GRAPH_URL`, the agent's own excluded) and
   invites a person of it by email (`POST {sessions}/spaces/{id}/members { organizationKey, email }`). The agent refuses
   an organization the graph does not hold trusted (`422 not-on-verana`), its own (`422 home-organization`), one whose
-  badges `identity.authentication.issuers.organizations` does not accept (`409 organization-not-accepted`), and every
+  badges no `credential` method of the authentication accepts (`409 organization-not-accepted`), and every
   invitation without an SMTP server (`503 email-unavailable`). The email names who invites, the space, the agent and
   its organization, says that a badge of that organization carrying the address is needed, and carries the app link to
   the agent (`<APP_LINK_BASE>service/<did>`): no token, nothing that opens the space. The invitation binds to the first
@@ -1190,8 +1254,11 @@ enables crypto-erasure with its lineage cascade.
 
 ## Cross-field rules (checked after schema validation)
 
-1. `identity.authentication` holds at most one entry, whose `subjectKey` is among the `attributes` it asks;
-   no `identity.organizations` pattern sets `relation: home`.
+1. `identity.authentication`: each method of a known type, with the fields of its type only; a `credential` method
+   names its schema and a `subjectKey` among the `attributes` it asks; a `face-match` method names its `reference`;
+   each combination names enabled methods, each once, holds an identifying method and is listed once; `on-demand`
+   lets visitors in; an `email` or `document` method, or a face match with the `directory` reference, needs
+   `identity.directory`. No `identity.organizations` pattern sets `relation: home`.
 2. Every role named in `roleRules`, `perActorOverrides`, a source's `access.roles`, `approvers`,
    `purposes[].permittedRoles`, `persona.menu[].roles` and `spaces.templates[].creators` is declared in
    `identity.roles`.

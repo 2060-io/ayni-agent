@@ -374,6 +374,18 @@ describe('an approval of several approvers (INTX-APPR-021, INTX-APPR-026, PROF-T
     expect(approval.approverIds).toEqual([jonas.principal.id, marta.principal.id])
     expect(ph.authorizeRequests(jonas.connectionId).slice(jonasBefore)).toHaveLength(1)
     expect(ph.authorizeRequests(marta.connectionId).slice(martaBefore)).toHaveLength(1)
+    // each phone's request names the approvals needed and the other approvers, as they are when it is sent
+    // (FLOW-AUTH-004, INTX-APPR-026)
+    expect(ph.authorizeRequests(jonas.connectionId).at(-1)?.request.approvals).toEqual({
+      threshold: 2,
+      own: false,
+      others: [{ name: 'marta', required: false }],
+    })
+    expect(ph.authorizeRequests(marta.connectionId).at(-1)?.request.approvals).toEqual({
+      threshold: 2,
+      own: false,
+      others: [{ name: 'jonas', required: true }],
+    })
     expect(toolAnswers().at(-1)).toBe(
       `Post on X needs the approval of 2 approvers among jonas (required), marta. The request is pending: the action runs once approved, and its outcome will be told in this conversation.\n\n${ONE_CALL}`
     )

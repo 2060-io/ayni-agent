@@ -58,95 +58,129 @@
           "default": "required"
         },
         "authentication": {
-          "description": "The one credential schema that authenticates a person, requested on DIDComm connect by its ecosystem schema so that any accredited issuer satisfies the request (D65, IDENT-RES-010). A list validated to one entry. Omitted by an agent that authenticates nobody: everyone then enters unidentified (D53).",
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 1,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["credential", "subjectKey"],
-            "properties": {
-              "credential": {
+          "description": "How a person authenticates (D125, IDENT-AUTH-001, IDENT-RES-010): the methods enabled, keyed by a name the operator chooses, and the accepted combinations of them, one of which the person completes on the phone in one authenticate flow (D128). Omitted, or with no combination, by an agent that authenticates nobody: everyone then enters unidentified (D53).",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["methods", "combinations"],
+          "properties": {
+            "request": {
+              "description": "When it is asked: on-connect (default), before any conversation; on-demand, only when it is asked for, by the person, from their wallet or a menu item, or by the model's tool, the person entering as a visitor meanwhile (D53, D65, D72).",
+              "type": "string",
+              "enum": ["on-connect", "on-demand"],
+              "default": "on-connect"
+            },
+            "visitors": {
+              "description": "Whether a person may enter without authenticating, as a visitor (D72). With on-connect: false (default), the authentication is required and nothing opens without it; true, it is offered at connection and the person may continue as a visitor. on-demand lets visitors in by itself and refuses false.",
+              "type": "boolean"
+            },
+            "methods": {
+              "description": "The methods enabled, by name (D126): credential (a presentation of a credential of a schema), email (a code sent to an address of the user directory), document (the chip of a passport or identity card, matched to an entry of the directory), face-match (a live face against a reference picture; confirms), authenticator-app (a TOTP code; confirms; enrolled on the phone), passkey (enrolled on the phone).",
+              "type": "object",
+              "minProperties": 1,
+              "propertyNames": { "pattern": "^[A-Za-z0-9_-]{1,64}$" },
+              "additionalProperties": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["jsonSchemaCredentialId"],
+                "required": ["type"],
                 "properties": {
-                  "jsonSchemaCredentialId": {
+                  "type": {
                     "type": "string",
-                    "format": "uri"
-                  }
-                }
-              },
-              "subjectKey": {
-                "description": "The attributes that, with the organization of the issuer and the schema, form the principal key (D59): badgeNumber for the ECS-Badge.",
-                "type": "array",
-                "minItems": 1,
-                "items": {
-                  "type": "string",
-                  "minLength": 1
-                }
-              },
-              "attributes": {
-                "description": "The attributes asked of the credential; every attribute of the schema when omitted.",
-                "type": "array",
-                "minItems": 1,
-                "items": {
-                  "type": "string",
-                  "minLength": 1
-                }
-              },
-              "request": {
-                "description": "When the credential is asked: on-connect (default), before any conversation; on-demand, only when it is asked for, by the person, from their wallet or a menu item, or by the model's tool, the person entering as a guest meanwhile (D53, D65, D72).",
-                "type": "string",
-                "enum": ["on-connect", "on-demand"],
-                "default": "on-connect"
-              },
-              "visitors": {
-                "description": "Whether a person may enter without the credential, as a visitor (D72). With on-connect: false (default), the credential is required and nothing opens without it; true, it is offered at connection and the person may continue as a visitor. on-demand lets visitors in by itself and refuses false.",
-                "type": "boolean",
-                "default": false
-              },
-              "issuers": {
-                "description": "Whose credentials are accepted (D72). Absent: any accredited issuer of the schema that an organization backs.",
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["organizations"],
-                "properties": {
-                  "organizations": {
-                    "description": "The organization keys accepted: org:<country>:<register id>, as the verified Organization credential of the issuer gives them.",
+                    "description": "credential, email, document, face-match, authenticator-app or passkey; another type stops the start, naming the method (IDENT-AUTH-001)."
+                  },
+                  "credential": {
+                    "description": "A credential method: its schema, asked by its ecosystem schema so that any accredited issuer satisfies the request.",
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["jsonSchemaCredentialId"],
+                    "properties": {
+                      "jsonSchemaCredentialId": {
+                        "type": "string",
+                        "format": "uri"
+                      }
+                    }
+                  },
+                  "subjectKey": {
+                    "description": "A credential method: the attributes that, with the organization of the issuer and the schema, form the principal key of a person of another organization (D59): badgeNumber for the ECS-Badge.",
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "attributes": {
+                    "description": "A credential method: the attributes asked of the credential; every attribute of the schema when omitted.",
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "issuers": {
+                    "description": "A credential method: whose credentials are accepted (D72). Absent: any accredited issuer of the schema that an organization backs.",
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["organizations"],
+                    "properties": {
+                      "organizations": {
+                        "description": "The organization keys accepted: org:<country>:<register id>, as the verified Organization credential of the issuer gives them.",
+                        "type": "array",
+                        "minItems": 1,
+                        "uniqueItems": true,
+                        "items": {
+                          "type": "string",
+                          "pattern": "^org:[A-Z]{2}:.+$"
+                        }
+                      }
+                    }
+                  },
+                  "reference": {
+                    "description": "A face-match method: the reference picture, in order of preference (D131): document, the portrait of a passport read in the same authentication; directory, the photo of the entry found.",
                     "type": "array",
                     "minItems": 1,
                     "uniqueItems": true,
                     "items": {
                       "type": "string",
-                      "pattern": "^org:[A-Z]{2}:.+$"
+                      "enum": ["document", "directory"]
                     }
-                  }
-                }
-              },
-              "obtain": {
-                "description": "How a person obtains the credential, in the operator's words, with a link when there is one (D72). Shown by the wallet to a person who holds no such credential, or whose credential was not accepted.",
-                "type": "object",
-                "additionalProperties": false,
-                "minProperties": 1,
-                "properties": {
-                  "text": {
-                    "type": "string",
-                    "minLength": 1
                   },
-                  "url": {
-                    "type": "string",
-                    "format": "uri",
-                    "pattern": "^https://"
+                  "store": {
+                    "$ref": "#/$defs/evidenceStore"
+                  },
+                  "modelVisible": {
+                    "$ref": "#/$defs/evidenceModelVisible"
                   }
                 }
-              },
-              "store": {
-                "$ref": "#/$defs/evidenceStore"
-              },
-              "modelVisible": {
-                "$ref": "#/$defs/evidenceModelVisible"
+              }
+            },
+            "combinations": {
+              "description": "The accepted combinations, each a list of method names: the person is identified once every method of one of them completed in one authenticate flow (D125, D127). Each holds an identifying method (credential, email, document, passkey).",
+              "type": "array",
+              "items": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "obtain": {
+              "description": "How a person obtains what they lack to authenticate (a credential, an address the agent knows), in the operator's words, with a link when there is one (D72). Shown by the phone to a person who can complete no combination, or whose authentication was not accepted.",
+              "type": "object",
+              "additionalProperties": false,
+              "minProperties": 1,
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri",
+                  "pattern": "^https://"
+                }
               }
             }
           }
@@ -1197,7 +1231,8 @@
                   "media-objects",
                   "credential-presentations",
                   "approvals",
-                  "statistics"
+                  "statistics",
+                  "biometric-matching"
                 ]
               },
               "lawfulBasis": {

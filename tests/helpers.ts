@@ -1,6 +1,7 @@
 /** Builds a complete agent on the in-memory store with the stub model, no network. */
 import { buildAgent, type RunningAgent } from '../src/app.js'
 import type { Env } from '../src/config/env.js'
+import type { PackAuthentication } from '../src/config/packTypes.js'
 import { createLogger } from '../src/util/logger.js'
 
 export function testEnv(over: Partial<Env> = {}): Env {
@@ -46,4 +47,26 @@ export function parseSse(body: string): { id?: number; event: Record<string, unk
     if (data) out.push({ id, event: JSON.parse(data) })
   }
   return out
+}
+
+/**
+ * The authentication of a pack that accepts one `credential` method alone, named `badge` (ayni-spec D125): what an
+ * agent-pack of one authentication schema said before, in the shape of methods and combinations.
+ */
+export function badgeAuthentication(entry: {
+  credential: { jsonSchemaCredentialId: string }
+  subjectKey: string[]
+  request?: 'on-connect' | 'on-demand'
+  visitors?: boolean
+  obtain?: { text?: string; url?: string }
+  [key: string]: unknown
+}): PackAuthentication {
+  const { request, visitors, obtain, ...method } = entry
+  return {
+    ...(request ? { request } : {}),
+    ...(visitors !== undefined ? { visitors } : {}),
+    ...(obtain ? { obtain } : {}),
+    methods: { badge: { type: 'credential', ...method } },
+    combinations: [['badge']],
+  }
 }

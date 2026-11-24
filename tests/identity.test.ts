@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'vitest'
 import { IdentityFlow } from '../src/channels/didcomm/identity.js'
 import type { AgentPack } from '../src/config/packTypes.js'
+import { badgeAuthentication } from './helpers.js'
 
 const silent = { info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined }
 
@@ -14,9 +15,10 @@ function packWith(identity: Partial<AgentPack['identity']>): AgentPack {
       homeBackingIdentity: 'did:webvh:x:home',
       roleRules: [],
       userAgentGate: 'optional',
-      authentication: [
-        { credential: { jsonSchemaCredentialId: 'https://ecs.example/badge.json' }, subjectKey: ['badgeNumber'] },
-      ],
+      authentication: badgeAuthentication({
+        credential: { jsonSchemaCredentialId: 'https://ecs.example/badge.json' },
+        subjectKey: ['badgeNumber'],
+      }),
       ...identity,
     },
   } as unknown as AgentPack
@@ -49,13 +51,11 @@ describe('unidentified peers (D53, IDENT-RES-007)', () => {
     const ref: { flow?: IdentityFlow } = {}
     ref.flow = new IdentityFlow(
       packWith({
-        authentication: [
-          {
-            credential: { jsonSchemaCredentialId: 'https://ecs.example/badge.json' },
-            subjectKey: ['badgeNumber'],
-            request: 'on-demand',
-          },
-        ],
+        authentication: badgeAuthentication({
+          credential: { jsonSchemaCredentialId: 'https://ecs.example/badge.json' },
+          subjectKey: ['badgeNumber'],
+          request: 'on-demand',
+        }),
       }),
       clientRefusing(ref) as never,
       {} as never,

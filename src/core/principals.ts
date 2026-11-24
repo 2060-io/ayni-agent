@@ -10,7 +10,14 @@ import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import { type EvidenceInput, storedIdentityAttributes } from './evidence.js'
 import { type HomeKeySource, matchOrganization, type OrganizationFacts } from './organization.js'
-import type { BackingIdentity, ConnectionType, LivenessVerdict, Principal, Relation } from './types.js'
+import type {
+  AuthenticationRecord,
+  BackingIdentity,
+  ConnectionType,
+  LivenessVerdict,
+  Principal,
+  Relation,
+} from './types.js'
 
 export interface VerifiedFacts {
   connectionType: ConnectionType
@@ -22,6 +29,18 @@ export interface VerifiedFacts {
   legacyActorIdentity?: string
   /** the verification the facts come from, when it is a presented credential: recorded as evidence (D67) */
   evidence?: EvidenceInput
+  /**
+   * what else the authentication verified (an address by its email code, a document read, a face match): recorded as
+   * evidence once the authentication is accepted, and only then (IDENT-RES-019, PRIV-EVID-001)
+   */
+  moreEvidence?: EvidenceInput[]
+  /**
+   * the entry of the user directory the authentication identified (IDENT-AUTH-003, IDENT-RES-002): the Principal holds it,
+   * and its actor identity is the entry's
+   */
+  directoryEntryId?: string
+  /** the authentication the facts come from, recorded on the Principal (IDENT-AUTH-003) */
+  authentication?: AuthenticationRecord
   /** verified claims: badge facts (userName, photo, title, department...) or ECS-Service attributes */
   claims: Record<string, unknown>
   userAgentVerified: boolean
@@ -137,6 +156,14 @@ export class PrincipalService {
       if (existing)
         this.logger.info({ principalId: existing.id }, 'principal re-keyed on the organization of its issuer')
     }
+    if (!existing && facts.directoryEntryId) {
+      // the Principal that held the entry under the key of its badge keeps its conversations under the entry's key: one
+      // Principal whichever methods identify the person (IDENT-AUTH-003, IDENT-RES-002)
+      existing = (await this.store.principals.list()).find(
+        (p) => p.directoryEntryId === facts.directoryEntryId && p.connectionType === facts.connectionType
+      )
+      if (existing) this.logger.info({ principalId: existing.id }, 'principal re-keyed on its directory entry')
+    }
     const { id: _id, ...attributes } = facts.claims as Record<string, unknown>
     // of a presented credential a Principal keeps what the pack stores and nothing else (PRIV-EVID-004/009);
     // the attributes of a service come from its public credentials and are kept as they are
@@ -144,8 +171,9 @@ export class PrincipalService {
       ? storedIdentityAttributes(this.pack, { ...facts.evidence.values, issuerDid: facts.evidence.issuerDid })
       : { ...(existing?.identityAttributes ?? {}), ...attributes }
     const now = nowIso()
-    // the entry this agent issued the presented credential from: its roles join those of the facts (IDENT-ROLE-012)
-    const issuedFrom = facts.evidence ? await this.directory?.entryOf(facts) : undefined
+    // the entry the authentication identified (IDENT-AUTH-003), else the one this agent issued the presented credential
+    // from: its roles join those of the facts (IDENT-ROLE-012)
+    const issuedFrom = facts.directoryEntryId ?? (facts.evidence ? await this.directory?.entryOf(facts) : undefined)
     const factRoles = assignRoles(this.pack, facts, recognition, { issuedFromDirectory: issuedFrom !== undefined })
     const entryRoles = issuedFrom ? this.directory?.rolesOf(issuedFrom) : undefined
     const principal: Principal = {
@@ -161,6 +189,11 @@ export class PrincipalService {
       identityAttributes,
       capabilityChannelId: existing?.capabilityChannelId ?? null,
       identityCredentialRef: facts.identityCredentialRef ?? existing?.identityCredentialRef ?? null,
+      ...(facts.authentication
+        ? { lastAuthentication: facts.authentication }
+        : existing?.lastAuthentication
+          ? { lastAuthentication: existing.lastAuthentication }
+          : {}),
       livenessCache: existing?.livenessCache ?? {},
       userAgentVerified: facts.userAgentVerified,
       createdAt: existing?.createdAt ?? now,

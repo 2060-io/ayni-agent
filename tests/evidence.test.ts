@@ -5,24 +5,28 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import type { RunningAgent } from '../src/app.js'
 import { crossFieldErrors, evidenceWarnings, loadPack } from '../src/config/pack.js'
-import type { AgentPack, AuthenticationEntry } from '../src/config/packTypes.js'
+import type { AgentPack, AuthenticationMethod } from '../src/config/packTypes.js'
 import { AUTHENTICATION_ENTRY, type EvidenceInput, EvidenceService, nameForModel } from '../src/core/evidence.js'
 import { PrincipalService, type VerifiedFacts } from '../src/core/principals.js'
 import type { Principal } from '../src/core/types.js'
 import { createEntryCrypto, sha256Hex } from '../src/memory/crypto.js'
 import { MemoryStore } from '../src/store/memory.js'
-import { startTestAgent } from './helpers.js'
+import { badgeAuthentication, startTestAgent } from './helpers.js'
 
 const silent = { info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined }
 const BADGE = 'https://ecs.example/vt/schemas-badge-jsc.json'
 const crypto = createEntryCrypto(Buffer.alloc(32, 3))
 
-function packWith(policy: Partial<AuthenticationEntry> = {}): AgentPack {
+function packWith(policy: Partial<AuthenticationMethod> = {}): AgentPack {
   return {
     identity: {
       homeBackingIdentity: 'did:webvh:x:agent',
       roleRules: [],
-      authentication: [{ credential: { jsonSchemaCredentialId: BADGE }, subjectKey: ['badgeNumber'], ...policy }],
+      authentication: badgeAuthentication({
+        credential: { jsonSchemaCredentialId: BADGE },
+        subjectKey: ['badgeNumber'],
+        ...policy,
+      }),
     },
   } as unknown as AgentPack
 }
@@ -216,7 +220,7 @@ describe('what a Principal keeps of its identity credential (PRIV-EVID-004/005/0
 describe('the pack (PRIV-EVID-006)', () => {
   const dev = () =>
     structuredClone(loadPack('agent-packs/dev', { ...process.env, HOME_BACKING_IDENTITY: 'did:webvh:x:h' }).pack)
-  const entry = (over: Partial<AuthenticationEntry>): AuthenticationEntry => ({
+  const entry = (over: Partial<AuthenticationMethod>) => ({
     credential: { jsonSchemaCredentialId: BADGE },
     subjectKey: ['badgeNumber'],
     attributes: ['badgeNumber', 'name'],
@@ -225,23 +229,25 @@ describe('the pack (PRIV-EVID-006)', () => {
 
   it('refuses a model-visible attribute that is not stored and a stored attribute that is not asked', () => {
     const ok = dev()
-    ok.identity.authentication = [entry({ store: { attributes: ['name'] }, modelVisible: ['name'] })]
+    ok.identity.authentication = badgeAuthentication(entry({ store: { attributes: ['name'] }, modelVisible: ['name'] }))
     expect(crossFieldErrors(ok)).toEqual([])
     const notStored = dev()
-    notStored.identity.authentication = [entry({ modelVisible: ['name'] })]
+    notStored.identity.authentication = badgeAuthentication(entry({ modelVisible: ['name'] }))
     expect(crossFieldErrors(notStored).join('\n')).toMatch(/PRIV-EVID-006.*\[name\].*without storing/)
     const notAsked = dev()
-    notAsked.identity.authentication = [entry({ store: { attributes: ['department'] } })]
+    notAsked.identity.authentication = badgeAuthentication(entry({ store: { attributes: ['department'] } }))
     expect(crossFieldErrors(notAsked).join('\n')).toMatch(/PRIV-EVID-006.*\[department\].*without asking/)
   })
 
   it('warns when the model reads an attribute kept for less time than the conversation', () => {
     const pack = dev()
-    pack.identity.authentication = [
-      entry({ store: { attributes: ['name'], retention: { days: 30 } }, modelVisible: ['name'] }),
-    ]
+    pack.identity.authentication = badgeAuthentication(
+      entry({ store: { attributes: ['name'], retention: { days: 30 } }, modelVisible: ['name'] })
+    )
     expect(evidenceWarnings(pack).join('\n')).toMatch(/\[name\] 30 days.*conversation for 365 days/)
-    pack.identity.authentication = [entry({ store: { attributes: ['name'], retention: { days: 30 } } })]
+    pack.identity.authentication = badgeAuthentication(
+      entry({ store: { attributes: ['name'], retention: { days: 30 } } })
+    )
     expect(evidenceWarnings(pack)).toEqual([])
   })
 })

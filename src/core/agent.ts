@@ -1683,8 +1683,8 @@ export class AyniAgent {
     options: { welcome?: boolean } = {}
   ): Promise<{ principal: Principal; session: Session }> {
     const principal = await this.principals.resolve(facts)
-    // the presentation that identified the peer is evidence of the Principal (PRIV-EVID-001)
-    if (facts.evidence) await this.evidence.record(principal, { ...facts.evidence, connectionRef: connectionId })
+    // what the authentication verified is evidence of the Principal (PRIV-EVID-001)
+    await this.recordFactsEvidence(principal, facts, connectionId)
     // a person of the directory added to a list while invited is a member from now (SPACE-MEMB-002), and so is one of
     // another organization whose badge carries the invited address (SPACE-INV-003)
     await this.spaces.bindDirectoryMember(principal)
@@ -1706,6 +1706,15 @@ export class AyniAgent {
   }
 
   /**
+   * What an accepted authentication verified, as evidence of its Principal (PRIV-EVID-001, IDENT-AUTH-009/011): the
+   * presentation of a credential, an address by its email code, a document read, a face match's audit fields.
+   */
+  private async recordFactsEvidence(principal: Principal, facts: VerifiedFacts, connectionId: string): Promise<void> {
+    for (const input of [...(facts.evidence ? [facts.evidence] : []), ...(facts.moreEvidence ?? [])])
+      await this.evidence.record(principal, { ...input, connectionRef: connectionId })
+  }
+
+  /**
    * An identity credential presented on a connection that is already served (D66, IDENT-RES-013/014/017).
    * An unidentified connection is upgraded to the Principal of the credential and its conversations, with
    * their sessions and entries, move to it. An identified connection accepts the credential only when it
@@ -1718,19 +1727,20 @@ export class AyniAgent {
     const current = await this.store.principals.findByCapabilityChannel(connectionId)
     if (!current) return { outcome: 'unavailable' }
     if (current.identityCredentialRef) {
-      if (current.actorIdentity !== facts.actorIdentity) {
+      // the same person, under its key or the key it had before (D59, IDENT-AUTH-003)
+      if (current.actorIdentity !== facts.actorIdentity && current.actorIdentity !== facts.legacyActorIdentity) {
         this.logger.warn({ principalId: current.id }, 'another identity presented on a bound connection: refused')
         return { outcome: 'another-identity' }
       }
       const principal = await this.principals.resolve(facts)
-      if (facts.evidence) await this.evidence.record(principal, { ...facts.evidence, connectionRef: connectionId })
+      await this.recordFactsEvidence(principal, facts, connectionId)
       await this.spaces.bindDirectoryMember(principal)
       await this.bindInvitations(principal, facts)
       this.issueAutomatically(principal)
       return { outcome: 'refreshed', principal }
     }
     const target = await this.principals.resolve(facts)
-    if (facts.evidence) await this.evidence.record(target, { ...facts.evidence, connectionRef: connectionId })
+    await this.recordFactsEvidence(target, facts, connectionId)
     await this.spaces.bindDirectoryMember(target)
     await this.bindInvitations(target, facts)
     // the identified Principal may hold another channel: the device policy applies, as at a connection

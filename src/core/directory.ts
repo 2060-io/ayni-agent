@@ -19,7 +19,7 @@
  */
 import { createHash } from 'node:crypto'
 import { type FSWatcher, readFileSync, watch } from 'node:fs'
-import { dirname } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { parse as parseYaml } from 'yaml'
 import { type EntryCrypto, openJson, sealJson } from '../memory/crypto.js'
 import type { AdminAuditRepo, KvRepo } from '../store/types.js'
@@ -37,6 +37,11 @@ export interface DirectoryEntry {
   birthDate?: string
   /** the code of ICAO Doc 9303 (`ESP`, `D`); read only to match a document read */
   nationality?: string
+  /**
+   * the reference picture of a face match (D131, IDENT-DIR-010): the name of a JPEG or PNG file in the folder of the
+   * directory file, read when a face match needs it and at no other time
+   */
+  photo?: string
   /** one text: rule spaces only (SPACE-MEMB-001) */
   department?: string
   /** rule spaces only */
@@ -61,6 +66,7 @@ export const ENTRY_FIELDS = [
   'email',
   'birthDate',
   'nationality',
+  'photo',
   'department',
   'groups',
   'roles',
@@ -181,6 +187,10 @@ export function parseDirectory(text: string, rules: DirectoryRules): DirectoryEn
       fault('nationality', 'is not a code of ICAO Doc 9303 (one to three letters)')
     const nationality = nationalityText && NATIONALITY.test(nationalityText) ? nationalityText.toUpperCase() : undefined
     const department = text('department', false)
+    // a file beside the directory, by its name alone: never a path that leaves its folder (IDENT-DIR-010)
+    const photo = text('photo', false)
+    if (photo && (basename(photo) !== photo || !/\.(jpe?g|png)$/i.test(photo)))
+      fault('photo', 'names a JPEG or PNG file in the folder of the directory, by its name alone')
     const groups = list('groups')
     const roles = list('roles')
     for (const role of roles)
@@ -205,6 +215,7 @@ export function parseDirectory(text: string, rules: DirectoryRules): DirectoryEn
       ...(birthDate ? { birthDate } : {}),
       ...(nationality ? { nationality } : {}),
       ...(department ? { department } : {}),
+      ...(photo && basename(photo) === photo && /\.(jpe?g|png)$/i.test(photo) ? { photo } : {}),
       groups,
       roles,
     })
@@ -235,7 +246,7 @@ export interface SnapshotEntry {
   department?: string
   groups: string[]
   roles: string[]
-  digests: Partial<Record<'email' | 'birthDate' | 'nationality', string>>
+  digests: Partial<Record<'email' | 'birthDate' | 'nationality' | 'photo', string>>
 }
 export type DirectorySnapshot = Map<string, SnapshotEntry>
 
@@ -254,6 +265,7 @@ export function snapshotOf(
       ['email', e.email.toLowerCase()],
       ['birthDate', e.birthDate],
       ['nationality', e.nationality],
+      ['photo', e.photo],
     ] as const) {
       const d = digest(field, value)
       if (d) digests[field] = d
@@ -565,6 +577,23 @@ export class UserDirectory {
       else nearest[reason] = (nearest[reason] ?? 0) + 1
     }
     return { ids, nearest }
+  }
+
+  /**
+   * The reference picture of an entry, for a face match and nothing else (D131, IDENT-DIR-010): the file its `photo`
+   * names, read now, with its type; undefined when it names none or the file cannot be read (the reason is logged, the
+   * picture never).
+   */
+  public photoOf(id: string): { bytes: Buffer; mimeType: string } | undefined {
+    const photo = this.current.get(id)?.photo
+    if (!photo) return undefined
+    try {
+      const bytes = readFileSync(join(dirname(this.file), photo))
+      return { bytes, mimeType: /\.png$/i.test(photo) ? 'image/png' : 'image/jpeg' }
+    } catch (error) {
+      this.logger.warn({ entryId: id, err: (error as Error).message }, 'the photo of a directory entry cannot be read')
+      return undefined
+    }
   }
 
   /** The entry that holds an address, compared in lower case (IDENT-DIR-004). */

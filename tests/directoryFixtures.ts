@@ -14,6 +14,7 @@ import type { RunningAgent } from '../src/app.js'
 import { actorIdentityOf } from '../src/channels/didcomm/identity.js'
 import { issuanceEntry } from '../src/core/issuance.js'
 import type { Principal } from '../src/core/types.js'
+import { badgeAuthentication } from './helpers.js'
 
 export const BADGE = 'https://ecs.example/vt/schemas-badge-jsc.json'
 export const AGENT_DID = 'did:webvh:QmAgent:agent.northwind.example'
@@ -198,16 +199,14 @@ export function directoryPack(
     { when: { relation: 'home', claims: { department: 'Depot Rotterdam' } }, roles: ['claimrole'] },
     ...doc.identity.roleRules,
   ]
-  doc.identity.authentication = [
-    {
-      credential: { jsonSchemaCredentialId: BADGE },
-      subjectKey: ['badgeNumber'],
-      request: 'on-demand',
-      visitors: true,
-      store: { attributes: options.authenticationStores ?? ['name'] },
-      ...(options.acceptedOrganizations ? { issuers: { organizations: options.acceptedOrganizations } } : {}),
-    },
-  ]
+  doc.identity.authentication = badgeAuthentication({
+    credential: { jsonSchemaCredentialId: BADGE },
+    subjectKey: ['badgeNumber'],
+    request: 'on-demand',
+    visitors: true,
+    store: { attributes: options.authenticationStores ?? ['name'] },
+    ...(options.acceptedOrganizations ? { issuers: { organizations: options.acceptedOrganizations } } : {}),
+  })
   if (options.language) doc.language = { ...doc.language, agent: options.language }
   if (options.contextWindowTokens) doc.memory = { ...doc.memory, contextWindowTokens: options.contextWindowTokens }
   if (options.partners?.length)

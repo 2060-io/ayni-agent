@@ -18,10 +18,10 @@ import {
 import { fieldsNamedBy } from '../tools/accountValues.js'
 import type {
   AgentPack,
-  AuthenticationEntry,
   BundledName,
   EvidencePolicy,
   PackApprovalPolicy,
+  PackAuthentication,
   SourceAccount,
   SpaceTemplate,
   ToolAccess,
@@ -30,6 +30,7 @@ import type {
 } from './packTypes.js'
 import {
   ACCOUNT_KINDS,
+  AUTHENTICATION_METHOD_TYPES,
   AVAILABILITIES,
   BUNDLED_NAMES,
   BUNDLED_TOOLS,
@@ -39,9 +40,11 @@ import {
   CLIENT_REGISTRATIONS,
   COMPUTED_FUNCTIONS,
   challengeTypesOf,
+  credentialMethodsOf,
   DOCUMENT_ATTRIBUTES,
   EMAIL_ATTRIBUTES,
   featuresOf,
+  IDENTIFYING_METHOD_TYPES,
   PERSONAL_RETENTION_DAYS,
   providerNameOf,
   RESERVED_ACCOUNT_KINDS,
@@ -57,6 +60,8 @@ export const DOCUMENT_ENTRY = 'document'
 /** The entry under which an address verified by an email code is kept as evidence: the `email` evidence kind (D89). */
 export const EMAIL_ENTRY = 'email'
 /** The attributes of a document read the matching of a directory entry reads (IDENT-DIR-003). */
+/** The entry under which a face match is kept as evidence, its audit fields only (D131, IDENT-AUTH-011). */
+export const FACE_MATCH_ENTRY = 'face-match'
 export const DIRECTORY_MATCH_ATTRIBUTES = ['lastName', 'firstName', 'dateOfBirth', 'nationality'] as const
 
 export class PackError extends Error {
@@ -190,7 +195,7 @@ export function bundledToolNames(pack: AgentPack): string[] {
   if (on('generateImage')) names.push('generate_image')
   if (on('principalCredentials')) names.push('principal_credentials')
   const asksOnDemand = Object.values(pack.presentations ?? {}).some((e) => e.request === 'on-demand')
-  if (on('requestPresentation') && (pack.identity.authentication?.length || asksOnDemand))
+  if (on('requestPresentation') && (pack.identity.authentication?.combinations?.length || asksOnDemand))
     names.push('request_presentation')
   if (on('credentialIssuance') && Object.keys(pack.issuance ?? {}).length) {
     names.push('credential_requirements')
@@ -230,7 +235,7 @@ export function evidenceWarnings(pack: AgentPack): string[] {
   const conversation = pack.privacy.processingActivities.find((a) => a.id === 'conversation-memory')?.retention?.days
   const warnings: string[] = []
   const policies: [string, EvidencePolicy][] = [
-    ...(pack.identity.authentication ?? []).map((e): [string, EvidencePolicy] => ['identity.authentication', e]),
+    ...credentialMethodsOf(pack).map(([n, e]): [string, EvidencePolicy] => [`identity.authentication.methods.${n}`, e]),
     ...Object.entries(pack.presentations ?? {}).map(([n, e]): [string, EvidencePolicy] => [`presentations.${n}`, e]),
     ...(pack.evidence?.document ? [['evidence.document', pack.evidence.document] as [string, EvidencePolicy]] : []),
   ]
@@ -248,31 +253,115 @@ export function evidenceWarnings(pack: AgentPack): string[] {
 }
 
 /**
- * What an authentication entry may not say (D72, IDENT-RES-010): `on-demand` lets visitors in by itself; a list of
- * organizations is not empty and holds organization keys; how the credential is obtained is a text, an https
- * link, or both.
+ * The evidence policy of the `authentication` entry: what is kept of a presentation of a `credential` method, and what
+ * the model may read of it (D67). Each method says it for its own presentations; the entry the rest of the agent reads
+ * (a claim's source, the model's view) takes all of them together.
  */
-export function authenticationErrors(entry: AuthenticationEntry): string[] {
+export function authenticationEvidencePolicy(pack: Pick<AgentPack, 'identity'>): EvidencePolicy {
+  const methods = credentialMethodsOf(pack).map(([, m]) => m)
+  const stored = [...new Set(methods.flatMap((m) => m.store?.attributes ?? []))]
+  const visible = [...new Set(methods.flatMap((m) => m.modelVisible ?? []))]
+  const retention = methods.find((m) => m.store?.retention)?.store?.retention
+  return {
+    ...(stored.length ? { store: { attributes: stored, ...(retention ? { retention } : {}) } } : {}),
+    ...(visible.length ? { modelVisible: visible } : {}),
+  }
+}
+
+/**
+ * What `identity.authentication` may not say (D72, D125, D126; IDENT-RES-010, IDENT-AUTH-001): `on-demand` lets visitors
+ * in by itself; a type the agent does not know; a combination that names a method not enabled, names one twice, is
+ * listed twice or holds no identifying method; a `credential` method without its schema or subject key, whose subject
+ * key is not among the attributes it asks, or whose list of organizations is empty or not of organization keys; a field
+ * of one type on a method of another; how a person obtains what they lack as neither a text nor an https link. What a
+ * method needs of the deployment (an SMTP server, a face-verification service) is checked when the agent starts.
+ */
+export function authenticationErrors(
+  authentication: PackAuthentication,
+  pack?: Pick<AgentPack, 'privacy' | 'media'>
+): string[] {
   const errors: string[] = []
-  if (entry.request === 'on-demand' && entry.visitors === false)
-    errors.push('rule 1: identity.authentication asked on-demand lets visitors in: visitors cannot be false')
-  const organizations = entry.issuers?.organizations
-  if (organizations !== undefined) {
-    if (!organizations.length)
+  const at = 'identity.authentication'
+  if (authentication.request === 'on-demand' && authentication.visitors === false)
+    errors.push(`rule 1: ${at} asked on-demand lets visitors in: visitors cannot be false`)
+  const methods = authentication.methods ?? {}
+  for (const [name, method] of Object.entries(methods)) {
+    const where = `${at}.methods.${name}`
+    if (!(AUTHENTICATION_METHOD_TYPES as readonly string[]).includes(method.type)) {
       errors.push(
-        'rule 1: identity.authentication.issuers.organizations is empty: it would accept nobody; leave it out to accept any accredited issuer'
+        `rule 1: ${where} has the type ${method.type}, which this agent does not know (${AUTHENTICATION_METHOD_TYPES.join(', ')})`
       )
-    const unkeyed = organizations.filter((key) => !/^org:[A-Z]{2}:.+$/.test(key))
-    if (unkeyed.length)
+      continue
+    }
+    if (method.type === 'credential') {
+      if (!method.credential?.jsonSchemaCredentialId)
+        errors.push(`rule 1: ${where} is a credential method without its schema (credential.jsonSchemaCredentialId)`)
+      if (!method.subjectKey?.length)
+        errors.push(`rule 1: ${where} is a credential method without a subject key (subjectKey)`)
+      const hidden = method.attributes ? (method.subjectKey ?? []).filter((a) => !method.attributes?.includes(a)) : []
+      if (hidden.length)
+        errors.push(
+          `rule 1: ${where}.subjectKey [${hidden.join(', ')}] must be among the attributes asked, or the credential can never identify`
+        )
+      const organizations = method.issuers?.organizations
+      if (organizations !== undefined) {
+        if (!organizations.length)
+          errors.push(
+            `rule 1: ${where}.issuers.organizations is empty: it would accept nobody; leave it out to accept any accredited issuer`
+          )
+        const unkeyed = organizations.filter((key) => !/^org:[A-Z]{2}:.+$/.test(key))
+        if (unkeyed.length)
+          errors.push(
+            `rule 1: ${where}.issuers.organizations [${unkeyed.join(', ')}] must be organization keys, org:<country>:<register id>`
+          )
+      }
+      errors.push(...evidencePolicyErrors(where, method, method.attributes))
+    } else {
+      const foreign = (['credential', 'subjectKey', 'attributes', 'issuers', 'store', 'modelVisible'] as const).filter(
+        (field) => method[field] !== undefined
+      )
+      if (foreign.length)
+        errors.push(`rule 1: ${where} is of type ${method.type}: [${foreign.join(', ')}] belong to a credential method`)
+    }
+    if (method.type === 'face-match') {
+      if (!method.reference?.length)
+        errors.push(`rule 1: ${where} names no reference picture (reference: document, directory)`)
+      // consent is the one lawful basis of a face match (D131, IDENT-AUTH-011)
+      const activity = pack?.privacy.processingActivities.find((a) => (a.id as string) === 'biometric-matching')
+      if (pack && activity?.lawfulBasis !== 'consent')
+        errors.push(
+          activity
+            ? `IDENT-AUTH-011: ${where} needs the processing activity biometric-matching with the lawful basis consent, not ${activity.lawfulBasis}`
+            : `IDENT-AUTH-011: ${where} needs the processing activity biometric-matching, with the lawful basis consent`
+        )
+      if (pack && !pack.media?.faceVerification)
+        errors.push(`IDENT-AUTH-001: ${where} needs a face-verification service (media.faceVerification)`)
+    } else if (method.reference !== undefined) {
+      errors.push(`rule 1: ${where} is of type ${method.type}: reference belongs to a face-match method`)
+    }
+  }
+  const seen = new Set<string>()
+  for (const [i, combination] of (authentication.combinations ?? []).entries()) {
+    const where = `${at}.combinations[${i}] [${combination.join(', ')}]`
+    const unknown = combination.filter((name) => !methods[name])
+    if (unknown.length) {
+      errors.push(`rule 1: ${where} names [${unknown.join(', ')}], which no method enables`)
+      continue
+    }
+    if (new Set(combination).size !== combination.length) errors.push(`rule 1: ${where} names a method twice`)
+    const key = [...combination].sort().join('\u0000')
+    if (seen.has(key)) errors.push(`rule 1: ${where} is listed twice`)
+    seen.add(key)
+    if (!combination.some((name) => IDENTIFYING_METHOD_TYPES.includes(methods[name].type)))
       errors.push(
-        `rule 1: identity.authentication.issuers.organizations [${unkeyed.join(', ')}] must be organization keys, org:<country>:<register id>`
+        `rule 1: ${where} holds no identifying method (${IDENTIFYING_METHOD_TYPES.join(', ')}): it would identify nobody`
       )
   }
-  if (entry.obtain) {
-    if (!entry.obtain.text && !entry.obtain.url)
-      errors.push('rule 1: identity.authentication.obtain says a text, a link, or both')
-    if (entry.obtain.url && !entry.obtain.url.startsWith('https://'))
-      errors.push('rule 1: identity.authentication.obtain.url must be an https link')
+  if (authentication.obtain) {
+    if (!authentication.obtain.text && !authentication.obtain.url)
+      errors.push(`rule 1: ${at}.obtain says a text, a link, or both`)
+    if (authentication.obtain.url && !authentication.obtain.url.startsWith('https://'))
+      errors.push(`rule 1: ${at}.obtain.url must be an https link`)
   }
   return errors
 }
@@ -978,27 +1067,27 @@ function templateBoundsErrors(pack: AgentPack, template: SpaceTemplate, where: s
 export function crossFieldErrors(pack: AgentPack): string[] {
   const errors: string[] = []
   const identity = pack.identity
-  // rule 1: one authentication schema, whose subject key is among the attributes asked (D65, IDENT-RES-010/012)
-  const authentication = identity.authentication ?? []
-  if (authentication.length > 1) errors.push('rule 1: identity.authentication must hold exactly one entry')
-  for (const entry of authentication) {
-    const hidden = entry.attributes ? entry.subjectKey.filter((a) => !entry.attributes?.includes(a)) : []
-    if (hidden.length) {
+  // rule 1: the methods and the accepted combinations (D125, D126; IDENT-RES-010, IDENT-AUTH-001), what is read by the
+  // model is stored and what is stored is asked (PRIV-EVID-006)
+  if (identity.authentication) errors.push(...authenticationErrors(identity.authentication, pack))
+  // an email, a document and a directory photo find or picture an entry of the user directory (IDENT-DIR-003/004/010)
+  for (const [name, method] of Object.entries(identity.authentication?.methods ?? {})) {
+    const needsDirectory =
+      method.type === 'email' ||
+      method.type === 'document' ||
+      (method.type === 'face-match' && method.reference?.includes('directory'))
+    if (needsDirectory && !identity.directory)
       errors.push(
-        `rule 1: identity.authentication subjectKey [${hidden.join(', ')}] must be among the attributes asked, or the credential can never bind`
+        `rule 1: identity.authentication.methods.${name} (${method.type}) finds a person in the user directory: identity.directory names none`
       )
-    }
   }
-  // rule 1, the mode (D72): who enters, who is accepted and how the credential is obtained
-  for (const entry of authentication) errors.push(...authenticationErrors(entry))
-  // what is read by the model is stored, what is stored is asked (PRIV-EVID-006)
-  for (const entry of authentication)
-    errors.push(...evidencePolicyErrors('identity.authentication', entry, entry.attributes))
+  const authenticationStore = authenticationEvidencePolicy(pack).store?.attributes
   for (const [name, entry] of Object.entries(pack.presentations ?? {})) {
     if (name === AUTHENTICATION_ENTRY)
       errors.push('presentations: the name authentication is the entry of identity.authentication')
     if (name === DOCUMENT_ENTRY) errors.push('presentations: the name document is the entry of evidence.document')
     if (name === EMAIL_ENTRY) errors.push('presentations: the name email is the entry of evidence.email')
+    if (name === FACE_MATCH_ENTRY) errors.push('presentations: the name face-match is the entry of a face match')
     errors.push(...evidencePolicyErrors(`presentations.${name}`, entry, entry.attributes))
   }
   // a document read gives a closed list of attributes: only those can be stored (PRIV-EVID-012)
@@ -1045,7 +1134,7 @@ export function crossFieldErrors(pack: AgentPack): string[] {
       }
       const stored =
         source.entry === AUTHENTICATION_ENTRY
-          ? identity.authentication?.[0]?.store?.attributes
+          ? authenticationStore
           : source.entry === DOCUMENT_ENTRY
             ? document?.store?.attributes
             : source.entry === EMAIL_ENTRY
@@ -1053,7 +1142,7 @@ export function crossFieldErrors(pack: AgentPack): string[] {
               : pack.presentations?.[source.entry]?.store?.attributes
       const known =
         source.entry === AUTHENTICATION_ENTRY
-          ? authentication.length > 0
+          ? credentialMethodsOf(pack).length > 0
           : source.entry === DOCUMENT_ENTRY
             ? !!document
             : source.entry === EMAIL_ENTRY
