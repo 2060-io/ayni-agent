@@ -42,10 +42,12 @@ import {
 import { TooManyWaiting } from '../../core/waiting.js'
 import { canonicalMime, mimeAllowed } from '../../media/service.js'
 import { MemoryService } from '../../memory/service.js'
+import { type AdminChanged, deviceOf } from '../../platform/adminGrants.js'
 import { displayName } from '../../policy/approvals.js'
 import { prefixedId } from '../../util/ids.js'
 import type { Logger } from '../../util/logger.js'
 import type { AgUiAdapter } from './adapter.js'
+import { registerAdminAccess } from './adminRoutes.js'
 import { type AgUiEvent, ev, sse } from './events.js'
 import { attachmentActivity, entryToMessages, replyReference, sharedEntryToMessages } from './mapping.js'
 import { RunMirror } from './mirror.js'
@@ -217,6 +219,9 @@ export class AgUiRoutes {
         // one offered or asked on request (IDENT-RES-007, IDENT-RES-010, PROF-DESC-012); an agent that requires it
         // declares nothing
         ...(admitsUnidentified(this.agent.pack) ? { visitors: true } : {}),
+        // admin access from the agent's card: Show Admin, Audit and Operations (agent D132, D133, PROF-DESC-013), while
+        // the agent-pack declares auditor or operator
+        ...(this.agent.adminGrants ? { admin: true } : {}),
       },
       locales: [this.agent.pack.language.agent],
     }
@@ -508,6 +513,16 @@ export class AgUiRoutes {
     // operators erase through the admin interface. Handover: its author shares it with its own space, or stops
     this.registerSpaces(app, base)
     this.registerTools(app, base)
+    // admin access (§3.14, D132, D133): while the agent-pack declares an admin role
+    const { adminGrants, adminService } = this.agent
+    if (adminGrants && adminService)
+      registerAdminAccess(app, base, {
+        grants: adminGrants,
+        service: adminService,
+        bound: (request, reply) => this.bound(request, reply),
+        sendError: (reply, error) => this.sendError(reply, error),
+        titleOf: this.titleOf,
+      })
 
     // PROF-SESS-011: the Principal's paired devices
     app.get(`${base}/devices`, async (request, reply) => {
@@ -1497,6 +1512,13 @@ export class AgUiRoutes {
     for (const session of await this.agent.store.sessions.listByPrincipal(principalId, ['bound']))
       if (session.channelType === 'ag-ui')
         await this.streams.publish(session.id, ev.custom(CUSTOM_EVENT.spaceNotificationsChanged, { ...value }))
+  }
+
+  /** The admin state of a device changed: every bound session of that device hears it (PROF-ADMIN-004). */
+  public async announceAdmin(principalId: string, device: string, value: AdminChanged): Promise<void> {
+    for (const session of await this.agent.store.sessions.listByPrincipal(principalId, ['bound']))
+      if (session.channelType === 'ag-ui' && deviceOf(session) === device)
+        await this.streams.publish(session.id, ev.custom(CUSTOM_EVENT.adminChanged, { ...value }))
   }
 
   /** One of a person's own accounts, or an attempt, changed: every bound session of theirs hears it (PROF-TOOL-019). */

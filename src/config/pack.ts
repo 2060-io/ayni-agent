@@ -31,6 +31,7 @@ import type {
 } from './packTypes.js'
 import {
   ACCOUNT_KINDS,
+  ADMIN_ROLES,
   AUTHENTICATION_METHOD_TYPES,
   AVAILABILITIES,
   BUNDLED_NAMES,
@@ -43,6 +44,7 @@ import {
   challengeTypesOf,
   credentialMethodsOf,
   DOCUMENT_ATTRIBUTES,
+  declaredAdminRoles,
   EMAIL_ATTRIBUTES,
   featuresOf,
   IDENTIFYING_METHOD_TYPES,
@@ -1317,6 +1319,65 @@ export function crossFieldErrors(pack: AgentPack): string[] {
   }
   // the tool catalog: accounts, availability, bindings, templates, approvers (TOOL-CAT, TOOL-AVAIL, D96 to D99)
   errors.push(...catalogErrors(pack))
+  // the admin interface's roles give nothing elsewhere (RBAC-XSESS-008)
+  errors.push(...adminRoleErrors(pack))
+  errors.push(...adminAccessErrors(pack))
+  return errors
+}
+
+/**
+ * What admin access needs (D127, D132, RBAC-ADMIN-002): a pack that declares `auditor` or `operator` names the set of
+ * methods Show Admin asks on the phone, and every method of it is one `identity.authentication.methods` enables.
+ */
+export function adminAccessErrors(pack: AgentPack): string[] {
+  const errors: string[] = []
+  const declared = declaredAdminRoles(pack)
+  const set = pack.admin?.authentication?.methods
+  if (declared.length && !set?.length)
+    errors.push(
+      `RBAC-ADMIN-002: identity.roles declares [${declared.join(', ')}]: admin.authentication.methods must name the set of methods Show Admin asks on the phone`
+    )
+  const enabled = pack.identity.authentication?.methods ?? {}
+  const unknown = (set ?? []).filter((name) => !enabled[name])
+  if (unknown.length)
+    errors.push(
+      `RBAC-ADMIN-002: admin.authentication.methods names [${unknown.join(', ')}], which identity.authentication.methods does not enable`
+    )
+  return errors
+}
+
+/**
+ * The admin interface's roles, `auditor` and `operator`, give nothing in conversations, spaces, memories or tools
+ * (RBAC-XSESS-008): a pack that names one in a source's access, among the approvers, with `canApprove`, among the
+ * creators of a template's spaces or among the roles a purpose permits is refused.
+ */
+export function adminRoleErrors(pack: AgentPack): string[] {
+  const errors: string[] = []
+  const refuse = (roles: Iterable<string> | undefined, where: string) => {
+    for (const role of roles ?? [])
+      if ((ADMIN_ROLES as readonly string[]).includes(role))
+        errors.push(
+          `RBAC-XSESS-008: ${where} names ${role}, a role of the admin interface, which gives nothing in conversations, spaces, memories or tools`
+        )
+  }
+  for (const [id, source] of Object.entries(pack.tools?.sources ?? {})) {
+    const access = source.access
+    refuse(Object.keys(access?.roles ?? {}), `tools.sources.${id}.access.roles`)
+    for (const [i, rule] of (access?.approval ?? []).entries())
+      refuse(rule.approvers, `tools.sources.${id}.access.approval[${i}].approvers`)
+    for (const [i, rule] of (access?.elevation ?? []).entries())
+      refuse(rule.approvers, `tools.sources.${id}.access.elevation[${i}].approvers`)
+  }
+  refuse(pack.approvals?.approvers, 'approvals.approvers')
+  refuse(
+    Object.entries(pack.identity.roles ?? {})
+      .filter(([, role]) => role.canApprove)
+      .map(([name]) => name),
+    'identity.roles (canApprove)'
+  )
+  for (const template of pack.spaces?.templates ?? [])
+    refuse(template.creators, `spaces.templates.${template.id}.creators`)
+  for (const purpose of pack.purposes ?? []) refuse(purpose.permittedRoles, `purposes.${purpose.id}.permittedRoles`)
   return errors
 }
 

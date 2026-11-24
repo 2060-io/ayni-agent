@@ -116,6 +116,10 @@
           "type": "boolean",
           "description": "the agent lets a person in without authenticating, as a visitor: no authentication schema, or one that lets visitors in (3.5.2, agent IDENT-RES-007, IDENT-RES-010, PROF-DESC-012)"
         },
+        "admin": {
+          "type": "boolean",
+          "description": "the agent serves admin access from its card: the admin state and grant, Audit and Operations, ayni.admin.changed (3.5.5, agent D132, D133, PROF-DESC-013)"
+        },
         "erasure": {
           "type": "object",
           "required": ["windowSeconds"],

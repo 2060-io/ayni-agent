@@ -13,7 +13,11 @@ import type { MessageEntry } from '../src/core/types.js'
 import { OpenAiChatModel, usageOf } from '../src/llm/openai.js'
 import type { StubChatModel } from '../src/llm/stub.js'
 import type { ChatDelta } from '../src/llm/types.js'
+import { type AdminService, buildAdmin } from '../src/platform/admin.js'
 import { parseSse, testEnv } from './helpers.js'
+
+/** The break-glass token of the admin interface in these tests (RBAC-XSESS-009). */
+const BREAK_GLASS = 'break-glass-of-the-tests'
 
 const client = { name: 'ayni-ui', version: '3.0.0', platform: 'web' }
 const lines: Record<string, unknown>[] = []
@@ -427,12 +431,40 @@ describe('a person deletes a message of theirs within its window (PRIV-ERASE-007
   })
 })
 
-describe('the admin interface (PRIV-ERASE-008, RBAC-XSESS-006)', () => {
-  const admin = () => running.admin as NonNullable<RunningAgent['admin']>
+describe('the internal admin interface (PRIV-ERASE-008, RBAC-XSESS-006, RBAC-XSESS-009)', () => {
+  // the internal admin interface over this agent's Audit and Operations, opened by the break-glass token (D134)
+  const glass = { authorization: `Bearer ${BREAK_GLASS}` }
+  let internal: ReturnType<typeof buildAdmin> | undefined
+  const raw = () => {
+    internal ??= buildAdmin({
+      service: running.agent.adminService as AdminService,
+      logger: running.agent.logger,
+      breakGlassToken: BREAK_GLASS,
+    })
+    return internal
+  }
+  afterAll(async () => {
+    await internal?.close()
+  })
+  const admin = () => ({
+    inject: (opts: { method: 'GET' | 'POST'; url: string; payload?: unknown; headers?: Record<string, string> }) =>
+      raw().inject({ ...opts, headers: { ...glass, ...opts.headers } } as never),
+  })
 
-  it('requires an operator and a reason', async () => {
-    const response = await admin().inject({ method: 'POST', url: '/admin/erasure', payload: { entryIds: ['x'] } })
+  it('refuses a call without the break-glass token, and requires a reason', async () => {
+    const anonymous = await raw().inject({
+      method: 'POST',
+      url: '/admin/operations/erase',
+      payload: { entryIds: ['x'], reason: 'r' },
+    })
+    expect(anonymous.statusCode).toBe(401)
+    const response = await admin().inject({
+      method: 'POST',
+      url: '/admin/operations/erase',
+      payload: { entryIds: ['x'] },
+    })
     expect(response.statusCode).toBe(400)
+    expect(response.json().error).toBe('reason-required')
   })
 
   it('holds, refuses the erasure on hold, releases, erases, and records every call', async () => {
@@ -444,8 +476,8 @@ describe('the admin interface (PRIV-ERASE-008, RBAC-XSESS-006)', () => {
     ) as MessageEntry
     const held = await admin().inject({
       method: 'POST',
-      url: '/admin/legal-hold',
-      payload: { operator: 'ops@example.org', reason: 'case 42', hold: true, entryIds: [message.id] },
+      url: '/admin/operations/legal-hold',
+      payload: { reason: 'case 42', hold: true, entryIds: [message.id] },
     })
     expect(held.json().changed).toEqual([message.id])
     // the person's erasure is refused on hold (PROF-HIST-010), and counted held for the conversation (PROF-CONV-009)
@@ -458,38 +490,37 @@ describe('the admin interface (PRIV-ERASE-008, RBAC-XSESS-006)', () => {
     expect(refused.json()).toEqual({ error: 'legal-hold' })
     const byOperator = await admin().inject({
       method: 'POST',
-      url: '/admin/erasure',
-      payload: { operator: 'ops@example.org', reason: 'request 7', entryIds: [message.id] },
+      url: '/admin/operations/erase',
+      payload: { reason: 'request 7', entryIds: [message.id] },
     })
     expect(byOperator.json()).toMatchObject({ erased: [], held: [message.id] })
     await admin().inject({
       method: 'POST',
-      url: '/admin/legal-hold',
-      payload: { operator: 'ops@example.org', reason: 'case closed', hold: false, conversationId },
+      url: '/admin/operations/legal-hold',
+      payload: { reason: 'case closed', hold: false, conversationId },
     })
     const erased = await admin().inject({
       method: 'POST',
-      url: '/admin/erasure',
-      payload: { operator: 'ops@example.org', reason: 'request 7', entryIds: [message.id] },
+      url: '/admin/operations/erase',
+      payload: { reason: 'request 7', entryIds: [message.id] },
     })
     expect(erased.json().erased).toContain(message.id)
-    // the auditor reads the conversation: the erased message keeps its audit fields, not its text
+    // the erased message keeps its audit fields, not its text; Audit reads the rest of the conversation decrypted
+    expect((await running.agent.store.entries.get(message.id))?.state).toBe('crypto-erased')
     const read = await admin().inject({
       method: 'GET',
-      url: `/admin/audit/entries?conversationId=${conversationId}`,
-      headers: { 'x-ayni-auditor': 'auditor@example.org', 'x-ayni-reason': 'quarterly audit' },
+      url: `/admin/audit/conversations/${conversationId}/messages?reason=quarterly%20audit`,
     })
-    const view = (read.json().entries as Record<string, unknown>[]).find((e) => e.id === message.id)
-    expect(view).toMatchObject({ state: 'crypto-erased', sourceType: 'text' })
-    expect(view?.text).toBeUndefined()
-    const log = await admin().inject({
-      method: 'GET',
-      url: '/admin/audit/log',
-      headers: { 'x-ayni-auditor': 'auditor@example.org', 'x-ayni-reason': 'quarterly audit' },
-    })
-    const records = log.json().records as { action: string; actor: string; reason: string }[]
+    expect(read.statusCode).toBe(200)
+    const erasedMessage = (read.json().messages as { id: string; content: unknown }[]).find((m) => m.id === message.id)
+    expect(erasedMessage?.content).toBe('[erased]')
+    const log = await admin().inject({ method: 'GET', url: '/admin/audit/log?reason=quarterly%20audit' })
+    const records = log.json().records as { action: string; actor: string; reason: string; breakGlass?: boolean }[]
+    // every call made with the break-glass token is recorded and flagged (RBAC-XSESS-009)
     for (const action of ['legal-hold', 'legal-hold-release', 'erasure', 'audit-read'])
-      expect(records.some((r) => r.action === action && r.actor && r.reason)).toBe(true)
+      expect(
+        records.some((r) => r.action === action && r.actor === 'break-glass' && r.breakGlass === true && r.reason)
+      ).toBe(true)
   })
 
   it('erases with the tool calls of its turn and flags the note that cites it, deletes no note (PRIV-ERASE-005)', async () => {
@@ -503,8 +534,8 @@ describe('the admin interface (PRIV-ERASE-008, RBAC-XSESS-006)', () => {
     await running.agent.store.entries.update(message.id, { createdAt: new Date(Date.now() - 3_600_000).toISOString() })
     const response = await admin().inject({
       method: 'POST',
-      url: '/admin/erasure',
-      payload: { operator: 'ops@example.org', reason: 'request 12', entryIds: [message.id] },
+      url: '/admin/operations/erase',
+      payload: { reason: 'request 12', entryIds: [message.id] },
     })
     expect(response.json().erased).toEqual(expect.arrayContaining([message.id, call.id]))
     const note = (await running.agent.store.notes.list(d.principal.id)).find((n) => n.lineageRefs.includes(message.id))
@@ -530,28 +561,10 @@ describe('the admin interface (PRIV-ERASE-008, RBAC-XSESS-006)', () => {
     const newest = (await entries(conversationId)).filter((e) => e.text.includes('words to forget')).map((e) => e.id)
     const erased = await admin().inject({
       method: 'POST',
-      url: '/admin/erasure',
-      payload: { operator: 'ops@example.org', reason: 'request 9', entryIds: newest },
+      url: '/admin/operations/erase',
+      payload: { reason: 'request 9', entryIds: newest },
     })
     expect(erased.json().erased).toEqual(expect.arrayContaining(newest))
     expect((await list())?.lastPreview).toContain('first words')
-  })
-
-  it('asks for the bearer token when one is set', async () => {
-    const guarded = await buildAgent(testEnv({ adminToken: 'secret-token' }), pino({ level: 'silent' }), {
-      drainMs: 100,
-    })
-    try {
-      const guard = guarded.admin as NonNullable<RunningAgent['admin']>
-      expect((await guard.inject({ method: 'GET', url: '/admin/health' })).statusCode).toBe(401)
-      const ok = await guard.inject({
-        method: 'GET',
-        url: '/admin/health',
-        headers: { authorization: 'Bearer secret-token' },
-      })
-      expect(ok.statusCode).toBe(200)
-    } finally {
-      await guarded.stop()
-    }
   })
 })

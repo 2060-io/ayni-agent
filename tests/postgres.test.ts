@@ -31,6 +31,8 @@ import type { ChatDelta, ChatModel, ChatRequest } from '../src/llm/types.js'
 import { createEntryCrypto, newKeyUnder, openJson, openUnder, sealJson, sealUnder } from '../src/memory/crypto.js'
 import { buildScope } from '../src/memory/scope.js'
 import { MemoryService } from '../src/memory/service.js'
+import { AdminService } from '../src/platform/admin.js'
+import { AdminGrants, deviceOf } from '../src/platform/adminGrants.js'
 import type { MailMessage } from '../src/platform/mail.js'
 import { sealedApprovals } from '../src/policy/approvals.js'
 import { MIGRATIONS } from '../src/store/migrations.js'
@@ -1583,5 +1585,51 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
     expect(await enrolments.types('prn-ana')).toEqual([])
     expect(await enrolments.principalOfPasskey('cred-2')).toBeUndefined()
     await store.close()
+  })
+
+  it('keeps an admin grant across a restart with its end, and records it with its grant (RBAC-ADMIN-003/007)', async () => {
+    const url = await freshDatabase()
+    const jonas = { id: 'prn-jonas', roles: ['auditor'], actorIdentity: 'did:peer:jonas' } as unknown as Principal
+    const browser = { id: 'ses-1', deviceHandle: 'dev-1', client: { name: 'ui', version: '1', platform: 'web' } }
+    const pack = { identity: { roles: { auditor: {} } }, admin: { authentication: { methods: ['otp'] } } } as never
+    const grantsOn = (store: PostgresStore) =>
+      new AdminGrants(
+        pack,
+        store.kv,
+        new AdminService({ store, logger } as never),
+        {
+          reauthenticate: async () => 'accepted',
+          principal: async (id) => (id === jonas.id ? jonas : undefined),
+          announce: async () => undefined,
+        },
+        logger,
+        { requestMs: 60_000 }
+      )
+    const first = new PostgresStore(url)
+    await first.init()
+    const grants = grantsOn(first)
+    await grants.request(jonas, browser as unknown as Session)
+    await grants.waitFor(browser)
+    const state = await grants.state(jonas, browser as unknown as Session)
+    expect(state).toEqual({ roles: ['auditor'], grant: { open: true, expiresAt: expect.any(String) } })
+    const [opened] = await first.adminAudit.list(1)
+    expect(opened).toMatchObject({ action: 'admin-grant-opened', principalId: jonas.id, grantId: expect.any(String) })
+    grants.stop()
+    await first.close()
+    // the next process reads the grant, its end unchanged, and ends it on Hide Admin
+    const second = new PostgresStore(url)
+    await second.init()
+    const again = grantsOn(second)
+    expect(await again.state(jonas, browser as unknown as Session)).toEqual(state)
+    await again.hide(jonas, browser as unknown as Session)
+    expect(await again.state(jonas, browser as unknown as Session)).toEqual({ roles: ['auditor'], grant: null })
+    expect((await second.adminAudit.list(1))[0]).toMatchObject({
+      action: 'admin-grant-ended',
+      grantId: opened?.grantId,
+      reason: 'hidden',
+    })
+    expect(deviceOf(browser)).toBe('dev-1')
+    again.stop()
+    await second.close()
   })
 })

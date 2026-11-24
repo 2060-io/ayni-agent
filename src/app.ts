@@ -11,6 +11,7 @@ import { AgUiAdapter } from './channels/agui/adapter.js'
 import { AgUiRoutes } from './channels/agui/routes.js'
 import { SessionStreams } from './channels/agui/streams.js'
 import { DidcommAdapter, MediaLinks } from './channels/didcomm/adapter.js'
+import { AUTHENTICATE_FLOW_EXPIRY_MS } from './channels/didcomm/authenticate.js'
 import { registerDidcommCallbacks } from './channels/didcomm/callbacks.js'
 import { CredentialDefinitions } from './channels/didcomm/credentialDefinitions.js'
 import { CredentialOffers } from './channels/didcomm/credentialOffers.js'
@@ -30,6 +31,7 @@ import {
   admitsUnidentified,
   credentialMethodFor,
   credentialMethodsOf,
+  declaredAdminRoles,
   directoryReadsDocuments,
   featuresOf,
   sourcesOfType,
@@ -40,6 +42,7 @@ import { ChallengeService } from './core/challenges.js'
 import { CapabilityRouter } from './core/channel.js'
 import { ConnectionService } from './core/connections.js'
 import { ContextAssembler } from './core/context.js'
+import { sealedConversations } from './core/conversationSeal.js'
 import { UserDirectory } from './core/directory.js'
 import { DirectoryClaims } from './core/directoryClaims.js'
 import { documentOutcomeForModel } from './core/document.js'
@@ -70,7 +73,8 @@ import { createEntryCrypto } from './memory/crypto.js'
 import { RagService } from './memory/rag.js'
 import { storeShapeFaults } from './memory/scope.js'
 import { MemoryService } from './memory/service.js'
-import { buildAdmin } from './platform/admin.js'
+import { AdminService, buildAdmin } from './platform/admin.js'
+import { AdminGrants, reauthenticationOutcome } from './platform/adminGrants.js'
 import { createMailer, type Mailer } from './platform/mail.js'
 import { RetentionService } from './platform/retention.js'
 import { HttpStats, NoopStats, RedisStreamStats, type StatsSink, StoreStats } from './platform/stats.js'
@@ -91,7 +95,7 @@ const RUNS_END_WITHIN_MS = 2000
 
 export interface RunningAgent {
   app: FastifyInstance
-  /** the admin interface (D78), when ADMIN_PORT is not 0; never exposed */
+  /** the internal admin interface (D134), when the agent-pack enables it; never exposed */
   admin?: FastifyInstance
   agent: AyniAgent
   /** the retention job (PRIV-RETN, decision 60), for the tests that run it */
@@ -576,19 +580,57 @@ export async function buildAgent(
   // a notification of a person entered, changed or ended: every bound session of theirs hears it (PROF-TOOL-025)
   agent.notifications.announce = (principalId, value) =>
     aguiRoutes?.announceNotifications(principalId, value) ?? Promise.resolve()
-  // the admin interface (D78): erasure, legal hold, the auditor's reads; served by start() on the loopback
-  const admin =
-    env.adminPort === 0
-      ? undefined
-      : buildAdmin({
-          store,
-          memory,
-          evidence,
-          logger,
-          token: env.adminToken,
-          announceErased: (principalId, conversationId, ids, clientIds) =>
-            aguiRoutes?.announceErased(principalId, conversationId, ids, clientIds) ?? Promise.resolve(),
-        })
+  // admin access (D132, D133): Audit and Operations through the AG-UI profile, from the agent's card, while the
+  // agent-pack declares auditor or operator; each grant opened by the phone's re-authentication (RBAC-ADMIN-002)
+  const adminService = new AdminService({
+    store,
+    memory,
+    evidence,
+    conversations: sealedConversations(store.conversations, crypto),
+    logger,
+    announceErased: (principalId, conversationId, ids, clientIds) =>
+      aguiRoutes?.announceErased(principalId, conversationId, ids, clientIds) ?? Promise.resolve(),
+  })
+  agent.adminService = adminService
+  if (declaredAdminRoles(pack).length) {
+    const adminGrants = new AdminGrants(
+      pack,
+      store.kv,
+      adminService,
+      {
+        reauthenticate: async (principal, session, methods) => {
+          const connectionId = principal.capabilityChannelId
+          if (!connectionId) return 'failed'
+          const attempt = await identity.authenticate(
+            connectionId,
+            principal.actorIdentity,
+            await peerProfiles.isFlowCapable(connectionId),
+            principal.userAgentVerified,
+            { purpose: 'admin', combinations: [methods], bound: principal, origin: session, text: 'Show Admin' }
+          )
+          return reauthenticationOutcome(principal, attempt)
+        },
+        principal: (id) => store.principals.get(id),
+        announce: (principalId, device, value) =>
+          aguiRoutes?.announceAdmin(principalId, device, value) ?? Promise.resolve(),
+      },
+      logger,
+      { requestMs: AUTHENTICATE_FLOW_EXPIRY_MS }
+    )
+    await adminGrants.restore()
+    agent.adminGrants = adminGrants
+    sessions.onDeviceUnlinked = (principalId, handle) => adminGrants.deviceUnlinked(principalId, handle)
+  }
+  // the internal admin interface (D134, RBAC-XSESS-009): only when the agent-pack enables it, opened by the
+  // break-glass token alone; disabled, no listener opens and ADMIN_TOKEN is read by nothing
+  let admin: FastifyInstance | undefined
+  if (pack.admin?.internal?.enabled) {
+    if (!env.adminToken)
+      throw new Error('admin.internal.enabled: the internal admin interface needs ADMIN_TOKEN (RBAC-XSESS-009)')
+    if (env.adminPort === 0)
+      logger.warn('admin.internal.enabled, and ADMIN_PORT is 0: the internal admin interface is off')
+    else admin = buildAdmin({ service: adminService, logger, breakGlassToken: env.adminToken })
+  }
   aguiRoutes.register(app, did)
   // the callback of people's sign-ins and the agent's client metadata document, public paths (D105)
   aguiRoutes.registerOAuth(app)
@@ -941,6 +983,8 @@ export async function buildAgent(
     // on now; then every change of the file while it runs (IDENT-ROLE-013)
     await people.apply(await directory.settle())
     directory.onReload(async (reload) => void (await people.apply(reload)))
+    // a grant whose Principal lost a role it opened for ends (RBAC-ADMIN-004)
+    directory.onReload(async () => void (await agent.adminGrants?.review()))
     directory.watch((env.directoryPollSeconds ?? 10) * 1000)
     stops.push(() => directory.stop())
     // a revocation the DIDComm agent could not make is made again (D91)
@@ -964,6 +1008,7 @@ export async function buildAgent(
       app.server.closeAllConnections()
       await app.close()
       await admin?.close()
+      agent.adminGrants?.stop()
       await registry.close()
       await personalConnections.closeAll()
       await redis?.quit().catch(() => undefined)
@@ -1008,10 +1053,10 @@ export async function start(): Promise<RunningAgent> {
   const running = await buildAgent(env, logger)
   await running.app.listen({ port: env.port, host: '0.0.0.0' })
   logger.info({ port: env.port, publicBaseUrl: env.publicBaseUrl }, 'ayni-agent listening')
-  // the admin interface listens on the loopback only: an operator reaches it with a port-forward (D78)
+  // the internal admin interface, when the agent-pack enables it, listens on the loopback only (D134)
   if (running.admin && env.adminPort) {
     await running.admin.listen({ port: env.adminPort, host: '127.0.0.1' })
-    logger.info({ port: env.adminPort }, 'admin interface listening on the loopback')
+    logger.warn({ port: env.adminPort }, 'internal admin interface listening on the loopback (break-glass)')
   }
   return running
 }

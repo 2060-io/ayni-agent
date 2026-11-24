@@ -1556,6 +1556,46 @@
         }
       }
     },
+    "admin": {
+      "description": "Admin access (ayni-spec D132 to D134, RBAC-ADMIN-001 to 008, RBAC-XSESS-009): a person whose roles hold auditor or operator opens Audit or Operations from the agent's card, after re-authenticating on the phone, for a grant of grantMinutes; and the internal admin interface, off unless enabled.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "authentication": {
+          "description": "The re-authentication Show Admin asks on the phone (D127, IDENT-AUTH-015): an authenticate flow of purpose admin whose one combination is this set. Required whenever identity.roles declares auditor or operator (RBAC-ADMIN-002).",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["methods"],
+          "properties": {
+            "methods": {
+              "description": "The set of methods, by their names in identity.authentication.methods; it may hold confirming methods only (face-match, authenticator-app).",
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" }
+            }
+          }
+        },
+        "grantMinutes": {
+          "description": "How long an admin grant lasts, counted from the phone's confirmation and never moved by use; only a new confirmation opens a new one (RBAC-ADMIN-003).",
+          "type": "integer",
+          "minimum": 1,
+          "default": 30
+        },
+        "internal": {
+          "description": "The internal admin interface, on a listener of its own inside the deployment (ADMIN_PORT, the loopback), opened only by the break-glass token ADMIN_TOKEN, each call recorded and flagged (D134, RBAC-XSESS-009).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "false (default): no admin listener opens and ADMIN_TOKEN is read by nothing.",
+              "type": "boolean",
+              "default": false
+            }
+          }
+        }
+      }
+    },
     "spaces": {
       "description": "The rules of the Personal space and the templates of the spaces people may create (SPACE-DEF-002/003, ayni-agent decision 60).",
       "type": "object",

@@ -11,6 +11,42 @@ export type Relation = 'home' | 'partner' | 'unrecognized'
 export type ConnectionType = 'verifiable-user-agent' | 'verifiable-service'
 export type ToolNameOrStar = string
 
+/**
+ * The admin interface's two roles (RBAC-XSESS-008), declared like any other role and given by the user directory:
+ * `auditor` reads what the admin interface serves, `operator` erases, sets and releases legal hold and rotates keys.
+ * Nothing but the admin interface reads them.
+ */
+export const ADMIN_ROLES = ['auditor', 'operator'] as const
+export type AdminRole = (typeof ADMIN_ROLES)[number]
+
+/**
+ * Admin access (ayni-spec D132 to D134): the set of methods Show Admin asks on the phone, how long a grant lasts from
+ * the confirmation, and whether the internal admin interface exists.
+ */
+export interface PackAdmin {
+  /** the one set of the re-authentication, by the names of `identity.authentication.methods` (RBAC-ADMIN-002) */
+  authentication?: { methods: string[] }
+  /** 30 by default, counted from the confirmation (RBAC-ADMIN-003) */
+  grantMinutes?: number
+  /** the internal admin interface: `false` by default (D134, RBAC-XSESS-009) */
+  internal?: { enabled?: boolean }
+}
+
+/** How long an admin grant lasts, in minutes (RBAC-ADMIN-003). */
+export function adminGrantMinutes(pack: Pick<AgentPack, 'admin'>): number {
+  return pack.admin?.grantMinutes ?? 30
+}
+
+/** The admin roles the agent-pack declares in `identity.roles`: admin access is served only when it declares one. */
+export function declaredAdminRoles(pack: Pick<AgentPack, 'identity'>): AdminRole[] {
+  return ADMIN_ROLES.filter((role) => !!pack.identity.roles?.[role])
+}
+
+/** The admin roles a Principal holds, of those the agent-pack declares (RBAC-ADMIN-001). */
+export function adminRolesOf(pack: Pick<AgentPack, 'identity'>, roles: readonly string[]): AdminRole[] {
+  return declaredAdminRoles(pack).filter((role) => roles.includes(role))
+}
+
 /** A role: approval rights and flags, never a scope of conversation reads (RBAC-XSESS-005, decision 60). */
 export interface RoleDefinition {
   description?: string
@@ -934,6 +970,8 @@ export interface AgentPack {
   }
   /** the rules of Personal and the spaces people may create in this agent (SPACE-DEF-002/003) */
   spaces?: { personal?: PersonalSpaceRules; templates?: SpaceTemplate[] }
+  /** admin access: Show Admin's re-authentication, the grant's minutes, the internal admin interface (D132 to D134) */
+  admin?: PackAdmin
 }
 
 /** The retention of a space whose template or `spaces.personal` gives none (SPACE-DEF-002). */

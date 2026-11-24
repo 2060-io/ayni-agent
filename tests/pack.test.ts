@@ -51,6 +51,12 @@ describe('agent-pack loader (CORE-PACK-001..004)', () => {
       WEBRTC_SERVER_URL: 'https://webrtc.example',
     })
     expect(example.pack.metadata.id).toBe('northwind-support')
+    // admin access: both roles, the set of Show Admin, the grant's minutes, no internal interface (D132 to D134)
+    expect(example.pack.admin).toEqual({
+      authentication: { methods: ['badge'] },
+      grantMinutes: 30,
+      internal: { enabled: false },
+    })
   })
 
   it('refuses another schema major and names the failing field', () => {
