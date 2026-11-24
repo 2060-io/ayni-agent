@@ -252,7 +252,7 @@ beforeAll(async () => {
         url: `${x.url}/wire`,
         parameters: { type: 'object', properties: { amount: { type: 'number' } } },
         access: {
-          roles: { operator: ['*'] },
+          roles: { support: ['*'] },
           elevation: [{ tools: ['wire'], purposes: ['support-case'], approvers: ['manager'], grantTtlMinutes: 60 }],
         },
       }

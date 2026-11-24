@@ -2,6 +2,12 @@
  * Ayni AG-UI Profile 3.5 (2060-io/ayni-spec, v4/ayni-agui-profile/profile.md).
  * Every name below cites the section or the PROF-* requirement it implements.
  *
+ * 3.5, package 3.5.5 (admin access, ayni-spec PRs #127 to #129, agent D132 to D134): `features.admin` (PROF-DESC-013);
+ * the admin state, Show Admin and Hide Admin (`GET {sessions}/admin`, `POST` and `DELETE {sessions}/admin/grant`,
+ * PROF-ADMIN-001 to 003); `ayni.admin.changed` (PROF-ADMIN-004); the pages Audit and Operations (§3.14, PROF-ADMIN-005,
+ * PROF-ADMIN-006); the errors `admin-closed`, `not-auditor`, `not-operator` and `reason-required` (PROF-ADMIN-007).
+ * Additive.
+ *
  * 3.5, package 3.5.4 (space governance, ayni-spec PR #125, agent D135 to D142): one owner of a space, or none (`owner:
  * null`), its `successor` to the owner (PROF-SPACE-008), the stewards' endpoints (PROF-SPACE-009), the rule
  * `approvalTimeouts`; the approval policy of a tool of a space in `tools[].approval` and in `PATCH ….approvals`
@@ -138,6 +144,12 @@ export interface DescriptorFeatures {
    * requires the authentication does not declare it. The web UI says so on the agent's page.
    */
   visitors?: boolean
+  /**
+   * the agent serves admin access from its card (3.5.5, PROF-DESC-013, agent D132, D133): the admin state and grant,
+   * Audit and Operations (§3.14) and `ayni.admin.changed` (§5). A UI shows no Show Admin for an agent that does not
+   * declare it.
+   */
+  admin?: boolean
 }
 
 export type BindingMode = 'cross-device' | 'same-device'
@@ -326,6 +338,8 @@ export const CUSTOM_EVENT = {
    * `spaceId` is null (3.5 amended, agent D114, PROF-TOOL-025)
    */
   spaceNotificationsChanged: 'ayni.space.notifications.changed',
+  /** the admin state of the device changed: a grant opened, a request that opened none, a grant ended (3.5.5, PROF-ADMIN-004) */
+  adminChanged: 'ayni.admin.changed',
 } as const
 
 /** What became of a change of a space's tools (3.4, PROF-TOOL-006). */
@@ -644,6 +658,7 @@ export interface CustomEventValueMap {
   'ayni.space.tools.changed': SpaceToolsChangedValue
   'ayni.connections.changed': ConnectionsChangedValue
   'ayni.space.notifications.changed': SpaceNotificationsChangedValue
+  'ayni.admin.changed': AdminChangedValue
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1119,6 +1134,16 @@ export const ERROR_STATUS = {
   'threshold-below-required': 422,
   /** 3.5 (D140): attestation turned off where the agent-pack requires it, with `field` (§3.10) */
   'attestation-required': 422,
+  /** 3.5.5: a call of Audit or Operations while the device holds no open admin grant (§3.14, PROF-ADMIN-007) */
+  'admin-closed': 403,
+  /** 3.5.5: a call of Audit by a person who does not hold `auditor` (§3.14) */
+  'not-auditor': 403,
+  /** 3.5.5: a call of Operations by a person who does not hold `operator` (§3.14) */
+  'not-operator': 403,
+  /** 3.5.5: a call of Audit or Operations without a reason of at least one word (§3.14) */
+  'reason-required': 400,
+  /** the reference agent, beyond §9: a rotation of a key while the key store is not built (§3.14) */
+  'not-implemented': 501,
 } as const
 
 export type ErrorCode = keyof typeof ERROR_STATUS
@@ -1928,4 +1953,148 @@ export interface SpaceNotificationsChangedValue {
   status?: ApprovalStatus
   waiting: boolean
   count: number
+}
+
+// ---------------------------------------------------------------------------------------------
+// Admin access (3.5.5, §3.14; agent D132 to D134): the admin state, Show Admin and Hide Admin, Audit and Operations
+
+/** The two roles of admin access, which nothing else reads (agent RBAC-XSESS-008). */
+export type AdminRoleName = 'auditor' | 'operator'
+
+/** A device's open admin grant: its end, counted from the phone's confirmation (agent RBAC-ADMIN-003). */
+export interface AdminGrantState {
+  open: true
+  expiresAt: string
+}
+
+/**
+ * `GET {sessions}/admin` (PROF-ADMIN-001): the admin roles the Principal holds and the device's open grant. To a person
+ * who holds neither role, `{ roles: [] }` and nothing else: a UI then shows no Show Admin.
+ */
+export type AdminStateResponse = { roles: [] } | { roles: AdminRoleName[]; grant: AdminGrantState | null }
+
+/**
+ * `POST {sessions}/admin/grant` answers `202` at once (PROF-ADMIN-002): the phone is asked to re-authenticate, and the
+ * outcome comes as `ayni.admin.changed`. A second request of the device while one waits answers the one that waits.
+ */
+export interface AdminGrantRequestResponse {
+  requestId: string
+  /** when the request stops waiting for the phone */
+  expiresAt: string
+}
+
+/** What became of a request (`declined`, `failed`, `expired`) or of a grant (`opened`, `ended`). */
+export type AdminOutcome = 'opened' | 'declined' | 'failed' | 'expired' | 'ended'
+
+/**
+ * `ayni.admin.changed` (§5, PROF-ADMIN-004): to every bound session of the device. A UI shows the ADMIN area exactly
+ * while the last value says `grant.open`, and hides it at `expiresAt` by its own clock too.
+ */
+export interface AdminChangedValue {
+  roles: AdminRoleName[]
+  grant: AdminGrantState | null
+  outcome?: AdminOutcome
+}
+
+/** Every answer of Audit and Operations names the record of the admin audit the call wrote. */
+export interface AdminAudited {
+  auditId: string
+}
+
+/** One conversation of `GET {sessions}/admin/audit/conversations?principal=&space=&from=&to=&reason=`. */
+export interface AuditConversation {
+  id: string
+  principalId: string
+  spaceId: string
+  title: string
+  state: 'active' | 'archived' | 'final'
+  createdAt: string
+  lastActivityAt: string
+}
+
+/** Newest activity first. */
+export interface AuditConversationsResponse extends AdminAudited {
+  conversations: AuditConversation[]
+}
+
+/**
+ * `GET {sessions}/admin/audit/conversations/{id}/messages?before=&limit=&reason=`: the entries, decrypted, in the shapes
+ * of §8, each page oldest first; an erased entry reads `[erased]`.
+ */
+export interface AuditMessagesResponse extends AdminAudited {
+  messages: unknown[]
+  nextBefore: string | null
+}
+
+/** `GET {sessions}/admin/audit/evidence?principal=&reason=`: each record's audit fields and the values stored. */
+export interface AuditEvidenceResponse extends AdminAudited {
+  evidence: { record: Record<string, unknown>; values: Record<string, string> }[]
+}
+
+/**
+ * `GET {sessions}/admin/audit/tool-calls?principal=&space=&conversation=&source=&from=&to=&reason=` (agent
+ * TOOL-PROV-005): the call records, newest first, with no argument, no result and no account value.
+ */
+export interface AuditToolCallsResponse extends AdminAudited {
+  calls: Record<string, unknown>[]
+}
+
+/** One record of the admin audit: who (the verified Principal and the grant, or the break-glass token), why, what. */
+export interface AdminAuditItem {
+  id: string
+  ts: string
+  action: string
+  actor: string
+  principalId?: string
+  grantId?: string
+  breakGlass?: boolean
+  reason: string
+  detail: Record<string, unknown>
+}
+
+/** `GET {sessions}/admin/audit/log?before=&limit=&reason=`: newest first. */
+export interface AuditLogResponse extends AdminAudited {
+  records: AdminAuditItem[]
+  nextBefore: string | null
+}
+
+/** `POST {sessions}/admin/operations/erase`. */
+export interface EraseRequest {
+  entryIds: string[]
+  reason: string
+}
+
+/** What was erased (with the cascade), what a legal hold kept, what was not found. */
+export interface EraseResponse extends AdminAudited {
+  erased: string[]
+  held: string[]
+  notFound: string[]
+}
+
+/** `POST {sessions}/admin/operations/legal-hold`: entries, or every entry of a conversation. */
+export interface LegalHoldRequest {
+  entryIds?: string[]
+  conversationId?: string
+  hold: boolean
+  reason: string
+}
+
+export interface LegalHoldResponse extends AdminAudited {
+  changed: string[]
+  skipped: string[]
+}
+
+/** One key of `GET {sessions}/admin/operations/keys?reason=`: its versions, a rotation's progress. */
+export interface KeyStatus {
+  key: 'master' | 'index'
+  versions: { version: number; current: boolean; wraps: number | null }[]
+  rotation: { from: number; to: number; done: number; total: number } | null
+  /** whether `POST {sessions}/admin/operations/keys/{key}/rotate` can rotate it */
+  rotatable: boolean
+}
+
+export interface KeysResponse extends AdminAudited {
+  keys: KeyStatus[]
+  /** when the key service last answered; null while the agent has none */
+  keyService: { lastAnsweredAt: string } | null
 }

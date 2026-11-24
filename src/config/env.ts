@@ -8,9 +8,15 @@ export interface Env {
   agentPackPath: string
   publicBaseUrl: string
   port: number
-  /** listener of the admin interface (D78): erasure, legal hold, audit reads; 0 turns it off; never exposed */
+  /**
+   * listener of the internal admin interface (D134), opened only when the agent-pack sets `admin.internal.enabled`, on
+   * the loopback; 0 keeps it closed. Audit and Operations themselves are served on `port` (RBAC-ADMIN-005)
+   */
   adminPort?: number
-  /** when set, every admin call carries it as a bearer token */
+  /**
+   * the break-glass token of the internal admin interface (RBAC-XSESS-009): with `admin.internal.enabled`, a call that
+   * carries it as a bearer token is let in when no phone is available, each use recorded and flagged; else unused
+   */
   adminToken?: string
   logLevel: string
   nodeEnv: string

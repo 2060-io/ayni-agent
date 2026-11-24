@@ -20,6 +20,8 @@ import type { ChatModel } from '../llm/types.js'
 import type { MediaService } from '../media/service.js'
 import type { RagService } from '../memory/rag.js'
 import { MemoryService, type NewEntry } from '../memory/service.js'
+import type { AdminService } from '../platform/admin.js'
+import type { AdminGrants } from '../platform/adminGrants.js'
 import type { StatsSink } from '../platform/stats.js'
 import { type ApprovalChange, ApprovalError, type ApprovalService, displayName } from '../policy/approvals.js'
 import { attestedFor } from '../policy/spacePolicy.js'
@@ -160,6 +162,13 @@ export class AyniAgent {
   public peerStatus?: PeerStatusNotifier
   /** the people of the user directory: who holds an entry, the member picker, the admin view (decision 61) */
   public people?: PeopleService
+  /** what Audit reads and Operations does (D133), for admin access and the internal admin interface (D134) */
+  public adminService?: AdminService
+  /**
+   * the admin grants of the devices: Show Admin, Hide Admin and their end (RBAC-ADMIN-001 to 005); while the agent-pack
+   * declares `auditor` or `operator`
+   */
+  public adminGrants?: AdminGrants
   /** the email code of a badge from the directory, served by the code in the conversation (decision 62, D89) */
   public emailChecks?: EmailChecks
   /** the service's own sentences in the person's language (decision 64) */
@@ -1884,6 +1893,8 @@ export class AyniAgent {
   public async onPeerDisconnected(connectionId: string): Promise<void> {
     const principal = await this.store.principals.findByCapabilityChannel(connectionId)
     if (!principal) return
+    // no phone, no admin grant (RBAC-ADMIN-004): told to the devices before their sessions close
+    await this.adminGrants?.endForPrincipal(principal.id, 'channel-closed')
     await this.sessions.closeAll(principal.id, 'channel-closed')
     principal.capabilityChannelId = null
     await this.principals.save(principal)

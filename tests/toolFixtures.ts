@@ -301,7 +301,7 @@ export function toolsPack(options: ToolsPackOptions): string {
         },
         availability: 'spaces',
         bindings: [{ name: 'handle', label: 'X account' }],
-        access: { roles: { comms: ['post_to_x'], operator: ['*'] } },
+        access: { roles: { comms: ['post_to_x'], support: ['*'] } },
         tools: { post_to_x: { effect: 'external' } },
       },
       // the mentions of the X account of a space: an account of four fields sent in one header (D102); the test server
@@ -315,7 +315,7 @@ export function toolsPack(options: ToolsPackOptions): string {
         parameters: { type: 'object', properties: {} },
         account: { kind: 'space', fields: X_ACCOUNT_FIELDS, apply: X_ACCOUNT_APPLY },
         availability: 'spaces',
-        access: { roles: { comms: ['x_mentions'], operator: ['*'] } },
+        access: { roles: { comms: ['x_mentions'], support: ['*'] } },
         tools: { x_mentions: { effect: 'read' } },
       },
       crm_status: {
@@ -326,7 +326,7 @@ export function toolsPack(options: ToolsPackOptions): string {
         url: `${options.xUrl}/status`,
         parameters: { type: 'object', properties: {} },
         availability: 'spaces',
-        access: { roles: { sales: ['crm_status'], operator: ['*'] } },
+        access: { roles: { sales: ['crm_status'], support: ['*'] } },
       },
       lookup: {
         type: 'http',
@@ -335,7 +335,7 @@ export function toolsPack(options: ToolsPackOptions): string {
         method: 'GET',
         url: `${options.xUrl}/lookup?q={q}`,
         parameters: { type: 'object', properties: { q: { type: 'string' } } },
-        access: { roles: { employee: ['lookup'], guest: ['lookup'], comms: ['lookup'], operator: ['*'] } },
+        access: { roles: { employee: ['lookup'], guest: ['lookup'], comms: ['lookup'], support: ['*'] } },
       },
       purge: {
         type: 'http',
@@ -344,7 +344,7 @@ export function toolsPack(options: ToolsPackOptions): string {
         method: 'DELETE',
         url: `${options.xUrl}/purge`,
         parameters: { type: 'object', properties: {} },
-        access: { roles: { employee: ['purge'], guest: ['purge'], operator: ['*'] } },
+        access: { roles: { employee: ['purge'], guest: ['purge'], support: ['*'] } },
       },
     },
   }

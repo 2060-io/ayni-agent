@@ -45,6 +45,7 @@ Relative paths (`rag.sources[].path`) resolve from the pack directory.
 | `sessions` | | idle timeout, binding expiry, liveness TTL, sibling sessions, device pairing window | D6, D7, D36, D51 |
 | `conversations` | | the window within which a person deletes a message of theirs | decision 60 of the agent |
 | `spaces` | | the templates people with a role create spaces from | decision 60 of the agent |
+| `admin` | with `auditor` or `operator` | the methods Show Admin asks on the phone, the minutes of an admin grant, the internal admin interface | D132 to D134, RBAC-ADMIN |
 | `channels` | | AG-UI and A2A adapters | D1, D2, CHAN-* |
 | `privacy` | yes | processing activities with lawful basis and retention, erasure | D18, PRIV-RETN |
 | `media` | | speech-to-text, vision, image generation, face verification | D45, INTX-AUTH-007 |
@@ -91,7 +92,7 @@ identity:
       roles: [visitor]
   roles:
     finance-manager: { canApprove: true }
-    auditor:         { description: Read-only access to the persistent store. }
+    auditor:         { description: Reads what Audit serves. }   # with admin.authentication (see "admin")
   roleRules:
     - when: { relation: home, claims: { department: [Finance, Treasury] } }
       roles: [employee, finance]
@@ -204,8 +205,8 @@ identity:
   above.
 - `roles` declares every role used anywhere in the pack. **No role reads other people's conversations**
   (RBAC-XSESS-005/007): a role carries no scope of conversation reads. A conversation is read by its author, by the
-  active members of its space once its author shares it with the space, and by an auditor through the admin
-  interface. `canApprove` marks roles that may appear in `approvers`. `admin` lets the role read the admin view of
+  active members of its space once its author shares it with the space, and by an auditor through Audit (see
+  `admin`). `canApprove` marks roles that may appear in `approvers`. `admin` lets the role read the admin view of
   roles and changes (IDENT-DIR-008, with the user directory).
 - **Who enters unidentified follows from `authentication`, and from nothing else** (D53, D72). A pack that
   accepts no combination lets every wallet in, unidentified. One that accepts some is in one of three modes:
@@ -1150,13 +1151,60 @@ missed.
 wrote: with it go the agent's reply to it (its messages, the tool calls and the memory lines of the turn that
 answered it) and the memories the agent took from it, at once and on every device; a reply still being written is
 cancelled first (PRIV-ERASE-010..012). `0` turns deletion off: the descriptor then declares no `erasure`. After the
-window the message stays; an operator erases through the admin interface, which respects legal hold. A person
-cannot delete a conversation.
+window the message stays; a holder of the role `operator` erases through Operations (see `admin`), which respects
+legal hold. A person cannot delete a conversation.
 
 ```yaml
 conversations:
   messageDeletionWindowSeconds: ${MESSAGE_DELETION_WINDOW_SECONDS:-600}
 ```
+
+## admin
+
+Admin access to the raw store (D132 to D134, RBAC-ADMIN-001 to 008, RBAC-XSESS-006 to 009): no port-forward and no
+typed name. It is served through the AG-UI profile (§3.14) to the web UI and the Ayni app alike.
+
+**The two roles** (RBAC-XSESS-008). `auditor` reads what Audit serves: the conversations of any person, decrypted, by
+person, space and period, the evidence records, the call records of the tools and the admin audit; it writes nothing.
+`operator` erases entries, sets and releases legal hold and rotates keys through Operations. They are declared in
+`identity.roles` like any other role and given to people by the user directory (or `perActorOverrides`); nothing but
+admin access reads them, and the loader refuses a pack that names one in a source's `access`, among the approvers, with
+`canApprove`, among the creators of a template or among the roles a purpose permits.
+
+**Show Admin.** The agent's card offers Show Admin to a person who holds either role. It asks the person's phone to
+re-authenticate with the set of methods `admin.authentication.methods` names: an `authenticate` flow of purpose
+`admin` whose one combination is that set (D127, IDENT-AUTH-015). The set names methods of
+`identity.authentication.methods`, and may hold confirming methods only (an authenticator app, a face match): every
+method must find or confirm the Principal of the connection. Once the phone confirms, an **admin grant** opens for the
+device that asked (the browser or the phone), with the roles the person holds then. It lasts `admin.grantMinutes`
+(30 by default) **counted from the confirmation**: use never extends it, and only a new confirmation opens a new one.
+It ends at its time, on Hide Admin, when the person loses a role it opened for (a reload of the directory), when its
+device is unlinked and when the phone's connection closes. Every read of Audit and every action of Operations carries
+a reason the person types, names the verified Principal and the grant, and leaves a record in the admin audit; so do
+the grant's opening and its end. Nothing Audit reads reaches a model.
+
+**The internal admin interface** (D134, RBAC-XSESS-009) exists only when `admin.internal.enabled` is `true` (`false` by
+default). Enabled, it listens on `ADMIN_PORT` (3011) on the loopback, never through a Service or an ingress; it serves
+what Audit and Operations serve, at the same paths under `/admin` (`/admin/audit/…`, `/admin/operations/…`), to a call
+that carries the break-glass token `ADMIN_TOKEN` as a bearer token and a reason (in the query for a read, in the body
+for an action); each call is recorded and flagged `breakGlass`. The agent refuses to start with it enabled and no
+`ADMIN_TOKEN`. Disabled, no listener opens and `ADMIN_TOKEN` is read by nothing.
+
+```yaml
+identity:
+  roles:
+    auditor:  { description: Reads what Audit serves. }
+    operator: { description: Erases entries, sets legal hold and rotates keys. }
+admin:
+  authentication:
+    methods: [badge]          # or a confirming set alone: [otp], [face]
+  grantMinutes: 30            # from the phone's confirmation; never extended by use
+  internal:
+    enabled: false            # true: the break-glass listener on ADMIN_PORT, opened by ADMIN_TOKEN
+```
+
+Refused by the loader: a pack that declares `auditor` or `operator` with no `admin.authentication.methods`
+(RBAC-ADMIN-002), and a set that names a method `identity.authentication.methods` does not enable.
 
 ## spaces
 
@@ -1286,6 +1334,9 @@ enables crypto-erasure with its lineage cascade.
 
 14. The tool catalog: see `tools: the catalog of tool sources`, "Refused by the loader" (TOOL-CAT-001..010,
     TOOL-AVAIL-002/003).
+15. Admin access: a pack that declares `auditor` or `operator` names `admin.authentication.methods`, each an enabled
+    method of `identity.authentication.methods` (RBAC-ADMIN-002); neither role is named where a role grants something
+    (RBAC-XSESS-008, see `admin`).
 
 Before the schema, a step-up that declares the email code is refused in words (INTX-AUTH-011), and so are a kind of
 account of a later phase (`organization`, TOOL-CAT-002) and a source of the catalog with no type or an unknown value
