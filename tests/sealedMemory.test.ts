@@ -111,41 +111,11 @@ describe('preferences, sealed (D77)', () => {
   })
 })
 
-describe('what an earlier version kept in the clear (D77)', () => {
-  it('is sealed at start, once, and reads the same', async () => {
-    const { store, memory } = rig()
-    const ana = principal('p-ana')
-    // rows as the previous version wrote them, straight to the store
-    await store.notes.save({
-      id: 'note_old',
-      principalId: ana.id,
-      content: 'works the night shift',
-      visibility: 'principal-private',
-      state: 'active',
-      backingIdentity: null,
-      lineageRefs: [],
-      needsRevision: false,
-      createdAt: '2026-11-01T00:00:00.000Z',
-      updatedAt: '2026-11-01T00:00:00.000Z',
-    })
-    await store.preferences.set({
-      principalId: ana.id,
-      key: 'style',
-      value: 'short numbered steps',
-      updatedAt: '2026-11-01T00:00:00.000Z',
-    })
-    // readable before sealing: the service opens what is sealed and passes what is not
-    expect((await memory.notes(ana, session(ana.id)))[0]?.content).toBe('works the night shift')
-
-    expect(await memory.sealPlainNotesAndPreferences()).toEqual({ notes: 1, preferences: 1 })
-    const raw = JSON.stringify([await store.notes.listAll(), await store.preferences.listAll()])
-    expect(raw).not.toMatch(/night shift|short numbered|"style"/)
-    expect(await store.preferences.listAll()).toHaveLength(1)
-    expect((await memory.notes(ana, session(ana.id)))[0]?.content).toBe('works the night shift')
-    expect((await memory.preferences(ana, session(ana.id))).map((p) => [p.key, p.value])).toEqual([
-      ['style', 'short numbered steps'],
-    ])
-    expect(await memory.sealPlainNotesAndPreferences()).toEqual({ notes: 0, preferences: 0 })
+describe('what an earlier version kept in the clear (no backward compatibility, ayni-spec PR #123)', () => {
+  it('is not sealed at start: the agent has no such pass, every row being written sealed', () => {
+    const { memory } = rig()
+    expect('sealPlainNotesAndPreferences' in memory).toBe(false)
+    expect('sealPlainAttachments' in memory).toBe(false)
   })
 })
 

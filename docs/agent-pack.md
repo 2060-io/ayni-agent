@@ -62,7 +62,7 @@ identity:
     - credential: { jsonSchemaCredentialId: https://.../vt/schemas-badge-jsc.json }
       subjectKey: [badgeNumber]
       request: on-connect                     # or on-demand: nothing is asked at connection
-      guests: false                           # true: the person may continue as a guest (with on-connect)
+      visitors: false                         # true: the person may continue as a visitor (with on-connect)
       issuers: { organizations: ["org:EE:14000000"] }   # whose credentials are accepted; any issuer when absent
       obtain: { text: "Ask your front desk for your badge.", url: https://.../badge }   # how to obtain it
       attributes: [badgeNumber, name, title, department]
@@ -78,7 +78,7 @@ identity:
       roles: [visitor]
   roles:
     finance-manager: { canApprove: true }
-    auditor:         { auditor: true }
+    auditor:         { description: Read-only access to the persistent store. }
   roleRules:
     - when: { relation: home, claims: { department: [Finance, Treasury] } }
       roles: [employee, finance]
@@ -142,12 +142,10 @@ identity:
 - `perActorOverrides` apply before the rules, for named actors: a service by its DID, a person by the key
   above.
 - `roles` declares every role used anywhere in the pack. **No role reads other people's conversations**
-  (RBAC-XSESS-005/007): `crossSession`, the role-wide conversation reads of an earlier version, is withdrawn, and a
-  pack that declares it, whatever its value, is refused with a message that says so. A conversation is read by its
-  author, by the active members of its space once its author shares it with the space, and by an auditor through
-  the admin interface. `canApprove` marks roles that may appear in `approvers`. `auditor` grants read-only access to
-  the whole persistent store outside LLM retrieval. `admin` lets the role read the admin view of roles and changes
-  (IDENT-DIR-008, with the user directory).
+  (RBAC-XSESS-005/007): a role carries no scope of conversation reads. A conversation is read by its author, by the
+  active members of its space once its author shares it with the space, and by an auditor through the admin
+  interface. `canApprove` marks roles that may appear in `approvers`. `admin` lets the role read the admin view of
+  roles and changes (IDENT-DIR-008, with the user directory).
 - **Who enters unidentified follows from `authentication`, and from nothing else** (D53, D72). A pack that
   names no authentication schema lets every wallet in, unidentified. One that names a schema is in one of
   three modes:
@@ -155,13 +153,13 @@ identity:
   | Mode | Pack | At connection |
   |---|---|---|
   | required | `request: on-connect` | the credential is asked; nothing opens without it |
-  | offered | `request: on-connect`, `guests: true` | the credential is asked; the person may continue as a guest |
-  | on request | `request: on-demand` | nothing is asked; the person enters as a guest and authenticates when they ask |
+  | offered | `request: on-connect`, `visitors: true` | the credential is asked; the person may continue as a visitor |
+  | on request | `request: on-demand` | nothing is asked; the person enters as a visitor and authenticates when they ask |
 
-  `on-demand` lets guests in by itself: `guests: false` with it is refused at start-up.
+  `on-demand` lets visitors in by itself: `visitors: false` with it is refused at start-up.
 - **The request at connection** (D72). It is valid five minutes. A credential that is not accepted is
   answered with its reason and asked again, with no limit: the person ends it by declining. A decline ends
-  the connection when the credential is required and lets the person in as a guest when it is offered. No
+  the connection when the credential is required and lets the person in as a visitor when it is offered. No
   answer in time ends the connection in both. Nothing is open before the outcome, so no conversation
   exists before it; a person who authenticates finds their conversations.
 - **Whose credentials are accepted** (D72). With no `issuers`, the credential of any accredited issuer of
@@ -170,13 +168,13 @@ identity:
   this when it verifies the presentation; the wallet is told the list so that it offers no other.
 - **How the credential is obtained** (D72). `obtain` is the operator's own text, with a link when there is
   one. The wallet shows it to a person who holds no such credential, or whose credential was not accepted.
-- An unidentified person, a guest, is a Principal
+- An unidentified person, a visitor, is a Principal
   without backing identity: relation `unrecognized`, `public` visibility only, the role rules decide the
   rest. The agent says at start-up that it admits unidentified peers. There is no separate setting: the
   earlier `unidentifiedPeers` and the `UNIDENTIFIED_PEERS` variable are gone (the variable is ignored, with
   a warning). `DEV_ALLOW_UNIDENTIFIED_PRINCIPALS` stays, for development only.
 - **The wallet is told where it stands** (D71, D72). The same entry gives the status message the agent sends
-  on each connection: the rule, `none` with no authentication schema, `optional` when guests are let in,
+  on each connection: the rule, `none` with no authentication schema, `optional` when visitors are let in,
   `required` when they are not; the schema asked for; the organizations accepted, when the pack lists any;
   and how the credential is obtained, when the pack says it. The message also says whether the person is
   identified and what is open to them, so the app knows whether to wait for the request, and when it may
@@ -560,7 +558,7 @@ starts with a letter or a digit, then letters, digits, `_` and `-`, 64 at most.
 | Key | Sources | What it says | Default |
 |---|---|---|---|
 | `type` | all | `mcp`, `http` or `bundled` | required |
-| `transport`, `url`, `command`, `args`, `env`, `headers`, `lazy`, `reconnect` | `mcp` | the connection: `stdio` needs `command`, `sse` and `streamable-http` need `url`; `headers` and `env` hold the agent's account as placeholders | `lazy: true`, `reconnect: true` |
+| `transport`, `url`, `command`, `args`, `env`, `headers` | `mcp` | the connection: `stdio` needs `command`, `sse` and `streamable-http` need `url`; `headers` and `env` hold the agent's account as placeholders; the agent connects on first need and again after a drop (TOOL-MCP-003) | none |
 | `description`, `method`, `url`, `headers`, `parameters`, `bodyTemplate`, `timeoutSeconds` | `http` | the request: `description` is what the model reads of the tool (required), `parameters` the JSON Schema of its arguments, `{param}` placeholders in `url` and `bodyTemplate` | `timeoutSeconds: 30` |
 | `bundled`, `enabled` | `bundled` | the bundled tool it names (below), and `enabled: false` to turn off one that is on by default; `endpoint` and `defaultStatClass` for `statistics`, `provider` for `generateImage` | `enabled: true` |
 | `title`, `description` | all | what people read on the cards, in the sources and in a space's settings | the id; none |
@@ -993,17 +991,11 @@ How it works:
 
 ### Refused by the loader
 
-- `mcp.servers`, `tools.http`, `tools.bundled`, `tools.access` and `actions`, in words and before the schema, each with
-  the key that replaces it: `tools.sources.<id>` with `type: mcp`, `http` or `bundled`, the source's `access`, and
-  `tools.sources.<id>.tools.<tool>.stepUp` (TOOL-CAT-011);
 - a source with no `type` or an unknown one; an unknown `availability`, `account.kind`, `effect`, `call`, `bundled` or
   template `add`, naming the source and the field (TOOL-CAT-001); a key of another type's connection (an HTTP tool with
   `transport`), named by the schema; `account.kind: organization` (TOOL-CAT-002);
 - an HTTP tool whose `tools` names another tool than its own; a bundled tool named by two sources, or whose `tools` names
   a tool it does not give, or declares an `effect` or `untrusted`;
-- `account.label`, `account.pattern` and `account.apply` as one object (`header`, `prefix`), in words and before the
-  schema, each with the form that replaces it, `account.fields` and `account.apply: [{ header, value }]`, written from
-  what the account declares (TOOL-CAT-012, D102);
 - an `account` on a bundled tool; a `space` account without `fields` or `apply`; `fields` or `apply` on an account that
   is neither a space's nor a person's; two fields of one name, a field's pattern that is not a regular expression, a header declared twice,
   a header's value that names a field the account does not declare, and a field no header names (TOOL-CAT-002, D102);
@@ -1182,14 +1174,13 @@ enables crypto-erasure with its lineage cascade.
 13. A badge from the user directory: see `issuance`, "Refused by the loader" (IDENT-DIR-002/003, INTX-AUTH-011/012/015,
     INTX-ISSUE-020). A profile that takes nothing from the directory declares at most one challenge, never `email`.
 
-14. The tool catalog: see `tools: the catalog of tool sources`, "Refused by the loader" (TOOL-CAT-001..012,
+14. The tool catalog: see `tools: the catalog of tool sources`, "Refused by the loader" (TOOL-CAT-001..010,
     TOOL-AVAIL-002/003).
 
-Before the schema, a role that declares `crossSession` is refused in words (RBAC-XSESS-005), and so are the keys
-`tools.sources` replaced (`mcp.servers`, `tools.http`, `tools.bundled`, `tools.access`, `actions`, TOOL-CAT-011), the
-keys of an account its fields replaced (`account.label`, `account.pattern`, `account.apply` as one header, TOOL-CAT-012),
-a step-up that declares the email code (INTX-AUTH-011), a kind of account of a later phase (`personal`, `organization`,
-TOOL-CAT-002), and a source of the catalog with no type or an unknown value (TOOL-CAT-001).
+Before the schema, a step-up that declares the email code is refused in words (INTX-AUTH-011), and so are a kind of
+account of a later phase (`organization`, TOOL-CAT-002) and a source of the catalog with no type or an unknown value
+(TOOL-CAT-001). The keys of an earlier pack (`crossSession`, the keys `tools.sources` and an account's fields replaced)
+are not read: the schema refuses them as keys it does not know.
 
 ## Differences from the previous generation of packs
 

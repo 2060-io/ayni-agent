@@ -228,26 +228,6 @@ export function fieldValue(value: unknown): string {
   return JSON.stringify(value, null, 2)
 }
 
-/** Whether a profile version is a given one or later (PROF-SESS-016): `3.5` is at least `3.4`. */
-export function profileAtLeast(profileVersion: string | undefined, least: string): boolean {
-  const m = /^(\d+)\.(\d+)/.exec(profileVersion ?? '')
-  const l = /^(\d+)\.(\d+)/.exec(least)
-  if (!m || !l) return false
-  const [major, minor] = [Number(m[1]), Number(m[2])]
-  const [lMajor, lMinor] = [Number(l[1]), Number(l[2])]
-  return major > lMajor || (major === lMajor && minor >= lMinor)
-}
-
-/** A profile version is 3.4 or later (PROF-SESS-016). */
-export function cardCapable(profileVersion: string | undefined): boolean {
-  return profileAtLeast(profileVersion, '3.4')
-}
-
-/** A profile version is 3.5 or later: its sessions show a Connect card (PROF-SESS-016, TOOL-CONN-011). */
-export function connectCapable(profileVersion: string | undefined): boolean {
-  return profileAtLeast(profileVersion, '3.5')
-}
-
 const ajv = new Ajv2020({ allErrors: true, strict: false })
 addFormats.default(ajv)
 

@@ -363,7 +363,7 @@ describe('what the agent-pack may say of a badge from the directory (IDENT-DIR-0
         credential: { jsonSchemaCredentialId: BADGE },
         subjectKey: ['badgeNumber'],
         request: 'on-demand',
-        guests: true,
+        visitors: true,
       },
     ]
     doc.evidence = { document, email: { store: { attributes: ['address'] } } }

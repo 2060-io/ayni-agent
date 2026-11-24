@@ -54,7 +54,7 @@ import { LANGUAGE_PREFERENCE, ServiceLanguage } from './core/serviceLanguage.js'
 import { SessionService } from './core/sessions.js'
 import { SpaceService } from './core/spaces.js'
 import { SpaceToolService } from './core/spaceTools.js'
-import { cardCapable, connectCapable, ToolGate } from './core/toolGate.js'
+import { ToolGate } from './core/toolGate.js'
 import { AnchoringService, VeranaLedgerWriter } from './integrity/anchoring.js'
 import { createChatModel, createEmbeddings } from './llm/index.js'
 import { createImageGenerators } from './media/imageGen.js'
@@ -123,7 +123,7 @@ export async function buildAgent(
   if (admitsUnidentified(pack))
     logger.warn(
       pack.identity.authentication?.length
-        ? 'identity: the authentication lets guests in: user agents enter unidentified until they authenticate (D53, D72)'
+        ? 'identity: the authentication lets visitors in: user agents enter unidentified until they authenticate (D53, D72)'
         : 'identity: the agent-pack names no authentication schema: every user agent enters unidentified (D53)'
     )
   const features = featuresOf(pack)
@@ -279,13 +279,6 @@ export async function buildAgent(
     await context.discardSummary(conversationId)
     await sessions.refreshPreview(conversationId)
   }
-  const sealed = await sessions.sealPlainConversations()
-  if (sealed) logger.info({ sealed }, 'conversation titles and previews sealed (D77)')
-  const resealed = await memory.sealPlainAttachments()
-  if (resealed) logger.info({ resealed }, 'attachment texts and names sealed with their entries (D77)')
-  const plainMemory = await memory.sealPlainNotesAndPreferences()
-  if (plainMemory.notes || plainMemory.preferences)
-    logger.info(plainMemory, 'working-memory notes and preferences sealed (D77)')
 
   let agentRef: AyniAgent | undefined
   const approvals = new ApprovalService(store, pack, {
@@ -446,24 +439,20 @@ export async function buildAgent(
     announce: async (principalId, value) => aguiRoutes?.announceConnections(principalId, value),
     accountEnded: (accountId) => registry.closePersonal(accountId),
     endAllowances: (principalId, sourceIds) => gate.endPersonalAllowances(principalId, sourceIds),
-    // a Connect card shows only in the sessions of a client of profile 3.5 or later (TOOL-CONN-011, PROF-SESS-016)
+    // a Connect card shows in the bound AG-UI sessions of the conversation (TOOL-CONN-011)
     connectSessions: async (conversationId) => {
       const conversation = await sessions.conversationById(conversationId)
-      if (!conversation) return []
-      return (await sessions.sessionsOfConversation(conversation)).filter((s) =>
-        connectCapable(s.client.profileVersion)
-      )
+      return conversation ? sessions.sessionsOfConversation(conversation) : []
     },
   }
   gate.hooks = {
     // the arguments of an approval erased with its turn: its card and its items say so (INTX-APPR-015)
     approvalErased: (record) => agentRef?.approvalErased(record) ?? Promise.resolve(),
     onCredentialInvalid: (principal) => agentRef?.onCredentialInvalid(principal) ?? Promise.resolve(),
-    // a card is asked only of the sessions of a client of profile 3.4 or later (TOOL-CALL-005, PROF-SESS-016)
+    // a card is asked of the bound AG-UI sessions of the conversation, which show it (TOOL-CALL-005)
     cardSessions: async (conversationId) => {
       const conversation = await sessions.conversationById(conversationId)
-      if (!conversation) return []
-      return (await sessions.sessionsOfConversation(conversation)).filter((s) => cardCapable(s.client.profileVersion))
+      return conversation ? sessions.sessionsOfConversation(conversation) : []
     },
     toConversation: async (conversationId, events) => aguiRoutes?.announceToConversation(conversationId, events),
     deliver: async (session, entry) => {

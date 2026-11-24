@@ -173,7 +173,7 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
       await store.close()
     })
 
-    it('keeps no plaintext of a note or a preference, and seals what an earlier version kept in the clear', async () => {
+    it('keeps no plaintext of a note or a preference', async () => {
       const { pack } = loadPack('agent-packs/dev', { ...process.env })
       const memory = new MemoryService(
         store,
@@ -185,26 +185,6 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
       const ana = principal('p9')
       await memory.addNote(ana, 'CANARY-NOTE-4412', ['msg_1'])
       await memory.setPreference(ana, 'CANARY-PREF-NAME-3021', 'CANARY-PREF-VALUE-8830')
-      // rows as the previous version wrote them, in the clear
-      await store.notes.save({
-        id: 'note_legacy',
-        principalId: 'p9',
-        content: 'CANARY-LEGACY-NOTE-5517',
-        visibility: 'principal-private',
-        state: 'active',
-        backingIdentity: null,
-        lineageRefs: [],
-        needsRevision: false,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      })
-      await store.preferences.set({
-        principalId: 'p9',
-        key: 'CANARY-LEGACY-PREF-NAME-6604',
-        value: 'CANARY-LEGACY-PREF-VALUE-7190',
-        updatedAt: new Date().toISOString(),
-      })
-      expect(await memory.sealPlainNotesAndPreferences()).toEqual({ notes: 1, preferences: 1 })
 
       const client = new pg.Client({ connectionString: url })
       await client.connect()
@@ -213,18 +193,14 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
         ...(await client.query('SELECT p::text AS row FROM preferences p')).rows,
         ...(await client.query('SELECT l::text AS row FROM memory_access_log l')).rows,
       ]
-      expect(rows.length).toBeGreaterThanOrEqual(4)
+      expect(rows.length).toBeGreaterThanOrEqual(2)
       for (const { row } of rows) expect(row).not.toMatch(/CANARY/)
-      expect((await client.query('SELECT count(*)::int AS n FROM preferences')).rows[0].n).toBe(2)
+      expect((await client.query('SELECT count(*)::int AS n FROM preferences')).rows[0].n).toBe(1)
       await client.end()
 
       const scopeSession = session('s9', 'p9', 'conv_9')
-      expect((await memory.notes(ana, scopeSession)).map((n) => n.content).sort()).toEqual([
-        'CANARY-LEGACY-NOTE-5517',
-        'CANARY-NOTE-4412',
-      ])
-      expect((await memory.preferences(ana, scopeSession)).map((p) => `${p.key}=${p.value}`).sort()).toEqual([
-        'CANARY-LEGACY-PREF-NAME-6604=CANARY-LEGACY-PREF-VALUE-7190',
+      expect((await memory.notes(ana, scopeSession)).map((n) => n.content)).toEqual(['CANARY-NOTE-4412'])
+      expect((await memory.preferences(ana, scopeSession)).map((p) => `${p.key}=${p.value}`)).toEqual([
         'CANARY-PREF-NAME-3021=CANARY-PREF-VALUE-8830',
       ])
       // the access log of those reads names neither
@@ -233,7 +209,6 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
       for (const { row } of (await log.query('SELECT l::text AS row FROM memory_access_log l')).rows)
         expect(row).not.toMatch(/CANARY/)
       await log.end()
-      expect(await memory.sealPlainNotesAndPreferences()).toEqual({ notes: 0, preferences: 0 })
     })
   })
 
@@ -360,36 +335,6 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
           },
         ],
       })
-      // an entry an earlier version wrote: the attachment's text in the clear beside the ciphertext
-      const legacy = await memory.append({
-        sessionId: 's1',
-        principalId: 'p1',
-        role: 'principal',
-        sourceType: 'media',
-        text: 'an older file',
-        backingIdentity: null,
-        attachments: [
-          {
-            id: 'att_2',
-            type: 'file',
-            bucketKey: 'b2',
-            mimeType: 'text/plain',
-            textRepr: 'x',
-            objectKeyRef: 'w',
-            refDigest: 'd',
-          },
-        ],
-      })
-      const raw = new pg.Client({ connectionString: url })
-      await raw.connect()
-      // the earlier format: the ciphertext held the text and the payload only
-      const old = sealJson(crypto, legacy.encKeyRef as string, { text: 'an older file' })
-      await raw.query(
-        `UPDATE entries SET cipher = $2, data = jsonb_set(data, '{attachments,0,textRepr}', '"CANARY-LEGACY-TEXT-2240"') WHERE id = $1`,
-        [legacy.id, old.cipher]
-      )
-      await raw.end()
-      expect(await memory.sealPlainAttachments()).toBe(1)
       const conversations = sealedConversations(store.conversations, crypto)
       await conversations.save({
         id: 'conv_secret',
@@ -406,12 +351,11 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
       await client.connect()
       const entries = (await client.query("SELECT e::text AS row FROM entries e WHERE conversation_id = 'conv_secret'"))
         .rows
-      expect(entries).toHaveLength(3)
+      expect(entries).toHaveLength(2)
       for (const { row } of entries) {
         expect(row).not.toContain('CANARY-MESSAGE-7781')
         expect(row).not.toContain('CANARY-ATTACHMENT-TEXT-1187')
         expect(row).not.toContain('CANARY-FILENAME-6620')
-        expect(row).not.toContain('CANARY-LEGACY-TEXT-2240')
       }
       const kept = (await client.query("SELECT c::text AS row FROM conversations c WHERE id = 'conv_secret'")).rows[0]
       expect(kept.row).not.toContain('CANARY-TITLE-5521')
@@ -426,7 +370,6 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
         textRepr: 'CANARY-ATTACHMENT-TEXT-1187',
         filename: 'CANARY-FILENAME-6620.pdf',
       })
-      expect(history.find((e) => e.id === legacy.id)?.attachments[0]?.textRepr).toBe('CANARY-LEGACY-TEXT-2240')
     })
 
     it('reads a conversation in order, between two places, whatever its sessions (MEM-ENTRY-004)', async () => {

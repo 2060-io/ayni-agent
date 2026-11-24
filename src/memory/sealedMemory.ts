@@ -14,15 +14,9 @@ interface SealedPreference {
   value: string
 }
 
-export interface SealedNotes extends WorkingMemoryRepo {
-  /** Seals what an earlier version kept in the clear; returns how many it sealed. */
-  sealPlain(): Promise<number>
-}
+export type SealedNotes = WorkingMemoryRepo
 
-export interface SealedPreferences extends PreferenceRepo {
-  /** Seals what an earlier version kept in the clear; returns how many it sealed. */
-  sealPlain(): Promise<number>
-}
+export type SealedPreferences = PreferenceRepo
 
 export function sealedNotes(repo: WorkingMemoryRepo, crypto: EntryCrypto): SealedNotes {
   const open = (n: WorkingMemoryNote): WorkingMemoryNote => {
@@ -42,15 +36,6 @@ export function sealedNotes(repo: WorkingMemoryRepo, crypto: EntryCrypto): Seale
     delete: (id) => repo.delete(id),
     flagByLineage: (entryId) => repo.flagByLineage(entryId),
     listAll: async () => (await repo.listAll()).map(open),
-    sealPlain: async () => {
-      let sealed = 0
-      for (const note of await repo.listAll()) {
-        if (note.sealed) continue
-        await repo.save(seal(note))
-        sealed++
-      }
-      return sealed
-    },
   }
 }
 
@@ -88,16 +73,5 @@ export function sealedPreferences(repo: PreferenceRepo, crypto: EntryCrypto): Se
     set: (pref) => repo.set(seal(pref)),
     delete: (principalId, key) => repo.delete(principalId, indexOf(principalId, key)),
     listAll: async () => (await repo.listAll()).map(open),
-    sealPlain: async () => {
-      let sealed = 0
-      for (const pref of await repo.listAll()) {
-        if (pref.sealed) continue
-        // stored under its name in the clear: stored again under the index of its name, then the plain row goes
-        await repo.set(seal(pref))
-        await repo.delete(pref.principalId, pref.key)
-        sealed++
-      }
-      return sealed
-    },
   }
 }

@@ -986,7 +986,7 @@ describe('the authentication of a person (D72; IDENT-RES-010/018/019/020, FLOW-S
   })
 
   it('offered: a decline lets the person in as a guest; no answer in time still ends the connection', async () => {
-    const guest = setup({ guests: true })
+    const guest = setup({ visitors: true })
     await settle()
     expect(guest.flowNow().kind).toBe('authenticate')
     await guest.holder('declined')
@@ -997,14 +997,14 @@ describe('the authentication of a person (D72; IDENT-RES-010/018/019/020, FLOW-S
     })
     expect(guest.refused).toEqual([])
 
-    const silentWallet = setup({ guests: true })
+    const silentWallet = setup({ visitors: true })
     await settle()
     await silentWallet.holder('expired')
     expect(await silentWallet.establishing).toBeUndefined()
     expect(silentWallet.refused).toEqual(['authentication-unanswered'])
 
     // offered, and a badge that is not accepted: asked again, and the person may still enter as a guest
-    const retry = setup({ guests: true, issuers: { organizations: ['org:EE:1'] } })
+    const retry = setup({ visitors: true, issuers: { organizations: ['org:EE:1'] } })
     await settle()
     retry.present(ISSUER_2)
     await settle()
@@ -1017,7 +1017,7 @@ describe('the authentication of a person (D72; IDENT-RES-010/018/019/020, FLOW-S
     // Found on devnet with a phone: Continue as guest brought the request back. The decline reached the agent
     // as an abandoned presentation, a moment before the flow closed, and was taken for a presentation that did
     // not verify: the agent said `not-valid` and asked again, for ever
-    const guest = setup({ guests: true })
+    const guest = setup({ visitors: true })
     await settle()
     await guest.declines()
     expect(await guest.establishing).toMatchObject({ identityCredentialRef: null })
@@ -1035,7 +1035,7 @@ describe('the authentication of a person (D72; IDENT-RES-010/018/019/020, FLOW-S
   })
 
   it('still says not-valid, and asks again, of a presentation that came and did not verify', async () => {
-    const t = setup({ guests: true })
+    const t = setup({ visitors: true })
     await settle()
     const request = t.calls.filter((c) => c.method === 'requestPresentation').at(-1) as Call
     t.identityOf().onPresentation({

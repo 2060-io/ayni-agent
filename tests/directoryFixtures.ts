@@ -203,7 +203,7 @@ export function directoryPack(
       credential: { jsonSchemaCredentialId: BADGE },
       subjectKey: ['badgeNumber'],
       request: 'on-demand',
-      guests: true,
+      visitors: true,
       store: { attributes: options.authenticationStores ?? ['name'] },
       ...(options.acceptedOrganizations ? { issuers: { organizations: options.acceptedOrganizations } } : {}),
     },

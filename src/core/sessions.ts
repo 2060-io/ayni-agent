@@ -830,11 +830,6 @@ export class SessionService {
     await this.conversations.save(conversation)
   }
 
-  /** Seals the titles and last texts an earlier version kept in the clear (D77); run once at start. */
-  public async sealPlainConversations(): Promise<number> {
-    return this.conversations.sealPlain()
-  }
-
   /** The newest message the person wrote in the conversation. */
   private async lastWritten(conversation: Conversation) {
     const [row] = await this.store.entries.query(this.scopeOf(conversation), {

@@ -7,7 +7,7 @@ import type { RunningAgent } from '../src/app.js'
 import { buildAgent } from '../src/app.js'
 import { SessionStreams } from '../src/channels/agui/streams.js'
 import type { AuthenticationEntry } from '../src/config/packTypes.js'
-import type { Session } from '../src/core/types.js'
+import { type Session, TRUST_BOUND_KINDS } from '../src/core/types.js'
 import { createLogger } from '../src/util/logger.js'
 import { parseSse, startTestAgent, testEnv } from './helpers.js'
 
@@ -121,7 +121,7 @@ describe('descriptor (PROF-DESC-001/002)', () => {
       expect(before).toBeUndefined()
       expect((await features()).visitors).toBe(true)
       // offered: asked at connection, the person may enter as a visitor instead (IDENT-RES-010)
-      identity.authentication = [entry({ guests: true })]
+      identity.authentication = [entry({ visitors: true })]
       expect((await features()).visitors).toBe(true)
       // on request: nothing asked at connection
       identity.authentication = [entry({ request: 'on-demand' })]
@@ -129,7 +129,7 @@ describe('descriptor (PROF-DESC-001/002)', () => {
       // required: nobody enters without it, and the descriptor says nothing of visitors
       identity.authentication = [entry({})]
       expect((await features()).visitors).toBeUndefined()
-      identity.authentication = [entry({ request: 'on-connect', guests: false })]
+      identity.authentication = [entry({ request: 'on-connect', visitors: false })]
       expect('visitors' in (await features())).toBe(false)
     } finally {
       identity.authentication = before
@@ -1010,6 +1010,31 @@ describe('conversations (PROF-CONV-001..005, IDENT-SESS-010..013)', () => {
 })
 
 describe('runs, tools and history (PROF-RUN-002..005, PROF-MAP-005, PROF-HIST-001)', () => {
+  it('takes no resume of an interrupt: a menu is answered with menu.select, and a run is what its message says (PROF-RUN-006 withdrawn)', async () => {
+    const { body } = await createSession()
+    await bindViaPhone(body.sessionId, 'did:peer:no-resume')
+    const response = await running.app.inject({
+      method: 'POST',
+      url: `/agui/v3/sessions/${body.sessionId}/runs`,
+      headers: { authorization: `Bearer ${body.sessionToken}` },
+      payload: {
+        threadId: body.sessionId,
+        runId: 'run-no-resume',
+        messages: [{ id: 'u1', role: 'user', content: 'plain words' }],
+        resume: [{ interruptId: 'i1', status: 'resolved', payload: { menuId: 'main', itemId: 'authenticate' } }],
+      },
+    })
+    expect(response.statusCode).toBe(200)
+    const text = parseSse(response.body)
+      .map((e) => e.event)
+      .filter((e) => e.type === 'TEXT_MESSAGE_CONTENT')
+      .map((e) => e.delta)
+      .join('')
+    expect(text).toContain('You said: plain words')
+    // no capability of the conversation is an approval of someone else's request (D114): no routed authorization
+    expect(TRUST_BOUND_KINDS).not.toContain('authorization')
+  })
+
   it('ignores client tools, runs a permitted tool with a step label, hides tool names from the wire', async () => {
     const { body } = await createSession()
     await bindViaPhone(body.sessionId, 'did:peer:carol')

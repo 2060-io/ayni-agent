@@ -123,8 +123,6 @@ export interface EntryRepo {
    * and the auditor's interface (RBAC-XSESS-006), never for the model
    */
   listAll(q: { conversationId?: string; principalId?: string; limit: number }): Promise<StoredEntry[]>
-  /** entries an earlier version stored with an attachment's text or name in the clear (D77) */
-  listWithPlainAttachments(limit: number): Promise<StoredEntry[]>
   listUnanchored(limit: number): Promise<StoredEntry[]>
   markAnchored(ids: string[], batchId: string): Promise<void>
   /**

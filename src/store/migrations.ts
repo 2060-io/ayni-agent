@@ -241,8 +241,7 @@ CREATE INDEX IF NOT EXISTS admin_audit_ts ON admin_audit (ts DESC);
   },
   {
     // D77: a preference keeps its name and value only as ciphertext under a key of its own, found by a keyed index
-    // of its name; the agent seals at start what an earlier version kept in the clear (working-memory notes keep
-    // theirs in `data`, which needs no column)
+    // of its name (working-memory notes keep theirs in `data`, which needs no column)
     version: '3.5.0',
     sql: `
 ALTER TABLE preferences ADD COLUMN IF NOT EXISTS enc_key_ref TEXT;

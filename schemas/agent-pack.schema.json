@@ -102,8 +102,8 @@
                 "enum": ["on-connect", "on-demand"],
                 "default": "on-connect"
               },
-              "guests": {
-                "description": "Whether a person may enter without the credential, as a guest (D72). With on-connect: false (default), the credential is required and nothing opens without it; true, it is offered at connection and the person may continue as a guest. on-demand lets guests in by itself and refuses false.",
+              "visitors": {
+                "description": "Whether a person may enter without the credential, as a visitor (D72). With on-connect: false (default), the credential is required and nothing opens without it; true, it is offered at connection and the person may continue as a visitor. on-demand lets visitors in by itself and refuses false.",
                 "type": "boolean",
                 "default": false
               },
@@ -290,15 +290,10 @@
                 "default": false,
                 "description": "May act as an approver where listed."
               },
-              "auditor": {
-                "type": "boolean",
-                "default": false,
-                "description": "Read-only access to the whole persistent store, outside LLM retrieval (RBAC-XSESS)."
-              },
               "admin": {
                 "type": "boolean",
                 "default": false,
-                "description": "The role reads the admin view of the user directory: who holds which role and why, and what each reload changed (IDENT-DIR-008/009, PROF-DIR-003). A role carries no scope of conversation reads: crossSession is withdrawn and refused (RBAC-XSESS-005)."
+                "description": "The role reads the admin view of the user directory: who holds which role and why, and what each reload changed (IDENT-DIR-008/009, PROF-DIR-003). A role carries no scope of conversation reads (RBAC-XSESS-005)."
               }
             }
           }
@@ -1950,15 +1945,6 @@
             "type": "string"
           },
           "description": "Deployment-held credentials, typically ${VAR} placeholders."
-        },
-        "lazy": {
-          "type": "boolean",
-          "default": true,
-          "description": "Connect on first need (TOOL-MCP-002)."
-        },
-        "reconnect": {
-          "type": "boolean",
-          "default": true
         },
         "offer": {
           "type": "array",

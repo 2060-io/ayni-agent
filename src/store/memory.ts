@@ -204,12 +204,6 @@ export class MemoryStore implements Store {
       }
       return hits.sort((a, b) => b.score - a.score).slice(0, topK)
     },
-    listWithPlainAttachments: async (limit: number) =>
-      clone(
-        [...this.entryRows.values()]
-          .filter((e) => e.attachments.some((a) => a.textRepr || a.filename !== undefined))
-          .slice(0, limit)
-      ),
     listAll: async (q: { conversationId?: string; principalId?: string; limit: number }) =>
       clone(
         [...this.entryRows.values()]

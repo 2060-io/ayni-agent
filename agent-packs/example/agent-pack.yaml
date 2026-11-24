@@ -59,7 +59,6 @@ identity:
       description: People of an accredited organization this agent does not otherwise know.
     auditor:
       description: Read-only access to the persistent store.
-      auditor: true
     people-admin:
       description: Reads who holds which role of the user directory, and what each reload changed (D92).
       admin: true
@@ -225,7 +224,6 @@ tools:
       transport: streamable-http
       url: ${CRM_MCP_URL}
       headers: { Authorization: "Bearer ${CRM_MCP_TOKEN}" }   # the agent's account, deployment-held (TOOL-ACCESS-002)
-      lazy: true
       access:
         roles:
           employee: [search_customer, search_invoices]

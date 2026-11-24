@@ -351,16 +351,6 @@ export class PostgresStore implements Store {
       )
       return rows.map((r) => ({ item: this.entryFromRow(r), score: Number(r.score) }) as VectorHit<StoredEntry>)
     },
-    listWithPlainAttachments: async (limit: number) => {
-      const rows = await this.rows(
-        `SELECT * FROM entries e WHERE EXISTS (
-           SELECT 1 FROM jsonb_array_elements(COALESCE(e.data->'attachments', '[]'::jsonb)) a
-           WHERE COALESCE(a->>'textRepr', '') <> '' OR a ? 'filename'
-         ) LIMIT $1`,
-        [limit]
-      )
-      return rows.map((r) => this.entryFromRow(r))
-    },
     listAll: async (q: { conversationId?: string; principalId?: string; limit: number }) => {
       const where: string[] = ['true']
       const params: unknown[] = []

@@ -27,11 +27,6 @@
           "type": "string",
           "maxLength": 120,
           "description": "what the phone shows when it links this session (PROF-SESS-014)"
-        },
-        "profileVersion": {
-          "type": "string",
-          "pattern": "^[0-9]+\\.[0-9]+$",
-          "description": "the version of the profile the client implements (3.4, PROF-SESS-016): the agent asks the confirmation of a tool call only of sessions whose client declared 3.4 or later"
         }
       }
     },

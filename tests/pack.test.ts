@@ -7,7 +7,7 @@ import {
   substitutePlaceholders,
   validatePackDocument,
 } from '../src/config/pack.js'
-import { messageDeletionWindowSeconds, type SpaceTemplate } from '../src/config/packTypes.js'
+import { authenticationModeOf, messageDeletionWindowSeconds, type SpaceTemplate } from '../src/config/packTypes.js'
 
 const env = { HOME_BACKING_IDENTITY: 'did:webvh:x:home', AGUI_ALLOWED_ORIGINS: 'https://a.example,https://b.example' }
 
@@ -72,23 +72,22 @@ describe('agent-pack loader (CORE-PACK-001..004)', () => {
 })
 
 describe("no role reads other people's conversations (RBAC-XSESS-005)", () => {
-  it('refuses a pack whose role declares crossSession, whatever its value, in words', () => {
+  it('leaves crossSession, a key of an earlier pack, to the schema, which refuses it as a key it does not know', () => {
     const dev = loadPack('agent-packs/dev', { ...process.env, ...env })
-    for (const scope of ['own-backing-identity', 'all', 'own-sessions']) {
-      const bad = structuredClone(dev.pack) as unknown as {
-        identity: { roles: Record<string, Record<string, unknown>> }
-      }
-      bad.identity.roles.manager = { ...bad.identity.roles.manager, crossSession: scope }
-      let message = ''
-      try {
-        validatePackDocument(bad, env)
-      } catch (error) {
-        expect(error).toBeInstanceOf(PackError)
-        message = (error as Error).message
-      }
-      expect(message).toContain(`identity.roles.manager.crossSession ("${scope}") is withdrawn`)
-      expect(message).toContain("no role reads other people's conversations")
+    const bad = structuredClone(dev.pack) as unknown as {
+      identity: { roles: Record<string, Record<string, unknown>> }
     }
+    bad.identity.roles.manager = { ...bad.identity.roles.manager, crossSession: 'all' }
+    let message = ''
+    try {
+      validatePackDocument(bad, env)
+    } catch (error) {
+      expect(error).toBeInstanceOf(PackError)
+      message = (error as Error).message
+    }
+    expect(message).toContain('agent-pack fails schema validation')
+    expect(message).toContain('(crossSession)')
+    expect(message).not.toContain('is withdrawn')
     // the admin flag is a role's (IDENT-DIR-008)
     const admin = structuredClone(dev.pack) as unknown as {
       identity: { roles: Record<string, Record<string, unknown>> }
@@ -163,5 +162,44 @@ describe('space templates and the deletion window (SPACE-DEF-002/003, PRIV-ERASE
     )
     // the names of an earlier draft are not read
     expect(() => validatePackDocument(template({ label: 'P' }), env)).toThrow(/schema/)
+  })
+})
+
+describe('the keys the clean spec removed (ayni-spec PR #123: no backward compatibility)', () => {
+  const dev = () =>
+    structuredClone(loadPack('agent-packs/dev', { ...process.env, ...env }).pack) as unknown as {
+      identity: Record<string, unknown> & { roles: Record<string, Record<string, unknown>> }
+    }
+  const refusal = (pack: unknown): string => {
+    try {
+      validatePackDocument(pack, env)
+    } catch (error) {
+      if (error instanceof PackError) return error.message
+      throw error
+    }
+    return ''
+  }
+  const authentication = (over: Record<string, unknown>) => [
+    { credential: { jsonSchemaCredentialId: 'https://ecs.example/badge.json' }, subjectKey: ['badgeNumber'], ...over },
+  ]
+
+  it('refuses a role that declares auditor: the admin interface reads the roles auditor and operator instead', () => {
+    const pack = dev()
+    pack.identity.roles.manager = { ...pack.identity.roles.manager, auditor: true }
+    const message = refusal(pack)
+    expect(message).toContain('agent-pack fails schema validation')
+    expect(message).toContain('(auditor)')
+  })
+
+  it('names the authentication entry that lets people in without the credential visitors, and refuses guests', () => {
+    const offered = dev()
+    offered.identity.authentication = authentication({ request: 'on-connect', visitors: true })
+    const pack = validatePackDocument(offered, env)
+    expect(authenticationModeOf(pack.identity.authentication?.[0])).toBe('offered')
+    const old = dev()
+    old.identity.authentication = authentication({ request: 'on-connect', guests: true })
+    const message = refusal(old)
+    expect(message).toContain('agent-pack fails schema validation')
+    expect(message).toContain('(guests)')
   })
 })

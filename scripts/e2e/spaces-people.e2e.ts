@@ -216,7 +216,7 @@ function packWithDirectory(dir: string): string {
       credential: { jsonSchemaCredentialId: BADGE },
       subjectKey: ['badgeNumber'],
       request: 'on-demand',
-      guests: true,
+      visitors: true,
       store: { attributes: ['name', 'email'] },
     },
   ]

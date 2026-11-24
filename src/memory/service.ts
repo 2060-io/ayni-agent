@@ -462,11 +462,6 @@ export class MemoryService {
     return true
   }
 
-  /** Seals the notes and preferences an earlier version kept in the clear (D77); at start. */
-  public async sealPlainNotesAndPreferences(): Promise<{ notes: number; preferences: number }> {
-    return { notes: await this.notesRepo.sealPlain(), preferences: await this.prefsRepo.sealPlain() }
-  }
-
   // ---- working memory (D10, MEM-TIER-003) ---------------------------------------------------------
 
   /**
@@ -669,24 +664,6 @@ export class MemoryService {
     await this.store.entries.setEmbedding(stored.id, null)
     const flagged = await this.store.notes.flagByLineage(stored.id)
     if (flagged) this.logger.info({ entryId: stored.id, flaggedNotes: flagged }, 'notes citing an erased entry flagged')
-  }
-
-  /**
-   * Seals what an earlier version kept in the clear beside an entry: an attachment's text and name (D77). An erased
-   * entry, which has no key any more, loses them. Run at start; returns how many entries it changed.
-   */
-  public async sealPlainAttachments(): Promise<number> {
-    let changed = 0
-    for (;;) {
-      const rows = await this.store.entries.listWithPlainAttachments(200)
-      if (!rows.length) return changed
-      for (const row of rows) {
-        if (row.state === 'crypto-erased' || !row.encKeyRef) {
-          await this.store.entries.update(row.id, { attachments: row.attachments.map(skeleton) })
-        } else await this.rewrite(this.open(row))
-        changed++
-      }
-    }
   }
 
   /** Legal hold set or released (PRIV-ERASE-004, PRIV-ERASE-008): an erased entry stays erased. */

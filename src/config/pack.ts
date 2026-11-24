@@ -239,14 +239,14 @@ export function evidenceWarnings(pack: AgentPack): string[] {
 }
 
 /**
- * What an authentication entry may not say (D72, IDENT-RES-010): `on-demand` lets guests in by itself; a list of
+ * What an authentication entry may not say (D72, IDENT-RES-010): `on-demand` lets visitors in by itself; a list of
  * organizations is not empty and holds organization keys; how the credential is obtained is a text, an https
  * link, or both.
  */
 export function authenticationErrors(entry: AuthenticationEntry): string[] {
   const errors: string[] = []
-  if (entry.request === 'on-demand' && entry.guests === false)
-    errors.push('rule 1: identity.authentication asked on-demand lets guests in: guests cannot be false')
+  if (entry.request === 'on-demand' && entry.visitors === false)
+    errors.push('rule 1: identity.authentication asked on-demand lets visitors in: visitors cannot be false')
   const organizations = entry.issuers?.organizations
   if (organizations !== undefined) {
     if (!organizations.length)
@@ -266,21 +266,6 @@ export function authenticationErrors(entry: AuthenticationEntry): string[] {
       errors.push('rule 1: identity.authentication.obtain.url must be an https link')
   }
   return errors
-}
-
-/**
- * What a role may no longer say (RBAC-XSESS-005, decision 60): a role carries no scope of conversation reads, so
- * `crossSession` is withdrawn, whatever its value. Said in words before the schema, which would only name the key.
- */
-export function removedCrossSessionErrors(doc: unknown): string[] {
-  const roles = (doc as { identity?: { roles?: Record<string, { crossSession?: unknown }> } })?.identity?.roles
-  if (!roles || typeof roles !== 'object') return []
-  return Object.entries(roles)
-    .filter(([, role]) => role && typeof role === 'object' && role.crossSession !== undefined)
-    .map(
-      ([name, role]) =>
-        `identity.roles.${name}.crossSession (${JSON.stringify(role.crossSession)}) is withdrawn: no role reads other people's conversations (RBAC-XSESS-005); remove it. A conversation is read by its author, by the active members of its space when its author shares it, and by an auditor through the admin interface (RBAC-XSESS-007)`
-    )
 }
 
 /**
@@ -388,59 +373,6 @@ type Doc = Record<string, unknown>
 
 const isObject = (value: unknown): value is Doc => !!value && typeof value === 'object' && !Array.isArray(value)
 
-/**
- * The keys a pack may no longer use (D101, TOOL-CAT-011): every source is one entry of `tools.sources`, its tier model is
- * its `access`, and a tool's step-up is in its own source. Each is refused in words before the schema, which would only
- * name the key, with the key that replaces it.
- */
-export function withdrawnToolKeyErrors(doc: unknown): string[] {
-  const d = isObject(doc) ? doc : {}
-  const errors: string[] = []
-  const named = (list: unknown, key: string): string[] =>
-    Array.isArray(list)
-      ? list.map((item, i) => (isObject(item) && typeof item[key] === 'string' ? (item[key] as string) : `#${i}`))
-      : []
-  if (d.mcp !== undefined) {
-    const servers = named(isObject(d.mcp) ? d.mcp.servers : undefined, 'name')
-    const fix =
-      'declare each MCP server as an entry of tools.sources keyed by its name, with type: mcp, and its toolAccess as access (D101, TOOL-CAT-011)'
-    if (servers.length) for (const name of servers) errors.push(`mcp.servers.${name} is withdrawn: ${fix}`)
-    else errors.push(`mcp is withdrawn: ${fix}`)
-  }
-  const tools = isObject(d.tools) ? d.tools : {}
-  if (tools.http !== undefined) {
-    const fix =
-      'declare each HTTP tool as an entry of tools.sources keyed by its name, with type: http (D101, TOOL-CAT-011)'
-    const names = named(tools.http, 'name')
-    if (names.length) for (const name of names) errors.push(`tools.http.${name} is withdrawn: ${fix}`)
-    else errors.push(`tools.http is withdrawn: ${fix}`)
-  }
-  if (tools.bundled !== undefined) {
-    const keys = isObject(tools.bundled) ? Object.keys(tools.bundled) : []
-    const fix = (key: string) =>
-      `declare it as an entry of tools.sources with type: bundled and bundled: ${key} (D101, TOOL-CAT-011)`
-    if (keys.length) for (const key of keys) errors.push(`tools.bundled.${key} is withdrawn: ${fix(key)}`)
-    else errors.push(`tools.bundled is withdrawn: ${fix('<its name>')}`)
-  }
-  if (tools.access !== undefined)
-    errors.push(
-      'tools.access is withdrawn: each source declares the tier model of its own tools in tools.sources.<id>.access (D101, TOOL-CAT-011)'
-    )
-  if (d.actions !== undefined) {
-    const entries = isObject(d.actions) ? Object.keys(d.actions) : []
-    if (entries.length)
-      for (const tool of entries)
-        errors.push(
-          `actions.${tool} is withdrawn: declare its step-up in the source of the tool, as tools.sources.<id>.tools.${tool}.stepUp (D101, TOOL-CAT-011)`
-        )
-    else
-      errors.push(
-        "actions is withdrawn: a tool's step-up is tools.sources.<id>.tools.<tool>.stepUp (D101, TOOL-CAT-011)"
-      )
-  }
-  return errors
-}
-
 /** Every source of a pack document before the schema: an entry of `tools.sources`, where it is written (TOOL-CAT-001). */
 function docSources(doc: unknown): { where: string; name: string; type: unknown; body: Doc }[] {
   const tools = isObject(doc) && isObject(doc.tools) ? doc.tools : {}
@@ -465,46 +397,6 @@ export function emailChallengeStepUpErrors(doc: unknown): string[] {
         errors.push(
           `${where}.tools.${tool}.stepUp.authChallenge: the email code is the challenge of an issuance profile that takes claims from the user directory, and of no tool (INTX-AUTH-011)`
         )
-    }
-  }
-  return errors
-}
-
-/** A text as the agent-pack would write it in a flow mapping: quoted when YAML would read it otherwise. */
-function yamlText(value: unknown): string {
-  const text = String(value)
-  return /^[A-Za-z0-9][A-Za-z0-9 ._-]*$/.test(text) ? text : JSON.stringify(text)
-}
-
-/**
- * The keys of an account that named fields replaced (D102, TOOL-CAT-012): `label` and `pattern`, now each field's, and
- * `apply` as one header with its `prefix`, now a list of headers built from the fields. Each is refused in words before
- * the schema, which would only name the key, with the form that replaces it, written from what the account declares.
- */
-export function withdrawnAccountKeyErrors(doc: unknown): string[] {
-  const errors: string[] = []
-  for (const { where, body } of docSources(doc)) {
-    if (!isObject(body.account)) continue
-    const account = body.account
-    const apply = isObject(account.apply) ? account.apply : undefined
-    if (account.label === undefined && account.pattern === undefined && !apply) continue
-    const label = account.label !== undefined ? yamlText(account.label) : 'API token'
-    const pattern = account.pattern !== undefined ? `, pattern: ${JSON.stringify(String(account.pattern))}` : ''
-    const fields = `fields: [{ name: token, label: ${label}${pattern} }]`
-    if (account.label !== undefined)
-      errors.push(
-        `${where}.account.label is withdrawn: a space account declares the fields its owner fills, each with its own label, as account.${fields} (D102, TOOL-CAT-012)`
-      )
-    if (account.pattern !== undefined)
-      errors.push(
-        `${where}.account.pattern is withdrawn: each field carries the pattern of its own value, as account.${fields} (D102, TOOL-CAT-012)`
-      )
-    if (apply) {
-      const header = typeof apply.header === 'string' ? apply.header : 'Authorization'
-      const prefix = typeof apply.prefix === 'string' ? apply.prefix : ''
-      errors.push(
-        `${where}.account.apply as one header with its prefix is withdrawn: account.apply is a list of headers, each a header and a value that names the fields as {name}, as apply: [{ header: ${header}, value: ${JSON.stringify(`${prefix}{token}`)} }] with ${fields} (D102, TOOL-CAT-012)`
-      )
     }
   }
   return errors
@@ -1255,20 +1147,9 @@ export function validatePackDocument(doc: unknown, env: Record<string, string | 
   if (!/^3\.\d+$/.test(version)) {
     throw new PackError(`schemaVersion "${version}" is not supported (CORE-PACK-004, major 3 required)`)
   }
-  // RBAC-XSESS-005: a role that declares crossSession is refused in words, before the schema names the key
-  const removed = removedCrossSessionErrors(coerced)
-  if (removed.length) throw new PackError('agent-pack names a cross-session scope that was removed', removed)
   // IDENT-ROLE-012: the people of the user directory are refused in words, before the schema names the key
   const inline = inlineDirectoryErrors(coerced)
   if (inline.length) throw new PackError('agent-pack writes the people of the user directory inline', inline)
-  // TOOL-CAT-011: the keys one map replaced are refused in words, with the key that replaces each (D101)
-  const withdrawn = withdrawnToolKeyErrors(coerced)
-  if (withdrawn.length)
-    throw new PackError('agent-pack declares tools under keys that tools.sources replaced (D101)', withdrawn)
-  // TOOL-CAT-012: the keys of an account that named fields replaced are refused in words, with their new form (D102)
-  const accountKeys = withdrawnAccountKeyErrors(coerced)
-  if (accountKeys.length)
-    throw new PackError('agent-pack declares a space account in the form that its fields replaced (D102)', accountKeys)
   // INTX-AUTH-011: a step-up that declares the email code is refused in words, before the schema names the value
   const email = emailChallengeStepUpErrors(coerced)
   if (email.length)
