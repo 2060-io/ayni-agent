@@ -1863,7 +1863,8 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     approval request** (2026-11-24, Fabrice's decisions of 2026-11-23, ayni-spec PR #127: D125 to D131; IDENT-AUTH-001
     to 014 and 017, IDENT-RES-002, 010, 014, 019, 020, IDENT-DIR-003, 004, 010, IDENT-STAT-002, 005, PLAT-MAIL-001; flow
     profile §4.1, §6.4, §6.14, §11, FLOW-SIGNIN-001 to 014, FLOW-STAT-001, 003; FLOW-AUTH-004, INTX-APPR-026; the Ayni
-    flow library 0.2.1, credo-ts-ayni-flow PRs #39, #40, #41).
+    flow library 0.3.0, credo-ts-ayni-flow PRs #39, #40, #41, #47; then ayni-spec PR #128: D152 to D155, O91, O92,
+    IDENT-AUTH-002, 008, 011, 014, 015, IDENT-RES-019, 020, FLOW-SIGNIN-001, 005, 008, 011, 012, 014).
     - **The agent-pack** (`identity.authentication`, rule 1): one object, `request`, `visitors`, `methods` (by name, each
       with a `type`: `credential`, `email`, `document`, `face-match`, `authenticator-app`, `passkey`), `combinations`
       and `obtain`. A `credential` method carries what the one entry carried (`credential`, `subjectKey`, `attributes`,
@@ -1890,6 +1891,20 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       answered). Not accepted: the `step-result` with the reason, then the flow's problem report; the identity is
       checked against the connection's before the flow closes, so `another-identity` never ends `completed`. The
       library's constants are mirrored (the agent does not depend on Credo); `timings` shortens them in the tests.
+    - **A declined face-match consent** (D152, flow library 0.3.0): an `answer` with `consent: false` ends the face
+      step with the `step-result` `failed` `consent-declined`, the only result the library takes for it; no call is
+      offered, nothing is recorded, no problem report is sent, and the flow stays open. The agent then waits for a new
+      `choice-received` on the same request, five minutes from that step result and never past the flow's fifteen
+      minutes, which do not change (unanswered otherwise: the flow closes `expired`). Every step of the new
+      combination runs, a method that passed under the combination left included, and the step numbers follow those
+      already used in the flow (O91; the library would let them start at 1 again, the spec does not). What the earlier
+      attempt found and proved is dropped: the identity and the evidence are those of the combination that completes.
+      The Principal's `lastAuthentication.steps` keeps every step of the flow, the declined face step with
+      `reason: consent-declined`; `combination` and `types` are the last combination's. A new choice that holds the
+      declined method, and any exchange the plugin fails (a second `choice` that is not awaited, FLOW-SIGNIN-008), are
+      answered with the flow's problem report (`malformed`) whatever the agent was waiting for, and end as a decline.
+      The exchange's `earlierAttempts`, `awaitingChoice` and `declinedMethods` are typed on `AuthenticateExchange`;
+      the agent keeps its own list of the declined methods.
     - **The methods.** `credential`: present-proof under the flow id; what a badge issued from the directory finds is
       its entry. `email`: the address (ten minutes), the same answer for an address no entry holds, a code to an
       entry's address only, in the background, kept as a keyed hash, ten minutes, five tries in all, three new codes
@@ -1913,19 +1928,21 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       `enrol` flow, a type the pack enables for an identified person (else `not-eligible`); authenticated within ten
       minutes by a combination holding neither type, or first an `authenticate` flow of purpose `enrol` (`not-eligible`
       when it does not complete). The authenticator app's secret is handed once, kept sealed in the key-value store and
-      held in memory until the code proves it (a restart drops a pending enrolment); a wrong code gets the same secret
-      again, three challenges in all, then `not-valid`. A passkey's attestation is checked (challenge, relying party,
+      held in memory until the code proves it (a restart drops a pending enrolment); three codes in all (D155,
+      `ENROL_AUTHENTICATOR_APP_ATTEMPTS`, the library's constant): a first and a second wrong code get a new challenge
+      with the same secret, the third closes the flow with the problem report `not-valid`, and the agent never asks
+      the plugin for a fourth challenge (it refuses one). The `error: "wrong-code"` and `tries_left` the spec puts on
+      that challenge (O92) are not sent: the plugin 0.3.0's challenge declares neither and its route refuses a field it
+      does not declare (`400`); they wait for the library. A passkey's attestation is checked (challenge, relying party,
       presence, verification), not its statement; its credential id is found by a keyed index. `unenrol` removes the
       type and sends the status. Both are erased when the entry leaves the directory (`endAccess`).
     - **The approvers on an approval request** (`Governance.approvalsFor`, `openApprovalFlow`): an approval of a tool of
       a space carries `approvals`: the threshold, `own` for the requester, and every other entry of the policy, by the
       person's name, else by a label ("The role manager", "The department Depot Rotterdam", "Any member of the space",
       "The owner of the space"), each `required` or not; sent once, never again for a later progress.
-    - **Where the spec says nothing, the choice made here:** a face-match consent declined is the flow declined (the
-      library takes only `consent: true`, and a `choice` is sent once); the reason of a refused new code is
-      `step.reason`, as the library writes it; a `choice` that the plugin fails `malformed` is answered `malformed` and
-      ends as a decline (not asked again); the enrolment's "three times at most" is three challenges in all; `requires`
-      is not sent on `open` (the library still takes it); the purpose of a re-authentication that asks the badge again
+    - **Where the spec says nothing, the choice made here:** a `choice` that the plugin fails `malformed` is answered
+      `malformed` and ends as a decline (not asked again); `requires` is not sent on `open` (the library 0.3.0 removed
+      it, and the plugin answers `400` to a body that holds it); the purpose of a re-authentication that asks the badge again
       to read its email (SPACE-INV-004) is `step-up`, with the credentials that ask for `email` as its combinations; a
       person identified through the directory without a badge is named to the model as a badge holder is, only when a
       `credential` method makes `name` visible (by default the model reads nothing, D67): a pack of `[email]` alone never
@@ -1934,8 +1951,9 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       D134, RBAC-ADMIN): the engine takes `purpose: step-up | admin`, `combinations` and `bound` already; the badge
       independent of the authentication (D130, IDENT-AUTH-016) and the end of the email check in a conversation
       (`emailCheck.ts`, `email_check`), which still serve the badge's issuance profiles.
-    - **Deployments:** the VS Agent image must carry `@ayni.org/vs-agent-plugin-ayni-flow` 0.2.1 (the `authenticate`
-      routes, the new peer-status shape and `approvals` on `authorize`; 0.1.10 refuses them), and its calls route must
+    - **Deployments:** the VS Agent image must carry `@ayni.org/vs-agent-plugin-ayni-flow` 0.3.0 (the `authenticate`
+      routes, the new peer-status shape and `approvals` on `authorize`, which 0.1.10 refuses; a declined consent and a
+      new choice, which 0.2.1 refuses), and its calls route must
       take `parentThreadId` (CC-VSA-006) before a pack enables `face-match`. Every agent-pack with
       `identity.authentication` moves to the object (the dev agent's `- credential: …` becomes `methods.badge` and
       `combinations: [[badge]]`).
@@ -1944,4 +1962,8 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       creation and assertion), `enrol.test.ts`, `authenticationStart.test.ts` (the SMTP refusal, the photo), the new
       rule 1 in `pack.test.ts`, the enrolments on PostgreSQL in `postgres.test.ts`, `approvals` in
       `governance.test.ts`; the flows, peer-status and on-demand tests moved to authenticate/1.0 and the new shape. The
-      new tests fail on the code before this change (the modules they import do not exist there).
+      new tests fail on the code before this change (the modules they import do not exist there). For 0.3.0, in
+      `authenticate.test.ts`: the declined consent (no call, no refusal, the new combination in the same flow, step
+      numbers 3 on, the email that passed run again), the five minutes from the step result, the flow's expiry kept, a
+      new choice holding the declined method and a second choice that is not awaited refused `malformed`, and an
+      `open` without `requires`; they fail on the code before it.
