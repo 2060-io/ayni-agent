@@ -323,6 +323,7 @@ export class SessionService {
     if (principal.devices.length === before) return false
     await this.store.principals.save(principal)
     this.logger.info({ principalId: principal.id, device: handle }, 'device pairing revoked')
+    await this.onDeviceUnlinked?.(principal.id, handle)
     return true
   }
 
@@ -331,7 +332,11 @@ export class SessionService {
     principal.devices = []
     await this.store.principals.save(principal)
     this.logger.info({ principalId: principal.id }, 'all device pairings revoked')
+    await this.onDeviceUnlinked?.(principal.id)
   }
+
+  /** A device unlinked, or every device of a Principal when no handle is named: its admin grant ends (RBAC-ADMIN-004). */
+  public onDeviceUnlinked?: (principalId: string, handle?: string) => Promise<void>
 
   // ---- tokens (PROF-SESS-002/004) ---------------------------------------------------------------
 

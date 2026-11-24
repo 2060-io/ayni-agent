@@ -90,6 +90,12 @@ describe('profile 3.5 constants', () => {
 describe('errors (§9, PROF-ERR-001)', () => {
   it('gives each code its status, as profile.md does', () => {
     expect(ERROR_STATUS['has-messages']).toBe(409)
+    // 3.5.5: admin access (§3.14, PROF-ADMIN-007)
+    expect(ERROR_STATUS['admin-closed']).toBe(403)
+    expect(ERROR_STATUS['not-auditor']).toBe(403)
+    expect(ERROR_STATUS['not-operator']).toBe(403)
+    expect(ERROR_STATUS['reason-required']).toBe(400)
+    expect(CUSTOM_EVENT.adminChanged).toBe('ayni.admin.changed')
     // 3.5: the refusals of Your accounts (§3.11) and of a binding set from the owner's account (§3.10)
     expect(ERROR_STATUS['not-oauth']).toBe(409)
     expect(ERROR_STATUS['not-fields']).toBe(409)
@@ -180,6 +186,9 @@ describe('schemas', () => {
     // 3.5.2: the agent lets visitors in, a boolean (PROF-DESC-012)
     expect(validate({ ...base, features: { ...base.features, visitors: true } })).toBe(true)
     expect(validate({ ...base, features: { ...base.features, visitors: 'yes' } })).toBe(false)
+    // 3.5.5: admin access, a boolean (PROF-DESC-013)
+    expect(validate({ ...base, features: { ...base.features, admin: true } })).toBe(true)
+    expect(validate({ ...base, features: { ...base.features, admin: 'yes' } })).toBe(false)
     expect(validate({ ...base, features: { ...base.features, erasure: {} } })).toBe(false)
     expect(
       validate({ ...base, binding: { modes: ['cross-device'], walletLinkTemplate: 'didcomm://x?oob={oob}' } })

@@ -12,7 +12,7 @@ import { personalSpaceId } from '../src/core/spaces.js'
 import { ONE_CALL } from '../src/core/toolGate.js'
 import type { ApprovalRecord, MessageEntry, Principal } from '../src/core/types.js'
 import { createEntryCrypto, openJson, sealJson } from '../src/memory/crypto.js'
-import { buildAdmin } from '../src/platform/admin.js'
+import type { AdminService } from '../src/platform/admin.js'
 import type { McpServerSource } from '../src/tools/mcp.js'
 import { parseSse, startTestAgent, testEnv } from './helpers.js'
 import {
@@ -1277,50 +1277,31 @@ describe('provenance and the record of each call (TOOL-PROV-001..006, PROF-TOOL-
     expect((await running.agent.store.toolCalls.list({ conversationId, limit: 100 })).length).toBe(records)
   })
 
-  it('lets an auditor read the call records through the admin interface only, each read recorded (TOOL-PROV-005)', async () => {
-    // the person the admin interface signed in, whose entry of the directory holds the auditor role (RBAC-XSESS-008/009)
+  it('lets an auditor read the call records through Audit only, each read recorded (TOOL-PROV-005)', async () => {
+    // an auditor through an open admin grant (RBAC-ADMIN-007): the record names the verified Principal and the grant
     const jonas = { id: 'prn_jonas_auditor', roles: ['auditor'] } as unknown as Principal
-    const admin = buildAdmin({
-      store: running.agent.store,
-      memory: running.agent.memory,
-      evidence: running.agent.evidence,
-      logger: running.agent.logger,
-      signedIn: async (request) => (request.headers['x-test-signed-in'] === jonas.id ? jonas : undefined),
-      announceErased: async () => undefined,
-    })
+    const caller = { kind: 'principal' as const, principal: jonas, grantId: 'admgrant_1' }
+    const service = running.agent.adminService as AdminService
     const from = new Date(Date.now() - 3600_000).toISOString()
-    const read = await admin.inject({
-      method: 'GET',
-      url: `/admin/audit/tool-calls?spaceId=${salesEu.id}&sourceId=relaticle&from=${encodeURIComponent(from)}`,
-      headers: { 'x-test-signed-in': jonas.id, 'x-ayni-reason': 'weekly review' },
-    })
-    expect(read.statusCode).toBe(200)
-    const body = read.json() as { calls: Record<string, unknown>[]; auditId: string }
-    expect(body.calls.length).toBeGreaterThan(3)
-    expect(body.calls.every((c) => c.spaceId === salesEu.id && c.sourceId === 'relaticle')).toBe(true)
+    const body = await service.toolCalls(caller, 'weekly review', { space: salesEu.id, source: 'relaticle', from })
+    const calls = body.calls as Record<string, unknown>[]
+    expect(calls.length).toBeGreaterThan(3)
+    expect(calls.every((c) => c.spaceId === salesEu.id && c.sourceId === 'relaticle')).toBe(true)
     // no argument, no result, no account value (TOOL-PROV-004)
-    expect(JSON.stringify(body.calls)).not.toContain('Acme')
-    expect(JSON.stringify(body.calls)).not.toContain('crmToken')
+    expect(JSON.stringify(calls)).not.toContain('Acme')
+    expect(JSON.stringify(calls)).not.toContain('crmToken')
     const log = await running.agent.store.adminAudit.list(5, { action: 'audit-read' })
     expect(log[0]).toMatchObject({
       id: body.auditId,
       actor: jonas.id,
       principalId: jonas.id,
+      grantId: 'admgrant_1',
       reason: 'weekly review',
       detail: { what: 'tool-calls' },
     })
     expect(log[0]?.breakGlass).toBeUndefined()
-    const anonymous = await admin.inject({ method: 'GET', url: '/admin/audit/tool-calls' })
-    expect(anonymous.statusCode).toBe(401)
-    const noReason = await admin.inject({
-      method: 'GET',
-      url: '/admin/audit/tool-calls',
-      headers: { 'x-test-signed-in': jonas.id },
-    })
-    expect(noReason.statusCode).toBe(400)
-    await admin.close()
-    // no endpoint of the AG-UI profile serves them
-    expect((await call(anaSales, 'GET', '/admin/audit/tool-calls')).status).toBe(404)
+    // an agent that declares no admin role serves no Audit through the profile
+    expect((await call(anaSales, 'GET', '/admin/audit/tool-calls?reason=x')).status).toBe(404)
   })
 })
 

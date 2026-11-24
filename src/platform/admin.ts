@@ -1,167 +1,288 @@
 /**
- * The admin interface (D78, PRIV-ERASE-008, RBAC-XSESS-006 to 009): erasure, legal hold and the auditor's reads, on a
- * listener of its own that the deployment never exposes (it listens on the loopback: reach it with a port-forward).
- * Two locks keep it closed, the network and the person: a call is let in for a person it signed in, whose roles of the
- * user directory say what they may do (`auditor` reads, `operator` erases and holds, RBAC-XSESS-008), or with the
- * break-glass token, each such call recorded and flagged. Every record names the verified Principal and the reason,
- * never a name typed in the request; what an auditor reads never reaches the model.
+ * Admin access to the raw store (ayni-spec D78, D132 to D134; RBAC-XSESS-006 to 009, RBAC-ADMIN-005 to 008,
+ * PRIV-ERASE-008, TOOL-PROV-005): what Audit reads and what Operations does, outside every retrieval of the model.
  *
- * The person's sign-in with the phone and the badge (RBAC-XSESS-009) is not built: `signedIn` is its place. Until it
- * is, only the break-glass token opens the interface.
+ * Two callers reach it. A person whose roles hold `auditor` or `operator`, through the AG-UI profile while an admin
+ * grant is open for their device (§3.14, `adminGrants.ts`): each record names their verified Principal and the grant.
+ * And, only when the agent-pack enables it (`admin.internal.enabled`), the internal admin interface built here, on a
+ * listener of its own on the loopback, which opens to the break-glass token `ADMIN_TOKEN` alone: each record is flagged.
+ * Every call carries a reason, refused `400 reason-required` without one, and writes one record of the admin audit; a
+ * name typed in the request is never read. Nothing Audit reads reaches a model.
  */
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify'
-import type { AdminRole } from '../config/packTypes.js'
+import { entryToMessages } from '../channels/agui/mapping.js'
+import type { SealedConversations } from '../core/conversationSeal.js'
 import type { EvidenceService } from '../core/evidence.js'
+import { spaceIdOf } from '../core/spaces.js'
 import type { MessageEntry, Principal } from '../core/types.js'
 import type { MemoryService } from '../memory/service.js'
-import type { AdminAuditRecord, Store, StoredEntry } from '../store/types.js'
+import type { AdminAuditRecord, Store } from '../store/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 
-export interface AdminDeps {
-  store: Store
-  memory: MemoryService
-  evidence: EvidenceService
-  logger: Logger
-  /**
-   * the break-glass token (`ADMIN_TOKEN`, RBAC-XSESS-009): a call that carries it as a bearer token is let in when no
-   * phone is available, and its record is flagged; unset, no call is let in that way
-   */
-  breakGlassToken?: string
-  /**
-   * the Principal the admin interface signed in with their phone and their badge (RBAC-XSESS-009), for a call; none
-   * when it signed nobody in. Not built: without it, a call without the break-glass token is refused
-   */
-  signedIn?: (request: FastifyRequest) => Promise<Principal | undefined>
-  /** erased messages are told to the devices of their conversation (PROF-STREAM-008) */
-  announceErased(principalId: string, conversationId: string, messageIds: string[], clientIds: string[]): Promise<void>
-}
-
+/** At most this many rows of one read. */
 const LIMIT = 100_000
 
-class AdminError extends Error {
+/** A refusal of admin access, with the status and the code of the AG-UI profile (§3.14, §9). */
+export class AdminError extends Error {
   public constructor(
     public readonly status: number,
-    message: string
+    public readonly code:
+      | 'unauthorized'
+      | 'bad-request'
+      | 'reason-required'
+      | 'forbidden'
+      | 'admin-closed'
+      | 'not-auditor'
+      | 'not-operator'
+      | 'not-found'
+      | 'not-implemented',
+    message: string,
+    public readonly field?: string
   ) {
     super(message)
   }
 }
 
-/** Who makes a call: a person the interface signed in, or the holder of the break-glass token (RBAC-XSESS-009). */
-export type AdminCaller = { kind: 'principal'; principal: Principal } | { kind: 'break-glass' }
-
 /**
- * Who makes the call, with the role it needs, and why (PRIV-ERASE-008, RBAC-XSESS-008/009): the verified Principal,
- * who holds the role, or the break-glass token; the reason from the body, or from the headers of a read. A name typed
- * in the request is not read.
+ * Who makes a call: a person through an open admin grant (RBAC-ADMIN-007), or the holder of the break-glass token of the
+ * internal admin interface (RBAC-XSESS-009).
  */
-function callerOf(
-  callers: WeakMap<FastifyRequest, AdminCaller>,
-  request: FastifyRequest,
-  role: AdminRole
-): { caller: AdminCaller; reason: string } {
-  const caller = callers.get(request)
-  if (!caller) throw new AdminError(401, 'unauthorized')
-  if (caller.kind === 'principal' && !caller.principal.roles.includes(role))
-    throw new AdminError(403, `the admin interface's ${role} role is needed`)
-  const body = (request.body ?? {}) as Record<string, unknown>
-  const reason = String(body.reason ?? request.headers['x-ayni-reason'] ?? '').trim()
-  if (!reason) throw new AdminError(400, 'reason is required')
-  return { caller, reason }
+export type AdminCaller = { kind: 'principal'; principal: Principal; grantId: string } | { kind: 'break-glass' }
+
+/** The reason of a call, as the person typed it: at least one word (RBAC-ADMIN-006). */
+export function reasonOf(value: unknown): string {
+  const reason = typeof value === 'string' ? value.trim() : ''
+  if (!/[\p{L}\p{N}]/u.test(reason)) throw new AdminError(400, 'reason-required', 'say why you need this')
+  return reason
 }
 
-/** What a call asked, as its record keeps it: what it names, never a name typed for who makes it (RBAC-XSESS-009). */
-function asked(body: Record<string, unknown>): Record<string, unknown> {
-  const { operator: _operator, auditor: _auditor, ...rest } = body
-  return rest
+const time = (name: string, value: string | undefined): string | undefined => {
+  if (!value) return undefined
+  if (Number.isNaN(Date.parse(value))) throw new AdminError(400, 'bad-request', `${name} is not a time`, name)
+  return new Date(value).toISOString()
 }
 
-/** What an auditor reads of an entry: its audit fields always, its content when its key still exists. */
-function auditView(memory: MemoryService, stored: StoredEntry): Record<string, unknown> {
-  const opened: MessageEntry = memory.open(stored)
-  const { cipher: _c, encKeyRef: _k, ...audit } = stored
-  return stored.state === 'crypto-erased' ? audit : { ...audit, text: opened.text, payload: opened.payload }
+const limitOf = (value: string | undefined, fallback: number, max: number): number =>
+  Math.min(Math.max(Number(value) || fallback, 1), max)
+
+export interface AdminServiceDeps {
+  store: Store
+  memory: MemoryService
+  evidence: EvidenceService
+  /** the conversations, their titles opened (D77) */
+  conversations: SealedConversations
+  logger: Logger
+  /** erased messages are told to the devices of their conversation (PROF-STREAM-008) */
+  announceErased(principalId: string, conversationId: string, messageIds: string[], clientIds: string[]): Promise<void>
 }
 
-export function buildAdmin(deps: AdminDeps): FastifyInstance {
-  const app = Fastify({ logger: false })
-  const { store, memory } = deps
+/** A conversation as Audit finds it (PROF-ADMIN-005). */
+export interface AuditConversation {
+  id: string
+  principalId: string
+  spaceId: string
+  title: string
+  state: string
+  createdAt: string
+  lastActivityAt: string
+}
 
-  /** The record of a call: the verified Principal, or the break-glass token, flagged (RBAC-XSESS-009). */
-  const record = async (
-    caller: AdminCaller,
-    r: Omit<AdminAuditRecord, 'id' | 'ts' | 'actor' | 'principalId' | 'breakGlass'>
-  ): Promise<string> => {
+/** One key of Operations (PROF-ADMIN-006): its versions, how many keys each wraps, a rotation in progress. */
+export interface KeyInfo {
+  key: 'master' | 'index'
+  versions: { version: number; current: boolean; wraps: number | null }[]
+  rotation: { from: number; to: number; done: number; total: number } | null
+  rotatable: boolean
+}
+
+/** The fields of a record of the admin audit that a call gives; `record` adds who made it. */
+type RecordInput = Omit<AdminAuditRecord, 'id' | 'ts' | 'actor' | 'principalId' | 'breakGlass' | 'grantId'>
+
+/** What Audit reads and Operations does, each call recorded with its caller and its reason (RBAC-ADMIN-006/007). */
+export class AdminService {
+  public constructor(private readonly deps: AdminServiceDeps) {}
+
+  /** One record of the admin audit: the verified Principal and the grant, or the break-glass token, flagged. */
+  public async record(caller: AdminCaller, r: RecordInput): Promise<string> {
     const full: AdminAuditRecord = {
       id: prefixedId('adm'),
       ts: nowIso(),
       ...r,
       ...(caller.kind === 'principal'
-        ? { actor: caller.principal.id, principalId: caller.principal.id }
+        ? { actor: caller.principal.id, principalId: caller.principal.id, grantId: caller.grantId }
         : { actor: 'break-glass', breakGlass: true }),
     }
-    await store.adminAudit.insert(full)
+    await this.deps.store.adminAudit.insert(full)
     const fields = { audit: full.id, action: full.action, actor: full.actor }
-    if (full.breakGlass) deps.logger.warn(fields, 'admin call with the break-glass token')
-    else deps.logger.info(fields, 'admin call')
+    if (full.breakGlass) this.deps.logger.warn(fields, 'admin call with the break-glass token')
+    else this.deps.logger.info(fields, 'admin call')
     return full.id
   }
 
-  // a call is let in for a person the interface signed in, or with the break-glass token; any other is refused
-  const callers = new WeakMap<FastifyRequest, AdminCaller>()
-  app.addHook('onRequest', async (request, reply) => {
-    if (deps.breakGlassToken && request.headers.authorization === `Bearer ${deps.breakGlassToken}`) {
-      callers.set(request, { kind: 'break-glass' })
-      return
-    }
-    const principal = await deps.signedIn?.(request)
-    if (principal) {
-      callers.set(request, { kind: 'principal', principal })
-      return
-    }
-    return reply.code(401).send({ error: 'unauthorized' })
-  })
-  app.setErrorHandler(async (error, _request, reply: FastifyReply) => {
-    const status = error instanceof AdminError ? error.status : 500
-    if (status === 500) deps.logger.error({ err: error }, 'admin call failed')
-    await reply.code(status).send({ error: error instanceof AdminError ? error.message : 'internal' })
-  })
+  // ---- Audit (RBAC-ADMIN-008, PROF-ADMIN-005): reads only -------------------------------------------------------------
 
-  /** The entries a call names: by id, or every entry of a conversation or of a Principal. */
-  const named = async (body: Record<string, unknown>): Promise<StoredEntry[]> => {
-    const ids = Array.isArray(body.entryIds) ? body.entryIds.map(String) : []
-    const conversationId = typeof body.conversationId === 'string' ? body.conversationId : undefined
-    const principalId = typeof body.principalId === 'string' ? body.principalId : undefined
-    if (!ids.length && !conversationId && !principalId) {
-      throw new AdminError(400, 'name entryIds, a conversationId or a principalId')
-    }
-    const rows: StoredEntry[] = []
-    for (const id of ids) {
-      const row = await store.entries.get(id)
-      if (row) rows.push(row)
-    }
-    if (conversationId || principalId)
-      rows.push(...(await store.entries.listAll({ conversationId, principalId, limit: LIMIT })))
-    return [...new Map(rows.map((r) => [r.id, r])).values()]
+  /** The conversations found by Principal, space and period (active within it), newest activity first. */
+  public async conversations(
+    caller: AdminCaller,
+    reason: string,
+    q: { principal?: string; space?: string; from?: string; to?: string }
+  ): Promise<{ conversations: AuditConversation[]; auditId: string }> {
+    const from = time('from', q.from)
+    const to = time('to', q.to)
+    const { conversations } = this.deps
+    const found = q.principal
+      ? await conversations.listByPrincipal(q.principal, ['active', 'archived', 'final'])
+      : q.space
+        ? await conversations.listBySpace(q.space)
+        : await conversations.listAll()
+    const rows = found
+      .filter((c) => !q.space || spaceIdOf(c) === q.space)
+      .filter((c) => (!from || c.lastActivityAt >= from) && (!to || c.createdAt <= to))
+      .sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt))
+      .map(
+        (c): AuditConversation => ({
+          id: c.id,
+          principalId: c.principalId,
+          spaceId: spaceIdOf(c),
+          title: c.title,
+          state: c.state,
+          createdAt: c.createdAt,
+          lastActivityAt: c.lastActivityAt,
+        })
+      )
+    const auditId = await this.record(caller, {
+      action: 'audit-read',
+      reason,
+      detail: { what: 'conversations', principal: q.principal, space: q.space, from, to, count: rows.length },
+    })
+    return { conversations: rows, auditId }
   }
 
-  app.get('/admin/health', async () => ({ status: 'ok' }))
+  /**
+   * The entries of a conversation, decrypted: the newest page first, as the history serves them (§8); an erased entry
+   * reads `[erased]`.
+   */
+  public async messages(
+    caller: AdminCaller,
+    reason: string,
+    conversationId: string,
+    q: { before?: string; limit?: string }
+  ): Promise<{ entries: MessageEntry[]; nextBefore: string | null; auditId: string }> {
+    const conversation = await this.deps.conversations.get(conversationId)
+    if (!conversation) throw new AdminError(404, 'not-found', 'no such conversation')
+    const limit = limitOf(q.limit, 50, 200)
+    // newest first
+    const all = (await this.deps.store.entries.listAll({ conversationId, limit: LIMIT })).reverse()
+    const start = q.before ? all.findIndex((e) => e.id === q.before) + 1 : 0
+    const page = q.before && start === 0 ? [] : all.slice(start, start + limit)
+    const more = start + page.length < all.length
+    const auditId = await this.record(caller, {
+      action: 'audit-read',
+      reason,
+      detail: { what: 'messages', conversationId, principalId: conversation.principalId, count: page.length },
+    })
+    return {
+      entries: page.map((e) => this.deps.memory.open(e)),
+      nextBefore: more && page.length ? (page.at(-1)?.id ?? null) : null,
+      auditId,
+    }
+  }
 
-  // PRIV-ERASE-008: erasure by a holder of the operator role, with its cascade; legal hold refuses it
-  app.post('/admin/erasure', async (request) => {
-    const { caller, reason } = callerOf(callers, request, 'operator')
-    const body = (request.body ?? {}) as Record<string, unknown>
-    const rows = await named(body)
-    const missing = (Array.isArray(body.entryIds) ? body.entryIds.map(String) : []).filter(
-      (id) => !rows.some((r) => r.id === id)
-    )
+  /** The evidence records of a Principal: their audit fields and the values stored. */
+  public async evidence(
+    caller: AdminCaller,
+    reason: string,
+    principalId: string | undefined
+  ): Promise<{ evidence: { record: unknown; values: Record<string, string> }[]; auditId: string }> {
+    if (!principalId) throw new AdminError(400, 'bad-request', 'name a principal', 'principal')
+    const out: { record: unknown; values: Record<string, string> }[] = []
+    for (const stored of await this.deps.store.evidence.list(principalId)) {
+      const found = await this.deps.evidence.audit(stored.id)
+      if (found) out.push(found)
+    }
+    const auditId = await this.record(caller, {
+      action: 'audit-read',
+      reason,
+      detail: { what: 'evidence', principalId, count: out.length },
+    })
+    return { evidence: out, auditId }
+  }
+
+  /**
+   * The record of each call the model asked for, by Principal, space, conversation, source and period (TOOL-PROV-005):
+   * no argument, no result and no account value is in it.
+   */
+  public async toolCalls(
+    caller: AdminCaller,
+    reason: string,
+    q: {
+      principal?: string
+      space?: string
+      conversation?: string
+      source?: string
+      from?: string
+      to?: string
+      limit?: string
+    }
+  ): Promise<{ calls: unknown[]; auditId: string }> {
+    const filter = {
+      principalId: q.principal || undefined,
+      spaceId: q.space || undefined,
+      conversationId: q.conversation || undefined,
+      sourceId: q.source || undefined,
+      from: time('from', q.from),
+      to: time('to', q.to),
+    }
+    const calls = await this.deps.store.toolCalls.list({ ...filter, limit: limitOf(q.limit, 1000, LIMIT) })
+    const auditId = await this.record(caller, {
+      action: 'audit-read',
+      reason,
+      detail: { what: 'tool-calls', ...filter, count: calls.length },
+    })
+    return { calls, auditId }
+  }
+
+  /** The admin audit, newest first, by pages; the read is itself recorded once the page is read. */
+  public async log(
+    caller: AdminCaller,
+    reason: string,
+    q: { before?: string; limit?: string }
+  ): Promise<{ records: AdminAuditRecord[]; nextBefore: string | null; auditId: string }> {
+    const limit = limitOf(q.limit, 100, 1000)
+    const rows = await this.deps.store.adminAudit.list(limit + 1, q.before ? { before: q.before } : undefined)
+    const records = rows.slice(0, limit)
+    const auditId = await this.record(caller, {
+      action: 'audit-read',
+      reason,
+      detail: { what: 'admin-log', before: q.before, count: records.length },
+    })
+    return { records, nextBefore: rows.length > limit ? (records.at(-1)?.id ?? null) : null, auditId }
+  }
+
+  // ---- Operations (PRIV-ERASE-008, PROF-ADMIN-006) --------------------------------------------------------------------
+
+  /** Erases entries, with their cascade; legal hold refuses it. The devices of their conversations are told. */
+  public async erase(
+    caller: AdminCaller,
+    reason: string,
+    entryIds: unknown
+  ): Promise<{ erased: string[]; held: string[]; notFound: string[]; auditId: string }> {
+    if (!Array.isArray(entryIds) || !entryIds.length)
+      throw new AdminError(400, 'bad-request', 'name the entries to erase', 'entryIds')
+    const ids = [...new Set(entryIds.map(String))]
     const erased: string[] = []
     const held: string[] = []
+    const notFound: string[] = []
     const byConversation = new Map<string, { principalId: string | null; ids: string[]; clientIds: string[] }>()
-    for (const row of rows) {
+    for (const id of ids) {
+      const row = await this.deps.store.entries.get(id)
+      if (!row) {
+        notFound.push(id)
+        continue
+      }
       if (row.state === 'crypto-erased') continue
-      const result = await memory.erase(row.id)
+      const result = await this.deps.memory.erase(row.id)
       if (result.erased) {
         erased.push(row.id, ...result.cascaded)
         const group = byConversation.get(row.conversationId) ?? { principalId: row.principalId, ids: [], clientIds: [] }
@@ -172,108 +293,135 @@ export function buildAdmin(deps: AdminDeps): FastifyInstance {
       } else if (result.reason === 'legal-hold') held.push(row.id)
     }
     for (const [conversationId, group] of byConversation) {
-      if (group.principalId) await deps.announceErased(group.principalId, conversationId, group.ids, group.clientIds)
+      if (group.principalId)
+        await this.deps.announceErased(group.principalId, conversationId, group.ids, group.clientIds)
     }
-    const auditId = await record(caller, {
+    const auditId = await this.record(caller, {
       action: 'erasure',
       reason,
-      detail: { request: asked(body), erased, held, notFound: missing },
+      detail: { entryIds: ids, erased, held, notFound },
     })
-    return { erased, held, notFound: missing, auditId }
-  })
+    return { erased, held, notFound, auditId }
+  }
 
-  // PRIV-ERASE-004/008: legal hold set and released, by a holder of the operator role
-  app.post('/admin/legal-hold', async (request) => {
-    const { caller, reason } = callerOf(callers, request, 'operator')
-    const body = (request.body ?? {}) as Record<string, unknown>
-    if (typeof body.hold !== 'boolean') throw new AdminError(400, 'hold must be true or false')
-    const rows = await named(body)
-    const { changed, skipped } = await memory.setLegalHold(
-      rows.map((r) => r.id),
-      body.hold
-    )
-    const auditId = await record(caller, {
+  /** Sets or releases legal hold on entries, or on every entry of a conversation (PRIV-ERASE-004). */
+  public async legalHold(
+    caller: AdminCaller,
+    reason: string,
+    body: { entryIds?: unknown; conversationId?: unknown; hold?: unknown }
+  ): Promise<{ changed: string[]; skipped: string[]; auditId: string }> {
+    if (typeof body.hold !== 'boolean') throw new AdminError(400, 'bad-request', 'hold must be true or false', 'hold')
+    const entryIds = Array.isArray(body.entryIds) ? [...new Set(body.entryIds.map(String))] : []
+    const conversationId = typeof body.conversationId === 'string' ? body.conversationId : undefined
+    if (!entryIds.length && !conversationId)
+      throw new AdminError(400, 'bad-request', 'name entryIds or a conversationId', 'entryIds')
+    const ids = [...entryIds]
+    if (conversationId)
+      ids.push(...(await this.deps.store.entries.listAll({ conversationId, limit: LIMIT })).map((r) => r.id))
+    const { changed, skipped } = await this.deps.memory.setLegalHold([...new Set(ids)], body.hold)
+    const auditId = await this.record(caller, {
       action: body.hold ? 'legal-hold' : 'legal-hold-release',
       reason,
-      detail: { request: asked(body), changed, skipped },
+      detail: { entryIds, conversationId, changed, skipped },
     })
     return { changed, skipped, auditId }
+  }
+
+  /**
+   * The keys' versions (PRIV-KEY-008). The key store is not built: the master key is the deployment's
+   * `ENTRY_ENCRYPTION_KEY` and the index key is derived from it, each in its one version, and neither can be rotated.
+   */
+  public async keys(
+    caller: AdminCaller,
+    reason: string
+  ): Promise<{ keys: KeyInfo[]; keyService: null; auditId: string }> {
+    const keys: KeyInfo[] = [
+      { key: 'master', versions: [{ version: 1, current: true, wraps: null }], rotation: null, rotatable: false },
+      { key: 'index', versions: [{ version: 1, current: true, wraps: null }], rotation: null, rotatable: false },
+    ]
+    const auditId = await this.record(caller, { action: 'audit-read', reason, detail: { what: 'keys' } })
+    return { keys, keyService: null, auditId }
+  }
+
+  /** A rotation of the master key or of the index key needs the key store, which is not built (PRIV-KEY-008). */
+  public async rotate(_caller: AdminCaller, _reason: string, key: string): Promise<never> {
+    if (key !== 'master' && key !== 'index') throw new AdminError(404, 'not-found', 'no such key')
+    throw new AdminError(501, 'not-implemented', `the ${key} key cannot be rotated: the key store is not built`)
+  }
+}
+
+/** The answer of a refusal, as the AG-UI profile writes it (§9). */
+export function adminErrorBody(error: AdminError): Record<string, unknown> {
+  return { error: error.code, message: error.message, ...(error.field ? { field: error.field } : {}) }
+}
+
+export interface InternalAdminDeps {
+  service: AdminService
+  logger: Logger
+  /** the break-glass token (`ADMIN_TOKEN`): the only way in (RBAC-XSESS-009) */
+  breakGlassToken: string
+}
+
+/**
+ * The internal admin interface (D134, RBAC-XSESS-009), built only when the agent-pack enables it: what Audit and
+ * Operations serve, at the paths of the AG-UI profile (§3.14) under `/admin`, for a call that carries the break-glass
+ * token as a bearer token; any other call, the health probe included, is `401`. A read takes its reason in the query, an
+ * action in the body. Each call is recorded and flagged.
+ */
+export function buildAdmin(deps: InternalAdminDeps): FastifyInstance {
+  const app = Fastify({ logger: false })
+  const { service } = deps
+  const caller: AdminCaller = { kind: 'break-glass' }
+
+  app.addHook('onRequest', async (request, reply) => {
+    if (request.headers.authorization !== `Bearer ${deps.breakGlassToken}`)
+      return reply.code(401).send({ error: 'unauthorized' })
+  })
+  app.setErrorHandler(async (error, _request, reply: FastifyReply) => {
+    if (error instanceof AdminError) return reply.code(error.status).send(adminErrorBody(error))
+    deps.logger.error({ err: error }, 'admin call failed')
+    return reply.code(500).send({ error: 'internal' })
   })
 
-  // RBAC-XSESS-006/008: what a holder of the auditor role reads, outside every retrieval of the model, each read recorded
-  app.get('/admin/audit/entries', async (request) => {
-    const { caller, reason } = callerOf(callers, request, 'auditor')
-    const q = request.query as { conversationId?: string; principalId?: string; limit?: string }
-    if (!q.conversationId && !q.principalId) throw new AdminError(400, 'name a conversationId or a principalId')
-    const limit = Math.min(Number(q.limit) || 1000, LIMIT)
-    const rows = await store.entries.listAll({ conversationId: q.conversationId, principalId: q.principalId, limit })
-    const auditId = await record(caller, {
-      action: 'audit-read',
-      reason,
-      detail: { what: 'entries', conversationId: q.conversationId, principalId: q.principalId, count: rows.length },
-    })
-    return { entries: rows.map((r) => auditView(memory, r)), auditId }
-  })
+  type Query = Record<string, string | undefined>
+  const query = (request: FastifyRequest) => (request.query ?? {}) as Query
+  const body = (request: FastifyRequest) => (request.body ?? {}) as Record<string, unknown>
 
-  app.get('/admin/audit/evidence/:id', async (request) => {
-    const { caller, reason } = callerOf(callers, request, 'auditor')
+  app.get('/admin/health', async () => ({ status: 'ok' }))
+  app.get('/admin/audit/conversations', async (request) => {
+    const q = query(request)
+    return service.conversations(caller, reasonOf(q.reason), q)
+  })
+  app.get('/admin/audit/conversations/:id/messages', async (request) => {
+    const q = query(request)
     const { id } = request.params as { id: string }
-    const found = await deps.evidence.audit(id)
-    const auditId = await record(caller, {
-      action: 'audit-read',
-      reason,
-      detail: { what: 'evidence', id, found: !!found },
-    })
-    if (!found) throw new AdminError(404, 'not-found')
-    return { ...found, auditId }
+    const { entries, nextBefore, auditId } = await service.messages(caller, reasonOf(q.reason), id, q)
+    return { messages: [...entries].reverse().flatMap((e) => entryToMessages(e)), nextBefore, auditId }
   })
-
-  // TOOL-PROV-005: the record of each call the model asked for, by Principal, space, conversation, source and period; no
-  // argument, no result, no account value is in it, and the read is recorded with its auditor's Principal and reason
+  app.get('/admin/audit/evidence', async (request) => {
+    const q = query(request)
+    return service.evidence(caller, reasonOf(q.reason), q.principal)
+  })
   app.get('/admin/audit/tool-calls', async (request) => {
-    const { caller, reason } = callerOf(callers, request, 'auditor')
-    const q = request.query as {
-      principalId?: string
-      spaceId?: string
-      conversationId?: string
-      sourceId?: string
-      from?: string
-      to?: string
-      limit?: string
-    }
-    for (const [name, value] of [
-      ['from', q.from],
-      ['to', q.to],
-    ] as const)
-      if (value !== undefined && Number.isNaN(Date.parse(value))) throw new AdminError(400, `${name} is not a time`)
-    const filter = {
-      principalId: q.principalId || undefined,
-      spaceId: q.spaceId || undefined,
-      conversationId: q.conversationId || undefined,
-      sourceId: q.sourceId || undefined,
-      from: q.from ? new Date(q.from).toISOString() : undefined,
-      to: q.to ? new Date(q.to).toISOString() : undefined,
-    }
-    const calls = await store.toolCalls.list({ ...filter, limit: Math.min(Number(q.limit) || 1000, LIMIT) })
-    const auditId = await record(caller, {
-      action: 'audit-read',
-      reason,
-      detail: { what: 'tool-calls', ...filter, count: calls.length },
-    })
-    return { calls, auditId }
+    const q = query(request)
+    return service.toolCalls(caller, reasonOf(q.reason), q)
   })
-
   app.get('/admin/audit/log', async (request) => {
-    const { caller, reason } = callerOf(callers, request, 'auditor')
-    const q = request.query as { limit?: string }
-    const records = await store.adminAudit.list(Math.min(Number(q.limit) || 100, 1000))
-    const auditId = await record(caller, {
-      action: 'audit-read',
-      reason,
-      detail: { what: 'admin-log', count: records.length },
-    })
-    return { records, auditId }
+    const q = query(request)
+    return service.log(caller, reasonOf(q.reason), q)
   })
-
+  app.post('/admin/operations/erase', async (request) => {
+    const b = body(request)
+    return service.erase(caller, reasonOf(b.reason), b.entryIds)
+  })
+  app.post('/admin/operations/legal-hold', async (request) => {
+    const b = body(request)
+    return service.legalHold(caller, reasonOf(b.reason), b)
+  })
+  app.get('/admin/operations/keys', async (request) => service.keys(caller, reasonOf(query(request).reason)))
+  app.post('/admin/operations/keys/:key/rotate', async (request) => {
+    const { key } = request.params as { key: string }
+    return service.rotate(caller, reasonOf(body(request).reason), key)
+  })
   return app
 }

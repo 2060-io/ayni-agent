@@ -293,11 +293,16 @@ export interface AdminAuditRecord {
     | 'credential-revocation'
     /** one of a person's own accounts connected, replaced, to reconnect, disconnected or ended, or an attempt ended (TOOL-CONN-007) */
     | 'personal-account'
-  /** who did it: the verified Principal of a call to the admin interface, `break-glass`, or the agent's own part */
+    /** an admin grant opened after the phone's re-authentication, or ended (RBAC-ADMIN-007) */
+    | 'admin-grant-opened'
+    | 'admin-grant-ended'
+  /** who did it: the verified Principal of a call of admin access, `break-glass`, or the agent's own part */
   actor: string
-  /** a call to the admin interface: the Principal it signed in with the phone and the badge (RBAC-XSESS-009) */
+  /** a call of admin access: the verified Principal who made it (RBAC-ADMIN-007) */
   principalId?: string
-  /** a call to the admin interface made with the break-glass token: flagged (RBAC-XSESS-009) */
+  /** a call of admin access: the admin grant it was made under (RBAC-ADMIN-007) */
+  grantId?: string
+  /** a call to the internal admin interface, made with the break-glass token: flagged (RBAC-XSESS-009) */
   breakGlass?: boolean
   reason: string
   /** what it named and what came of it: entry ids, a conversation, a Principal, an evidence record, counts */

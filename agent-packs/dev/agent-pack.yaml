@@ -23,9 +23,11 @@ identity:
     # no role reads other people's conversations: a role carries no scope of conversation reads (RBAC-XSESS-005)
     manager: { description: Approves sensitive actions., canApprove: true }
     support: { description: Support operators. }
-    # the admin interface's roles (RBAC-XSESS-008), given by the user directory and read by nothing else
-    auditor: { description: Reads what the admin interface serves. }
-    operator: { description: Erases entries and sets legal hold through the admin interface. }
+    # Admin access (D132, RBAC-XSESS-008) needs an authentication: with one, declare the roles auditor and operator,
+    # given by the user directory and read by nothing but admin access, and the methods Show Admin asks on the phone:
+    #   auditor: { description: Reads what Audit serves. }
+    #   operator: { description: Erases entries, sets legal hold and rotates keys through Operations. }
+    # and, at the top level, admin: { authentication: { methods: [badge] }, grantMinutes: 30 }
     guest: { description: Authenticated peers without a recognized backing identity. }
   roleRules:
     - when: { relation: home, claims: { title: Manager } }

@@ -1967,30 +1967,77 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       numbers 3 on, the email that passed run again), the five minutes from the step result, the flow's expiry kept, a
       new choice holding the declined method and a second choice that is not awaited refused `malformed`, and an
       `open` without `requires`; they fail on the code before it.
-79. **The admin interface's roles, and who it lets in** (2026-11-23, Fabrice's answer B5 as revised to the clean spec,
-    ayni-spec PR #123; D78, RBAC-XSESS-006 to 009, PRIV-ERASE-008, TOOL-PROV-005). Draft: the person's sign-in with the
-    phone and the badge waits for his answers.
-    - **Two roles of the directory.** `auditor` reads what the admin interface serves (entries, evidence, call records,
-      the admin audit) and is refused every write; `operator` erases entries and sets and releases legal hold and is
-      refused the reads (`403`). A person who holds neither is refused everything. They are declared in `identity.roles`
-      like any other role (`ADMIN_ROLES`) and given by the user directory; the interface reads them on the signed-in
-      Principal at each call, so a reload of the directory takes effect at the next call.
-    - **They give nothing elsewhere** (RBAC-XSESS-008): the loader refuses a pack that names one in a source's `access`
-      (its roles, an approval's or an elevation's approvers), in `approvals.approvers`, with `canApprove`, among the
-      creators of a template or among the roles a purpose permits. The support role the dev and example packs called
-      `operator` is `support` now; both packs declare the two admin roles.
-    - **Who is let in** (RBAC-XSESS-009): a person the interface signed in (`signedIn`, the place of the phone's
-      sign-in, not built), or a call that carries the break-glass token `ADMIN_TOKEN` as a bearer token. Any other call,
-      the health probe of the listener included, is `401`: with no token set and no sign-in, the interface lets nobody
-      in (it let everyone on the loopback in before).
-    - **What each record names:** `principalId`, the verified Principal (its `actor` too), or `breakGlass: true` and the
-      actor `break-glass` for a call with the token, logged as a warning. The names typed in the body or the headers
-      (`operator`, `auditor`, `x-ayni-operator`, `x-ayni-auditor`) are no longer read; the reason still is, and a call
-      without one is `400`. No migration: the two fields live in the record's `data`.
-    - **Not built, for Fabrice:** the sign-in itself (where the person sees the code, what the admin session is, how
-      long it lasts, what the phone shows, whether the badge is asked again); the listener stays on the loopback.
-    - **Tests:** `adminRoles.test.ts` (neither, a wrong token, the agent's own interface with no sign-in; break-glass
-      flagged; the verified Principal, never the typed name; each role's reads and writes; a person with neither; the
-      reason; the pack refused), `turns.test.ts` (the operator's calls made with the break-glass token, every record
-      flagged), `tools.test.ts` (TOOL-PROV-005 by a signed-in auditor, the record naming that Principal). With
-      `src/platform/admin.ts` of main they fail, and so does the pack test without the loader's rule.
+79. **Admin access from the agent's card: the roles auditor and operator, Show Admin, the admin grant, Audit and
+    Operations through the AG-UI profile, the internal admin interface only when enabled** (2026-11-24, ayni-spec PRs
+    #123, #127 to #129: D78, D127, D132 to D134, RBAC-ADMIN-001 to 008, RBAC-XSESS-006 to 009, PRIV-ERASE-008,
+    TOOL-PROV-005, AG-UI profile §3.14, PROF-DESC-013, PROF-ADMIN-001 to 007; Fabrice's answers "B5 (revised)", "ADMIN
+    ACCESS" and "ADMIN ACCESS, settled", which replace the six sign-in questions of the draft).
+    - **Two roles of the directory** (RBAC-XSESS-008). `auditor` reads what Audit serves and writes nothing; `operator`
+      erases entries, sets and releases legal hold and rotates keys. They are declared in `identity.roles` like any
+      other role (`ADMIN_ROLES`) and given by the user directory or `perActorOverrides`; admin access reads them on the
+      Principal at each call. The loader refuses a pack that names one where a role grants something: a source's
+      `access` (its roles, an approval's or an elevation's approvers), `approvals.approvers`, `canApprove`, a
+      template's `creators`, a purpose's `permittedRoles`. The support role the packs called `operator` is `support`.
+    - **The agent-pack** (`admin`, schema and `docs/agent-pack.md`): `admin.authentication.methods`, the one set of
+      methods Show Admin asks (names of `identity.authentication.methods`; confirming methods alone are allowed, D127),
+      required whenever `identity.roles` declares `auditor` or `operator` (RBAC-ADMIN-002), each name enabled, none
+      twice; `admin.grantMinutes`, 30 by default, at least 1; `admin.internal.enabled`, `false` by default. The spec
+      names one set, not several combinations: the set is the request's only combination (IDENT-AUTH-015). The dev pack
+      has no authentication, so it declares neither role any more; the example pack declares both with `[badge]`.
+    - **Show Admin** (`POST {sessions}/admin/grant`, `202 { requestId, expiresAt }` at once): the agent runs
+      `IdentityFlow.authenticate` on the Principal's capability channel with `purpose: 'admin'`, `combinations: [set]`,
+      `bound` (the Principal), `origin` (the session that asked) and the text "Show Admin" (flow profile §6.14); the
+      request waits the fifteen minutes of an `authenticate` flow. A second request of the same device while one waits
+      answers the one that waits. `reauthenticationOutcome` maps the attempt: accepted only when its facts name the
+      Principal of the connection (`sameActor`); `declined` declined, `unanswered` expired, a refusal or an
+      authentication already open on the connection (`pending`) failed; no phone connected is failed too. `authenticate.ts`
+      is not changed.
+    - **The grant** (`src/platform/adminGrants.ts`) belongs to the device that asked (`deviceOf`: the session's device
+      handle) and holds the admin roles the person held at the confirmation. It ends `admin.grantMinutes` after the
+      confirmation, by a timer and by the clock at each call, and use never moves it; a new confirmation replaces it.
+      It ends on Hide Admin (`DELETE {sessions}/admin/grant`, `204` with or without a grant), when the Principal no
+      longer holds a role it opened for (at the next call and after each reload of the directory, `review`), when its
+      device is unlinked (`SessionService.onDeviceUnlinked`, from `revokeDevice` and `revokeAllDevices`) and when the
+      phone's connection closes (`onPeerDisconnected`, before the sessions close). A role lost ends the whole grant,
+      even when the person keeps the other role: Show Admin opens a new one. The grants are kept in the key-value table
+      (`admin-grants`), so that a restart neither ends nor extends them, and their timers are armed again at start.
+    - **What the devices hear** (`ayni.admin.changed`, PROF-ADMIN-004): `{ roles, grant: { open, expiresAt } | null,
+      outcome }` to every bound AG-UI session of the device: `opened`, `declined`, `failed`, `expired` for a request,
+      `ended` for a grant. `GET {sessions}/admin` answers `{ roles: [] }` and nothing else to a person without a role,
+      else `{ roles, grant }`. The descriptor declares `features.admin` while the agent-pack declares an admin role.
+    - **Audit and Operations** (`src/channels/agui/adminRoutes.ts` over `AdminService` in `src/platform/admin.ts`), each
+      call checked in this order: `403 admin-closed` without an open grant for the device, `403 not-auditor` or
+      `not-operator` without the role (now and at the confirmation), `400 reason-required` without a reason of at
+      least one letter or digit (in the query for a read, in the body for an action); a refused call writes nothing.
+      Audit: conversations by `principal`, `space` and a period (`from`, `to`: active within it), their titles opened;
+      a conversation's entries decrypted in the shapes of §8 by pages (`before`, `limit`), an erased entry reading
+      `[erased]`; a Principal's evidence (`principal` required: its audit fields and the values stored); the call
+      records (TOOL-PROV-005); the admin audit, newest first, with `nextBefore`. Operations: erase by `entryIds`, with
+      its cascade and `ayni.messages.erased`; legal hold on `entryIds` or a `conversationId`; the keys. Every answer
+      carries the `auditId` of its record, which names the verified Principal, the grant (`grantId`) and the reason; the
+      grant's opening and its end are recorded too (`admin-grant-opened`, `admin-grant-ended`, the reason being why it
+      ended).
+    - **Keys: not built.** The key store (D115 to D117, PRIV-KEY-008) does not exist: `GET …/operations/keys` answers the
+      master key (`ENTRY_ENCRYPTION_KEY`) and the index key derived from it, each in version 1, `rotatable: false`,
+      `keyService: null`; `POST …/operations/keys/{master|index}/rotate` answers `501 { error: 'not-implemented' }`
+      (a code of the reference agent beyond §9).
+    - **The internal admin interface** (D134, RBAC-XSESS-009) is built only when `admin.internal.enabled`: on
+      `ADMIN_PORT` on the loopback, it serves the same Audit and Operations at `/admin/audit/…` and
+      `/admin/operations/…`, to the bearer token `ADMIN_TOKEN` alone (anything else, the health probe included, is
+      `401`), each record flagged `breakGlass` with the actor `break-glass` and logged as a warning. The agent refuses
+      to start with it enabled and no `ADMIN_TOKEN`; disabled, no listener opens and the token is read by nothing. Its
+      former paths (`/admin/erasure`, `/admin/legal-hold`, `/admin/audit/entries`, `/admin/audit/evidence/:id`) and the
+      names typed in a request (`operator`, `auditor`, `x-ayni-*`) are gone.
+    - **Profile package 3.5.5:** `features.admin`, `CUSTOM_EVENT.adminChanged`, the types of §3.14 and the errors
+      `admin-closed`, `not-auditor`, `not-operator`, `reason-required` (and `not-implemented`).
+    - **Not done here:** nothing reaches a model from Audit (it is not wired to any), and Audit serves no attachment of
+      a conversation it reads.
+    - **Tests:** `adminAccess.test.ts` (20: the descriptor, the state, Show Admin asked once with the set and the
+      device's sessions told, each outcome, no phone, the refusals in order with nothing recorded, each read and action
+      recorded with Principal, grant and reason, the end counted from the confirmation, the timer, Hide Admin, a role
+      lost at a call and at a reload, a device unlinked, the phone disconnected, a restart, the internal interface's
+      token and flag, enabled or not, the pack's rules), `postgres.test.ts` (a grant kept across a restart and recorded
+      with its grant), `turns.test.ts` (holds and erasures through the internal interface), `tools.test.ts`
+      (TOOL-PROV-005 through `AdminService`), the package's test (the flag, the event, the codes). With `src/` before
+      this change, 18 of the 20 of `adminAccess.test.ts` fail (the two left check rules the draft already had), and the
+      pack refusal fails without `adminAccessErrors`.

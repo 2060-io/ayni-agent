@@ -174,7 +174,7 @@ describe('the agent-pack names the file and never the people (CORE-PACK-001, IDE
     identity: {
       homeBackingIdentity: 'did:webvh:x:home',
       roleRules: [],
-      roles: { dispatcher: {}, auditor: { admin: true } },
+      roles: { dispatcher: {}, 'people-admin': { admin: true } },
       ...identity,
     },
     language: { agent: 'en' },
@@ -195,7 +195,7 @@ describe('the agent-pack names the file and never the people (CORE-PACK-001, IDE
   it('accepts identity.directory.file and the admin flag of a role', () => {
     const pack = validatePackDocument(doc({ directory: { file: '/run/secrets/ayni/directory.yaml' } }), {})
     expect(pack.identity.directory).toEqual({ file: '/run/secrets/ayni/directory.yaml' })
-    expect(pack.identity.roles?.auditor?.admin).toBe(true)
+    expect(pack.identity.roles?.['people-admin']?.admin).toBe(true)
   })
 
   it('refuses a pack that writes the people inline, in words', () => {

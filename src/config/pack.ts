@@ -43,6 +43,7 @@ import {
   challengeTypesOf,
   credentialMethodsOf,
   DOCUMENT_ATTRIBUTES,
+  declaredAdminRoles,
   EMAIL_ATTRIBUTES,
   featuresOf,
   IDENTIFYING_METHOD_TYPES,
@@ -1288,6 +1289,28 @@ export function crossFieldErrors(pack: AgentPack): string[] {
   errors.push(...catalogErrors(pack))
   // the admin interface's roles give nothing elsewhere (RBAC-XSESS-008)
   errors.push(...adminRoleErrors(pack))
+  errors.push(...adminAccessErrors(pack))
+  return errors
+}
+
+/**
+ * What admin access needs (D127, D132, RBAC-ADMIN-002): a pack that declares `auditor` or `operator` names the set of
+ * methods Show Admin asks on the phone, and every method of it is one `identity.authentication.methods` enables.
+ */
+export function adminAccessErrors(pack: AgentPack): string[] {
+  const errors: string[] = []
+  const declared = declaredAdminRoles(pack)
+  const set = pack.admin?.authentication?.methods
+  if (declared.length && !set?.length)
+    errors.push(
+      `RBAC-ADMIN-002: identity.roles declares [${declared.join(', ')}]: admin.authentication.methods must name the set of methods Show Admin asks on the phone`
+    )
+  const enabled = pack.identity.authentication?.methods ?? {}
+  const unknown = (set ?? []).filter((name) => !enabled[name])
+  if (unknown.length)
+    errors.push(
+      `RBAC-ADMIN-002: admin.authentication.methods names [${unknown.join(', ')}], which identity.authentication.methods does not enable`
+    )
   return errors
 }
 

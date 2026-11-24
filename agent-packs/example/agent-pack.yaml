@@ -77,13 +77,14 @@ identity:
       description: Baseline for recognized partner organizations.
     visitor:
       description: People of an accredited organization this agent does not otherwise know.
+    # the roles of admin access (RBAC-XSESS-008), read by nothing else: Audit and Operations from the agent's card
     auditor:
-      description: Read-only access to the persistent store.
+      description: Reads what Audit serves, decrypted conversations among them, each read with a reason.
     people-admin:
       description: Reads who holds which role of the user directory, and what each reload changed (D92).
       admin: true
     operator:
-      description: Erases entries and sets or releases legal hold through the admin interface (RBAC-XSESS-008).
+      description: Erases entries, sets or releases legal hold and rotates keys through Operations (RBAC-XSESS-008).
   # With no identity provider, the people of Northwind and their roles, typed by hand, are a file mounted from a
   # secret of the deployment, never written here (D79, D87). The rules below never read a badge this agent issues
   # from it; its department and groups make people members of rule spaces only.
@@ -403,3 +404,15 @@ features:
   credentialTool: true
   anchoring: true
   history: true
+
+# Admin access (D132 to D134): Show Admin on the agent's card, for a person whose roles hold auditor or operator, asks
+# the phone to re-authenticate with this set of methods (names of identity.authentication.methods; it may hold
+# confirming methods only, e.g. [otp] or [face]); the grant lasts grantMinutes from the confirmation, never extended by
+# use. The internal admin interface (ADMIN_PORT, the loopback, the break-glass token ADMIN_TOKEN) exists only when
+# enabled.
+admin:
+  authentication:
+    methods: [badge]
+  grantMinutes: 30
+  internal:
+    enabled: false
