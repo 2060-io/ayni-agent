@@ -15,6 +15,14 @@ export type ToolNameOrStar = string
  * A role: approval rights and flags, never a scope of conversation reads (RBAC-XSESS-005, decision 60): `crossSession`
  * is withdrawn and a pack that declares it is refused at start.
  */
+/**
+ * The admin interface's two roles (RBAC-XSESS-008), declared like any other role and given by the user directory:
+ * `auditor` reads what the admin interface serves, `operator` erases, sets and releases legal hold and rotates keys.
+ * Nothing but the admin interface reads them.
+ */
+export const ADMIN_ROLES = ['auditor', 'operator'] as const
+export type AdminRole = (typeof ADMIN_ROLES)[number]
+
 export interface RoleDefinition {
   description?: string
   canApprove?: boolean

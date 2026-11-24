@@ -10,7 +10,10 @@ export interface Env {
   port: number
   /** listener of the admin interface (D78): erasure, legal hold, audit reads; 0 turns it off; never exposed */
   adminPort?: number
-  /** when set, every admin call carries it as a bearer token */
+  /**
+   * the break-glass token of the admin interface (RBAC-XSESS-009): a call that carries it as a bearer token is let in
+   * when no phone is available, each use recorded and flagged
+   */
   adminToken?: string
   logLevel: string
   nodeEnv: string

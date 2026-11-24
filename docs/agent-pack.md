@@ -1056,8 +1056,17 @@ missed.
 wrote: with it go the agent's reply to it (its messages, the tool calls and the memory lines of the turn that
 answered it) and the memories the agent took from it, at once and on every device; a reply still being written is
 cancelled first (PRIV-ERASE-010..012). `0` turns deletion off: the descriptor then declares no `erasure`. After the
-window the message stays; an operator erases through the admin interface, which respects legal hold. A person
-cannot delete a conversation.
+window the message stays; a holder of the role `operator` erases through the admin interface, which respects legal
+hold. A person cannot delete a conversation.
+
+**The admin interface's roles** (D78, RBAC-XSESS-008). `auditor` reads what the admin interface serves (entries,
+evidence, call records, the admin audit) and writes nothing; `operator` erases entries and sets and releases legal
+hold. They are declared in `identity.roles` like any other role and given to people by the user directory; nothing but
+the admin interface reads them, and the loader refuses a pack that names one in a source's `access`, among the
+approvers, with `canApprove`, among the creators of a template or among the roles a purpose permits. Every record of
+the admin interface names the Principal it signed in, never a name typed in the request; the break-glass token
+`ADMIN_TOKEN` lets a call in when no phone is available, and its record is flagged. The person's sign-in with the phone
+and the badge (RBAC-XSESS-009) is not built yet: until it is, only `ADMIN_TOKEN` opens the interface.
 
 ```yaml
 conversations:

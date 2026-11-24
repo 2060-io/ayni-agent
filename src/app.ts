@@ -549,7 +549,8 @@ export async function buildAgent(
           memory,
           evidence,
           logger,
-          token: env.adminToken,
+          // the break-glass token; the person's sign-in with the phone and the badge is not built (RBAC-XSESS-009)
+          breakGlassToken: env.adminToken,
           announceErased: (principalId, conversationId, ids, clientIds) =>
             aguiRoutes?.announceErased(principalId, conversationId, ids, clientIds) ?? Promise.resolve(),
         })

@@ -1709,3 +1709,30 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       your phone, the answers' line), `notifyAuthorize.test.ts` (a non-attested rule reaches the phone with `attested:
       false`; an attested decision without authentication is refused), `connections.test.ts` (the owner's approval on
       the phone), `toolCatalog.test.ts` (each rule of TOOL-CALL-010).
+77. **The admin interface's roles, and who it lets in** (2026-11-23, Fabrice's answer B5 as revised to the clean spec,
+    ayni-spec PR #123; D78, RBAC-XSESS-006 to 009, PRIV-ERASE-008, TOOL-PROV-005). Draft: the person's sign-in with the
+    phone and the badge waits for his answers.
+    - **Two roles of the directory.** `auditor` reads what the admin interface serves (entries, evidence, call records,
+      the admin audit) and is refused every write; `operator` erases entries and sets and releases legal hold and is
+      refused the reads (`403`). A person who holds neither is refused everything. They are declared in `identity.roles`
+      like any other role (`ADMIN_ROLES`) and given by the user directory; the interface reads them on the signed-in
+      Principal at each call, so a reload of the directory takes effect at the next call.
+    - **They give nothing elsewhere** (RBAC-XSESS-008): the loader refuses a pack that names one in a source's `access`
+      (its roles, an approval's or an elevation's approvers), in `approvals.approvers`, with `canApprove`, among the
+      creators of a template or among the roles a purpose permits. The support role the dev and example packs called
+      `operator` is `support` now; both packs declare the two admin roles.
+    - **Who is let in** (RBAC-XSESS-009): a person the interface signed in (`signedIn`, the place of the phone's
+      sign-in, not built), or a call that carries the break-glass token `ADMIN_TOKEN` as a bearer token. Any other call,
+      the health probe of the listener included, is `401`: with no token set and no sign-in, the interface lets nobody
+      in (it let everyone on the loopback in before).
+    - **What each record names:** `principalId`, the verified Principal (its `actor` too), or `breakGlass: true` and the
+      actor `break-glass` for a call with the token, logged as a warning. The names typed in the body or the headers
+      (`operator`, `auditor`, `x-ayni-operator`, `x-ayni-auditor`) are no longer read; the reason still is, and a call
+      without one is `400`. No migration: the two fields live in the record's `data`.
+    - **Not built, for Fabrice:** the sign-in itself (where the person sees the code, what the admin session is, how
+      long it lasts, what the phone shows, whether the badge is asked again); the listener stays on the loopback.
+    - **Tests:** `adminRoles.test.ts` (neither, a wrong token, the agent's own interface with no sign-in; break-glass
+      flagged; the verified Principal, never the typed name; each role's reads and writes; a person with neither; the
+      reason; the pack refused), `turns.test.ts` (the operator's calls made with the break-glass token, every record
+      flagged), `tools.test.ts` (TOOL-PROV-005 by a signed-in auditor, the record naming that Principal). With
+      `src/platform/admin.ts` of main they fail, and so does the pack test without the loader's rule.

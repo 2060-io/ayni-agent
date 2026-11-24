@@ -12,6 +12,7 @@ import { personalSpaceId } from '../src/core/spaces.js'
 import { ONE_CALL } from '../src/core/toolGate.js'
 import type { ApprovalRecord, MessageEntry, Principal } from '../src/core/types.js'
 import { createEntryCrypto, openJson, sealJson } from '../src/memory/crypto.js'
+import { buildAdmin } from '../src/platform/admin.js'
 import type { McpServerSource } from '../src/tools/mcp.js'
 import { parseSse, startTestAgent, testEnv } from './helpers.js'
 import {
@@ -1278,13 +1279,21 @@ describe('provenance and the record of each call (TOOL-PROV-001..006, PROF-TOOL-
   })
 
   it('lets an auditor read the call records through the admin interface only, each read recorded (TOOL-PROV-005)', async () => {
-    const admin = running.admin
-    if (!admin) throw new Error('no admin interface')
+    // the person the admin interface signed in, whose entry of the directory holds the auditor role (RBAC-XSESS-008/009)
+    const jonas = { id: 'prn_jonas_auditor', roles: ['auditor'] } as unknown as Principal
+    const admin = buildAdmin({
+      store: running.agent.store,
+      memory: running.agent.memory,
+      evidence: running.agent.evidence,
+      logger: running.agent.logger,
+      signedIn: async (request) => (request.headers['x-test-signed-in'] === jonas.id ? jonas : undefined),
+      announceErased: async () => undefined,
+    })
     const from = new Date(Date.now() - 3600_000).toISOString()
     const read = await admin.inject({
       method: 'GET',
       url: `/admin/audit/tool-calls?spaceId=${salesEu.id}&sourceId=relaticle&from=${encodeURIComponent(from)}`,
-      headers: { 'x-ayni-auditor': 'auditor-1', 'x-ayni-reason': 'weekly review' },
+      headers: { 'x-test-signed-in': jonas.id, 'x-ayni-reason': 'weekly review' },
     })
     expect(read.statusCode).toBe(200)
     const body = read.json() as { calls: Record<string, unknown>[]; auditId: string }
@@ -1296,12 +1305,21 @@ describe('provenance and the record of each call (TOOL-PROV-001..006, PROF-TOOL-
     const log = await running.agent.store.adminAudit.list(5, { action: 'audit-read' })
     expect(log[0]).toMatchObject({
       id: body.auditId,
-      actor: 'auditor-1',
+      actor: jonas.id,
+      principalId: jonas.id,
       reason: 'weekly review',
       detail: { what: 'tool-calls' },
     })
+    expect(log[0]?.breakGlass).toBeUndefined()
     const anonymous = await admin.inject({ method: 'GET', url: '/admin/audit/tool-calls' })
-    expect(anonymous.statusCode).toBe(400)
+    expect(anonymous.statusCode).toBe(401)
+    const noReason = await admin.inject({
+      method: 'GET',
+      url: '/admin/audit/tool-calls',
+      headers: { 'x-test-signed-in': jonas.id },
+    })
+    expect(noReason.statusCode).toBe(400)
+    await admin.close()
     // no endpoint of the AG-UI profile serves them
     expect((await call(anaSales, 'GET', '/admin/audit/tool-calls')).status).toBe(404)
   })

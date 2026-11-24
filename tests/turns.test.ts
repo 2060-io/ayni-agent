@@ -15,6 +15,9 @@ import type { StubChatModel } from '../src/llm/stub.js'
 import type { ChatDelta } from '../src/llm/types.js'
 import { parseSse, testEnv } from './helpers.js'
 
+/** The break-glass token of the admin interface in these tests (RBAC-XSESS-009). */
+const BREAK_GLASS = 'break-glass-of-the-tests'
+
 const client = { name: 'ayni-ui', version: '3.0.0', platform: 'web' }
 const lines: Record<string, unknown>[] = []
 let running: RunningAgent
@@ -115,7 +118,7 @@ beforeAll(async () => {
     { level: 'info' },
     { write: (chunk: string) => void lines.push(JSON.parse(chunk) as Record<string, unknown>) }
   )
-  running = await buildAgent(testEnv({ statsEnabled: true }), logger, { drainMs: 200 })
+  running = await buildAgent(testEnv({ statsEnabled: true, adminToken: BREAK_GLASS }), logger, { drainMs: 200 })
   mintLocally(running)
 }, 30_000)
 
@@ -427,10 +430,18 @@ describe('a person deletes a message of theirs within its window (PRIV-ERASE-007
   })
 })
 
-describe('the admin interface (PRIV-ERASE-008, RBAC-XSESS-006)', () => {
-  const admin = () => running.admin as NonNullable<RunningAgent['admin']>
+describe('the admin interface (PRIV-ERASE-008, RBAC-XSESS-006, RBAC-XSESS-009)', () => {
+  // the person's sign-in with the phone is not built: these calls are made with the break-glass token
+  const glass = { authorization: `Bearer ${BREAK_GLASS}` }
+  const raw = () => running.admin as NonNullable<RunningAgent['admin']>
+  const admin = () => ({
+    inject: (opts: { method: 'GET' | 'POST'; url: string; payload?: unknown; headers?: Record<string, string> }) =>
+      raw().inject({ ...opts, headers: { ...glass, ...opts.headers } } as never),
+  })
 
-  it('requires an operator and a reason', async () => {
+  it('refuses a call that carries neither a sign-in nor the break-glass token, and requires a reason', async () => {
+    const anonymous = await raw().inject({ method: 'POST', url: '/admin/erasure', payload: { entryIds: ['x'] } })
+    expect(anonymous.statusCode).toBe(401)
     const response = await admin().inject({ method: 'POST', url: '/admin/erasure', payload: { entryIds: ['x'] } })
     expect(response.statusCode).toBe(400)
   })
@@ -445,7 +456,7 @@ describe('the admin interface (PRIV-ERASE-008, RBAC-XSESS-006)', () => {
     const held = await admin().inject({
       method: 'POST',
       url: '/admin/legal-hold',
-      payload: { operator: 'ops@example.org', reason: 'case 42', hold: true, entryIds: [message.id] },
+      payload: { reason: 'case 42', hold: true, entryIds: [message.id] },
     })
     expect(held.json().changed).toEqual([message.id])
     // the person's erasure is refused on hold (PROF-HIST-010), and counted held for the conversation (PROF-CONV-009)
@@ -459,25 +470,25 @@ describe('the admin interface (PRIV-ERASE-008, RBAC-XSESS-006)', () => {
     const byOperator = await admin().inject({
       method: 'POST',
       url: '/admin/erasure',
-      payload: { operator: 'ops@example.org', reason: 'request 7', entryIds: [message.id] },
+      payload: { reason: 'request 7', entryIds: [message.id] },
     })
     expect(byOperator.json()).toMatchObject({ erased: [], held: [message.id] })
     await admin().inject({
       method: 'POST',
       url: '/admin/legal-hold',
-      payload: { operator: 'ops@example.org', reason: 'case closed', hold: false, conversationId },
+      payload: { reason: 'case closed', hold: false, conversationId },
     })
     const erased = await admin().inject({
       method: 'POST',
       url: '/admin/erasure',
-      payload: { operator: 'ops@example.org', reason: 'request 7', entryIds: [message.id] },
+      payload: { reason: 'request 7', entryIds: [message.id] },
     })
     expect(erased.json().erased).toContain(message.id)
     // the auditor reads the conversation: the erased message keeps its audit fields, not its text
     const read = await admin().inject({
       method: 'GET',
       url: `/admin/audit/entries?conversationId=${conversationId}`,
-      headers: { 'x-ayni-auditor': 'auditor@example.org', 'x-ayni-reason': 'quarterly audit' },
+      headers: { 'x-ayni-reason': 'quarterly audit' },
     })
     const view = (read.json().entries as Record<string, unknown>[]).find((e) => e.id === message.id)
     expect(view).toMatchObject({ state: 'crypto-erased', sourceType: 'text' })
@@ -485,11 +496,14 @@ describe('the admin interface (PRIV-ERASE-008, RBAC-XSESS-006)', () => {
     const log = await admin().inject({
       method: 'GET',
       url: '/admin/audit/log',
-      headers: { 'x-ayni-auditor': 'auditor@example.org', 'x-ayni-reason': 'quarterly audit' },
+      headers: { 'x-ayni-reason': 'quarterly audit' },
     })
-    const records = log.json().records as { action: string; actor: string; reason: string }[]
+    const records = log.json().records as { action: string; actor: string; reason: string; breakGlass?: boolean }[]
+    // every call made with the break-glass token is recorded and flagged (RBAC-XSESS-009)
     for (const action of ['legal-hold', 'legal-hold-release', 'erasure', 'audit-read'])
-      expect(records.some((r) => r.action === action && r.actor && r.reason)).toBe(true)
+      expect(
+        records.some((r) => r.action === action && r.actor === 'break-glass' && r.breakGlass === true && r.reason)
+      ).toBe(true)
   })
 
   it('erases with the tool calls of its turn and flags the note that cites it, deletes no note (PRIV-ERASE-005)', async () => {
@@ -504,7 +518,7 @@ describe('the admin interface (PRIV-ERASE-008, RBAC-XSESS-006)', () => {
     const response = await admin().inject({
       method: 'POST',
       url: '/admin/erasure',
-      payload: { operator: 'ops@example.org', reason: 'request 12', entryIds: [message.id] },
+      payload: { reason: 'request 12', entryIds: [message.id] },
     })
     expect(response.json().erased).toEqual(expect.arrayContaining([message.id, call.id]))
     const note = (await running.agent.store.notes.list(d.principal.id)).find((n) => n.lineageRefs.includes(message.id))
@@ -531,13 +545,13 @@ describe('the admin interface (PRIV-ERASE-008, RBAC-XSESS-006)', () => {
     const erased = await admin().inject({
       method: 'POST',
       url: '/admin/erasure',
-      payload: { operator: 'ops@example.org', reason: 'request 9', entryIds: newest },
+      payload: { reason: 'request 9', entryIds: newest },
     })
     expect(erased.json().erased).toEqual(expect.arrayContaining(newest))
     expect((await list())?.lastPreview).toContain('first words')
   })
 
-  it('asks for the bearer token when one is set', async () => {
+  it('opens with the break-glass token only, when no one is signed in', async () => {
     const guarded = await buildAgent(testEnv({ adminToken: 'secret-token' }), pino({ level: 'silent' }), {
       drainMs: 100,
     })
