@@ -15,6 +15,7 @@ import {
 } from '../../config/packTypes.js'
 import type { EvidenceInput } from '../../core/evidence.js'
 import type { VerifiedFacts } from '../../core/principals.js'
+import type { ReauthenticationOutcome } from '../../core/stepUp.js'
 import type { Principal, Session } from '../../core/types.js'
 import type { Logger } from '../../util/logger.js'
 import { type AuthenticateAsk, type AuthenticationAttempt, asksAgain } from './identity.js'
@@ -55,6 +56,11 @@ export interface IdentityRequestDeps {
   ): Promise<EvidenceInput | undefined>
   /** records what was verified as evidence of the Principal */
   record?(principal: Principal, evidence: EvidenceInput): Promise<unknown>
+  /**
+   * whether a phone that takes flows can be offered this combination (a face match only to one that takes calls,
+   * IDENT-AUTH-010); without it every combination is offered
+   */
+  canOffer?(connectionId: string, combination: string[]): Promise<boolean>
 }
 
 /** What a request for a catalog entry ends in. A status, never a value (D68, INTX-PRES-005/006). */
@@ -159,6 +165,82 @@ export class IdentityRequests {
       const { outcome } = await this.deps.onIdentityPresented(connectionId, attempt.facts)
       this.logger.info({ principalId: principal.id, outcome }, 'authentication asked again to reveal the email')
       return outcome === 'identified' || outcome === 'refreshed' ? 'identified' : (outcome as IdentityRequestOutcome)
+    } finally {
+      this.pending.delete(connectionId)
+    }
+  }
+
+  /**
+   * A step-up's re-authentication (D127, IDENT-AUTH-015, flow profile §6.14): the one set of methods a tool names, asked
+   * on the identified connection in an `authenticate` flow of purpose `step-up`, whose text names the action and whose
+   * origin is the session the call was asked from. Every method must find or confirm the Principal of the connection,
+   * another identity being refused on the flow (IDENT-RES-014). Asked once: a step that does not pass, a decline or no
+   * answer stops the action, which the person asks again (FLOW-SIGNIN-006). A wallet that takes no flows is asked a set
+   * that is one `credential` method alone, as a presentation, and nothing else (D128, O69). What the accepted
+   * authentication verified becomes evidence, and it is the Principal's latest (`lastAuthentication`), as at a connection.
+   */
+  public async stepUp(
+    principal: Principal,
+    input: {
+      methods: string[]
+      text: string
+      origin?: Session
+      onOpened?: (flowId: string, expiresAt: string) => void
+    }
+  ): Promise<ReauthenticationOutcome> {
+    if (!principal.identityCredentialRef) return 'not-identified'
+    const connectionId = principal.capabilityChannelId
+    if (!connectionId) return 'unavailable'
+    const methods = this.pack.identity.authentication?.methods ?? {}
+    if (!input.methods.length || input.methods.some((name) => !methods[name])) return 'unavailable'
+    if (this.pending.has(connectionId)) return 'busy'
+    this.pending.add(connectionId)
+    try {
+      const flowMode = await this.deps.isFlowCapable(connectionId)
+      if (!flowMode && !(input.methods.length === 1 && methods[input.methods[0]]?.type === 'credential')) {
+        this.logger.info({ principalId: principal.id }, 'a step-up a wallet without flows cannot do: not asked')
+        return 'unavailable'
+      }
+      if (flowMode && this.deps.canOffer && !(await this.deps.canOffer(connectionId, input.methods))) {
+        this.logger.info({ principalId: principal.id }, 'a step-up this phone cannot be offered: not asked')
+        return 'unavailable'
+      }
+      const attempt = await this.deps.authenticate(
+        connectionId,
+        principal.actorIdentity,
+        flowMode,
+        principal.userAgentVerified,
+        {
+          purpose: 'step-up',
+          combinations: [input.methods],
+          text: input.text,
+          bound: principal,
+          ...(input.origin ? { origin: input.origin } : {}),
+          ...(input.onOpened ? { onOpened: input.onOpened } : {}),
+        }
+      )
+      this.logger.info(
+        { principalId: principal.id, outcome: attempt.outcome, ...('code' in attempt ? { code: attempt.code } : {}) },
+        'step-up re-authentication'
+      )
+      switch (attempt.outcome) {
+        case 'accepted': {
+          const { outcome } = await this.deps.onIdentityPresented(connectionId, attempt.facts)
+          return outcome === 'another-identity'
+            ? 'another-identity'
+            : outcome === 'unavailable'
+              ? 'unavailable'
+              : 'completed'
+        }
+        case 'not-accepted':
+          return attempt.code === 'another-identity' ? 'another-identity' : 'failed'
+        case 'unanswered':
+          return 'expired'
+        case 'pending':
+          return 'busy'
+        default:
+          return 'declined'
+      }
     } finally {
       this.pending.delete(connectionId)
     }

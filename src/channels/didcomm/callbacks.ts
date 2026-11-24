@@ -1,7 +1,7 @@
 /**
- * Callbacks of the face-verification service and the WebRTC server (INTX-AUTH-007/008, IDENT-AUTH-010): keyed by the
- * token of a face step of an authentication, or of a challenge, never by a session token. Also the short-lived media
- * links for the wallet.
+ * Callbacks of the face-verification service and the WebRTC server (IDENT-AUTH-010): keyed by the token of a face step of
+ * an authentication, never by a session token. A face match is a method of the authentication, never a challenge (D126).
+ * Also the short-lived media links for the wallet.
  */
 import type { FastifyInstance } from 'fastify'
 import type { AyniAgent } from '../../core/agent.js'
@@ -50,45 +50,14 @@ export function registerDidcommCallbacks(
           logger.error({ err, flowId: face.flowId }, 'vision join-call failed: the face step fails')
           faces?.settle(face.token, 'failed')
         })
-      return reply.send({ ok: true })
-    }
-    const challenge = await agent.challenges.findPendingByPeer(peerId)
-    if (!challenge) return reply.send({ ok: true })
-    if (event === 'peer-joined' || event === 'PEER_JOINED') {
-      const visionUrl = agent.env.visionUrl ?? agent.pack.media?.faceVerification?.serviceUrl
-      const wsUrl = String(challenge.details?.wsUrl ?? '')
-      if (!visionUrl || !wsUrl) return reply.send({ ok: true })
-      const visionPeerId = `vision-${challenge.id}`
-      const body = {
-        ws_url: `${wsUrl}/?roomId=${roomId}&peerId=${visionPeerId}`,
-        callback_base_url: `${agent.env.publicBaseUrl}/vision`,
-        token: challenge.token,
-        lang: agent.pack.language.agent,
-      }
-      fetch(`${visionUrl.replace(/\/+$/, '')}/join-call`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-      })
-        .then((r) => {
-          if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        })
-        .catch(async (err) => {
-          logger.error({ err, challengeId: challenge.id }, 'vision join-call failed')
-          await agent.challenges.complete(challenge.id, 'unavailable', { reason: 'vision-unavailable' })
-        })
-    } else if (event === 'peer-left' || event === 'PEER_LEFT') {
-      // the person left before a verdict: the challenge expires on its timer
     }
     return reply.send({ ok: true })
   })
 
-  // reference images for the face match: the badge photo of the Principal (IDENT-RES-006)
+  // the reference image of a face step (D131)
   app.get('/vision/list/:token', async (request, reply) => {
     const { token } = request.params as { token: string }
-    if (faces?.byToken(token)) return [`${agent.env.publicBaseUrl}/vision/media/${token}/reference`]
-    const challenge = await agent.challenges.findByToken(token)
-    if (challenge?.outcome !== 'pending') return reply.code(400).send({ error: 'invalid token' })
+    if (!faces?.byToken(token)) return reply.code(400).send({ error: 'invalid token' })
     return [`${agent.env.publicBaseUrl}/vision/media/${token}/reference`]
   })
 
@@ -101,35 +70,19 @@ export function registerDidcommCallbacks(
       reply.header('cache-control', 'no-store')
       return reply.send(face.reference.bytes)
     }
-    const challenge = await agent.challenges.findByToken(token)
-    if (challenge?.outcome !== 'pending') return reply.code(400).send({ error: 'invalid token' })
-    const principal = await agent.principals.get(challenge.principalId)
-    const photo = principal?.identityAttributes.photo as string | undefined
-    if (!photo) return reply.code(404).send({ error: 'no reference image' })
-    const match = /^data:([^;]+);base64,(.+)$/.exec(photo)
-    if (match) {
-      reply.header('content-type', match[1])
-      return reply.send(Buffer.from(match[2], 'base64'))
-    }
-    return reply.redirect(photo)
+    return reply.code(400).send({ error: 'invalid token' })
   })
 
   app.put('/vision/success/:token', async (request, reply) => {
     const { token } = request.params as { token: string }
     if (faces?.settle(token, 'passed')) return { statusCode: 200 }
-    const challenge = await agent.challenges.findByToken(token)
-    if (!challenge) return reply.code(400).send({ error: 'invalid token' })
-    await agent.challenges.complete(challenge.id, 'completed', { verifier: 'face-match' })
-    return { statusCode: 200 }
+    return reply.code(400).send({ error: 'invalid token' })
   })
 
   app.put('/vision/failure/:token', async (request, reply) => {
     const { token } = request.params as { token: string }
     if (faces?.settle(token, 'failed')) return { statusCode: 200 }
-    const challenge = await agent.challenges.findByToken(token)
-    if (!challenge) return reply.code(400).send({ error: 'invalid token' })
-    await agent.challenges.complete(challenge.id, 'failed', { verifier: 'face-match' })
-    return { statusCode: 200 }
+    return reply.code(400).send({ error: 'invalid token' })
   })
 
   // short-lived links the wallet follows for media shared on DIDComm

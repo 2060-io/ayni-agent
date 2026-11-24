@@ -242,23 +242,23 @@ export type DirectoryField = (typeof DIRECTORY_FIELDS)[number]
  * subject, derived from the Principal and the profile (INTX-ISSUE-016): the number of a badge, for one.
  * `documentId` is an identifier of the document the Principal read, derived from its issuing state and its
  * number (INTX-ISSUE-019): one document gives one value, through whichever connection it is read. `emailId` is an
- * identifier of the address the Principal verified by an email code (INTX-ISSUE-020).
+ * identifier of the address an `email` method of the Principal's authentication verified (INTX-ISSUE-020).
  */
 export const COMPUTED_FUNCTIONS = ['today', 'now', 'addDays', 'constant', 'subjectId', 'documentId', 'emailId'] as const
 export type ComputedFunction = (typeof COMPUTED_FUNCTIONS)[number]
 
 /**
- * One challenge of an issuance profile (INTX-ISSUE-010): those of any action, and `email`, the email code of a badge
- * from the user directory (D89, INTX-AUTH-011), which no other action may declare.
+ * The challenge of an issuance profile (INTX-ISSUE-010, architecture §11.5): a device confirmation, or the NFC read of a
+ * document. An email code, a face match or a passport that identifies a person are methods of the authentication
+ * (D126), never challenges.
  */
 export interface IssuanceChallenge {
-  type: 'device' | 'face-match' | 'document' | 'email'
+  type: 'device' | 'document'
   onChannelUnavailable?: 'fail' | 'degrade'
-  referenceImage?: 'badge-photo'
   timeoutSeconds?: number
 }
 
-/** The one attribute of the evidence of an email check: the verified address (INTX-AUTH-015). */
+/** The one attribute of the evidence of an `email` method: the verified address (IDENT-AUTH-009). */
 export const EMAIL_ATTRIBUTES = ['address'] as const
 
 /** A credential the agent may issue, and the source of each of its claims (D70, INTX-ISSUE-001). */
@@ -277,8 +277,9 @@ export interface IssuanceProfile {
   /** the roles that may receive it; anyone of the subject kind when absent */
   roles?: string[]
   /**
-   * enforced before the issuance, in order (INTX-ISSUE-010): one challenge or a list of them; a badge from the user
-   * directory declares `[document]`, `[email]` or `[document, email]` (IDENT-DIR-002). Read through `challengesOf`
+   * enforced before the issuance (INTX-ISSUE-010): one challenge, written alone or as a list of one. Read through
+   * `challengesOf`. A badge from the user directory needs none: its claims come from the entry the authentication
+   * identified (D130)
    */
   authChallenge?: IssuanceChallenge | IssuanceChallenge[]
   /** evidence older than this is expired for the profile (INTX-ISSUE-013) */
@@ -451,7 +452,7 @@ export const SOURCE_TYPES: readonly SourceType[] = ['mcp', 'http', 'bundled']
 /**
  * The bundled tools a source of `type: bundled` may name (`bundled`), each with the tools it gives the model. A bundled
  * tool no source names keeps its defaults: on, except `statistics` and `generateImage`; the tools of no name here
- * (`knowledge_search`, `set_reaction_policy`, `email_check`) are sources of their own name (TOOL-CAT-001).
+ * (`knowledge_search`, `set_reaction_policy`) are sources of their own name (TOOL-CAT-001).
  */
 export const BUNDLED_TOOLS = {
   statistics: ['statistics'],
@@ -568,12 +569,24 @@ export interface SourceBinding {
   value?: string
 }
 
-/** The auth challenge a tool's step-up asks before the call (D28, INTX-AUTH-002). */
+/**
+ * The auth challenge a tool's step-up asks before the call (D28, INTX-AUTH-002, TOOL-CAT-010): a device confirmation on
+ * the phone. An email code, a face match and a document read are asked as methods of a re-authentication.
+ */
 export interface AuthChallengePolicy {
-  type: 'device' | 'face-match' | 'document'
+  type: 'device'
   onChannelUnavailable?: 'fail' | 'degrade'
-  referenceImage?: 'badge-photo'
   timeoutSeconds?: number
+}
+
+/**
+ * The re-authentication a tool's step-up asks before the call (D127, IDENT-AUTH-015): the one set of enabled methods,
+ * asked on the phone in an `authenticate` flow of purpose `step-up`, unless an authentication of the Principal that held
+ * every method of the set completed within `maxAgeMinutes` (0 by default: before each run).
+ */
+export interface StepUpAuthentication {
+  methods: string[]
+  maxAgeMinutes?: number
 }
 
 /**
@@ -581,6 +594,7 @@ export interface AuthChallengePolicy {
  * with a tool of one name never share it. `maxCredentialAge` in seconds: 0 forces a fresh liveness check (D7).
  */
 export interface StepUp {
+  authentication?: StepUpAuthentication
   authChallenge?: AuthChallengePolicy
   maxCredentialAge?: number
 }
@@ -840,8 +854,8 @@ export interface AgentPack {
   /** the credentials the agent may ask for, by name; `authentication` is the entry of identity.authentication (D69) */
   presentations?: Record<string, PresentationEntry>
   /**
-   * The evidence that is not a credential: what is kept of a document read (the `document` challenge) and of an address
-   * verified by an email code (the `email` challenge, D89), and what the model may read of it (D73, PRIV-EVID-003).
+   * The evidence that is not a credential: what is kept of a document read (a `document` method or challenge) and of an
+   * address verified by an `email` method (IDENT-AUTH-009), and what the model may read of it (D73, PRIV-EVID-003).
    */
   evidence?: { document?: EvidencePolicy; email?: EvidencePolicy }
   /** the credentials the agent may issue, by name (D70) */

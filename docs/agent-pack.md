@@ -30,7 +30,7 @@ Relative paths (`rag.sources[].path`) resolve from the pack directory.
 | `schemaVersion` | yes | `"3.x"`; the loader refuses another major | CORE-PACK-004 |
 | `metadata` | yes | id, display name, description, tags | |
 | `identity` | yes | the agent's DID, user-agent gate, the authentication (methods and combinations), organization patterns, roles, role rules, per-actor overrides, the file of the user directory | D30, D34, D37, D38, D79 |
-| `language` | yes | the one agent language; `language.agent` is also the language of the messages the agent's code writes itself (the email check's) for a person whose language is not known, and their fallback (decision 64) | D21, D94 |
+| `language` | yes | the one agent language; `language.agent` is also the language of the sentences the agent's code writes itself (the email that carries a code) when the phone gives no locale, and their fallback (decision 64) | D21, D94 |
 | `persona` | yes | system prompt, greeting, contextual menu | D46, CORE-PROMPT |
 | `llm` | yes | model provider and model | LLM-PROV |
 | `embeddings` | yes | embeddings provider and model | LLM-EMB |
@@ -185,9 +185,9 @@ identity:
   stored and a stored attribute must be asked, or the pack is refused. The agent warns at start-up when a
   model-visible attribute is kept for less time than conversation memory, since what the model reads stays in
   the conversation. The person's name reaches the model, the greeting and the lists shown to other people
-  only when `name` (or `userName`) is stored, and the model only when it is also visible; `photo` must be
-  stored to serve as the reference of a tool's face-match challenge (never of a `face-match` method, whose reference
-  is a passport read in the same flow or the directory entry's `photo`). The `principal_credentials` tool lists the
+  only when `name` (or `userName`) is stored, and the model only when it is also visible; a badge's `photo` is never
+  the reference of a face match (D131: a `face-match` method's reference is a passport read in the same flow or the
+  directory entry's `photo`). The `principal_credentials` tool lists the
   records with the visible attributes. An address verified by an email step, a document read and a face match of an
   accepted authentication are evidence too (`evidence.email`, `evidence.document` say what is kept of them; a face
   match keeps its audit fields only); nothing of an authentication that is not accepted is kept.
@@ -326,8 +326,8 @@ people:
   person who owns a list space or may create one. The admin view (`GET {sessions}/admin/roles` and `/admin/changes`)
   gives every entry with its roles and whether a Principal holds it, and the changes, to the holders of a role marked
   `admin`. The model reads nothing of the directory.
-- **Badges from it.** An issuance profile may take its claims from the entry of the person, found with a passport or an
-  email code: see `issuance`, "A badge from the user directory".
+- **Badges from it.** An issuance profile may take its claims from the entry the person's authentication identified:
+  see `issuance`, "A badge from the user directory".
 
 ## persona
 
@@ -462,8 +462,8 @@ issuance:
   `documentId` or `emailId`; the list is closed, and another name is refused. `record` reads a field of the
   person's entry of the **user directory** (`record: directory`), the one system of record of this version:
   see "A badge from the user directory" below. A human attestation and a value declared by the peer are
-  named by the specification and not available in this version. `evidence` also reads a **document** and a
-  **verified email address**: see below.
+  named by the specification and not available in this version. `evidence` also reads a **document** and the
+  **address an `email` method verified**: see below.
 - **An identifier of the subject.** `subjectId` gives a claim that numbers the holders of an issuer, such
   as `badgeNumber`: 16 characters derived from the Principal and the name of the profile with a key of the
   deployment (from `ENTRY_ENCRYPTION_KEY`). The same person gets the same number under the same profile at
@@ -515,92 +515,79 @@ issuance:
     attribute that is not of the list; a presentation entry named `document`.
   - **What it proves:** that the document was in hand. The chip is not checked against a copy, and nobody
     compares the holder with the portrait.
-- **A badge from the user directory (D88, D89; decision 62).** With a user directory the agent issues the badges of
-  its own organization from it. The person shows which entry is theirs as the profile's challenges say: a passport
-  (`[{ type: document }]`), an email code (`[{ type: email }]`), or both, in this order:
+- **A badge from the user directory (D130, IDENT-AUTH-016).** With a user directory the agent issues the badges of its
+  own organization from it, and **issuing one is independent of the authentication**: it neither authenticates nor is
+  needed to authenticate. The person authenticates first, by the methods of `identity.authentication` (an email code, a
+  passport, a passkey, a badge...), all on the phone; the badge is a credential they may carry elsewhere. Presenting it
+  later is a `credential` method that finds the entry it was issued from.
 
   ```yaml
   evidence:
-    email: { store: { attributes: [address], retention: { days: 30 } } }   # needed with an email code
-    document:                                    # needed with a passport: what the match reads
+    document:                                    # with a `document` method: what the match and the claims read
       store: { attributes: [documentNumber, issuingState, nationality, lastName, firstName, dateOfBirth, portrait] }
   issuance:
     badge:
       credential: { jsonSchemaCredentialId: <the ECS Badge schema of the ecosystem> }
       label: Northwind badge
-      trigger: model
-      authChallenge: [{ type: email }]           # [{ type: document }], or [{ type: document }, { type: email }]
+      trigger: automatic                         # offered after an authentication; request or model: on demand
       claims:
-        badgeNumber: { from: computed, fn: emailId }                    # documentId with a passport
-        name:        { from: record, record: directory, field: name }   # first and last name
+        badgeNumber: { from: computed, fn: subjectId }
+        name:        { from: record, record: directory, field: name }      # first and last name
         email:       { from: record, record: directory, field: email }
         department:  { from: record, record: directory, field: department }
-        birthDate:   { from: computed, fn: constant, value: "" }        # with a passport:
-                                                                        # { from: evidence, entry: document, attribute: dateOfBirth, as: dateint }
-        photo:       { from: computed, fn: constant, value: "" }        # with a passport: { from: evidence, entry: document, attribute: portrait }
+        birthDate:   { from: evidence, entry: document, attribute: dateOfBirth, as: dateint }   # empty without a passport
+        photo:       { from: evidence, entry: document, attribute: portrait }                    # idem
         phoneNumber: { from: computed, fn: constant, value: "" }
   ```
 
-  - **The entry.** A passport finds the one entry whose date of birth and nationality equal the document's, whose last
-    name equals the document's and whose first names are among its given names, in their order, after the names of the
-    entry are written as the machine-readable zone writes them (ICAO Doc 9303, Part 3: capitals A to Z; `Ríos` is
-    `RIOS`, `Müller` is `MUELLER`, `MUXXLLER` or `MULLER`; an apostrophe dropped; a space or a hyphen a separator). A
-    name the zone cut for want of room matches what it holds. An email code finds the entry that holds the verified
-    address. With both, the two must find the same entry. None, two, or two different ones: the claims of the
-    directory are `missing`, and the log says why, with no value.
-  - **`record: directory`** takes `name` (first and last name), `firstName`, `lastName`, `email` or `department` (empty
-    when the entry has none). Before the evidence that finds the entry exists, the claim is `pending`, and its action is
-    the profile's own challenge: the credential is `ready`. The issuance record keeps the entry, which the person who
-    presents the badge then holds, with its roles; the badge is revoked when the entry leaves the directory.
-  - **The email code.** The issuing call ends the turn of the model with a question the agent's code writes in the
-    conversation: which address the organization knows the person by. While the check waits, a message of the person
-    there, from any device, that holds an address (then a code of six digits, which may be split by spaces or dashes)
-    is the code's: it starts no turn and never reaches the model, which reads a record in its place, and the clients
-    draw it as a message the AI never read. The code's own messages are the agent's in the model's conversation. Any
-    other message ("the email did not arrive") goes
-    to the model as usual and counts no try. The answer to the address is the same whether or not an entry holds it;
-    a six-digit code is sent, by email, only to an address an entry holds. It is valid ten minutes, with five tries in
-    all; `cancel` stops the check. A right code records the address as evidence (`evidence.email`, never shown to the
-    model) and the issuance goes on by itself, offering the badge with no new turn of the model. The model is told
-    `passed`, `failed` or `expired`, and nothing else. A guest who receives the badge is asked at once to present it,
-    which identifies them (issuing identifies nobody).
-  - **Its messages are in the person's language** (decision 64): the language of the preference `language` (a BCP 47
-    tag the model stores when the person states one), else the locale of the session, else `language.agent`. The code
-    writes them in English and has the model translate each finished sentence once per language, with no context (the
-    sentence and the target language only, never anything the person typed); the translations are kept in the store.
-    A translation that fails, or drops a number or a name, is not used: the message is then in `language.agent`, and
-    in English when even that cannot be had. Nothing is configured for it.
-  - **The tool `email_check`** is given to the model whenever a profile declares an email challenge (no source names
-    it: it has no switch): `status` (whether a check waits, where, at which step, the time, tries and resends left),
-    `resend` (a new code to the same address, the previous one no longer valid and the ten minutes started again; three
-    times at most per check, thirty seconds apart, none before an address) and `cancel`. It never answers the address
-    or the code.
-  - **`emailId`** numbers a badge by the verified address, as `documentId` does by the document: the same address gives
-    the same number to whoever proves it, an address that changes in the directory gives another one.
-  - **Email** goes through the SMTP server of the deployment (`MAIL_HOST`, `MAIL_PORT`, `MAIL_ENCRYPTION`, `MAIL_USERNAME`,
-    `MAIL_PASSWORD`, `MAIL_FROM_ADDRESS`, `MAIL_FROM_NAME`: the variables of the 2060.io website). Without `MAIL_HOST`
-    and `MAIL_FROM_ADDRESS`, the email code
-    is unavailable: the claims it serves are `unavailable`, and the agent says so at start, naming the profiles.
-  - **Refused by the loader:** a profile that takes a claim from the directory with no challenge, another challenge or
-    another order; a directory claim with no `identity.directory`; a passport without `nationality`, `lastName`,
-    `firstName` and `dateOfBirth` stored; an email challenge without `evidence.email` storing `address`, with
-    `evidence.email.modelVisible`, on a profile that takes nothing from the directory, on an `automatic` profile, or in
-    a tool's `stepUp` (in words, before the schema); `emailId` without an email challenge.
+  - **The entry** is the one the Principal's authentication identified (IDENT-AUTH-003), whichever methods identified
+    it. **`record: directory`** takes `name` (first and last name), `firstName`, `lastName`, `email` or `department`
+    (empty when the entry has none). Before an authentication the claim is `pending`, its action the authentication
+    (`request_presentation` with `authentication`); for a person identified otherwise than by an entry (a badge of
+    another organization) it is `unavailable`. No challenge is needed, and none of `email` or `face-match` exists: they
+    are methods of the authentication.
+  - **The claims of the document** (`birthDate`, `photo`) come from a passport of that entry read when the person
+    authenticated (a `document` method), still within `evidenceMaxAgeMinutes`, which the match of the entry (below)
+    finds to be the entry's and nobody else's; without one they are **empty** (IDENT-DIR-005). A passport finds the one
+    entry whose date of birth and nationality equal the document's, whose last name equals the document's and whose
+    first names are among its given names, in their order, after the names of the entry are written as the
+    machine-readable zone writes them (ICAO Doc 9303, Part 3: capitals A to Z; `Ríos` is `RIOS`, `Müller` is
+    `MUELLER`, `MUXXLLER` or `MULLER`; an apostrophe dropped; a space or a hyphen a separator). A name the zone cut for
+    want of room matches what it holds.
+  - **The number** is the subject's own (`subjectId`): the Principal of a directory entry is keyed by the entry, so the
+    same person receives the same number at every issuance, on every wallet, whichever method identified them.
+  - **The trigger** (D130): `automatic` offers the badge right after an authentication that identified an entry, on a
+    connection to which the agent issued no badge that is still valid; `request` (a menu item) and `model` (the tool)
+    issue on demand, once the person is identified. A badge is **held by the wallet it was issued to**: a person who
+    connects a new phone authenticates and receives a badge again, with the same number.
+  - **The issuance record** keeps the entry, which the person who presents the badge then holds, with its roles; the
+    badge is revoked when the entry leaves the directory.
+  - **`emailId`** numbers a credential by the address an `email` method of the authentication verified, as `documentId`
+    does by the document: the same address gives the same number to whoever proves it. It needs an `email` method and
+    `evidence.email` storing `address`.
+  - **Refused by the loader:** a directory claim with no `identity.directory`; a claim of the document in such a profile
+    without `nationality`, `lastName`, `firstName`, `dateOfBirth` and the attributes it reads stored; a challenge of
+    type `email` or `face-match` on any profile (in words, before the schema: they are methods of the authentication);
+    more than one challenge; `emailId` without an `email` method or without `evidence.email` storing `address`;
+    `evidence.email.modelVisible`.
+  - **The email code** of an `email` method is typed on the phone, never in a conversation: see `identity`. The
+    conversational email check and the tool `email_check` of earlier versions are gone.
 - **Two tools.** `credential_requirements` is read-only and passes no gate. For each credential the person
   may receive it answers `held`, `ready` or `incomplete`, and for each claim a status without any value:
   `available`, `missing`, `expired`, `not-revealed`, `unavailable` or `pending` (a claim of the directory whose
   evidence does not exist yet). A claim that is not available names what obtains it: `request_presentation`
-  with an entry, `issue_credential` with the profile and the `challenge` (`document` or `email`) when the
-  issuance itself obtains it (the credential is then `ready`), or nothing to do. `issue_credential` takes the
+  with an entry (`authentication` asks the person to authenticate), `issue_credential` with the profile and the
+  `challenge` (`document`) when the issuance itself obtains it (the credential is then `ready`), or nothing to do. `issue_credential` takes the
   name of the credential and nothing else: the agent resolves the claims itself, for the person of the
   session, offers the credential to their wallet, and issues nothing when a claim cannot be resolved,
   answering with the same list.
 - **Triggers.** `model`: the model calls `issue_credential`. `request`: the person asks, from a menu item
-  "Get <label>"; the credential is absent from the model's list. `automatic`: the agent issues as soon as
-  every claim resolves, when evidence arrives. `credential_requirements` is there in the three cases.
-- **Gates.** `roles` limits who may receive the credential. `authChallenge` runs before the offer, as for
-  any action: one challenge, or a list of them, run in their order (a list is for a badge from the directory
-  only). A credential is issued once to a Principal.
+  "Get <label>"; the credential is absent from the model's list. `automatic`: the agent offers it right after an
+  authentication, or when evidence arrives, once every claim resolves, on a connection that holds none still valid.
+  `credential_requirements` is there in the three cases.
+- **Gates.** `roles` limits who may receive the credential. `authChallenge` runs before the offer: one challenge,
+  `device` (a confirmation on the phone) or `document` (the read of a document's chip), written alone or as a list of
+  one. A credential is issued once to each wallet (connection) of a Principal, while it is still valid.
 - **Persons only** in this version: a credential is offered on the connection of the person, as an `issue`
   flow on a flow-capable wallet.
 - **The record.** Each issuance leaves a record built as evidence is: the audit fields always (the profile,
@@ -791,7 +778,7 @@ source. `approval[]` entries name `tools`, `approvers` (declared roles with `can
 
 A source with no `access` denies its tools to every role, but for the bundled tools that act on the person's own
 records (`principalCredentials`, `requestPresentation`, `credentialIssuance`, `principalPreferences`, `workingMemory`, and
-`knowledge_search`, `set_reaction_policy` and `email_check`, which no source names): every Principal may use those until
+`knowledge_search` and `set_reaction_policy`, which no source names): every Principal may use those until
 their source declares an `access`.
 
 ### The effect and the rule of a tool
@@ -813,7 +800,8 @@ every argument whole, Allow, Refuse and "Allow for this conversation"); the **ap
 of Personal: the roles of its source's `access.approval` entry, else `approvals.approvers`, else the call is refused as
 `no-approver`; a tool of a space: the people its approval policy in the space names, below, each on the phone as an
 `authorize` flow and in the Notifications); the
-credential's **liveness** (`stepUp.maxCredentialAge`); the **step-up** (`stepUp.authChallenge`); the **call**, with the
+credential's **liveness** (`stepUp.maxCredentialAge`); the **step-up** (`stepUp.authentication`, a re-authentication on
+the phone, then `stepUp.authChallenge`, a device confirmation); the **call**, with the
 pinned arguments set by the code and the account opened for it.
 
 A source may be `untrusted`, and so may each of its tools (`tools.<name>.untrusted`, which wins); otherwise an MCP tool
@@ -836,17 +824,41 @@ tools:
       tools:
         issue_refund:
           stepUp:
-            authChallenge: { type: face-match, onChannelUnavailable: fail, referenceImage: badge-photo }
+            authentication: { methods: [face], maxAgeMinutes: 0 }    # a re-authentication on the phone (D127)
+            authChallenge: { type: device, onChannelUnavailable: fail }
             maxCredentialAge: 0
 ```
 
-- `authChallenge.type`: `device` (a `confirm` flow on the person's phone, or a question-answer on another wallet; the
-  device requires local authentication to be used), `face-match` (a call joined by the face-verification service, the
-  badge photo as reference; needs `media.faceVerification`), `document` (NFC read). `onChannelUnavailable` is `fail`
-  (default) or `degrade`; `timeoutSeconds` 30 at least. The email code belongs to the badges of the user directory and
-  to no tool.
+- `authentication` (D127, IDENT-AUTH-015): `methods`, one set of the methods `identity.authentication.methods` enables
+  (each once), asked on the person's phone before the call in an `authenticate` flow of purpose `step-up`, whose sheet
+  names the action ("Confirm it's you: Issue a refund") and whose origin is the session the call was asked from. The
+  set may hold confirming methods only (`face-match`, `authenticator-app`): a re-authentication confirms the Principal
+  of an identified connection, and every method must find or confirm that Principal (`another-identity` otherwise).
+  `maxAgeMinutes` (0 by default): not asked again while an authentication of the person that held every method of the
+  set completed within it; 0 asks before each run. The person must be identified, and the phone able to do the set (a
+  face match only on a phone that takes calls, with a face-verification service; a wallet that takes no flows only a
+  `credential` method alone).
+  - **While it waits** the turn waits, at most the flow's fifteen minutes (the person chooses within five). The session
+    the call was asked from gets `ayni.capability.routed` with `kind: authentication`, `status: pending`, the `flowId`
+    and `expiresAt`, then the end (`completed`, `failed`, `expired`, or `unavailable` with a `message`), and the turn a
+    step "Waiting for you to confirm it's you on your phone". The phone shows the authentication sheet over the screen
+    it is on; a browser shows its "continue on your phone" card. Nothing of the methods reaches the UI or the model.
+  - **After it** the conversation keeps the outcome only, an `auth-challenge` entry (`payload.kind: authentication`),
+    which the model reads as a record of the system and history gives as an `ayni.capability` activity of kind
+    `authentication`. What the accepted authentication verified becomes evidence, and it is the person's latest
+    authentication. Declined, unanswered, a step that does not pass, another identity, another authentication already
+    waiting on the phone, or a phone that cannot be asked: the call does not run, and the model reads the step and its
+    outcome ("… did not run: it needs the person to confirm who they are on their phone first, and they declined"),
+    never a method. The call record keeps `reauthentication: { methods, outcome }` (`recent` when `maxAgeMinutes` let an
+    earlier authentication stand for it).
+- `authChallenge.type`: `device` only (a `confirm` flow on the person's phone, or a question-answer on another wallet;
+  the device requires local authentication to be used). `onChannelUnavailable` is `fail` (default) or `degrade`;
+  `timeoutSeconds` 30 at least. An email code, a face match and a document read are methods, asked in
+  `authentication`, never challenges.
 - `maxCredentialAge`: seconds of accepted staleness for the credential-liveness verdict before this tool runs; `0`
   forces a fresh check; absent means the session TTL `N`.
+- The order (TOOL-CALL-001): the card, the approval, the liveness, the re-authentication, the device confirmation, the
+  call. An approved call that runs later asks the step-up then, of the requester's phone.
 
 ### Bundled tools
 
@@ -864,8 +876,8 @@ tools:
 A source names a bundled tool by `bundled`, and its id may differ (`notes: { type: bundled, bundled: workingMemory }`);
 one source per bundled tool. Declaring it turns it on (`enabled: false` turns it off) and gives it a `title`, an
 `availability`, an `access`, and, per tool, a stricter `call` and a `stepUp`; never an `account`, `bindings`, an
-`effect` or `untrusted`. `knowledge_search`, `set_reaction_policy` and `email_check` follow their features and are
-sources of their own name.
+`effect` or `untrusted`. `knowledge_search` and `set_reaction_policy` follow their features and are sources of their
+own name.
 
 ### Bindings and accounts
 
@@ -1074,7 +1086,9 @@ How it works:
   (TOOL-AVAIL-002);
 - an `access.approval` entry in a source of availability `spaces`, whose owner approves its tools (TOOL-CAT-009);
 - a role of `approvals.approvers` that is not declared or has no `canApprove`;
-- a step-up with the email code (INTX-AUTH-011), or a face match without `media.faceVerification`.
+- a step-up whose `authChallenge` is not `device` (in words, before the schema), or whose `authentication` names a
+  method `identity.authentication.methods` does not enable, a method twice, or no method, or in a pack that lists no
+  accepted combination (TOOL-CAT-010, IDENT-AUTH-015).
 
 Warned at start: a source of `spaces` that no template names, and a tool whose rule the pack sets to `approval` with no
 role to approve it (its calls are refused as `no-approver`; the same is warned at discovery when the annotations set it).
@@ -1270,7 +1284,7 @@ enables crypto-erasure with its lineage cascade.
 5. The tool names of a source's `access` are tools of that source (an HTTP tool's own, a bundled tool's; an MCP
    server's are checked at discovery and logged, not refused at start); `persona.menu[].action.tool` names an HTTP or
    bundled tool, unless the pack has an MCP server.
-6. A `stepUp.authChallenge.type: face-match` requires `media.faceVerification`.
+6. A tool's `stepUp.authentication` names enabled methods, each once, in a pack that lists an accepted combination.
 7. `features.rag` requires `rag`; `features.voiceNotes` requires `media.speechToText`;
    `features.inboundImages` requires `media.vision`; `features.imageGeneration` requires
    `media.imageGeneration`.
@@ -1281,13 +1295,14 @@ enables crypto-erasure with its lineage cascade.
 12. A space template is declared once; its `creators` and `stewards` are declared in `identity.roles` (rule 2); the default of
     each of its rules lies within its bounds; a template of kind `organization` has the rule `organization: true`
     (SPACE-DEF-003).
-13. A badge from the user directory: see `issuance`, "Refused by the loader" (IDENT-DIR-002/003, INTX-AUTH-011/012/015,
-    INTX-ISSUE-020). A profile that takes nothing from the directory declares at most one challenge, never `email`.
+13. A badge from the user directory: see `issuance`, "Refused by the loader" (IDENT-DIR-005, INTX-ISSUE-010/020/021).
+    A profile declares at most one challenge, `device` or `document`.
 
 14. The tool catalog: see `tools: the catalog of tool sources`, "Refused by the loader" (TOOL-CAT-001..010,
     TOOL-AVAIL-002/003).
 
-Before the schema, a step-up that declares the email code is refused in words (INTX-AUTH-011), and so are a kind of
+Before the schema, a challenge of a type that is a method of the authentication (a tool's other than `device`, an
+issuance's other than `device` or `document`) is refused in words (TOOL-CAT-010, INTX-ISSUE-010), and so are a kind of
 account of a later phase (`organization`, TOOL-CAT-002) and a source of the catalog with no type or an unknown value
 (TOOL-CAT-001). The keys of an earlier pack (`crossSession`, the keys `tools.sources` and an account's fields replaced)
 are not read: the schema refuses them as keys it does not know.

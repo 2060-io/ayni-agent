@@ -125,16 +125,71 @@ describe('a step-up belongs to one tool of one source (TOOL-CAT-010)', () => {
     expect(catalog.stepUpTypeOf(eu, 'delete-note')).toBeNull()
   })
 
-  it('refuses the email code and a face match without the face-verification service', () => {
-    expect(
-      refusal(doc((p) => (p.tools.sources.lookup.tools = { lookup: { stepUp: { authChallenge: { type: 'email' } } } })))
-    ).toContain(
-      'tools.sources.lookup.tools.lookup.stepUp.authChallenge: the email code is the challenge of an issuance'
+  it('refuses a challenge other than a device confirmation, naming the source and the tool: the rest are methods', () => {
+    for (const type of ['email', 'face-match', 'document']) {
+      const message = refusal(
+        doc((p) => (p.tools.sources.lookup.tools = { lookup: { stepUp: { authChallenge: { type } } } }))
+      )
+      expect(message).toContain(
+        `TOOL-CAT-010: tools.sources.lookup.tools.lookup.stepUp.authChallenge has the type ${type}: a tool's challenge is a device confirmation`
+      )
+    }
+  })
+})
+
+describe("a step-up's re-authentication (D127, IDENT-AUTH-015, TOOL-CAT-010)", () => {
+  /** the tools pack with an authentication of a badge, an email code, a face match and an authenticator app */
+  const withMethods = (stepUp: Record<string, unknown>) =>
+    doc((p) => {
+      p.identity.directory = { file: '/var/run/secrets/directory.yaml' }
+      p.identity.authentication = {
+        request: 'on-demand',
+        visitors: true,
+        methods: {
+          badge: {
+            type: 'credential',
+            credential: { jsonSchemaCredentialId: 'https://ecs.example/vt/schemas-badge-jsc.json' },
+            subjectKey: ['badgeNumber'],
+          },
+          email: { type: 'email' },
+          otp: { type: 'authenticator-app' },
+        },
+        combinations: [['badge'], ['email', 'otp']],
+      }
+      p.tools.sources.relaticle.tools['delete-note'] = { stepUp }
+    })
+
+  it('takes a set of enabled methods, confirming ones alone included, with maxAgeMinutes 0 by default', () => {
+    const pack = validatePackDocument(withMethods({ authentication: { methods: ['otp'] } }), env)
+    const catalog = new ToolCatalog(pack)
+    const crm = catalog.source('relaticle')
+    if (!crm) throw new Error('the CRM is missing')
+    expect(catalog.stepUpOf(crm, 'delete-note')).toEqual({ authentication: { methods: ['otp'], maxAgeMinutes: 0 } })
+    // the settings of a space read the types of the methods it asks (PROF-TOOL-001)
+    expect(catalog.stepUpTypeOf(crm, 'delete-note')).toEqual(['authenticator-app'])
+    const both = validatePackDocument(
+      withMethods({
+        authentication: { methods: ['email', 'otp'], maxAgeMinutes: 5 },
+        authChallenge: { type: 'device' },
+      }),
+      env
     )
-    const face = refusal(
-      doc((p) => (p.tools.sources.lookup.tools = { lookup: { stepUp: { authChallenge: { type: 'face-match' } } } }))
+    expect(both.tools?.sources?.relaticle?.tools?.['delete-note']?.stepUp).toMatchObject({
+      authentication: { methods: ['email', 'otp'], maxAgeMinutes: 5 },
+      authChallenge: { type: 'device' },
+    })
+  })
+
+  it('refuses a method that is not enabled, a set with none, and a set when nobody is ever identified', () => {
+    expect(refusal(withMethods({ authentication: { methods: ['face'] } }))).toContain(
+      'TOOL-CAT-010: tools.sources.relaticle.tools.delete-note.stepUp.authentication names [face], which identity.authentication.methods does not enable'
     )
-    expect(face).toContain('rule 6: tools.sources.lookup.tools.lookup.stepUp.authChallenge face-match requires')
+    expect(refusal(withMethods({ authentication: { methods: [] } }))).toContain('agent-pack fails schema validation')
+    const nobody = withMethods({ authentication: { methods: ['otp'] } })
+    nobody.identity.authentication.combinations = []
+    expect(refusal(nobody)).toContain(
+      'IDENT-AUTH-015: tools.sources.relaticle.tools.delete-note.stepUp.authentication re-authenticates an identified person, and identity.authentication lists no combination'
+    )
   })
 })
 

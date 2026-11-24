@@ -1967,3 +1967,71 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       numbers 3 on, the email that passed run again), the five minutes from the step result, the flow's expiry kept, a
       new choice holding the declined method and a second choice that is not awaited refused `malformed`, and an
       `open` without `requires`; they fail on the code before it.
+80. **A step-up re-authenticates on the phone before a tool; the badge is issued apart from the authentication; the email
+    check in a conversation is gone** (2026-11-24, Fabrice's decisions of 2026-11-23, "a tool's step-up names the set it
+    needs" and "badge issuance configured in the agent pack: automatic or on demand", ayni-spec PR #127: D127, D128,
+    D130; IDENT-AUTH-015, IDENT-AUTH-016, IDENT-RES-014, IDENT-DIR-005, TOOL-CAT-010, TOOL-CALL-001, INTX-AUTH-001..006,
+    INTX-ISSUE-008/010/020/021, FLOW-SIGNIN-006, PROF-MAP-003, PROF-TOOL-001, PROF-STREAM-011). Assumes entry 79 (admin
+    access, PR #120) lands first.
+    - **The pack key.** `tools.sources.<id>.tools.<name>.stepUp.authentication: { methods, maxAgeMinutes }`: one set of
+      the enabled methods, each once, confirming methods alone allowed; `maxAgeMinutes` 0 by default. Refused at start,
+      naming the source and the tool: a method `identity.authentication.methods` does not enable, a method twice, an
+      empty set, a set in a pack that lists no accepted combination (nobody is ever identified, so nobody can be
+      confirmed). `stepUp.authChallenge.type` is `device` only: `email`, `face-match` and `document` are refused in words
+      before the schema (they are methods, asked in `authentication`), and `referenceImage` is gone.
+    - **The gate** (`ToolGate.reauthenticate`): after the card, the approval and the liveness, before the device
+      confirmation and the call. Skipped when `principal.lastAuthentication` held every method of the set with each step
+      `passed`, within `maxAgeMinutes` (the record says `recent`); a superset counts ("an authentication with that set"
+      read as "that held every method of the set"). Otherwise `gate.hooks.reauthenticate` (`IdentityRequests.stepUp`)
+      asks the phone: an `authenticate` flow of purpose `step-up`, the set as its one combination, the text
+      "Confirm it's you: <title of the action>", the AG-UI session of the call as origin (no card in its conversation:
+      a re-authentication leaves the record of its outcome only), `bound` the Principal of the connection. Asked once:
+      a decline, no answer, a step that fails or another identity stops the call, and the person asks again
+      (FLOW-SIGNIN-006). Not asked, `unavailable`, of a person with no phone, of a set a wallet without flows cannot do
+      (anything but one `credential` method alone) or of a set this phone cannot be offered (a face match with no calls);
+      `not-identified` for a visitor; `busy` when another authentication is open on the connection (the plugin keeps one
+      at a time). Accepted, it goes through `onIdentityPresented`, as the reveal of SPACE-INV-004 does: its evidence is
+      recorded and it becomes `lastAuthentication`.
+    - **What the UIs, the conversation and the model get.** The session of the call: `ayni.capability.routed`
+      `{ kind: 'authentication', status: 'pending', flowId, expiresAt }` once the flow is open (a new `onOpened` option
+      of `Authenticator.run`, the only change to `authenticate.ts`), then the end (`completed`; `failed` for declined,
+      failed or another identity; `expired`; `unavailable` with a `message`), with no `challengeType`; a step "Waiting for
+      you to confirm it's you on your phone". The conversation: one `auth-challenge` entry, `payload.kind:
+      authentication`, which history gives as an `ayni.capability` activity of kind `authentication` and the model reads
+      as a record of the system. The model: the step and its outcome, never a method ("Add a note did not run: it needs
+      the person to confirm who they are on their phone first, and they declined. Do not try it again unless they
+      ask."). The call record: `reauthentication: { methods, outcome }`. The turn waits for the flow, at most its fifteen
+      minutes; nothing in the spec says a new message or Stop cancels a step-up, so neither does.
+    - **The badge (D130).** A profile that takes claims from the directory needs no challenge: its claims of the
+      directory come from `principal.directoryEntryId`, the entry the authentication identified, `pending` (action:
+      authenticate) before one and `unavailable` for a person identified otherwise; its claims of the document come from
+      the newest passport read still within `evidenceMaxAgeMinutes` that the match of IDENT-DIR-003 finds to be that
+      entry's and no one else's, and are empty without one (IDENT-DIR-005). The match is how "read in the authentication
+      that identified the entry" is checked: a later step-up would overwrite `lastAuthentication`, and a passport read for
+      another profile must never fill someone else's badge. A credential is held by the wallet it was issued to (the
+      issuance record's `connectionRef`): on a new connection it is issued again, with the same `subjectId`; that applies
+      to every profile, not only `automatic` (a person with a new phone could otherwise never get their badge on it).
+      `automatic` profiles are tried after every accepted authentication that identified someone, not only after a
+      presented credential. The issuance challenge is `device` or `document`, one only; `emailId` reads the address of
+      an `email` method and needs one enabled.
+    - **The email check in a conversation, removed** (the spec moved the code to the phone, D128; INTX-AUTH-013..019 and
+      PROF-RUN-015 are no longer in use, TOOL-CAT-022 lists two built-in tools): `core/emailCheck.ts`, the tool
+      `email_check`, the platform rule, the turn the code ended (`endTurn`, `codeMessage`), `continueIssuance`, the
+      outcomes `challenge-started` and `challenge-waiting`, the issuance challenge `email`, and the face-match challenge
+      of a tool (its call offer and its vision callbacks; a face match is a method only). Entries an email check recorded
+      before stay in the store: they are shown to no client and given to no model (`isLegacyEmailCheck`), so that an
+      address typed in one never reaches the model now that nothing reads them as a check.
+    - **Profile package 3.5.6** (after 3.5.5 of PR #120): `ChallengeType` is `device | document`; a tool's `stepUp` in the
+      settings of a space is `device`, the list of the method types of its set, or null (a list when both are declared);
+      `WithheldReason` is `credential` and `reason` is always sent. Platform rules 3.9.0.
+    - **Deployments.** A pack with an issuance challenge `email` or `face-match`, a tool challenge other than `device`, or
+      `referenceImage` no longer starts: the devnet Dev Agent's `list-badge-email` and `list-badge-passport` become one
+      badge with no challenge, its claims from the directory and `subjectId`, and an `email` and a `document` method in
+      `identity.authentication` (ayni-deploy, not changed here).
+    - **Tests:** `tests/stepUp.test.ts` (the request, each end, what is not asked, a wallet without flows, one at a time,
+      `maxAgeMinutes`, the model's words), the gate in `tests/tools.test.ts` (card, re-authentication, call; the routed
+      statuses; the entry; a decline; `recent`), the step-up flow in `tests/authenticate.test.ts` (a confirming method
+      alone, origin without a card, `onOpened`, another identity), the pack rules in `tests/toolSources.test.ts`, and
+      `tests/directoryBadge.test.ts` rewritten for D130. They fail on the code before this change. The tests of the email
+      check (`emailCode.test.ts`, `emailCheckMessages.test.ts`, its part of `serviceLanguage.test.ts` and two PostgreSQL
+      tests) are removed or rewritten: the persistence of translations is now tested on `ServiceLanguage` directly.

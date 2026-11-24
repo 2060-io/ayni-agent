@@ -34,7 +34,7 @@ identity:
           attributes: [name, email, title, department, photo]
           retention: { days: 365, onExpiry: erase }
         # what the model may read of it; by default nothing. department is used by the role rules and kept for
-        # audit, the photo is the reference of a tool's face-match challenge: neither is shown to the model
+        # audit, the photo is kept for audit (it is never the reference of a face match, D131): neither is shown to the model
         modelVisible: [name, title]
       # with identity.directory below: an address of an entry, by a code sent to it (MAIL_HOST and MAIL_FROM_ADDRESS),
       # the chip of a passport matched to one entry, a face against the passport's portrait or the entry's photo, an
@@ -198,26 +198,30 @@ issuance:
       issuedOn:   { from: computed, fn: today }
       validUntil: { from: computed, fn: addDays, days: 90 }
     record: { storeClaims: false }     # the audit record is always kept; the claims only when asked
-  # A badge from the user directory (D88, D89): with identity.directory above, the badges of Northwind are issued from
-  # it, and their claims come from the person's entry. The person shows which entry is theirs with an email code (the
-  # agent's code asks for the address in the conversation and sends a six-digit code to it: MAIL_HOST and MAIL_FROM_ADDRESS
-  # are needed), with a passport ([{ type: document }], numbered by documentId), or with both, in this order.
+  # A badge from the user directory, independent of the authentication (D130): with identity.directory above, its claims
+  # come from the entry the person's authentication identified (an email method, a passport, a badge, a passkey...), and
+  # the birth date and the photo from a passport of that entry read when they authenticated, empty without one. Issuing
+  # it authenticates nobody. The trigger says when: automatic, offered right after an authentication that identified an
+  # entry, on a connection that holds no valid badge yet; request (a menu item) or model, on demand. The number is the
+  # subject's own (subjectId): the same at every issuance, on every wallet.
   # badge:
   #   credential: { jsonSchemaCredentialId: "${IDENTITY_SCHEMA_ID:-https://ecs.example/vt/schemas-badge-jsc.json}" }
   #   label: Northwind badge
-  #   trigger: model
-  #   authChallenge: [{ type: email }]
+  #   trigger: automatic
   #   claims:
-  #     badgeNumber: { from: computed, fn: emailId }
+  #     badgeNumber: { from: computed, fn: subjectId }
   #     name:        { from: record, record: directory, field: name }
   #     email:       { from: record, record: directory, field: email }
   #     department:  { from: record, record: directory, field: department }
-  #     birthDate:   { from: computed, fn: constant, value: "" }
-  #     photo:       { from: computed, fn: constant, value: "" }
+  #     birthDate:   { from: evidence, entry: document, attribute: dateOfBirth, as: dateint }   # empty without a passport
+  #     photo:       { from: evidence, entry: document, attribute: portrait }                    # idem
   #     phoneNumber: { from: computed, fn: constant, value: "" }
-# ... with the address the email code verified, kept sealed and never shown to the model (INTX-AUTH-015):
+# ... with what a passport read keeps, for the matching of the entry and the claims above (IDENT-DIR-005):
 # evidence:
-#   email: { store: { attributes: [address], retention: { days: 30, onExpiry: erase } } }
+#   document:
+#     store:
+#       attributes: [documentNumber, issuingState, nationality, lastName, firstName, dateOfBirth, portrait]
+#       retention: { days: 1, onExpiry: erase }
 
 # the tool catalog (ayni-spec D101): one entry per source, keyed by its id, with everything said of it in one place
 tools:
@@ -262,7 +266,10 @@ tools:
       tools:                                         # the step-up of a tool of this server, and of no other (TOOL-CAT-010)
         issue_refund:
           stepUp:
-            authChallenge: { type: face-match, onChannelUnavailable: fail, referenceImage: badge-photo }
+            # authenticating again on the phone before each refund (D127, IDENT-AUTH-015), in an authenticate flow of
+            # purpose step-up: the set of methods named here, which may hold confirming methods only ([face], [otp] once
+            # enabled above); not asked again within maxAgeMinutes of an authentication that held them (0: each time)
+            authentication: { methods: [badge], maxAgeMinutes: 0 }
             maxCredentialAge: 0
         read_customer_record:
           stepUp:

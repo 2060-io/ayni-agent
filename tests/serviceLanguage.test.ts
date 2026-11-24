@@ -1,13 +1,4 @@
-/**
- * The service's own sentences in the person's language (decision 64; ayni-spec D94, INTX-AUTH-020..022, INTX-PREF-003):
- * the language order, no call for the sentence's own language, a translation kept and reused (across a restart too),
- * the request with no context, the checks of a translation, the fallback chain, an agent whose default language is not
- * English, and the space that does not allow the agent's model. Then over the agent: an email check in Spanish, the
- * preference `language`, and no address or code in any translation request or kept translation.
- */
-import { rmSync } from 'node:fs'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { buildAgent, type RunningAgent } from '../src/app.js'
+import { describe, expect, it } from 'vitest'
 import type { AgentPack } from '../src/config/packTypes.js'
 import {
   keepsWhatItMust,
@@ -17,24 +8,8 @@ import {
   TRANSLATION_INSTRUCTION_HEAD,
 } from '../src/core/serviceLanguage.js'
 import type { Principal, Session } from '../src/core/types.js'
-import type { StubChatModel } from '../src/llm/stub.js'
 import type { ChatDelta, ChatModel, ChatRequest } from '../src/llm/types.js'
-import type { Mailer, MailMessage } from '../src/platform/mail.js'
 import { MemoryStore } from '../src/store/memory.js'
-import { createLogger } from '../src/util/logger.js'
-import {
-  directoryPack,
-  guest,
-  historyOf,
-  type MockServices,
-  mintLocally,
-  mockServices,
-  type Person,
-  runText,
-  textOf,
-  until,
-} from './directoryFixtures.js'
-import { testEnv } from './helpers.js'
 
 /** A model that answers translation requests as it is told to, and keeps every request. */
 class FakeTranslator implements ChatModel {
@@ -233,125 +208,5 @@ describe('a sentence of the service in the person language (INTX-AUTH-020..022)'
     await service({ preferred: 'es', store }).language.render(WRONG, PRINCIPAL, session())
     expect(await refused.language.render(WRONG, PRINCIPAL, session())).toBe(`[es] ${WRONG.text}`)
     expect(refused.llm.requests).toHaveLength(0)
-  })
-})
-
-const ANA = {
-  id: 'p-0042',
-  firstName: 'Ana',
-  lastName: 'Ríos',
-  email: 'ana.rios@northwind.example',
-  department: 'Depot Rotterdam',
-  roles: [],
-}
-const ISSUE = '/call issue_credential {"credential":"badge"}'
-
-let services: MockServices
-let running: RunningAgent
-let root: string
-const sent: MailMessage[] = []
-const mailer: Mailer = {
-  from: 'Fleet support <fleet@northwind.example>',
-  send: async (message) => {
-    sent.push(message)
-    return `mail-${sent.length}`
-  },
-}
-const model = () => running.agent.llm as unknown as StubChatModel
-const codeOf = (message: MailMessage | undefined) => /\b(\d{6})\b/.exec(message?.text ?? '')?.[1] as string
-const isTranslation = (r: ChatRequest) =>
-  r.messages[0]?.role === 'system' && String(r.messages[0].content).startsWith(TRANSLATION_INSTRUCTION_HEAD)
-
-beforeAll(async () => {
-  services = await mockServices()
-  const fixture = directoryPack([ANA], { badge: 'email' })
-  root = fixture.root
-  running = await buildAgent(
-    testEnv({
-      agentPackPath: fixture.pack,
-      vsAgentAdminUrl: services.url,
-      veranaApiUrl: services.url,
-      directoryPollSeconds: 0,
-    }),
-    createLogger('silent'),
-    { drainMs: 200, mailer }
-  )
-  mintLocally(running)
-}, 30_000)
-
-afterAll(async () => {
-  await running?.stop()
-  await services?.app.close()
-  if (root) rmSync(root, { recursive: true, force: true })
-})
-
-let ana: Person
-
-describe('an email check in the language of the person, over the agent (decision 64)', () => {
-  it('asks and answers in the language of the session, as messages of the service the model never sees', async () => {
-    ana = await guest(running, 'ana-es', 'es')
-    const question = textOf(await runText(running, ana, ISSUE))
-    expect(question).toMatch(/^\[es\] To issue your Northwind badge, the agent checks your email address\./)
-    expect(textOf(await runText(running, ana, 'mi correo es ana.rios@northwind.example'))).toMatch(
-      /^\[es\] If this address is on the list of Northwind Logistics, a six-digit code was just sent to it\./
-    )
-    await until(() => sent.length === 1)
-    const code = codeOf(sent[0])
-    const wrong = code === '000000' ? '111111' : '000000'
-    expect(textOf(await runText(running, ana, wrong))).toBe('[es] That code is not right. 4 tries are left.')
-    // the same entries as before: the service's messages, with their source type
-    const history = await historyOf(running, ana)
-    expect(history.find((m) => String(m.content).startsWith('[es] That code'))?.metadata.sourceType).toBe(
-      'auth-challenge'
-    )
-    // the model reads them as the agent's, in the language they were shown in; what the code took, as a record (D95)
-    await runText(running, ana, 'gracias, ¿y ahora?')
-    const conversation =
-      model()
-        .requests.filter((r) => !isTranslation(r))
-        .at(-1)?.messages ?? []
-    const assistant = conversation.filter((m) => m.role === 'assistant').map((m) => String(m.content))
-    expect(assistant).toContain('[es] That code is not right. 4 tries are left.')
-    expect(assistant.some((t) => t.startsWith('[es] If this address is on the list'))).toBe(true)
-    expect(JSON.stringify(conversation)).not.toContain('ana.rios')
-    expect(JSON.stringify(conversation)).not.toContain(wrong)
-  })
-
-  it('reuses a kept translation: the same sentence for another person costs no call', async () => {
-    const before = model().requests.filter(isTranslation).length
-    const other = await guest(running, 'other-es', 'es-MX')
-    await runText(running, other, ISSUE)
-    // es-MX is another tag than es: one call for it, then none for a third person who reads es-MX
-    const third = await guest(running, 'third-es', 'es-MX')
-    await runText(running, third, ISSUE)
-    expect(model().requests.filter(isTranslation).length).toBe(before + 1)
-    await runText(running, other, 'cancel')
-  })
-
-  it('follows the preference language before the locale, and the model stores it as a tag', async () => {
-    const refused = textOf(
-      await runText(running, ana, '/call principal_preferences {"action":"set","key":"language","value":"French"}')
-    )
-    expect(refused).toContain('must be a BCP 47 language tag')
-    await runText(running, ana, '/call principal_preferences {"action":"set","key":"Language","value":"fr_ca"}')
-    // sealed in the store (D77): read as the person reads them
-    const own = await running.agent.memory.ownPreferences(
-      ana.principal,
-      (await running.agent.sessions.get(ana.sessionId)) as Session
-    )
-    expect(own.map((p) => [p.key, p.value])).toEqual([['language', 'fr-CA']])
-    const code = codeOf(sent[0])
-    const wrong = code === '222222' ? '333333' : '222222'
-    expect(textOf(await runText(running, ana, wrong))).toBe('[fr-CA] That code is not right. 3 tries are left.')
-  })
-
-  it('never puts the address or a code typed in a check in a translation request or a kept translation', async () => {
-    const code = codeOf(sent[0])
-    expect(textOf(await runText(running, ana, code))).toMatch(/^\[fr-CA\] Your email address is verified\./)
-    const translations = JSON.stringify(model().requests.filter(isTranslation))
-    const kept = JSON.stringify(await running.agent.store.translations.list())
-    expect(translations.length).toBeGreaterThan(0)
-    for (const secret of [code, '000000', '111111', '222222', '333333', 'ana.rios', 'mi correo'])
-      for (const text of [translations, kept]) expect(text).not.toContain(secret)
   })
 })

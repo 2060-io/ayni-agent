@@ -6,15 +6,16 @@
  * sources available in the conversation's space, a source of a space only when it is `ready` there, with no tool its
  * owner set `off`, for a guest only what the template opens to guests, and with every pinned argument out of the input
  * schemas (RBAC-FILTER-004). Each call then goes through, in order: the person's confirmation, the approval, the
- * credential's liveness, the step-up check, and the call, with the pinned arguments set in code and the account opened
- * for it (TOOL-CALL-001). A turn that read content from an untrusted source asks the person before any call that is not
- * a read (TOOL-CALL-008). Every call the model asks for leaves one record, with no argument, result or account value
- * (TOOL-PROV-004); every result records its source and whose account read it (TOOL-PROV-001).
+ * credential's liveness, the step-up (a re-authentication on the phone, then a device confirmation), and the call, with
+ * the pinned arguments set in code and the account opened for it (TOOL-CALL-001). A turn that read content from an
+ * untrusted source asks the person before any call that is not a read (TOOL-CALL-008). Every call the model asks for
+ * leaves one record, with no argument, result or account value (TOOL-PROV-004); every result records its source and
+ * whose account read it (TOOL-PROV-001).
  */
 import { ACTIVITY, CUSTOM_EVENT } from '@ayni.org/ayni-agui-profile'
 import { Ajv2020 } from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
-import type { AgentPack, CallRule, SpaceCallRule, ToolEffect } from '../config/packTypes.js'
+import type { AgentPack, CallRule, SpaceCallRule, StepUpAuthentication, ToolEffect } from '../config/packTypes.js'
 import { confirmationTimeoutSeconds } from '../config/packTypes.js'
 import type { ToolCallRequest, ToolDefinition } from '../llm/types.js'
 import type { MemoryService } from '../memory/service.js'
@@ -35,11 +36,21 @@ import type { CallAccountSecret, ToolContext, ToolResult, ToolSpec } from '../to
 import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import type { ChallengeService } from './challenges.js'
+import type { CapabilityRouter } from './channel.js'
 import type { ConnectionService, ToConnect } from './connections.js'
+import { conversationOrigin } from './flows.js'
 import type { TurnSink } from './orchestrator.js'
 import type { PrincipalService } from './principals.js'
 import { isPersonalSpace, type SpaceService } from './spaces.js'
 import type { ReadySource, SpaceToolService } from './spaceTools.js'
+import {
+  type Reauthenticate,
+  recentlyAuthenticated,
+  routedStatusOf,
+  stepUpForModel,
+  stepUpText,
+  unavailableMessage,
+} from './stepUp.js'
 import {
   type ApprovalRecord,
   type ApprovalStatus,
@@ -123,6 +134,8 @@ export interface ToolGateHooks {
   noApprover?: (record: ApprovalRecord, title: string) => Promise<void>
   /** whom a policy of a space names, each by name, role or department (TOOL-CALL-009) */
   policyWords?: (spaceId: string, policy: SpaceApprovalPolicy) => Promise<string[]>
+  /** a step-up's re-authentication on the person's phone (IDENT-AUTH-015): without it, none can be asked */
+  reauthenticate?: Reauthenticate
 }
 
 export interface ToolGateDeps {
@@ -140,7 +153,12 @@ export interface ToolGateDeps {
   logger: Logger
   /** each person's own accounts (D104 to D110) */
   connections?: ConnectionService
+  /** the routed status of a step-up's re-authentication, to the session the call was asked from (INTX-AUTH-004) */
+  router?: Pick<CapabilityRouter, 'notifyOrigin'>
 }
+
+/** The step of a turn while a step-up waits on the phone: a label, never a tool's name (PROF-MAP-005). */
+export const STEP_UP_LABEL = "Waiting for you to confirm it's you on your phone"
 
 /** The tool that shows the Connect card (D108, TOOL-CONN-011): given only while an account is to connect. */
 export const OFFER_CONNECTION = 'offer_connection'
@@ -483,7 +501,85 @@ export class ToolGate {
     return asked ? askedAnswer(answer) : answer
   }
 
-  /** Steps 3 to 5: the credential's liveness, the step-up, the call (TOOL-CALL-001). */
+  /**
+   * A step-up's re-authentication (D127, IDENT-AUTH-015): asked on the person's phone before the call, unless an
+   * authentication that held every method of the set completed within its `maxAgeMinutes`. The session the call was
+   * asked from gets the routed status (`kind: authentication`) and the turn a step; the conversation records the outcome
+   * only (INTX-AUTH-006), and the model reads the step and its outcome, never a method (TOOL-CALL-001). Returns what the
+   * model reads when the call does not run.
+   */
+  private async reauthenticate(
+    tool: TurnTool,
+    title: string,
+    stepUp: StepUpAuthentication,
+    ctx: CallContext,
+    record: ToolCallRecord
+  ): Promise<string | undefined> {
+    if (recentlyAuthenticated(ctx.principal, stepUp)) {
+      record.reauthentication = { methods: [...stepUp.methods], outcome: 'recent' }
+      return undefined
+    }
+    const origin = conversationOrigin(ctx.session)
+    const notify = async (status: 'pending' | ReturnType<typeof routedStatusOf>, extra: Record<string, string> = {}) =>
+      this.deps.router
+        ?.notifyOrigin(ctx.session.id, {
+          kind: 'routed',
+          trustBound: 'authentication',
+          status,
+          originSessionId: ctx.session.id,
+          ...extra,
+        })
+        .catch((err) => this.deps.logger.warn({ err }, 'the routed status of a re-authentication was not sent'))
+    let flowId: string | undefined
+    const opened: Promise<void>[] = []
+    await ctx.sink.emit({ type: 'step-started', label: STEP_UP_LABEL })
+    const outcome = this.hooks.reauthenticate
+      ? await this.hooks
+          .reauthenticate({
+            principal: ctx.principal,
+            methods: [...stepUp.methods],
+            text: stepUpText(title),
+            ...(origin ? { origin } : {}),
+            onOpened: (id, expiresAt) => {
+              flowId = id
+              opened.push(notify('pending', { flowId: id, expiresAt }))
+            },
+          })
+          .catch((err) => {
+            this.deps.logger.error({ err, tool: tool.spec.rawName }, 'a re-authentication could not be asked')
+            return 'unavailable' as const
+          })
+      : 'unavailable'
+    await Promise.all(opened)
+    await ctx.sink.emit({ type: 'step-finished', label: STEP_UP_LABEL })
+    const message = unavailableMessage(outcome)
+    await notify(routedStatusOf(outcome), { ...(flowId ? { flowId } : {}), ...(message ? { message } : {}) })
+    record.reauthentication = { methods: [...stepUp.methods], outcome }
+    // the outcome only, as a record of the system: no method, no address, no code (INTX-AUTH-006, INTX-FLOW-008)
+    await this.deps.memory.append({
+      sessionId: ctx.session.id,
+      principalId: ctx.principal.id,
+      role: 'system',
+      sourceType: 'auth-challenge',
+      text: `Identity check (authenticating again on the phone) for ${title}: ${outcome}`,
+      backingIdentity: ctx.principal.backingIdentity,
+      payload: {
+        kind: 'authentication',
+        outcome: routedStatusOf(outcome),
+        reason: outcome,
+        toolName: tool.spec.rawName,
+        ...(flowId ? { flowId } : {}),
+      },
+    })
+    if (outcome === 'completed') return undefined
+    await this.finish(record, 'failed')
+    return stepUpForModel(title, outcome)
+  }
+
+  /**
+   * Steps 3 to 5: the credential's liveness, the step-up (a re-authentication, a device confirmation), the call
+   * (TOOL-CALL-001).
+   */
   private async run(
     tool: TurnTool,
     title: string,
@@ -507,7 +603,12 @@ export class ToolGate {
         return `${title} did not run: the person's identity credential could not be verified.`
       }
     }
-    // 4. the step-up the action declares (INTX-AUTH-002/003/006)
+    // 4. the step-up the action declares: the re-authentication on the phone (IDENT-AUTH-015), then the device
+    // confirmation (INTX-AUTH-002/003/006)
+    if (policy?.authentication) {
+      const stopped = await this.reauthenticate(tool, title, policy.authentication, ctx, record)
+      if (stopped) return stopped
+    }
     if (policy?.authChallenge) {
       await ctx.sink.emit({ type: 'step-started', label: 'Waiting for your confirmation on your phone' })
       const { outcome, record: challenge } = await challenges.run({
@@ -577,7 +678,6 @@ export class ToolGate {
       data = scrubAccount(result.data, secrets())
       isError = result.isError === true
       accountOutcome = result.accountOutcome
-      if (result.endTurn) ctx.toolCtx.turnEnded?.(result.endTurn)
     } catch (error) {
       content = scrubAccount(`tool failed: ${error instanceof Error ? error.message : String(error)}`, secrets())
       isError = true

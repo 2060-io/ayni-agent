@@ -1,7 +1,6 @@
 /** Canonical entries to AG-UI messages (profile sections 6 to 8, PROF-MAP-002/006, PROF-HIST-001). */
 import { ACTIVITY, type AttachmentActivity } from '@ayni.org/ayni-agui-profile'
-import { isCredentialWithheld } from '../../core/credentials.js'
-import { isWithheldMessage } from '../../core/emailCheck.js'
+import { isCredentialWithheld, isLegacyEmailCheck } from '../../core/credentials.js'
 import { CARD_STATE, type MessageAttachment, type MessageEntry } from '../../core/types.js'
 
 export function attachmentActivity(a: MessageAttachment, role?: 'user' | 'assistant'): AttachmentActivity {
@@ -201,39 +200,25 @@ export function entryToMessages(
         },
       ]
     case 'auth-challenge':
-      // the messages of an email check, the person's and the code's, are shown as any message is (PROF-RUN-015); the
-      // person's, which the code took, are ones the model never received (decision 65, PROF-HIST-013)
-      if (entry.payload?.kind === 'email-check')
-        return [
-          {
-            id: entry.id,
-            role: entry.role === 'agent' ? 'assistant' : 'user',
-            content: entry.text,
-            metadata: {
-              createdAt: entry.createdAt,
-              initiatedAt: entry.initiatedAt,
-              sourceType: entry.sourceType,
-              externalId: entry.externalId,
-              ...(isWithheldMessage(entry) ? { modelVisible: false } : {}),
-            },
-          },
-        ]
+      // what an email check in a conversation recorded before the check moved to the phone (D128) is shown no more
+      if (isLegacyEmailCheck(entry)) return []
       // a challenge served as a `confirm` flow is shown by its flow card; the note stays for the model (D55)
-      if (entry.payload?.flowId) return []
-      // the outcome of an email check is a record for the model: the check ran in the conversation, never on the
-      // capability channel, and the code's own message told the person how it ended (PROF-RUN-015); it is no
-      // `ayni.capability` card, whose challengeType is device, face-match or document (profile §6)
-      if (entry.payload?.type === 'email') return []
+      if (entry.payload?.flowId && entry.payload?.kind !== 'authentication') return []
+      // a step-up's re-authentication leaves its outcome only (D127, INTX-AUTH-006): kind `authentication`, no
+      // challengeType; a device confirmation or a document read keeps its challengeType (profile §6)
       return [
         {
           id: entry.id,
           role: 'activity',
           activityType: ACTIVITY.capability,
           content: {
-            kind: 'auth-challenge',
-            challengeType: entry.payload?.type,
+            kind: entry.payload?.kind === 'authentication' ? 'authentication' : 'auth-challenge',
+            ...(entry.payload?.kind === 'authentication' ? {} : { challengeType: entry.payload?.type }),
             status: entry.payload?.outcome,
             originSessionId: entry.sessionId,
+            ...(entry.payload?.kind === 'authentication' && typeof entry.payload.flowId === 'string'
+              ? { flowId: entry.payload.flowId }
+              : {}),
           },
           metadata: meta,
         },

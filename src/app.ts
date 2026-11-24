@@ -28,7 +28,6 @@ import { catalogWarnings, evidenceWarnings, loadPack } from './config/pack.js'
 import {
   type AgentPack,
   admitsUnidentified,
-  challengeTypesOf,
   credentialMethodFor,
   credentialMethodsOf,
   directoryReadsDocuments,
@@ -44,7 +43,6 @@ import { ContextAssembler } from './core/context.js'
 import { UserDirectory } from './core/directory.js'
 import { DirectoryClaims } from './core/directoryClaims.js'
 import { documentOutcomeForModel } from './core/document.js'
-import { EmailChecks } from './core/emailCheck.js'
 import { EvidenceService } from './core/evidence.js'
 import { FlowService } from './core/flows.js'
 import { Governance } from './core/governance.js'
@@ -187,7 +185,8 @@ export async function buildAgent(
   const memory = new MemoryService(store, crypto, embeddings, pack, logger)
   const evidence = new EvidenceService(store, pack, crypto, logger)
   for (const warning of evidenceWarnings(pack)) logger.warn(`agent-pack: ${warning} (PRIV-EVID-006)`)
-  // email: the email code and the invitations of other organizations, only through the deployment's SMTP server
+  // email: the code of an `email` method and the invitations of other organizations, only through the deployment's SMTP
+  // server
   const mailer = hooks.mailer ?? createMailer(env.mail, logger)
   for (const warning of mailWarnings(pack, !!mailer, !!env.veranaGraphUrl)) logger.warn(warning)
   // an email method with no SMTP server stops the start, naming the method (IDENT-AUTH-001, PLAT-MAIL-001)
@@ -329,7 +328,6 @@ export async function buildAgent(
   let orchestratorRef: Orchestrator | undefined
   let identityRequestsRef: IdentityRequests | undefined
   let issuanceRef: IssuanceService | undefined
-  let emailChecksRef: EmailChecks | undefined
   let connectionsRef: ConnectionService | undefined
   registry.add(
     new BundledToolSource({
@@ -345,7 +343,6 @@ export async function buildAgent(
       rag,
       stats,
       setReactionPolicy: (sid, policy) => orchestratorRef?.setReactionPolicy(sid, policy),
-      emailChecks: () => emailChecksRef,
       connections: () => connectionsRef,
     })
   )
@@ -433,6 +430,7 @@ export async function buildAgent(
     stats,
     logger,
     connections,
+    router,
   })
   orchestrator.gate = gate
   gateRef = gate
@@ -650,6 +648,15 @@ export async function buildAgent(
       },
       present: (connectionId, name, entry, flowMode, origin) =>
         identity.present(connectionId, name, entry, flowMode, origin),
+      // a face match only to a phone that takes calls, with a face-verification service (IDENT-AUTH-010)
+      canOffer: async (connectionId, combination) =>
+        (
+          await identity.authenticator.combinationsFor({
+            connectionId,
+            purpose: 'step-up',
+            combinations: [combination],
+          })
+        ).length > 0,
       record: async (principal, input) => {
         const record = await evidence.record(principal, input)
         // a credential the agent issues by itself may now be complete (INTX-ISSUE-008)
@@ -660,6 +667,11 @@ export async function buildAgent(
     logger
   )
   agent.identityRequests = identityRequestsRef
+  // a tool's step-up asks the person's phone to re-authenticate before the call (IDENT-AUTH-015)
+  gate.hooks.reauthenticate = (input) => {
+    const { principal, ...rest } = input
+    return identityRequestsRef ? identityRequestsRef.stepUp(principal, rest) : Promise.resolve('unavailable')
+  }
   // credential issuance: the claims come from the sources of the profile, the offer goes to the Principal's wallet
   const credentialOffers = new CredentialOffers(vsAgent, flows, (c) => peerProfiles.isFlowCapable(c), logger)
   agent.credentialOffers = credentialOffers
@@ -704,29 +716,8 @@ export async function buildAgent(
       !(await spaces.providerRefusal(principal, await agent.spaceOfSession(session, principal))),
   })
   agent.serviceLanguage = serviceLanguage
-  // the email code of a badge from the directory, served by the code in the conversation (D89, INTX-AUTH-011..015)
-  const emailChecks = new EmailChecks({
-    store,
-    memory,
-    evidence,
-    crypto,
-    pack,
-    directory,
-    mailer,
-    organizationName: async () => (await home.name()) ?? undefined,
-    language: serviceLanguage,
-    deliver: async (sessionId, entry) => {
-      const session = await sessions.get(sessionId)
-      if (session) await agent.deliverToConversation(session, entry)
-    },
-    passed: (record) => agent.continueIssuance(record),
-    logger,
-  })
-  agent.emailChecks = emailChecks
-  emailChecksRef = emailChecks
-  await emailChecks.resume()
-  // the claims of a badge from the directory: the entry the person's evidence finds (D88, INTX-ISSUE-021)
-  const directoryClaims = directory ? new DirectoryClaims(directory, evidence, logger, emailChecks) : undefined
+  // the claims of a badge from the directory: the entry the person's authentication identified (D130, INTX-ISSUE-021)
+  const directoryClaims = directory ? new DirectoryClaims(directory, evidence, logger) : undefined
   // people of other organizations, invited by email and bound by their badge (D90, SPACE-INV)
   const graph = new TrustGraph(env.veranaGraphUrl, logger, hooks.graphFetch)
   const invitations = new InvitationService({
@@ -788,11 +779,14 @@ export async function buildAgent(
             )
             .catch((err) => logger.warn({ err, principalId: principal.id }, 'the badge just issued was not asked for'))
       },
-      // a field of the person's entry of the user directory, found from their evidence (INTX-ISSUE-021)
+      // a field of the entry the person's authentication identified, and the passport of that entry read then
+      // (INTX-ISSUE-021, IDENT-DIR-005)
       ...(directoryClaims
-        ? { record: (principal, name, profile, source) => directoryClaims.resolve(principal, name, profile, source) }
+        ? {
+            record: (principal, name, profile, source) => directoryClaims.resolve(principal, name, profile, source),
+            entryDocument: (principal, profile) => directoryClaims.entryDocument(principal, profile),
+          }
         : {}),
-      emailCheck: emailChecks,
       challenge: async (principal, session, policy, purpose) => {
         const { outcome, record } = await challenges.run({
           principal,
@@ -962,7 +956,6 @@ export async function buildAgent(
     stop: async () => {
       // no turn starts any more; those in progress end, or are cut when their time is over (PLAT-DEPLOY-004)
       await agent.shutdown(hooks.drainMs)
-      emailChecks.stop()
       mailer?.close?.()
       // the turns are over: their runs are given a moment to tell their clients so, before anything is closed
       await aguiRoutes?.quiet(RUNS_END_WITHIN_MS)
@@ -982,19 +975,16 @@ export async function buildAgent(
 }
 
 /**
- * What the email and the invitations of other organizations need, said at start (PLAT-MAIL-001, SPACE-INV-004): the
- * issuance profiles and the templates an absent SMTP server disables, an authentication that does not keep the email
- * invitations bind with, a trust graph to find organizations in.
+ * What the invitations of other organizations need, said at start (PLAT-MAIL-001, SPACE-INV-004): the templates an absent
+ * SMTP server disables, an authentication that does not keep the email invitations bind with, a trust graph to find
+ * organizations in. An `email` method with no SMTP server stops the start instead (IDENT-AUTH-001).
  */
 export function mailWarnings(pack: AgentPack, smtp: boolean, graph: boolean): string[] {
   const warnings: string[] = []
-  const profiles = Object.entries(pack.issuance ?? {})
-    .filter(([, p]) => challengeTypesOf(p).includes('email'))
-    .map(([name]) => name)
   const lists = (pack.spaces?.templates ?? []).filter((t) => t.membership.mode === 'list').map((t) => t.id)
-  if (!smtp && (profiles.length || lists.length))
+  if (!smtp && lists.length)
     warnings.push(
-      `email: MAIL_HOST and MAIL_FROM_ADDRESS are not both set: the email code is disabled for the issuance profiles [${profiles.join(', ')}] and the invitations of other organizations for the templates [${lists.join(', ')}] (PLAT-MAIL-001)`
+      `email: MAIL_HOST and MAIL_FROM_ADDRESS are not both set: the invitations of other organizations are disabled for the templates [${lists.join(', ')}] (PLAT-MAIL-001)`
     )
   if (lists.length) {
     const methods = credentialMethodsOf(pack).map(([, m]) => m)

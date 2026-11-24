@@ -97,7 +97,7 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
     private readonly client: VsAgentClient,
     private readonly publicBaseUrl: string,
     private readonly mediaLinks: MediaLinks,
-    private readonly webrtcServerUrl: string | undefined,
+    readonly _webrtcServerUrl: string | undefined,
     private readonly peers: PeerProfiles,
     readonly _logger: Logger
   ) {}
@@ -244,31 +244,6 @@ export class DidcommAdapter implements ChannelAdapter, CapabilityChannelOps, Inv
       await this.flows.close(flow.flowId, 'failed', { reason: 'The link request could not be sent.' })
       throw error
     }
-  }
-
-  public async offerFaceMatchCall(
-    connectionId: string,
-    challenge: AuthChallengeRecord,
-    description: string
-  ): Promise<string> {
-    if (!this.webrtcServerUrl) throw new Error('WEBRTC_SERVER_URL is not configured')
-    const response = await fetch(`${this.webrtcServerUrl.replace(/\/+$/, '')}/rooms`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ eventNotificationUri: `${this.publicBaseUrl}/webrtc/call-event`, maxPeerCount: 50 }),
-    })
-    if (!response.ok) throw new Error(`webrtc room creation HTTP ${response.status}`)
-    const room = (await response.json()) as { wsUrl: string; roomId: string }
-    const peerId = randomBytes(12).toString('hex')
-    challenge.details = { ...(challenge.details ?? {}), wsUrl: room.wsUrl, roomId: room.roomId, peerId }
-    const { id } = await this.client.offerCall(
-      connectionId,
-      'service',
-      { ...room, peerId, protocol: '2060-mediasoup-v1' },
-      description,
-      challenge.expiresAt
-    )
-    return id
   }
 
   /**

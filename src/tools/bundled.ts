@@ -8,16 +8,8 @@ import {
 } from '../channels/didcomm/identityRequests.js'
 import { AUTHENTICATION_ENTRY, hasPersonalSource } from '../config/pack.js'
 import type { AgentPack, BundledName, ToolAccess } from '../config/packTypes.js'
-import { bundledEnabled, bundledSource, challengeTypesOf, connectionTypeOf, featuresOf } from '../config/packTypes.js'
+import { bundledEnabled, bundledSource, connectionTypeOf, featuresOf } from '../config/packTypes.js'
 import type { ConnectionService } from '../core/connections.js'
-import { conversationOf } from '../core/conversationOf.js'
-import {
-  EMAIL_CHECK_KIND,
-  type EmailChecks,
-  emailCancelForModel,
-  emailResendForModel,
-  emailStatusForModel,
-} from '../core/emailCheck.js'
 import type { EvidenceService } from '../core/evidence.js'
 import { type IssuanceService, issuanceOutcomeForModel, offeredProfiles } from '../core/issuance.js'
 import { LANGUAGE_PREFERENCE, languageTag } from '../core/serviceLanguage.js'
@@ -48,8 +40,6 @@ export interface BundledDeps {
   stats: StatsSink
   /** the model sets a per-message reaction policy (INTX-REACT-001) */
   setReactionPolicy: (sessionId: string, policy: 'notify' | 'historize' | { notifyOn: string[] }) => void
-  /** the email checks the code runs, which the model follows, renews or cancels (INTX-AUTH-016..018) */
-  emailChecks?: () => Pick<EmailChecks, 'status' | 'resend' | 'cancel'> | undefined
   /** each person's own accounts: the Connect card the model offers (D108, TOOL-CONN-011) */
   connections?: () => Pick<ConnectionService, 'offer'> | undefined
 }
@@ -180,7 +170,7 @@ export class BundledToolSource implements ToolSource {
           key: 'bundled:issue_credential',
           name: 'issue_credential',
           description: [
-            'Issues a credential of this agent to the person, to their wallet. Call credential_requirements first: issue only when the state is ready. For a credential made from a passport or an identity card, the call first asks the person to read the chip of their document with their phone, and can take up to five minutes; tell them before you call that their phone will ask for it. For a credential that needs an email check, the call ends your turn: the system itself asks the person in this conversation for their address and a code, and issues by itself once the code is right. The agent fills every claim from what it verified; you give the name of the credential and nothing else. The call sends the offer and waits for the person to answer it in their wallet, up to two minutes: it returns whether they accepted, declined, did not answer, or their wallet refused it. Before you call, nothing has been sent: do not say it was. After it returns, tell the person what happened.',
+            'Issues a credential of this agent to the person, to their wallet. Call credential_requirements first: issue only when the state is ready. For a credential made from a passport or an identity card, the call first asks the person to read the chip of their document with their phone, and can take up to five minutes; tell them before you call that their phone will ask for it. The agent fills every claim from what it verified; you give the name of the credential and nothing else. The call sends the offer and waits for the person to answer it in their wallet, up to two minutes: it returns whether they accepted, declined, did not answer, or their wallet refused it. Before you call, nothing has been sent: do not say it was. After it returns, tell the person what happened.',
             undefined,
             ...byModel.map(([name, p]) => `${name}${p.label ? `: ${p.label}` : ''}`),
           ].join('\n'),
@@ -201,56 +191,10 @@ export class BundledToolSource implements ToolSource {
               content: issuanceOutcomeForModel(result.outcome, result.requirements, result.reason),
               data: { credential: args.credential, outcome: result.outcome },
               isError: result.outcome === 'failed',
-              // an email check now waits in the conversation: the code asks, and the turn ends (INTX-AUTH-012)
-              ...(result.ask
-                ? {
-                    endTurn: {
-                      text: result.ask.text,
-                      payload: { kind: EMAIL_CHECK_KIND, challengeId: result.ask.challengeId, step: 'question' },
-                    },
-                  }
-                : {}),
             }
           },
         })
       }
-    }
-
-    // the email check, which the code runs: the model follows it, has a new code sent, or ends it, and never sees the
-    // address or the code (decision 63, INTX-AUTH-016..018). Present only when a profile declares one.
-    if (profiles.some(([, p]) => challengeTypesOf(p).includes('email'))) {
-      specs.push({
-        key: 'bundled:email_check',
-        name: 'email_check',
-        description:
-          'The email check the system runs when a credential needs one (issue_credential): the system itself asks the person, in the conversation, for the address their organization knows them by, then for the code it emails there, and takes the message that carries either. You never see them and never ask for them; any other message of the person reaches you as usual. status: whether a check is waiting for the person, in this conversation or another, at which step (address or code), and the seconds, tries and resends left. resend: when the person says the code did not arrive, sends a new one to the same address; the previous code stops working and the ten minutes start again; at most three times per check, thirty seconds apart. cancel: ends the check, and nothing is issued. To use another address, cancel, then call issue_credential again.',
-        parameters: {
-          type: 'object',
-          required: ['action'],
-          additionalProperties: false,
-          properties: { action: { type: 'string', enum: ['status', 'resend', 'cancel'] } },
-        },
-        access: ALWAYS_ALLOWED,
-        stepLabel: 'Looking at your email check',
-        invoke: async (args, ctx) => {
-          const checks = this.deps.emailChecks?.()
-          const action = String(args.action ?? '')
-          const conversationId = conversationOf(ctx.session)
-          if (action === 'status') {
-            const status = checks ? await checks.status(ctx.principal.id, conversationId) : { waiting: false as const }
-            return { content: emailStatusForModel(status), data: { action, waiting: status.waiting } }
-          }
-          if (action === 'resend') {
-            const result = checks ? await checks.resend(ctx.principal.id, conversationId) : { outcome: 'none' as const }
-            return { content: emailResendForModel(result), data: { action, outcome: result.outcome } }
-          }
-          if (action === 'cancel') {
-            const cancelled = checks ? await checks.cancel(ctx.principal.id) : false
-            return { content: emailCancelForModel(cancelled), data: { action, cancelled } }
-          }
-          return { content: 'Unknown action: use status, resend or cancel.', isError: true }
-        },
-      })
     }
 
     if (features.preferences && on('principalPreferences')) {

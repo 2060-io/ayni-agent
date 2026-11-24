@@ -126,7 +126,10 @@ export function declinedByHolder(record: Pick<PresentationRecord, 'state' | 'err
 }
 
 /** How an authentication is asked: why, and of whom (flow profile §6.14). */
-export type AuthenticateAsk = Pick<AuthenticateOptions, 'purpose' | 'bound' | 'combinations' | 'text' | 'origin'>
+export type AuthenticateAsk = Pick<
+  AuthenticateOptions,
+  'purpose' | 'bound' | 'combinations' | 'text' | 'origin' | 'onOpened'
+>
 
 export class IdentityFlow {
   private readonly pending = new Map<string, PendingProof>()
