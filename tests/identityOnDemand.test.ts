@@ -71,18 +71,18 @@ describe('who enters unidentified follows from the authentication (D53, IDENT-RE
   it('gives the agent one of three modes, and refuses a pack that contradicts itself (D72, IDENT-RES-010)', () => {
     expect(authenticationModeOf(undefined)).toBeUndefined()
     expect(authenticationModeOf(entry())).toBe('required')
-    expect(authenticationModeOf(entry({ request: 'on-connect', guests: true }))).toBe('offered')
+    expect(authenticationModeOf(entry({ request: 'on-connect', visitors: true }))).toBe('offered')
     expect(authenticationModeOf(entry({ request: 'on-demand' }))).toBe('on-request')
-    expect(authenticationModeOf(entry({ request: 'on-demand', guests: true }))).toBe('on-request')
-    // offered lets guests in; required does not
-    expect(admitsUnidentified(packWith([entry({ guests: true })]))).toBe(true)
-    expect(admitsUnidentified(packWith([entry({ guests: false })]))).toBe(false)
+    expect(authenticationModeOf(entry({ request: 'on-demand', visitors: true }))).toBe('on-request')
+    // offered lets visitors in; required does not
+    expect(admitsUnidentified(packWith([entry({ visitors: true })]))).toBe(true)
+    expect(admitsUnidentified(packWith([entry({ visitors: false })]))).toBe(false)
 
     const errorsOf = (over: Partial<AuthenticationEntry>) => authenticationErrors(entry(over))
     expect(
-      errorsOf({ guests: true, issuers: { organizations: ['org:EE:1'] }, obtain: { text: 'At the desk.' } })
+      errorsOf({ visitors: true, issuers: { organizations: ['org:EE:1'] }, obtain: { text: 'At the desk.' } })
     ).toEqual([])
-    expect(errorsOf({ request: 'on-demand', guests: false })[0]).toMatch(/guests cannot be false/)
+    expect(errorsOf({ request: 'on-demand', visitors: false })[0]).toMatch(/visitors cannot be false/)
     expect(errorsOf({ issuers: { organizations: [] } })[0]).toMatch(/would accept nobody/)
     expect(errorsOf({ issuers: { organizations: ['Acme'] } })[0]).toMatch(/must be organization keys/)
     expect(errorsOf({ obtain: {} })[0]).toMatch(/a text, a link, or both/)

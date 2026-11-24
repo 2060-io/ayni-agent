@@ -97,21 +97,6 @@ export class RunMirror {
     this.send(() => event)
   }
 
-  /** An event of the run to some of the targets only: a Connect card to the sessions of profile 3.5 (PROF-TOOL-020). */
-  public only(event: AgUiEvent, targets: ReadonlySet<string>): void {
-    if (!this.targets.some((t) => targets.has(t))) return
-    this.open()
-    this.flush()
-    this.queue = this.queue.then(async () => {
-      for (const target of this.targets) {
-        if (!targets.has(target)) continue
-        await this.streams
-          .publish(target, event)
-          .catch((err) => this.logger.debug({ err, target }, 'mirror publish failed'))
-      }
-    })
-  }
-
   /**
    * The person's message as the other devices show it: what history will give for the entry. The session the
    * message came through already shows it, and is left out when it is one of the targets: a message that waited

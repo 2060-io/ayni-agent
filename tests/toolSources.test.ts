@@ -1,8 +1,7 @@
 /**
  * The tool catalog as one map (ayni-spec D101): `tools.sources`, keyed by the source's id, holds each source's type and
  * connection, its account, availability, offer and bindings, its tier model (`access`) and what the pack says of each of
- * its tools, the step-up included. TOOL-CAT-001, TOOL-CAT-010 (a step-up belongs to one tool of one source), TOOL-CAT-011
- * (the keys the map replaced are refused at start, naming the key that replaces each).
+ * its tools, the step-up included. TOOL-CAT-001, TOOL-CAT-010 (a step-up belongs to one tool of one source).
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -31,40 +30,26 @@ function refusal(pack: Record<string, unknown>): string {
   throw new Error('the pack was accepted')
 }
 
-describe('the keys one map replaced (TOOL-CAT-011)', () => {
-  it('refuses each at start, naming the key that replaces it', () => {
+describe('the keys of an earlier pack are not read (no backward compatibility, ayni-spec PR #123)', () => {
+  it('leaves the keys one map replaced to the schema, which refuses them as keys it does not know', () => {
     const message = refusal(
       doc((p) => {
         p.mcp = { servers: [{ name: 'crm', transport: 'streamable-http', url: 'https://crm.example/mcp' }] }
         p.tools.http = [{ name: 'lookup', description: 'Looks up.', method: 'GET', url: 'https://x.example' }]
-        p.tools.bundled = { workingMemory: { enabled: true } }
-        p.tools.access = { roles: { employee: ['lookup'] } }
         p.actions = { wire_money: { authChallenge: { type: 'device' } } }
       })
     )
-    expect(message).toContain('agent-pack declares tools under keys that tools.sources replaced')
-    expect(message).toContain('mcp.servers.crm is withdrawn: declare each MCP server as an entry of tools.sources')
-    expect(message).toContain('with type: mcp, and its toolAccess as access')
-    expect(message).toContain('tools.http.lookup is withdrawn: declare each HTTP tool as an entry of tools.sources')
-    expect(message).toContain('with type: http')
-    expect(message).toContain('tools.bundled.workingMemory is withdrawn')
-    expect(message).toContain('with type: bundled and bundled: workingMemory')
-    expect(message).toContain(
-      'tools.access is withdrawn: each source declares the tier model of its own tools in tools.sources.<id>.access'
-    )
-    expect(message).toContain(
-      'actions.wire_money is withdrawn: declare its step-up in the source of the tool, as tools.sources.<id>.tools.wire_money.stepUp'
-    )
+    expect(message).toContain('agent-pack fails schema validation')
+    expect(message).toContain('must NOT have additional properties (mcp)')
+    expect(message).not.toContain('is withdrawn')
   })
 
-  it('refuses the pack of the previous shape as it was written, before the schema names anything', () => {
-    const old = {
-      ...doc(),
-      tools: { http: [], bundled: { workingMemory: { enabled: true } }, access: { default: 'none', roles: {} } },
+  it('refuses lazy and reconnect on an MCP server: nothing read them, the agent connects on first need (TOOL-MCP-003)', () => {
+    for (const key of ['lazy', 'reconnect']) {
+      const message = refusal(doc((p) => (p.tools.sources.websearch[key] = true)))
+      expect(message).toContain('agent-pack fails schema validation')
+      expect(message).toContain(`(${key})`)
     }
-    const message = refusal(old)
-    expect(message).toContain('tools.http is withdrawn')
-    expect(message).not.toContain('schema validation')
   })
 })
 

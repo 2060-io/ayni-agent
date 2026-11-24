@@ -18,7 +18,7 @@ identity:
   #       request: on-demand        # on-connect (default): identified or refused
   roles:
     employee: { description: Any verified home employee. }
-    # no role reads other people's conversations: a role carries no crossSession (RBAC-XSESS-005)
+    # no role reads other people's conversations: a role carries no scope of conversation reads (RBAC-XSESS-005)
     manager: { description: Approves sensitive actions., canApprove: true }
     operator: { description: Support operators. }
     guest: { description: Authenticated peers without a recognized backing identity. }

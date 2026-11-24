@@ -28,7 +28,6 @@ import { conversationKey, type TurnEvent, type TurnSink, withheldValue } from '.
 import { normalizeClient, SessionError } from '../../core/sessions.js'
 import { type SpaceAccess, SpaceError, spaceIdOf } from '../../core/spaces.js'
 import type { SpaceToolsChanged } from '../../core/spaceTools.js'
-import { profileAtLeast } from '../../core/toolGate.js'
 import {
   type ClientDescription,
   type Conversation,
@@ -77,7 +76,6 @@ interface RunAgentInput {
   messages?: { id?: string; role: string; content?: unknown }[]
   tools?: unknown[]
   forwardedProps?: { ayni?: AyniAction }
-  resume?: { interruptId: string; status: string; payload?: unknown }[]
 }
 
 const ajv = new Ajv2020({ allErrors: true, strict: false })
@@ -621,17 +619,10 @@ export class AgUiRoutes {
           : Array.isArray(content)
             ? (content as { type: string; text?: string }[]).map((p) => p.text ?? '').join(' ')
             : ''
-      let resumeAction: AyniAction | undefined
-      const resumed = input.resume?.find((r) => r.status === 'resolved')
-      if (resumed?.payload && typeof resumed.payload === 'object') {
-        const p = resumed.payload as { menuId?: string; itemId?: string }
-        if (p.menuId && p.itemId) resumeAction = { kind: 'menu.select', menuId: p.menuId, itemId: p.itemId }
-      }
-      const effective = resumeAction ?? action
       // a conversation of a space its author left: 409 space-left, nothing recorded (PROF-RUN-014)
-      const refusal = await this.agent.runRefusal(session, effective.kind)
+      const refusal = await this.agent.runRefusal(session, action.kind)
       if (refusal) return reply.code(refusal.status).send({ error: refusal.code, message: refusal.message })
-      await this.run(session, input.runId, effective, text, reply, request, last?.id ? String(last.id) : undefined)
+      await this.run(session, input.runId, action, text, reply, request, last?.id ? String(last.id) : undefined)
     })
 
     // PROF-RUN-007
@@ -1546,20 +1537,8 @@ export class AgUiRoutes {
             return emit(ev.stepStarted(event.label))
           case 'step-finished':
             return emit(ev.stepFinished(event.label))
-          case 'activity': {
-            const activity = ev.activitySnapshot(event.messageId, event.activityType, event.content)
-            // a Connect card, only to the sessions of a client of profile 3.5 or later (PROF-TOOL-020)
-            if (event.minProfile) {
-              const least = event.minProfile
-              if (profileAtLeast(session.client.profileVersion, least)) write(activity)
-              mirror.only(
-                activity,
-                new Set(peers.filter((p) => profileAtLeast(p.client.profileVersion, least)).map((p) => p.id))
-              )
-              return
-            }
-            return emit(activity)
-          }
+          case 'activity':
+            return emit(ev.activitySnapshot(event.messageId, event.activityType, event.content))
           case 'inbound':
             // the other devices get the person's message whole; the device that sent it already shows it
             mirror.inbound(event.entry)
@@ -1755,18 +1734,8 @@ export class AgUiRoutes {
             return mirror.event(ev.stepStarted(event.label))
           case 'step-finished':
             return mirror.event(ev.stepFinished(event.label))
-          case 'activity': {
-            const activity = ev.activitySnapshot(event.messageId, event.activityType, event.content)
-            // a Connect card, only to the sessions of a client of profile 3.5 or later (PROF-TOOL-020)
-            if (event.minProfile) {
-              const least = event.minProfile
-              return mirror.only(
-                activity,
-                new Set(targets.filter((t) => profileAtLeast(t.client.profileVersion, least)).map((t) => t.id))
-              )
-            }
-            return mirror.event(activity)
-          }
+          case 'activity':
+            return mirror.event(ev.activitySnapshot(event.messageId, event.activityType, event.content))
           case 'inbound':
             // every device but the one that sent it, which shows it already and gets its echo
             mirror.inbound(event.entry)

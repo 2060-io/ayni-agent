@@ -236,7 +236,7 @@ describe('the status of a person (IDENT-STAT-001/002/003/004)', () => {
 
   it('a schema offered at connection: the rule is optional, nothing is open until the person has answered, then a guest enters', async () => {
     // asked at connection, with guests let in (D72): the person declined, and is a guest
-    useRule('required', { guests: true })
+    useRule('required', { visitors: true })
     await connect('ps-offered')
     const authentication = { rule: 'optional', credential: { jsonSchemaCredentialId: BADGE } }
     expect(statuses('ps-offered')).toEqual([
@@ -246,7 +246,7 @@ describe('the status of a person (IDENT-STAT-001/002/003/004)', () => {
     const order = calls.map((c) => c.method)
     expect(order.indexOf('sendPeerStatus')).toBeLessThan(order.indexOf('establish'))
     // the same agent, and a person who authenticated
-    useRule('required', { guests: true })
+    useRule('required', { visitors: true })
     outcome = { facts: person('did:peer:ps-offered-2', true) }
     await connect('ps-offered-2')
     expect(statuses('ps-offered-2')).toEqual([

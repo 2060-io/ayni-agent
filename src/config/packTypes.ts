@@ -11,14 +11,10 @@ export type Relation = 'home' | 'partner' | 'unrecognized'
 export type ConnectionType = 'verifiable-user-agent' | 'verifiable-service'
 export type ToolNameOrStar = string
 
-/**
- * A role: approval rights and flags, never a scope of conversation reads (RBAC-XSESS-005, decision 60): `crossSession`
- * is withdrawn and a pack that declares it is refused at start.
- */
+/** A role: approval rights and flags, never a scope of conversation reads (RBAC-XSESS-005, decision 60). */
 export interface RoleDefinition {
   description?: string
   canApprove?: boolean
-  auditor?: boolean
   /** the role reads the admin view of roles and of the changes of the user directory (IDENT-DIR-008, decision 61) */
   admin?: boolean
 }
@@ -91,10 +87,10 @@ export interface AuthenticationEntry extends EvidencePolicy {
    */
   request?: 'on-connect' | 'on-demand'
   /**
-   * whether a person may enter without the credential, as a guest (D72). `false` by default with `on-connect`:
-   * nothing opens without it. `on-demand` lets guests in by itself, and refuses `false`.
+   * whether a person may enter without the credential, as a visitor (D72). `false` by default with `on-connect`:
+   * nothing opens without it. `on-demand` lets visitors in by itself, and refuses `false`.
    */
-  guests?: boolean
+  visitors?: boolean
   /** the organizations whose credentials are accepted, by organization key; any accredited issuer when absent */
   issuers?: { organizations?: string[] }
   /** how a person obtains the credential, in the operator's words, with a link when there is one */
@@ -103,15 +99,15 @@ export interface AuthenticationEntry extends EvidencePolicy {
 
 /**
  * How an agent authenticates a person (D72, IDENT-RES-010): **required**, asked at connection and nothing opens
- * without it; **offered**, asked at connection and the person may enter as a guest instead; **on-request**,
- * nothing asked at connection and a guest authenticates when they ask.
+ * without it; **offered**, asked at connection and the person may enter as a visitor instead; **on-request**,
+ * nothing asked at connection and a visitor authenticates when they ask.
  */
 export type AuthenticationMode = 'required' | 'offered' | 'on-request'
 
 export function authenticationModeOf(entry: AuthenticationEntry | undefined): AuthenticationMode | undefined {
   if (!entry) return undefined
   if (entry.request === 'on-demand') return 'on-request'
-  return entry.guests ? 'offered' : 'required'
+  return entry.visitors ? 'offered' : 'required'
 }
 
 export interface OrganizationPattern {
@@ -537,8 +533,6 @@ export interface McpSource extends SourceFields {
   args?: string[]
   env?: Record<string, string>
   headers?: Record<string, string>
-  lazy?: boolean
-  reconnect?: boolean
   /** the tools of the server the model is given; every tool it lists when absent (TOOL-CAT-003) */
   offer?: string[]
   bindings?: SourceBinding[]

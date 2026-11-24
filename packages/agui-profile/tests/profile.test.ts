@@ -206,12 +206,10 @@ describe('schemas', () => {
       })
     ).toBe(true)
     expect(validate({ client: { name: 'ayni-ui', version: '3.3.0', platform: 'web' }, spaceId: 7 })).toBe(false)
-    // 3.4: the version of the profile the client implements (PROF-SESS-016)
-    expect(validate({ client: { name: 'ayni-ui', version: '3.4.0', platform: 'web', profileVersion: '3.4' } })).toBe(
-      true
-    )
+    // a client's profile version is no part of the body any more (PROF-SESS-016 withdrawn): a client that still sends
+    // one is not refused, and nothing reads it
     expect(validate({ client: { name: 'ayni-ui', version: '3.4.0', platform: 'web', profileVersion: 'four' } })).toBe(
-      false
+      true
     )
   })
 

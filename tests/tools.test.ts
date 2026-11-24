@@ -777,27 +777,17 @@ describe('the confirmation of a call (TOOL-CALL-003..008, PROF-TOOL-007/008/012,
     expect((await running.agent.store.approvals.list({})).length).toBe(before)
   })
 
-  it('runs no call when no session of the conversation can show the card, nor for a service (TOOL-CALL-005, PROF-SESS-016)', async () => {
-    const old = await open(ana, { spaceId: salesEu.id, profileVersion: null })
+  it('asks the card of every bound AG-UI session of the conversation, whatever its client declares, and none of a service (TOOL-CALL-005)', async () => {
+    // a client that declares no profile version is asked the card: there is no run-time test of a version any more
+    const unversioned = await open(ana, { spaceId: salesEu.id, profileVersion: null })
     model.script = [{ calls: [{ name: 'create-note', arguments: { company: 'Acme', note: 'n' } }] }, { text: 'ok' }]
     const before = crm.calls.length
-    await run(old, 'note')
-    expect(toolAnswers().at(-1)).toBe(
-      `Add a note needs the person's confirmation, which could not be asked here: it did not run.\n\n${ONE_CALL}`
-    )
-    expect(crm.calls.length).toBe(before)
-    const [record] = await running.agent.store.toolCalls.list({
-      conversationId: await conversationOf(old.sessionId),
-      limit: 1,
-    })
-    expect(record?.outcome).toBe('unavailable')
-    // the same conversation open in a client of 3.4 too gets the card there
-    const current = await otherDevice(ana, await conversationOf(old.sessionId))
-    model.script = [{ calls: [{ name: 'create-note', arguments: { company: 'Acme', note: 'n' } }] }, { text: 'ok' }]
-    const turn = start(old, 'note')
-    const pending = await pendingConfirmation(await conversationOf(old.sessionId))
-    await decide(current, pending.id, 'reject')
+    const turn = start(unversioned, 'note')
+    const pending = await pendingConfirmation(await conversationOf(unversioned.sessionId))
+    expect(pending.kind).toBe('confirmation')
+    await decide(unversioned, pending.id, 'reject')
     await turn
+    expect(crm.calls.length).toBe(before)
     // a service peer is asked no card: its call does not run (TOOL-CALL-005)
     const service = await device('svc', ['sales'])
     await addMember(salesEu.id, service.principal.id)

@@ -134,11 +134,6 @@ export interface ClientDescription {
   platform: string
   /** what the phone shows when it links this session: "Firefox on Linux", "Ayni on iPhone" (CHAN-BIND-015) */
   description?: string
-  /**
-   * the version of the AG-UI profile the client implements (PROF-SESS-016): a confirmation card is asked only of a
-   * session whose client declared 3.4 or later (TOOL-CALL-005); a session without it is one of profile 3.3
-   */
-  profileVersion?: string
 }
 
 export interface BindingState {
@@ -754,7 +749,6 @@ export type TrustBoundKind =
   | 'authentication'
   | 'credential-exchange'
   | 'auth-challenge'
-  | 'authorization'
   | 'confirmation'
   | 'signature'
   | 'link-session'
@@ -811,7 +805,6 @@ export const TRUST_BOUND_KINDS: readonly string[] = [
   'authentication',
   'credential-exchange',
   'auth-challenge',
-  'authorization',
   'confirmation',
   'signature',
   'link-session',

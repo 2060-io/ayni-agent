@@ -1197,12 +1197,14 @@ describe('what the model knows, and the Connect card (TOOL-CONN-010..012, PROF-T
     expect(JSON.stringify(model.requests.at(-1)?.messages)).toContain('The Connect card of GitHub was shown')
   })
 
-  it('answers unavailable, with no card, in a conversation open only in a 3.4 client (PROF-SESS-016)', async () => {
-    const old = await open(ana, { profileVersion: '3.4' })
-    model.script = [{ calls: [{ name: 'offer_connection', arguments: { source: 'github' } }] }, { text: 'ok' }]
-    const result = await run(old, 'issues')
-    expect(toolAnswers().at(-1)).toMatch(/^unavailable: /)
-    expect(result.events.some((e) => e.activityType === ACTIVITY.connect)).toBe(false)
+  it('shows the card in a conversation open in a client that declares an earlier profile, or none (no run-time version test)', async () => {
+    for (const profileVersion of ['3.4', null]) {
+      const conversation = await open(ana, { profileVersion })
+      model.script = [{ calls: [{ name: 'offer_connection', arguments: { source: 'github' } }] }, { text: 'ok' }]
+      const result = await run(conversation, 'issues')
+      expect(toolAnswers().at(-1)).toMatch(/^shown/)
+      expect(result.events.some((e) => e.activityType === ACTIVITY.connect)).toBe(true)
+    }
   })
 
   it('answers connected once the person connected meanwhile; the next turn has the tools and no line, its system parts and history as they were (LLM-CACHE-005)', async () => {

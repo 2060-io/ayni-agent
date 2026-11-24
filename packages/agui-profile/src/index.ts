@@ -2,6 +2,10 @@
  * Ayni AG-UI Profile 3.5 (2060-io/ayni-spec, v4/ayni-agui-profile/profile.md).
  * Every name below cites the section or the PROF-* requirement it implements.
  *
+ * 3.5, package 3.5.2 (the clean spec, ayni-spec PR #123): `client.profileVersion` (PROF-SESS-016), the routed kind
+ * `authorization` and the interrupts with `resume` (PROF-RUN-006) are withdrawn; a client that sends a version is not
+ * refused, and nothing reads it.
+ *
  * 3.5, amended 2026-11-21 (ayni-spec agent D114, found on devnet): approvals reach each person once. The requester's
  * card is one `ayni.approval` activity of the conversation where it was asked, replaced in place by each later status
  * (PROF-TOOL-009); the approver gets no card and no `ayni.approval.request`, which is withdrawn: the request is on their
@@ -191,11 +195,6 @@ export interface ClientDescription {
   platform: ClientPlatform | (string & {})
   /** what the phone shows when it links this session: "Firefox on Linux", "Ayni on iPhone" (PROF-SESS-014) */
   description?: string
-  /**
-   * the version of this profile the client implements (3.4, PROF-SESS-016): the agent asks the confirmation of a tool
-   * call only of sessions whose client declared 3.4 or later. A client that implements 3.4 sends it.
-   */
-  profileVersion?: string
 }
 
 export function isClientPlatform(value: unknown): value is ClientPlatform {
@@ -398,7 +397,6 @@ export type CapabilityKind =
   | 'authentication'
   | 'credential-exchange'
   | 'auth-challenge'
-  | 'authorization'
   | 'confirmation'
   | 'signature'
   | 'link-session'
@@ -820,11 +818,6 @@ export interface MemoryUpdateActivity {
   spaceId: string
   action: MemoryAction
 }
-
-/** Interrupt reasons the agent uses (PROF-RUN-006). */
-export const INTERRUPT_REASON = {
-  menu: 'ayni.menu',
-} as const
 
 /** RunError codes the agent uses (PROF-RUN-007). */
 export const RUN_ERROR_CODE = {

@@ -51,8 +51,8 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
 15. **Stub providers** (`stub`) exist for the model, embeddings, speech-to-text, vision and image
     generation so the whole pipeline runs offline; the stub model answers `/call <tool> {json}` with
     a tool call, which the tests use.
-16. **Interrupts.** Inline menus are delivered as activities and answered with `menu.select` (or a
-    `resume` entry carrying `menuId`/`itemId`); the run is not suspended with an interrupt outcome.
+16. **Interrupts.** Inline menus are delivered as activities and answered with `menu.select`; the run is not
+    suspended with an interrupt outcome, and no `resume` is read (decision 76).
     Mid-run inputs that must block the model are approvals, which end the model's tool call with a
     pending result instead.
 17. **One reaction per person per message** (INTX-REACT-004, PROF-RUN-010). The current reaction of
@@ -1751,3 +1751,41 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       the same identity accepted), `identityOnDemand.test.ts` (`reveal` names the identity and asks once),
       `presentationCatalog.test.ts` and `issuance.test.ts` (the origin of `present` and `issue`). Each fails with its
       change reverted.
+76. **What the clean spec removed, removed from the code** (2026-11-23, Fabrice's answers to the clean spec, ayni-spec
+    PR #123: A1, A2, B4, B5 as revised, B11 d, F4, D13; "no backward compatibility": only the team's deployments exist).
+    - **The refusals of earlier pack keys** (A1): `crossSession` on a role (formerly RBAC-XSESS-005's refusal), the keys
+      `tools.sources` replaced (`mcp`, `tools.http`, `tools.bundled`, `tools.access`, `actions`, TOOL-CAT-011) and those
+      an account's fields replaced (`account.label`, `account.pattern`, `account.apply` as one header, TOOL-CAT-012) are no
+      longer refused in words before the schema: the schema refuses them as keys it does not know.
+    - **The sealing at start of what an earlier version kept in the clear** (A1, PRIV-ERASE-009's clause): the passes over
+      the conversations' titles and last texts, the attachments' texts and names, and the working-memory notes and
+      preferences are gone, with `listWithPlainAttachments` of the stores. Every row is written sealed.
+    - **The run-time tests of a client's profile version** (A2: PROF-SESS-016, PROF-TOOL-020, TOOL-CALL-005,
+      TOOL-CONN-011): `profileAtLeast`, `cardCapable`, `connectCapable`, an activity's `minProfile` and the mirror's
+      `only` are gone. A confirmation card and a Connect card go to every bound AG-UI session of the conversation;
+      `client.profileVersion` is no part of the session request (a client that still sends it is not refused).
+    - **The MCP keys `lazy` and `reconnect`** (B11 d), which nothing read: the agent connects on first need and again
+      after a drop (TOOL-MCP-003). The example pack no longer sets `lazy`.
+    - **The routed capability kind `authorization`** (F4): an approval of someone else's request is never in a
+      conversation (D114).
+    - **Interrupts and `resume`** (B4, PROF-RUN-006): the agent never ended a run with an interrupt; it no longer reads a
+      run's `resume` as a menu selection, and `INTERRUPT_REASON` leaves the profile package.
+    - **The role key `auditor`** (B5 as revised): the admin interface's roles are the roles named `auditor` and
+      `operator`, declared like any other and given in the directory (RBAC-XSESS-008), in their own pull request. The
+      example pack's role `auditor` keeps its name and loses the flag.
+    - **`visitors`** (D13): the authentication entry's key that lets a person in without the credential is `visitors`,
+      not `guests`; "guest" names a member of a space of another organization. The start-up notice says visitors.
+    - **Already absent from the code:** the device policy `sessions.devices` (B1), and the issuance profile's `format`,
+      `subjectKind: service` and the claim sources `attestation` and `declared` (B3).
+    - **Profile package 3.5.3:** no `client.profileVersion` in `ClientDescription` or the create-session schema, no
+      `authorization` in `CapabilityKind`, no `INTERRUPT_REASON`.
+    - **Deployments:** the Dev Agent's pack in `2060-io/ayni-deploy` (`charts/devnet/dev-ayni-agent.yaml`) names its
+      authentication `guests: true` and must say `visitors: true` before this agent starts with it; the Welcome pack and
+      the packs of this repository carry no removed key.
+    - **Tests:** `pack.test.ts` (`crossSession`, a role's `auditor`, `guests` refused by the schema, `visitors` offered),
+      `toolSources.test.ts` (the keys `tools.sources` replaced, `lazy`, `reconnect`), `toolCatalog.test.ts` (an
+      account's former keys), `sealedMemory.test.ts` and `postgres.test.ts` (no pass at start), `tools.test.ts` (a card
+      for a client that declares no version), `connections.test.ts` (a Connect card for a client of 3.4 or of none),
+      `agui.test.ts` (a run's `resume` is not read; no routed `authorization`), the profile package's test, and the
+      renamed key in the tests of identity, flows, peer status and the directory. Each new test fails with its removal
+      reverted.

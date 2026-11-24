@@ -11,10 +11,7 @@ interface SealedFields {
   lastPreview?: string
 }
 
-export interface SealedConversations extends ConversationRepo {
-  /** Seals what an earlier version kept in the clear; returns how many it sealed. */
-  sealPlain(): Promise<number>
-}
+export type SealedConversations = ConversationRepo
 
 export function sealedConversations(repo: ConversationRepo, crypto: EntryCrypto): SealedConversations {
   const open = (c: Conversation | undefined): Conversation | undefined => {
@@ -35,15 +32,6 @@ export function sealedConversations(repo: ConversationRepo, crypto: EntryCrypto)
       (await repo.listByPrincipal(principalId, states)).map((c) => open(c) as Conversation),
     listAll: async () => (await repo.listAll()).map((c) => open(c) as Conversation),
     listBySpace: async (spaceId, opts) => (await repo.listBySpace(spaceId, opts)).map((c) => open(c) as Conversation),
-    sealPlain: async () => {
-      let sealed = 0
-      for (const c of await repo.listAll()) {
-        if (c.sealed || (!c.title && !c.lastPreview)) continue
-        await repo.save(seal(c))
-        sealed++
-      }
-      return sealed
-    },
   }
   return sealedRepo
 }
