@@ -789,7 +789,11 @@ export interface AuthenticationRecord {
   purpose: 'connection' | 'visitor' | 'step-up' | 'admin' | 'enrol'
   combination: string[]
   types: string[]
-  steps: { method: string; type: string; outcome: 'passed' | 'failed' | 'expired' }[]
+  /**
+   * every step of the flow, in order: a combination left after a declined face-match consent stays here, its face step
+   * `failed` with the reason `consent-declined` (D152)
+   */
+  steps: { method: string; type: string; outcome: 'passed' | 'failed' | 'expired'; reason?: 'consent-declined' }[]
   directoryEntryId?: string
 }
 

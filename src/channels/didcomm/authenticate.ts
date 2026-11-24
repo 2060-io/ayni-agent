@@ -1,7 +1,7 @@
 /**
  * The authentication on the phone (ayni-spec D125 to D131; IDENT-AUTH-001 to 017, IDENT-RES-019/020, IDENT-DIR-003/004;
  * flow profile §6.14, FLOW-SIGNIN-001 to 013): one `authenticate` flow, carried by authenticate/1.0 through the Ayni flow
- * plugin of the DIDComm agent (`@ayni.org/vs-agent-plugin-ayni-flow` 0.2.1).
+ * plugin of the DIDComm agent (`@ayni.org/vs-agent-plugin-ayni-flow` 0.3.0).
  *
  * 1. The agent opens the flow, valid fifteen minutes, the time of every step, and sends the `request`: the purpose, the
  *    methods and the accepted combinations, those the phone can be offered (a face match only to a phone that disclosed
@@ -12,6 +12,11 @@
  *    ones, each announced by a `step` and ended by a `step-result`: a credential (present-proof under the flow id), an
  *    email (the address, then a code), a document (mrtd under the flow id), a face match (the consent, then a call the
  *    face-verification service joins), an authenticator app's code, a passkey's assertion.
+ *    A person who declines the consent of a face match ends that step `failed` `consent-declined` (D152, FLOW-SIGNIN-012):
+ *    no call, no evidence, no refusal; the flow stays open and the person chooses, on the same request, a combination
+ *    without the declined method, within five minutes of that step's result (the flow's fifteen minutes do not change).
+ *    Every step of the new combination runs, a method that passed before included, numbered after the steps already
+ *    used in the flow (O91).
  * 4. The methods must find one identity: an entry of the user directory, else the person of a credential of another
  *    organization, else the Principal a passkey was enrolled for; on an identified connection, the same one. The agent
  *    checks it before it closes the flow, so that a refused authentication never ends `completed`.
@@ -213,8 +218,11 @@ export interface AuthenticateOptions {
 class ExchangeEvents {
   private readonly queue: AuthenticateExchange[] = []
   private waiter?: Deferred<AuthenticateExchange>
+  /** the exchange the DIDComm agent failed, whatever the agent waits for then */
+  public readonly failed = new Deferred<AuthenticateExchange>()
 
   public push(exchange: AuthenticateExchange): void {
+    if (exchange.state === 'failed') this.failed.resolve(exchange)
     if (this.waiter) {
       const w = this.waiter
       this.waiter = undefined
@@ -230,14 +238,28 @@ class ExchangeEvents {
   }
 }
 
-/** How a wait ends: what was awaited, the flow closed by the holder or by its expiry, or the step's own time. */
-type Waited<T> = { value: T } | { closed: FlowClosed } | { timeout: true }
+/** The reason of the `step-result` of a face step whose consent the person declined: no refusal (D152, flow profile §11). */
+export const CONSENT_DECLINED = 'consent-declined'
+
+/**
+ * What stops an authentication whatever it waits for: the flow closed by the holder or by its expiry, or the exchange
+ * the DIDComm agent failed (a message of the phone that broke a rule of the profile, such as a second `choice` that is
+ * not awaited, FLOW-SIGNIN-008), which the agent answers with the flow's problem report.
+ */
+type Stop =
+  | { outcome: 'closed'; closed: FlowClosed }
+  | { outcome: 'exchange-failed'; code: string; description?: string }
+
+/** How a wait ends: what was awaited, a stop, or the step's own time. */
+type Waited<T> = { value: T } | { stop: Stop } | { timeout: true }
 
 /** What a step ends in. */
 type StepEnd =
   | { outcome: 'passed'; found?: Found; evidence?: EvidenceInput; portrait?: string }
   | { outcome: 'failed' | 'expired'; reason: NotAcceptedCode }
-  | { outcome: 'closed'; closed: FlowClosed }
+  /** a face step whose consent the person declined: the person chooses another combination (D152) */
+  | { outcome: 'consent-declined' }
+  | Stop
 
 interface Run {
   options: AuthenticateOptions
@@ -247,6 +269,8 @@ interface Run {
   closed: Promise<FlowClosed>
   events: ExchangeEvents
   methods: Record<string, AuthenticationMethod>
+  /** the methods whose consent the person declined in this flow: a new choice holds none of them (D152) */
+  declined: Set<string>
   /** the identity the identifying steps found */
   found?: Found
   /** the portrait of a document read in this flow: the reference of a face match (D131) */
@@ -411,6 +435,7 @@ export class Authenticator {
       closed,
       events,
       methods,
+      declined: new Set(),
       evidence: [],
       steps: [],
     }
@@ -422,58 +447,106 @@ export class Authenticator {
   }
 
   private async drive(run: Run): Promise<AuthenticationAttempt> {
-    // the choice, within five minutes (FLOW-SIGNIN-005)
-    const choice = await this.wait(
+    // the choice, within five minutes of the request (FLOW-SIGNIN-005)
+    let chosen = await this.choice(run)
+    // the step numbers of the flow: those of a new combination follow the ones already used (D152, O91)
+    let next = 1
+    for (;;) {
+      if ('attempt' in chosen) return chosen.attempt
+      const combination = chosen.combination
+      // every step of the combination runs, a method that passed under a combination left before included (O91)
+      run.found = undefined
+      run.portrait = undefined
+      run.evidence = []
+      let declined = false
+      for (const name of runOrder(run.methods, combination)) {
+        const step = String(next++)
+        const method = run.methods[name]
+        const end = await this.step(run, step, name, method)
+        if (end.outcome === 'closed' || end.outcome === 'exchange-failed') return this.stopped(run, end)
+        if (end.outcome === 'consent-declined') {
+          // no refusal: the person chooses another combination on the same request (D152, FLOW-SIGNIN-012)
+          run.steps.push({ method: name, type: method.type, outcome: 'failed', reason: CONSENT_DECLINED })
+          run.declined.add(name)
+          declined = true
+          break
+        }
+        run.steps.push({ method: name, type: method.type, outcome: end.outcome })
+        if (end.outcome !== 'passed') return this.refuse(run, end.reason)
+        if (end.evidence) run.evidence.push(end.evidence)
+        if (end.portrait) run.portrait = end.portrait
+        if (end.found) {
+          // the methods of a combination find one identity (IDENT-DIR-004)
+          if (run.found && !sameIdentity(run.found, end.found)) return this.refuse(run, 'different-identities')
+          // of the same entry, what a credential presented is kept: its facts and its evidence
+          const withFacts = end.found.kind === 'entry' && !!end.found.facts
+          if (!run.found || (withFacts && run.found.kind === 'entry' && !run.found.facts)) run.found = end.found
+        }
+      }
+      if (!declined) {
+        const facts = await this.factsOf(run, combination)
+        if (typeof facts === 'string') return this.refuse(run, facts)
+        // the identity is checked before the flow closes: another one never ends completed (IDENT-RES-014, FLOW-SIGNIN-004)
+        const bound = run.options.bound
+        if (bound?.identityCredentialRef && !sameActor(bound, facts)) {
+          this.logger.warn(
+            { connectionId: run.options.connectionId },
+            'another identity authenticated on an identified connection: refused'
+          )
+          return this.refuse(run, 'another-identity')
+        }
+        await this.ports.flows.close(run.flowId, 'completed')
+        return { outcome: 'accepted', facts }
+      }
+      // a new choice, within five minutes of the step result that ended the declined step (D152); the flow keeps its
+      // fifteen minutes
+      chosen = await this.choice(run)
+    }
+  }
+
+  /**
+   * The person's choice, within five minutes of the request or of a step that ended `consent-declined`, and never
+   * later than the flow's expiry (FLOW-SIGNIN-005, FLOW-SIGNIN-012): unanswered otherwise, and the flow closes `expired`.
+   */
+  private async choice(run: Run): Promise<{ combination: string[] } | { attempt: AuthenticationAttempt }> {
+    const waited = await this.wait(
       run,
       async () => {
         for (;;) {
           const e = await run.events.next()
-          if (e.state === 'choice-received' || e.state === 'failed') return e
+          if (e.state === 'choice-received' && e.combination) return e.combination
         }
       },
-      Math.min(this.timings.choiceMs, run.expiresAt - Date.now())
+      Math.min(this.timings.choiceMs, this.left(run))
     )
-    if ('closed' in choice) return this.closedBy(choice.closed)
-    if ('timeout' in choice) {
+    if ('stop' in waited) return { attempt: await this.stopped(run, waited.stop) }
+    if ('timeout' in waited) {
       await this.ports.flows.close(run.flowId, 'expired', { reason: 'No choice came in time.' })
-      return { outcome: 'unanswered' }
+      return { attempt: { outcome: 'unanswered' } }
     }
-    if (choice.value.state === 'failed' || !choice.value.combination) {
-      // a choice that is not one of the request's combinations (FLOW-SIGNIN-008): refused, and not asked again
-      await this.ports.flows.problemReport(run.flowId, 'malformed', choice.value.errorDescription)
-      return { outcome: 'declined' }
-    }
-    const combination = choice.value.combination
-    for (const [i, name] of runOrder(run.methods, combination).entries()) {
-      const step = String(i + 1)
-      const method = run.methods[name]
-      const end = await this.step(run, step, name, method)
-      if (end.outcome === 'closed') return this.closedBy(end.closed)
-      run.steps.push({ method: name, type: method.type, outcome: end.outcome })
-      if (end.outcome !== 'passed') return this.refuse(run, end.reason)
-      if (end.evidence) run.evidence.push(end.evidence)
-      if (end.portrait) run.portrait = end.portrait
-      if (end.found) {
-        // the methods of a combination find one identity (IDENT-DIR-004)
-        if (run.found && !sameIdentity(run.found, end.found)) return this.refuse(run, 'different-identities')
-        // of the same entry, what a credential presented is kept: its facts and its evidence
-        const withFacts = end.found.kind === 'entry' && !!end.found.facts
-        if (!run.found || (withFacts && run.found.kind === 'entry' && !run.found.facts)) run.found = end.found
+    // a choice that holds a method whose consent the person declined is malformed (FLOW-SIGNIN-012); the DIDComm agent
+    // refuses it first
+    const declined = waited.value.filter((name) => run.declined.has(name))
+    if (declined.length)
+      return {
+        attempt: await this.stopped(run, {
+          outcome: 'exchange-failed',
+          code: 'malformed',
+          description: `The choice holds ${declined.join(', ')}, whose consent was declined.`,
+        }),
       }
-    }
-    const facts = await this.factsOf(run, combination)
-    if (typeof facts === 'string') return this.refuse(run, facts)
-    // the identity is checked before the flow closes: another one never ends completed (IDENT-RES-014, FLOW-SIGNIN-004)
-    const bound = run.options.bound
-    if (bound?.identityCredentialRef && !sameActor(bound, facts)) {
-      this.logger.warn(
-        { connectionId: run.options.connectionId },
-        'another identity authenticated on an identified connection: refused'
-      )
-      return this.refuse(run, 'another-identity')
-    }
-    await this.ports.flows.close(run.flowId, 'completed')
-    return { outcome: 'accepted', facts }
+    return { combination: waited.value }
+  }
+
+  /**
+   * The holder closed the flow or it expired (a decline, or no answer); or the DIDComm agent failed the exchange on a
+   * message of the phone that broke a rule of the profile (a choice that is not one of the combinations, a second
+   * choice that is not awaited, FLOW-SIGNIN-008): refused with the flow's problem report, and not asked again.
+   */
+  private async stopped(run: Run, stop: Stop): Promise<AuthenticationAttempt> {
+    if (stop.outcome === 'closed') return this.closedBy(stop.closed)
+    await this.ports.flows.problemReport(run.flowId, stop.code, stop.description)
+    return { outcome: 'declined' }
   }
 
   private async refuse(run: Run, code: NotAcceptedCode): Promise<AuthenticationAttempt> {
@@ -486,16 +559,23 @@ export class Authenticator {
     return closed.outcome === 'expired' ? { outcome: 'unanswered' } : { outcome: 'declined' }
   }
 
-  /** Waits for `what`, the close of the flow or `ms`, whichever comes first. */
+  /** Waits for `what`, the close of the flow, the failure of the exchange or `ms`, whichever comes first. */
   private async wait<T>(run: Run, what: () => Promise<T>, ms: number): Promise<Waited<T>> {
     let timer: NodeJS.Timeout | undefined
     const timeout = new Promise<{ timeout: true }>((resolve) => {
       timer = setTimeout(() => resolve({ timeout: true }), Math.max(0, ms))
     })
     try {
-      return await Promise.race([
+      return await Promise.race<Waited<T>>([
         what().then((value) => ({ value })),
-        run.closed.then((closed) => ({ closed })),
+        run.closed.then((closed) => ({ stop: { outcome: 'closed' as const, closed } })),
+        run.events.failed.promise.then((failed) => ({
+          stop: {
+            outcome: 'exchange-failed' as const,
+            code: failed.errorCode ?? 'malformed',
+            description: failed.errorDescription,
+          },
+        })),
         timeout,
       ])
     } finally {
@@ -503,14 +583,13 @@ export class Authenticator {
     }
   }
 
-  /** The next answer to a step (`answer-received`), or the end of the exchange the DIDComm agent recorded. */
+  /** The next answer to a step (`answer-received`); the failure of the exchange stops the wait (`wait`). */
   private async answer(run: Run, step: string, ms: number) {
     return this.wait(
       run,
       async () => {
         for (;;) {
           const e = await run.events.next()
-          if (e.state === 'failed') return undefined
           if (e.state !== 'answer-received') continue
           const entry = e.steps.find((s) => s.step === step)
           if (entry?.answer) return entry.answer
@@ -528,7 +607,7 @@ export class Authenticator {
     run: Run,
     step: string,
     outcome: 'passed' | 'failed' | 'expired',
-    reason?: NotAcceptedCode
+    reason?: NotAcceptedCode | typeof CONSENT_DECLINED
   ): Promise<void> {
     await this.ports.client.sendAuthenticateStepResult(run.threadId, {
       step,
@@ -588,7 +667,7 @@ export class Authenticator {
       () => this.ports.awaitPresentation(proofExchangeId, Math.max(0, this.left(run))),
       this.left(run)
     )
-    if ('closed' in waited) return { outcome: 'closed', closed: waited.closed }
+    if ('stop' in waited) return waited.stop
     if ('timeout' in waited) return this.ended(run, step, 'expired', 'step-expired')
     const record = waited.value
     const ok = record.verified && record.state !== 'declined' && record.state !== 'abandoned'
@@ -596,7 +675,7 @@ export class Authenticator {
       // a person who declines: the wallet's problem report comes first, then the close of the flow (IDENT-RES-019)
       if (record.state === 'declined' || /declin/i.test(record.errorMessage ?? '')) {
         const closed = await this.wait(run, () => run.closed, 5_000)
-        if ('closed' in closed) return { outcome: 'closed', closed: closed.closed }
+        if ('stop' in closed) return closed.stop
         if ('value' in closed) return { outcome: 'closed', closed: closed.value }
       }
       if (record.errorMessage === 'timeout') return this.ended(run, step, 'expired', 'step-expired')
@@ -618,7 +697,7 @@ export class Authenticator {
   private async emailStep(run: Run, step: string, name: string): Promise<StepEnd> {
     await this.send(run, { step, method: name, type: 'email', ask: 'address' })
     const given = await this.answer(run, step, Math.min(this.timings.emailMs, this.left(run)))
-    if ('closed' in given) return { outcome: 'closed', closed: given.closed }
+    if ('stop' in given) return given.stop
     if ('timeout' in given) return this.ended(run, step, 'expired', 'step-expired')
     const address = String(given.value?.address ?? '')
       .trim()
@@ -655,7 +734,7 @@ export class Authenticator {
     await this.send(run, prompt())
     for (;;) {
       const answered = await this.answer(run, step, Math.min(expiresAt - Date.now(), this.left(run)))
-      if ('closed' in answered) return { outcome: 'closed', closed: answered.closed }
+      if ('stop' in answered) return answered.stop
       if ('timeout' in answered) return this.ended(run, step, 'expired', 'step-expired')
       const answer = answered.value
       if (!answer) return this.ended(run, step, 'failed', 'step-failed')
@@ -739,13 +818,13 @@ export class Authenticator {
     this.documents.set(key, deferred)
     const waited = await this.wait(run, () => deferred.promise, this.left(run))
     this.documents.delete(key)
-    if ('closed' in waited) return { outcome: 'closed', closed: waited.closed }
+    if ('stop' in waited) return waited.stop
     if ('timeout' in waited) return this.ended(run, step, 'expired', 'step-expired')
     if (!waited.value.received) {
       // the person refused, or the phone gave up on the chip: a refusal closes the flow, a failure fails the step
       if (/refus/.test(String(waited.value.data.reason ?? ''))) {
         const closed = await this.wait(run, () => run.closed, 5_000)
-        if ('closed' in closed) return { outcome: 'closed', closed: closed.closed }
+        if ('stop' in closed) return closed.stop
       }
       return this.ended(run, step, 'failed', 'step-failed')
     }
@@ -778,7 +857,7 @@ export class Authenticator {
     }
   }
 
-  // ---- face-match: the consent, then the call (IDENT-AUTH-010/011, FLOW-SIGNIN-012) --------------------------------
+  // ---- face-match: the consent, then the call, or a consent declined (IDENT-AUTH-010/011, FLOW-SIGNIN-012, D152) ----
 
   private async faceStep(run: Run, step: string, name: string, method: AuthenticationMethod): Promise<StepEnd> {
     const agent = this.pack.metadata?.displayName ?? 'The agent'
@@ -790,8 +869,14 @@ export class Authenticator {
       text: `${agent} compares your live face with your reference picture, to confirm it's you. Nothing of your face is kept.`,
     })
     const consent = await this.answer(run, step, this.left(run))
-    if ('closed' in consent) return { outcome: 'closed', closed: consent.closed }
+    if ('stop' in consent) return consent.stop
     if ('timeout' in consent) return this.ended(run, step, 'expired', 'step-expired')
+    if (consent.value?.consent === false) {
+      // declined: no call, nothing recorded, no refusal; the step ends `consent-declined` and the person chooses
+      // another combination on the same request (D152, IDENT-AUTH-011, FLOW-SIGNIN-012)
+      await this.result(run, step, 'failed', CONSENT_DECLINED)
+      return { outcome: 'consent-declined' }
+    }
     if (consent.value?.consent !== true) return this.ended(run, step, 'failed', 'step-failed')
     const reference = await this.referenceOf(run, method)
     if (!reference) return this.ended(run, step, 'failed', 'no-match')
@@ -814,7 +899,7 @@ export class Authenticator {
       return this.ended(run, step, 'failed', 'step-failed')
     }
     const waited = await this.wait(run, () => outcome, this.left(run))
-    if ('closed' in waited) return { outcome: 'closed', closed: waited.closed }
+    if ('stop' in waited) return waited.stop
     if ('timeout' in waited || waited.value === 'expired') return this.ended(run, step, 'expired', 'step-expired')
     if (waited.value !== 'passed') return this.ended(run, step, 'failed', 'step-failed')
     await this.result(run, step, 'passed')
@@ -860,7 +945,7 @@ export class Authenticator {
     await this.send(run, { step, method: name, type: 'authenticator-app', ask: 'code', triesLeft: tries })
     for (;;) {
       const answered = await this.answer(run, step, this.left(run))
-      if ('closed' in answered) return { outcome: 'closed', closed: answered.closed }
+      if ('stop' in answered) return answered.stop
       if ('timeout' in answered) return this.ended(run, step, 'expired', 'step-expired')
       if (!answered.value) return this.ended(run, step, 'failed', 'step-failed')
       const code = String(answered.value.code ?? '')
@@ -891,7 +976,7 @@ export class Authenticator {
     const challenge = randomBytes(32).toString('base64url')
     await this.send(run, { step, method: name, type: 'passkey', ask: 'assertion', challenge, rpId: this.ports.rpId })
     const answered = await this.answer(run, step, this.left(run))
-    if ('closed' in answered) return { outcome: 'closed', closed: answered.closed }
+    if ('stop' in answered) return answered.stop
     if ('timeout' in answered) return this.ended(run, step, 'expired', 'step-expired')
     const assertion = answered.value?.assertion
     if (!assertion) return this.ended(run, step, 'failed', 'step-failed')
