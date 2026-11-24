@@ -7,9 +7,11 @@
  * - **Show Admin** asks the person's phone to re-authenticate with the set of methods the agent-pack names
  *   (`admin.authentication.methods`): an `authenticate` flow of purpose `admin`. The request is answered at once; a second
  *   request of the same device while one waits answers the one that waits.
- * - **The grant** belongs to the device that asked (its device handle) and to the roles the person held at the
- *   confirmation. It lasts `admin.grantMinutes` (30 by default) from the confirmation: use never moves its end, and
- *   only a new confirmation opens a new one.
+ * - **The grant** belongs to the device that asked and to the roles the person held at the confirmation. The device
+ *   is its device handle; for the phone, whose every session made through a session grant gets a handle of its own, it
+ *   is the phone's connection (`deviceOf`), so that the grant follows the phone to its next session, and to no other
+ *   device and no other Principal. It lasts `admin.grantMinutes` (30 by default) from the confirmation: use never
+ *   moves its end, and only a new confirmation opens a new one.
  * - **Its end:** its time, Hide Admin, a role it opened for lost, its device unlinked, the phone's connection closed.
  *   Each end, each opening and each request that opened none is told to every bound session of the device
  *   (`ayni.admin.changed`); the opening and the end are written to the admin audit.
@@ -31,7 +33,7 @@ const GRANTS_KEY = 'admin-grants'
 export interface AdminGrant {
   id: string
   principalId: string
-  /** the device it belongs to: the device handle of the session that asked */
+  /** the device it belongs to: `deviceOf` the session that asked */
   device: string
   /** the admin roles the person held at the confirmation */
   roles: AdminRole[]
@@ -68,6 +70,11 @@ export interface AdminGrantPorts {
   principal(id: string): Promise<Principal | undefined>
   /** `ayni.admin.changed` to every bound session of the device (PROF-ADMIN-004) */
   announce(principalId: string, device: string, value: AdminChanged): Promise<void>
+  /**
+   * The devices (`deviceOf`) of the Principal's sessions that carried a device handle: the handle itself, and the phone
+   * when the handle was minted for one of its sessions, so that unlinking that handle ends the phone's grant too
+   */
+  devicesOfHandle?(principalId: string, handle: string): Promise<string[]>
 }
 
 /**
@@ -85,8 +92,14 @@ export function reauthenticationOutcome(
   return 'failed'
 }
 
-/** The device a session belongs to: its device handle, or the session itself when it has none. */
-export function deviceOf(session: Pick<Session, 'id' | 'deviceHandle'>): string {
+/**
+ * The device a session belongs to (RBAC-ADMIN-003): the phone, by its connection, for a session made through a session
+ * grant or a sibling of one, since each of these gets a device handle of its own (`createFromGrant`); else its device
+ * handle, or the session itself when it has none. A browser bound by the phone, or by a device secret, never carries
+ * the connection: it is a device of its own.
+ */
+export function deviceOf(session: Pick<Session, 'id' | 'deviceHandle' | 'grantConnectionId'>): string {
+  if (session.grantConnectionId) return `phone:${session.grantConnectionId}`
   return session.deviceHandle ?? `session:${session.id}`
 }
 
@@ -208,7 +221,7 @@ export class AdminGrants {
   }
 
   /** The request that waits for a device, for the tests: resolves once it has ended. */
-  public waitFor(session: Pick<Session, 'id' | 'deviceHandle'>): Promise<void> {
+  public waitFor(session: Pick<Session, 'id' | 'deviceHandle' | 'grantConnectionId'>): Promise<void> {
     return this.pending.get(deviceOf(session))?.done ?? Promise.resolve()
   }
 
@@ -303,12 +316,18 @@ export class AdminGrants {
       if (grant.principalId === principalId) await this.end(grant.device, why, grant.id)
   }
 
-  /** The grant of a device unlinked ends (IDENT-DEV-005); every device of the Principal when none is named. */
+  /**
+   * The grant of a device unlinked ends (IDENT-DEV-005): the handle's, and the phone's when the handle was one of its
+   * sessions'; every device of the Principal when none is named.
+   */
   public async deviceUnlinked(principalId: string, handle?: string): Promise<void> {
     if (handle === undefined) return this.endForPrincipal(principalId, 'device-unlinked')
     await this.restore()
-    const grant = this.grants.get(handle)
-    if (grant?.principalId === principalId) await this.end(handle, 'device-unlinked', grant.id)
+    const devices = new Set([handle, ...((await this.ports.devicesOfHandle?.(principalId, handle)) ?? [])])
+    for (const device of devices) {
+      const grant = this.grants.get(device)
+      if (grant?.principalId === principalId) await this.end(device, 'device-unlinked', grant.id)
+    }
   }
 
   /** After a reload of the user directory: a grant whose Principal lost a role it opened for ends (RBAC-ADMIN-004). */

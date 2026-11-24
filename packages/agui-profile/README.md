@@ -19,7 +19,7 @@ the stewards, the approval timeouts, the approval policy of a tool of a space, t
 notices of a space's governance; from 3.5.5, admin access: `features.admin`, the admin state, Show Admin and Hide
 Admin, `ayni.admin.changed`, Audit and Operations and their errors; from 3.5.6, a step-up's re-authentication routed as
 `authentication`, the challenge types `device` and `document`, a tool's `stepUp` as the method types it asks, and
-`ayni.messages.withheld` for a credential only) and the few AG-UI message shapes it reuses.
+`ayni.messages.withheld` for a credential only; from 3.5.7, a person found by name in Audit) and the few AG-UI message shapes it reuses.
 
 ```ts
 import { APP_LINK_DOMAIN, buildAppLink, parseAppLink, PROFILE_VERSION } from '@ayni.org/ayni-agui-profile'

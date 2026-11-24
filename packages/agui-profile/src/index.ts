@@ -2,6 +2,11 @@
  * Ayni AG-UI Profile 3.5 (2060-io/ayni-spec, v4/ayni-agui-profile/profile.md).
  * Every name below cites the section or the PROF-* requirement it implements.
  *
+ * 3.5, package 3.5.7 (admin access, after 3.5.6): a person found by name for the filters of Audit that take a
+ * Principal, `GET {sessions}/admin/audit/people?q=&reason=` (`AuditPerson`, `AuditPeopleResponse`; `400 bad-request`
+ * with `field: 'q'` for an empty `q`). The admin grant of the phone holds across its sessions made through a session
+ * grant: nothing on the wire changes for it. Additive.
+ *
  * 3.5, package 3.5.6 (authentication, ayni-spec PR #127, agent D127, D128, D130): a step-up's re-authentication is
  * routed as `kind: 'authentication'` with no `challengeType` (PROF-MAP-003); `ChallengeType` is `device` or `document`
  * (a face match is a method of the authentication, never a challenge); a tool's `stepUp` in the settings of a space is
@@ -2045,6 +2050,25 @@ export interface AuditEvidenceResponse extends AdminAudited {
  */
 export interface AuditToolCallsResponse extends AdminAudited {
   calls: Record<string, unknown>[]
+}
+
+/**
+ * One person of `GET {sessions}/admin/audit/people?q=&reason=` (3.5.7): a Principal the agent knows by name (a holder of
+ * a directory entry, a person an authentication identified), to give to the filters that take a `principal`. The
+ * address the agent matched `q` against is never in it.
+ */
+export interface AuditPerson {
+  principalId: string
+  name: string
+  department: string | null
+}
+
+/**
+ * `GET {sessions}/admin/audit/people?q=&reason=` (3.5.7): at most twenty people whose name, or address when the agent
+ * knows one, contains `q`, without regard to case or marks, by name. An empty `q` is `400 bad-request`, `field: 'q'`.
+ */
+export interface AuditPeopleResponse extends AdminAudited {
+  people: AuditPerson[]
 }
 
 /** One record of the admin audit: who (the verified Principal and the grant, or the break-glass token), why, what. */

@@ -90,6 +90,11 @@ export function registerAdminAccess(app: FastifyInstance, base: string, deps: Ad
       return { messages, nextBefore, auditId }
     })
   )
+  // a person found by name, for the filters above that take a Principal (Fabrice, 2026-11-24)
+  app.get(
+    `${base}/admin/audit/people`,
+    as('auditor', (caller, reason, _request, q) => service.people(caller, reason, q.q))
+  )
   app.get(
     `${base}/admin/audit/evidence`,
     as('auditor', (caller, reason, _request, q) => service.evidence(caller, reason, q.principal))

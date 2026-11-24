@@ -193,6 +193,8 @@ export class SessionService {
       locale,
       conversationId: conversationId ?? grant.conversationId,
       newConversation: newConversation || grant.newConversation,
+      // the phone that redeemed the grant: its sessions share its admin grant, whatever device handle each gets
+      grantConnectionId: grant.connectionId,
       ...(spaceId ? { spaceId } : {}),
       resumedFromSessionId: resumeSessionId,
       tokenHash: hash,
@@ -497,6 +499,7 @@ export class SessionService {
       locale: locale ?? parent.locale,
       parentSessionId: parent.id,
       deviceHandle: parent.deviceHandle,
+      ...(parent.grantConnectionId ? { grantConnectionId: parent.grantConnectionId } : {}),
       conversationId,
       newConversation,
       ...(spaceId ? { spaceId } : {}),

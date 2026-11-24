@@ -2109,3 +2109,37 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       `tests/directoryBadge.test.ts` rewritten for D130. They fail on the code before this change. The tests of the email
       check (`emailCode.test.ts`, `emailCheckMessages.test.ts`, its part of `serviceLanguage.test.ts` and two PostgreSQL
       tests) are removed or rewritten: the persistence of translations is now tested on `ServiceLanguage` directly.
+81. **Admin access: a person found by name in Audit; the phone's grant holds across its sessions** (2026-11-24,
+    Fabrice's decisions of 2026-11-24 on admin access; RBAC-ADMIN-003, RBAC-ADMIN-004, RBAC-ADMIN-008, PROF-ADMIN-005,
+    PROF-ADMIN-007; ayni-spec PR #133). Comes after entry 80 (PR #127).
+    - **A person found by name** (`GET {sessions}/admin/audit/people?q=&reason=` and the same path of the internal
+      admin interface, `AdminService.people`): the filters of Audit take a Principal id, which nobody types. For an
+      `auditor` with an open grant, refused and recorded as every Audit read is (`403 admin-closed`, `403 not-auditor`,
+      `400 reason-required`, in that order, then `400 bad-request` with `field: 'q'` for an empty `q`; the record's
+      detail is `{ what: 'people', q, count }`). It answers `{ people: [{ principalId, name, department }], auditId }`,
+      at most twenty, by name: the Principals of a person (`verifiable-user-agent`) that hold a directory entry the
+      directory still lists or that an authentication identified (`identityCredentialRef`), and have a name, whose name
+      or address contains `q`, compared with the directory's `fold` (no case, no marks). The name and the department are
+      the entry's when the Principal holds one, else `identityAttributes.userName` and `.department`; the address is the
+      entry's, else `identityAttributes.email`; it is matched and never answered (IDENT-DIR-007). A visitor (named by no
+      authentication), a service and an entry nobody holds on the agent (no Principal to filter by) are not found.
+      `auditId` is added as on every other answer of Audit.
+    - **The phone's grant** (`deviceOf`): a session the phone makes through a session grant gets a new device handle
+      each time (`createFromGrant` mints one in `rotateDevice`), so a grant keyed to the handle was refused
+      `admin-closed` on the phone's next session while still open. A session made from a grant now keeps the
+      connection that received the grant (`Session.grantConnectionId`, inherited by its siblings), and `deviceOf` keys
+      it `phone:<connectionId>`: every session of the phone shares its one grant, and hears `ayni.admin.changed`. A
+      browser the phone bound, and a session bound by the device secret of one of the phone's sessions, carry no
+      connection: each is a device of its own. Another Principal never uses it: the grant names its Principal, and a
+      session grant is redeemed only on the connection of the Principal it was issued to. Unlinking the handle of any
+      of the phone's sessions ends the phone's grant (`devicesOfHandle`), as unlinking a browser ends the browser's. The
+      sessions of a phone made before this change carry no connection: their grant stays keyed to their handle until
+      it ends.
+    - **Profile package 3.5.7** (after 3.5.6 of PR #127): `AuditPerson` and `AuditPeopleResponse`. Nothing changes on
+      the wire for the phone's grant.
+    - **Tests:** `adminAccess.test.ts` (the refusals in order and the empty `q`; names, case and marks, the address
+      matched and never answered, a visitor and a nameless Principal left out, the record; at most twenty; the name,
+      department and address of a directory entry; the grant on the phone's next session and its siblings, Hide Admin
+      from one ending it for all; not the browser, not a session bound by the phone's device secret; not another
+      Principal; the phone's handle unlinked), `postgres.test.ts` (the connection kept on a stored session). With `src/`
+      before this change the eight new tests of `adminAccess.test.ts` fail.

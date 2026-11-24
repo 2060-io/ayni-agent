@@ -1190,12 +1190,17 @@ re-authenticate with the set of methods `admin.authentication.methods` names: an
 `admin` whose one combination is that set (D127, IDENT-AUTH-015). The set names methods of
 `identity.authentication.methods`, and may hold confirming methods only (an authenticator app, a face match): every
 method must find or confirm the Principal of the connection. Once the phone confirms, an **admin grant** opens for the
-device that asked (the browser or the phone), with the roles the person holds then. It lasts `admin.grantMinutes`
-(30 by default) **counted from the confirmation**: use never extends it, and only a new confirmation opens a new one.
-It ends at its time, on Hide Admin, when the person loses a role it opened for (a reload of the directory), when its
-device is unlinked and when the phone's connection closes. Every read of Audit and every action of Operations carries
-a reason the person types, names the verified Principal and the grant, and leaves a record in the admin audit; so do
-the grant's opening and its end. Nothing Audit reads reaches a model.
+device that asked (the browser or the phone), with the roles the person holds then. The phone is one device across
+its sessions: each session it makes through a session grant gets a device handle of its own, so its grant belongs to
+its connection, and holds on its next session; no browser, and no other person, ever uses it. It lasts
+`admin.grantMinutes` (30 by default) **counted from the confirmation**: use never extends it, and only a new
+confirmation opens a new one. It ends at its time, on Hide Admin, when the person loses a role it opened for (a reload
+of the directory), when its device is unlinked (for the phone, the handle of any of its sessions) and when the phone's
+connection closes. Every read of Audit and every action of Operations carries a reason the person types, names the
+verified Principal and the grant, and leaves a record in the admin audit; so do the grant's opening and its end.
+Audit finds a person by name (`GET {sessions}/admin/audit/people?q=`: at most twenty Principals the agent knows by
+name, a holder of a directory entry or a person an authentication identified, matched on the name and on the address
+the agent knows, never answered), to give to its filters that take a Principal. Nothing Audit reads reaches a model.
 
 **The internal admin interface** (D134, RBAC-XSESS-009) exists only when `admin.internal.enabled` is `true` (`false` by
 default). Enabled, it listens on `ADMIN_PORT` (3011) on the loopback, never through a Service or an ingress; it serves
