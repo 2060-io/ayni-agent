@@ -19,7 +19,7 @@ import {
 import { Ajv2020 } from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
-import { messageDeletionWindowSeconds } from '../../config/packTypes.js'
+import { admitsUnidentified, messageDeletionWindowSeconds } from '../../config/packTypes.js'
 import type { AyniAgent, QueuedRun } from '../../core/agent.js'
 import { CLIENT_METADATA_PATH, type ConnectionsChanged, OAUTH_CALLBACK_PATH } from '../../core/connections.js'
 import { conversationOf } from '../../core/conversationOf.js'
@@ -215,6 +215,10 @@ export class AgUiRoutes {
         ...(this.agent.connections?.personalSources().length ? { connections: true } : {}),
         // the Notifications of a space and of the agent: approvals, pending and past (ayni-spec D114, PROF-DESC-011)
         notifications: true,
+        // a person may enter without authenticating, as a visitor: the agent-pack names no authentication schema, or
+        // one offered or asked on request (IDENT-RES-007, IDENT-RES-010, PROF-DESC-012); an agent that requires it
+        // declares nothing
+        ...(admitsUnidentified(this.agent.pack) ? { visitors: true } : {}),
       },
       locales: [this.agent.pack.language.agent],
     }

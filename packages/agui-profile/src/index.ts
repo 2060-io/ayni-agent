@@ -122,6 +122,12 @@ export interface DescriptorFeatures {
    * Notifications of an agent that does not declare it.
    */
   notifications?: boolean
+  /**
+   * the agent lets a person in without authenticating, as a visitor (3.5.2, PROF-DESC-012): it names no authentication
+   * schema, or one that lets visitors in (offered, or on request; agent IDENT-RES-007, IDENT-RES-010). An agent that
+   * requires the authentication does not declare it. The web UI says so on the agent's page.
+   */
+  visitors?: boolean
 }
 
 export type BindingMode = 'cross-device' | 'same-device'

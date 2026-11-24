@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import type { RunningAgent } from '../src/app.js'
 import { buildAgent } from '../src/app.js'
 import { SessionStreams } from '../src/channels/agui/streams.js'
+import type { AuthenticationEntry } from '../src/config/packTypes.js'
 import type { Session } from '../src/core/types.js'
 import { createLogger } from '../src/util/logger.js'
 import { parseSse, startTestAgent, testEnv } from './helpers.js'
@@ -103,6 +104,36 @@ describe('descriptor (PROF-DESC-001/002)', () => {
     expect(body.sessions).toBe('http://agent.test/agui/v3/sessions')
     expect(body.binding.walletLinkTemplate).toMatch(/^https:\/\/.*\{oob\}/)
     expect(body.features.uploads.types).toContain('audio/webm')
+  })
+
+  it('declares features.visitors when a person may enter without authenticating, and only then (PROF-DESC-012)', async () => {
+    const features = async () =>
+      (await running.app.inject({ method: 'GET', url: '/.well-known/ayni-agent.json' })).json().features
+    const entry = (over: Partial<AuthenticationEntry>): AuthenticationEntry => ({
+      credential: { jsonSchemaCredentialId: 'https://ecs.example/vt/schemas-badge-jsc.json' },
+      subjectKey: ['badgeNumber'],
+      ...over,
+    })
+    const identity = running.agent.pack.identity
+    const before = identity.authentication
+    try {
+      // the dev pack names no authentication schema: everyone enters unidentified (IDENT-RES-007)
+      expect(before).toBeUndefined()
+      expect((await features()).visitors).toBe(true)
+      // offered: asked at connection, the person may enter as a visitor instead (IDENT-RES-010)
+      identity.authentication = [entry({ guests: true })]
+      expect((await features()).visitors).toBe(true)
+      // on request: nothing asked at connection
+      identity.authentication = [entry({ request: 'on-demand' })]
+      expect((await features()).visitors).toBe(true)
+      // required: nobody enters without it, and the descriptor says nothing of visitors
+      identity.authentication = [entry({})]
+      expect((await features()).visitors).toBeUndefined()
+      identity.authentication = [entry({ request: 'on-connect', guests: false })]
+      expect('visitors' in (await features())).toBe(false)
+    } finally {
+      identity.authentication = before
+    }
   })
 })
 

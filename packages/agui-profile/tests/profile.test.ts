@@ -177,6 +177,9 @@ describe('schemas', () => {
     expect(validate({ ...base, features: { ...base.features, connections: 'yes' } })).toBe(false)
     expect(validate({ ...base, features: { ...base.features, notifications: true } })).toBe(true)
     expect(validate({ ...base, features: { ...base.features, notifications: 'yes' } })).toBe(false)
+    // 3.5.2: the agent lets visitors in, a boolean (PROF-DESC-012)
+    expect(validate({ ...base, features: { ...base.features, visitors: true } })).toBe(true)
+    expect(validate({ ...base, features: { ...base.features, visitors: 'yes' } })).toBe(false)
     expect(validate({ ...base, features: { ...base.features, erasure: {} } })).toBe(false)
     expect(
       validate({ ...base, binding: { modes: ['cross-device'], walletLinkTemplate: 'didcomm://x?oob={oob}' } })
