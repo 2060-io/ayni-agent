@@ -175,6 +175,12 @@ export interface Session {
   /** opaque device handle: inherited from the creation request or minted at binding */
   deviceHandle?: string
   /**
+   * the DIDComm connection whose session grant created this session, or the session it is a sibling of: the phone
+   * (D56). Each such session gets a device handle of its own, so the admin grant of the phone is keyed to this
+   * connection, not to the handle (RBAC-ADMIN-003, `deviceOf`)
+   */
+  grantConnectionId?: string
+  /**
    * the pairing secret minted at binding, held for its client only until the client has collected it, five minutes
    * at most; only its hash stays, on the Principal's device (D51, IDENT-DEV-001)
    */

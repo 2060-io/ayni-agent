@@ -1669,4 +1669,19 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
     again.stop()
     await second.close()
   })
+
+  it("keeps the phone's connection on a session made through a session grant: its admin grant is the phone's (RBAC-ADMIN-003)", async () => {
+    const url = await freshDatabase()
+    const store = new PostgresStore(url)
+    await store.init()
+    await store.sessions.save({
+      ...session('ses-phone', 'p1', 'conv_phone'),
+      deviceHandle: 'dev-9',
+      grantConnectionId: 'conn-1',
+    })
+    const [read] = await store.sessions.listByPrincipal('p1')
+    expect(read).toMatchObject({ deviceHandle: 'dev-9', grantConnectionId: 'conn-1' })
+    expect(deviceOf(read as Session)).toBe('phone:conn-1')
+    await store.close()
+  })
 })

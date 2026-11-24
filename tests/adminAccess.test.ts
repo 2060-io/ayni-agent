@@ -17,7 +17,9 @@ import { IdentityFlow } from '../src/channels/didcomm/identity.js'
 import { loadPack, PackError } from '../src/config/pack.js'
 import type { VerifiedFacts } from '../src/core/principals.js'
 import type { Principal } from '../src/core/types.js'
-import { AdminGrants } from '../src/platform/adminGrants.js'
+import { AdminError, AdminService } from '../src/platform/admin.js'
+import { AdminGrants, deviceOf } from '../src/platform/adminGrants.js'
+import { MemoryStore } from '../src/store/memory.js'
 import type { AdminAuditRecord } from '../src/store/types.js'
 import { Deferred } from '../src/util/async.js'
 import { mintLocally, runText, until, webClient } from './directoryFixtures.js'
@@ -389,6 +391,160 @@ describe('Audit (PROF-ADMIN-005, RBAC-ADMIN-005/006/008)', () => {
   })
 })
 
+/** A Principal the agent knows by name, with no phone: identified unless `identified` is false (a visitor). */
+async function known(
+  slug: string,
+  attributes: Record<string, string>,
+  options: { identified?: boolean; directoryEntryId?: string } = {}
+): Promise<Principal> {
+  const now = new Date().toISOString()
+  const principal: Principal = {
+    id: `prn_${slug}`,
+    connectionType: 'verifiable-user-agent',
+    actorIdentity: `did:peer:${slug}`,
+    backingIdentity: null,
+    backingRelation: 'unrecognized',
+    roles: [],
+    identityAttributes: attributes,
+    capabilityChannelId: null,
+    identityCredentialRef: options.identified === false ? null : `cred:${slug}`,
+    livenessCache: {},
+    userAgentVerified: false,
+    ...(options.directoryEntryId ? { directoryEntryId: options.directoryEntryId } : {}),
+    createdAt: now,
+    updatedAt: now,
+  }
+  await running.agent.store.principals.save(principal)
+  return principal
+}
+
+describe('Audit: a person found by name (GET {sessions}/admin/audit/people)', () => {
+  it('refuses as every Audit read does, in the same order, and an empty q, recording nothing', async () => {
+    const jonas = await person('jonas-people-refusals', ['auditor'])
+    const ana = await person('ana-people-refusals', ['operator'])
+    const url = '/admin/audit/people?q=zoe&reason=Complaint%204411'
+    expect(await call(jonas, 'GET', url)).toEqual({
+      status: 403,
+      body: expect.objectContaining({ error: 'admin-closed' }),
+    })
+    await showAdmin(ana)
+    expect(await call(ana, 'GET', url)).toEqual({
+      status: 403,
+      body: expect.objectContaining({ error: 'not-auditor' }),
+    })
+    await showAdmin(jonas)
+    const opened = (await auditLog()).length
+    expect(await call(jonas, 'GET', '/admin/audit/people?q=zoe')).toEqual({
+      status: 400,
+      body: expect.objectContaining({ error: 'reason-required' }),
+    })
+    for (const q of ['', '%20%20'])
+      expect(await call(jonas, 'GET', `/admin/audit/people?q=${q}&reason=Complaint%204411`)).toEqual({
+        status: 400,
+        body: expect.objectContaining({ error: 'bad-request', field: 'q' }),
+      })
+    expect(await call(jonas, 'GET', '/admin/audit/people?reason=Complaint%204411')).toEqual({
+      status: 400,
+      body: expect.objectContaining({ error: 'bad-request', field: 'q' }),
+    })
+    expect((await auditLog()).length).toBe(opened)
+  })
+
+  it('finds identified people by name or address, without regard to case or marks, by name, and records the read', async () => {
+    await known('zoe-alvarez', {
+      userName: 'Zoë Ålvarez',
+      department: 'Sales EU',
+      email: 'z.alvarez@northwind.example',
+    })
+    await known('zoe-brandt', { userName: 'ZOE Brandt' })
+    await known('zoe-visitor', { userName: 'Zoe Visitor' }, { identified: false })
+    await known('zoe-nameless', {})
+    const jonas = await person('jonas-people', ['auditor'])
+    await showAdmin(jonas)
+    const grantId = (await latest()).grantId
+    const found = await call(jonas, 'GET', '/admin/audit/people?q=zoe&reason=Complaint%204411')
+    expect(found.status).toBe(200)
+    expect(found.body.people).toEqual([
+      { principalId: 'prn_zoe-alvarez', name: 'Zoë Ålvarez', department: 'Sales EU' },
+      { principalId: 'prn_zoe-brandt', name: 'ZOE Brandt', department: null },
+    ])
+    expect(await latest()).toMatchObject({
+      id: found.body.auditId,
+      action: 'audit-read',
+      reason: 'Complaint 4411',
+      principalId: jonas.principal.id,
+      grantId,
+      detail: { what: 'people', q: 'zoe', count: 2 },
+    })
+    // the marks and the case of the text typed do not matter either
+    const marked = await call(jonas, 'GET', `/admin/audit/people?q=${encodeURIComponent('ÁLV')}&reason=case`)
+    expect(marked.body.people.map((p: { principalId: string }) => p.principalId)).toEqual(['prn_zoe-alvarez'])
+    // an address is matched, and never answered
+    const byEmail = await call(jonas, 'GET', '/admin/audit/people?q=z.alvarez%40northwind&reason=case')
+    expect(byEmail.body.people.map((p: { principalId: string }) => p.principalId)).toEqual(['prn_zoe-alvarez'])
+    expect(JSON.stringify(byEmail.body)).not.toContain('northwind')
+  })
+
+  it('answers at most twenty', async () => {
+    for (let i = 0; i < 22; i++) await known(`many-${i}`, { userName: `Quill Many ${String(i).padStart(2, '0')}` })
+    const jonas = await person('jonas-people-many', ['auditor'])
+    await showAdmin(jonas)
+    const found = await call(jonas, 'GET', '/admin/audit/people?q=quill%20many&reason=case')
+    expect(found.body.people).toHaveLength(20)
+    expect(found.body.people[0].name).toBe('Quill Many 00')
+    expect(found.body.people[19].name).toBe('Quill Many 19')
+  })
+
+  it('names a person of the directory by their entry, and finds them by its address', async () => {
+    const store = new MemoryStore()
+    const now = new Date().toISOString()
+    const entry = {
+      id: 'e-renee',
+      firstName: 'Renée',
+      lastName: 'Dupont',
+      email: 'rdupont@acme.example',
+      department: 'Finance',
+      groups: [],
+      roles: [],
+    }
+    const directory = {
+      view: (id: string) =>
+        id === entry.id ? { id, name: 'Renée Dupont', department: 'Finance', groups: [], roles: [] } : undefined,
+      entry: (id: string) => (id === entry.id ? entry : undefined),
+    }
+    await store.principals.save({
+      id: 'prn_renee',
+      connectionType: 'verifiable-user-agent',
+      actorIdentity: 'did:peer:renee',
+      backingIdentity: null,
+      backingRelation: 'home',
+      roles: [],
+      identityAttributes: { userName: 'R. Dupont (old badge)' },
+      capabilityChannelId: null,
+      identityCredentialRef: null,
+      livenessCache: {},
+      userAgentVerified: false,
+      directoryEntryId: entry.id,
+      createdAt: now,
+      updatedAt: now,
+    })
+    const service = new AdminService({
+      store,
+      memory: {} as never,
+      evidence: {} as never,
+      conversations: {} as never,
+      directory,
+      logger: pino({ level: 'silent' }),
+      announceErased: async () => undefined,
+    })
+    const caller = { kind: 'break-glass' } as const
+    const expected = [{ principalId: 'prn_renee', name: 'Renée Dupont', department: 'Finance' }]
+    expect((await service.people(caller, 'case', 'rdupont@acme')).people).toEqual(expected)
+    expect((await service.people(caller, 'case', 'renee')).people).toEqual(expected)
+    expect((await service.people(caller, 'case', 'old badge')).people).toEqual([])
+  })
+})
+
 describe('Operations (PROF-ADMIN-006, PRIV-ERASE-008, PRIV-KEY-008)', () => {
   it('lets an operator hold, release and erase entries with a reason, and tells the conversation; no key rotates yet', async () => {
     const owner = await person('owner-ops', ['employee'])
@@ -535,6 +691,112 @@ describe('the end of a grant (PROF-ADMIN-003/004, RBAC-ADMIN-003/004)', () => {
     } finally {
       next.stop()
     }
+  })
+})
+
+/** A session the phone makes through a session grant on its connection (D56): each gets a device handle of its own. */
+async function phoneSession(d: Device): Promise<Device & { deviceHandle: string; deviceSecret: string }> {
+  const { grant } = await running.agent.sessions.issueGrant({
+    principalId: d.principal.id,
+    connectionId: d.connectionId,
+    client: { name: 'Ayni', version: '1.0.0', platform: 'ios' },
+    newConversation: false,
+  })
+  const response = await running.app.inject({
+    method: 'POST',
+    url: '/agui/v3/sessions',
+    payload: { client: { name: 'ayni-app', version: '1.0.0', platform: 'ios' }, locale: 'en', grant },
+  })
+  if (response.statusCode !== 201) throw new Error(`phone session ${response.statusCode}: ${response.body}`)
+  return {
+    ...(response.json() as { sessionId: string; sessionToken: string; deviceHandle: string; deviceSecret: string }),
+    principal: d.principal,
+    connectionId: d.connectionId,
+  }
+}
+
+describe('the grant across the sessions of the phone (RBAC-ADMIN-003)', () => {
+  const read = (d: Device) => call(d, 'GET', '/admin/audit/log?reason=Complaint%204411')
+
+  it("follows the phone to its next session made through a session grant, and to that session's siblings", async () => {
+    const jonas = await person('jonas-phone', ['auditor'])
+    const first = await phoneSession(jonas)
+    await showAdmin(first)
+    const expiresAt = (await call(first, 'GET', '/admin')).body.grant.expiresAt
+    const next = await phoneSession(jonas)
+    // a new device handle, minted for the new session: the grant is the phone's, not the handle's
+    expect((await sessionOf(next)).deviceHandle).not.toBe((await sessionOf(first)).deviceHandle)
+    expect((await call(next, 'GET', '/admin')).body).toEqual({ roles: ['auditor'], grant: { open: true, expiresAt } })
+    expect((await read(next)).status).toBe(200)
+    expect((await read(first)).status).toBe(200)
+    expect((await read(await sibling(next))).status).toBe(200)
+    // one grant: Hide Admin on one session of the phone ends it for every one, and each is told
+    expect((await call(next, 'DELETE', '/admin/grant')).status).toBe(204)
+    expect((await read(first)).body).toMatchObject({ error: 'admin-closed' })
+    expect(adminEvents(first.sessionId).at(-1)).toEqual({ roles: ['auditor'], grant: null, outcome: 'ended' })
+  })
+
+  it("is no other device's: not the browser the phone bound, not a session bound by the phone's device secret", async () => {
+    const jonas = await person('jonas-phone-only', ['auditor'])
+    const phone = await phoneSession(jonas)
+    await showAdmin(phone)
+    expect((await read(phone)).status).toBe(200)
+    // the browser of the same person
+    expect((await call(jonas, 'GET', '/admin')).body).toEqual({ roles: ['auditor'], grant: null })
+    expect((await read(jonas)).body).toMatchObject({ error: 'admin-closed' })
+    // a session that presents the device handle and secret of the phone's session holds the handle, not the phone
+    const { deviceHandle, deviceSecret } = phone
+    expect(deviceSecret).toMatch(/^dsk_/)
+    const proved = await running.app.inject({
+      method: 'POST',
+      url: '/agui/v3/sessions',
+      payload: { client: webClient, locale: 'en', deviceHandle, deviceProof: deviceSecret },
+    })
+    expect(proved.statusCode).toBe(201)
+    const other = { ...(proved.json() as { sessionId: string; sessionToken: string }), principal: jonas.principal }
+    expect((await sessionOf(other as Device)).state).toBe('bound')
+    expect((await read(other as Device)).body).toMatchObject({ error: 'admin-closed' })
+    // and the phone still holds it, on its next session
+    expect((await read(await phoneSession(jonas))).status).toBe(200)
+  })
+
+  it("is no other Principal's, even on a session that names the phone's connection", async () => {
+    const jonas = await person('jonas-phone-mine', ['auditor'])
+    const ben = await person('ben-phone-not-mine', ['auditor'])
+    const phone = await phoneSession(jonas)
+    await showAdmin(phone)
+    const own = await sessionOf(phone)
+    expect(deviceOf(own)).toBe(`phone:${jonas.connectionId}`)
+    const borrowed = { ...own, id: 'ses_borrowed', principalId: ben.principal.id }
+    await expect(grants().require(ben.principal, borrowed, 'auditor')).rejects.toMatchObject({
+      constructor: AdminError,
+      code: 'admin-closed',
+    })
+    // nor can a session grant of Ben's be redeemed on Jonas's connection
+    const { grant } = await running.agent.sessions.issueGrant({
+      principalId: ben.principal.id,
+      connectionId: jonas.connectionId,
+      client: { name: 'Ayni', version: '1.0.0', platform: 'ios' },
+      newConversation: false,
+    })
+    const refused = await running.app.inject({
+      method: 'POST',
+      url: '/agui/v3/sessions',
+      payload: { client: { name: 'ayni-app', version: '1.0.0', platform: 'ios' }, locale: 'en', grant },
+    })
+    expect(refused.statusCode).not.toBe(201)
+    expect((await read(await phoneSession(ben))).body).toMatchObject({ error: 'admin-closed' })
+  })
+
+  it("ends when the device handle of one of the phone's sessions is unlinked", async () => {
+    const jonas = await person('jonas-phone-unlink', ['auditor'])
+    const first = await phoneSession(jonas)
+    const next = await phoneSession(jonas)
+    await showAdmin(next)
+    const handle = (await sessionOf(first)).deviceHandle as string
+    expect((await call(jonas, 'DELETE', `/devices/${handle}`)).status).toBe(204)
+    expect(await latest()).toMatchObject({ action: 'admin-grant-ended', reason: 'device-unlinked' })
+    expect((await read(next)).body).toMatchObject({ error: 'admin-closed' })
   })
 })
 

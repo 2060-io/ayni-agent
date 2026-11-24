@@ -12,6 +12,7 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify'
 import { entryToMessages } from '../channels/agui/mapping.js'
 import type { SealedConversations } from '../core/conversationSeal.js'
+import { fold, type UserDirectory } from '../core/directory.js'
 import type { EvidenceService } from '../core/evidence.js'
 import { spaceIdOf } from '../core/spaces.js'
 import type { MessageEntry, Principal } from '../core/types.js'
@@ -22,6 +23,8 @@ import type { Logger } from '../util/logger.js'
 
 /** At most this many rows of one read. */
 const LIMIT = 100_000
+/** At most this many people of one search of Audit. */
+const PEOPLE_LIMIT = 20
 
 /** A refusal of admin access, with the status and the code of the AG-UI profile (§3.14, §9). */
 export class AdminError extends Error {
@@ -72,6 +75,8 @@ export interface AdminServiceDeps {
   evidence: EvidenceService
   /** the conversations, their titles opened (D77) */
   conversations: SealedConversations
+  /** the user directory, when the agent-pack names one: the names, departments and addresses of its entries */
+  directory?: Pick<UserDirectory, 'view' | 'entry'>
   logger: Logger
   /** erased messages are told to the devices of their conversation (PROF-STREAM-008) */
   announceErased(principalId: string, conversationId: string, messageIds: string[], clientIds: string[]): Promise<void>
@@ -86,6 +91,13 @@ export interface AuditConversation {
   state: string
   createdAt: string
   lastActivityAt: string
+}
+
+/** One person of a search of Audit: the Principal to find conversations by, never an address. */
+export interface AuditPerson {
+  principalId: string
+  name: string
+  department: string | null
 }
 
 /** One key of Operations (PROF-ADMIN-006): its versions, how many keys each wraps, a rotation in progress. */
@@ -121,6 +133,49 @@ export class AdminService {
   }
 
   // ---- Audit (RBAC-ADMIN-008, PROF-ADMIN-005): reads only -------------------------------------------------------------
+
+  /**
+   * The people Audit can find conversations of, by name (Fabrice, 2026-11-24): the Principals the agent knows that have
+   * a name, those that hold a directory entry and the people an authentication identified, whose name, or address when
+   * the agent knows one, contains `q`, compared without regard to case or marks; at most twenty, by name. A visitor
+   * (named by nobody) and a service are not people. The address is matched and never answered.
+   */
+  public async people(
+    caller: AdminCaller,
+    reason: string,
+    q: string | undefined
+  ): Promise<{ people: AuditPerson[]; auditId: string }> {
+    const needle = fold((q ?? '').trim())
+    if (!needle) throw new AdminError(400, 'bad-request', 'type part of a name or an address', 'q')
+    const directory = this.deps.directory
+    const text = (value: unknown): string | undefined =>
+      typeof value === 'string' && value.trim() ? value.trim() : undefined
+    const found: (AuditPerson & { key: string })[] = []
+    for (const p of await this.deps.store.principals.list()) {
+      if (p.connectionType !== 'verifiable-user-agent') continue
+      const view = p.directoryEntryId ? directory?.view(p.directoryEntryId) : undefined
+      // a person who holds an entry, or whom an authentication identified; a visitor is nobody's name
+      if (!view && !p.identityCredentialRef) continue
+      const name = view?.name ?? text(p.identityAttributes.userName)
+      if (!name) continue
+      const email =
+        (p.directoryEntryId ? directory?.entry(p.directoryEntryId)?.email : undefined) ??
+        text(p.identityAttributes.email)
+      if (!fold(name).includes(needle) && !(email && fold(email).includes(needle))) continue
+      const department = view?.department ?? text(p.identityAttributes.department) ?? null
+      found.push({ principalId: p.id, name, department, key: fold(name) })
+    }
+    const people = found
+      .sort((a, b) => a.key.localeCompare(b.key) || a.principalId.localeCompare(b.principalId))
+      .slice(0, PEOPLE_LIMIT)
+      .map(({ key: _key, ...person }) => person)
+    const auditId = await this.record(caller, {
+      action: 'audit-read',
+      reason,
+      detail: { what: 'people', q: q?.trim(), count: people.length },
+    })
+    return { people, auditId }
+  }
 
   /** The conversations found by Principal, space and period (active within it), newest activity first. */
   public async conversations(
@@ -397,6 +452,10 @@ export function buildAdmin(deps: InternalAdminDeps): FastifyInstance {
     const { id } = request.params as { id: string }
     const { entries, nextBefore, auditId } = await service.messages(caller, reasonOf(q.reason), id, q)
     return { messages: [...entries].reverse().flatMap((e) => entryToMessages(e)), nextBefore, auditId }
+  })
+  app.get('/admin/audit/people', async (request) => {
+    const q = query(request)
+    return service.people(caller, reasonOf(q.reason), q.q)
   })
   app.get('/admin/audit/evidence', async (request) => {
     const q = query(request)

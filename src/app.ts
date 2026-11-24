@@ -76,7 +76,7 @@ import { RagService } from './memory/rag.js'
 import { storeShapeFaults } from './memory/scope.js'
 import { MemoryService } from './memory/service.js'
 import { AdminService, buildAdmin } from './platform/admin.js'
-import { AdminGrants, reauthenticationOutcome } from './platform/adminGrants.js'
+import { AdminGrants, deviceOf, reauthenticationOutcome } from './platform/adminGrants.js'
 import { createMailer, type Mailer } from './platform/mail.js'
 import { RetentionService } from './platform/retention.js'
 import { HttpStats, NoopStats, RedisStreamStats, type StatsSink, StoreStats } from './platform/stats.js'
@@ -589,6 +589,7 @@ export async function buildAgent(
     memory,
     evidence,
     conversations: sealedConversations(store.conversations, crypto),
+    directory,
     logger,
     announceErased: (principalId, conversationId, ids, clientIds) =>
       aguiRoutes?.announceErased(principalId, conversationId, ids, clientIds) ?? Promise.resolve(),
@@ -615,6 +616,11 @@ export async function buildAgent(
         principal: (id) => store.principals.get(id),
         announce: (principalId, device, value) =>
           aguiRoutes?.announceAdmin(principalId, device, value) ?? Promise.resolve(),
+        devicesOfHandle: async (principalId, handle) => [
+          ...new Set(
+            (await store.sessions.listByPrincipal(principalId)).filter((s) => s.deviceHandle === handle).map(deviceOf)
+          ),
+        ],
       },
       logger,
       { requestMs: AUTHENTICATE_FLOW_EXPIRY_MS }

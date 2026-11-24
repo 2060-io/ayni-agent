@@ -17,7 +17,8 @@ reason `replaced` and `features.visitors`; from 3.5.3, what the clean spec remov
 routed kind `authorization` and `INTERRUPT_REASON`; from 3.5.4, space governance: one owner or none, the successor,
 the stewards, the approval timeouts, the approval policy of a tool of a space, the progress of an approval and the
 notices of a space's governance; from 3.5.5, admin access: `features.admin`, the admin state, Show Admin and Hide
-Admin, `ayni.admin.changed`, Audit and Operations and their errors) and the few AG-UI message shapes it reuses.
+Admin, `ayni.admin.changed`, Audit and Operations and their errors; from 3.5.7, a person found by name in Audit) and the
+few AG-UI message shapes it reuses.
 
 ```ts
 import { APP_LINK_DOMAIN, buildAppLink, parseAppLink, PROFILE_VERSION } from '@ayni.org/ayni-agui-profile'
