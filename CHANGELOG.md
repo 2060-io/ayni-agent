@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.33.0](https://github.com/2060-io/ayni-agent/compare/v0.32.0...v0.33.0) (2026-11-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* authentication by combinations of methods on the phone over authenticate/1.0, enrolment of an authenticator app or a passkey, approvers on the approval request (ayni-spec #127, flow library 0.2.1) ([#124](https://github.com/2060-io/ayni-agent/issues/124))
+
+### Features
+
+* authentication by combinations of methods on the phone over authenticate/1.0, enrolment of an authenticator app or a passkey, approvers on the approval request (ayni-spec [#127](https://github.com/2060-io/ayni-agent/issues/127), flow library 0.2.1) ([#124](https://github.com/2060-io/ayni-agent/issues/124)) ([7c96a3a](https://github.com/2060-io/ayni-agent/commit/7c96a3a308436406ec495514946ac329ca4db88f))
+* **authentication:** flow library 0.3.1: a declined face-match consent leaves another combination; no requires on open; three enrolment codes with the codes left (ayni-spec [#128](https://github.com/2060-io/ayni-agent/issues/128), [#129](https://github.com/2060-io/ayni-agent/issues/129)) ([#126](https://github.com/2060-io/ayni-agent/issues/126)) ([90b8404](https://github.com/2060-io/ayni-agent/commit/90b840401a9d748bc3f39b7f6ec64f5fb52b73cc))
+
 ## [0.32.0](https://github.com/2060-io/ayni-agent/compare/v0.31.0...v0.32.0) (2026-11-24)
 
 
