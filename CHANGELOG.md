@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.32.0](https://github.com/2060-io/ayni-agent/compare/v0.31.0...v0.32.0) (2026-11-24)
+
+
+### Features
+
+* **spaces:** one owner, a successor and stewards; an approval policy per tool of a space (ayni-spec D135 to D142) ([#122](https://github.com/2060-io/ayni-agent/issues/122)) ([0ff5026](https://github.com/2060-io/ayni-agent/commit/0ff502610472ebb5f828ac7a7af081d91406190f))
+
 ## [0.31.0](https://github.com/2060-io/ayni-agent/compare/v0.30.1...v0.31.0) (2026-11-24)
 
 
