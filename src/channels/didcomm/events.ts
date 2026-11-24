@@ -577,11 +577,17 @@ export class DidcommEvents {
       attestation: response.attestation,
       ...(exchange.errorCode ? { reason: exchange.errorCode } : {}),
     })
-    // the opener closes the flow when the carrier protocol ends (flow profile §5.2)
-    if (exchange.flowId)
-      await this.agent.flows.close(exchange.flowId, ok ? 'completed' : 'failed', {
-        reason: ok ? undefined : 'Not confirmed.',
-      })
+    // the opener closes the flow when the carrier protocol ends (flow profile §5.2): an answer, yes or no, closes it
+    // `completed`, as an `authorize` answered either way does (flow profile §6, row `confirm`), and the holder shows
+    // the person's own answer; only a carrier that failed closes it `failed`
+    if (exchange.flowId) {
+      const answered = exchange.state === 'response-received'
+      await this.agent.flows.close(
+        exchange.flowId,
+        answered ? 'completed' : 'failed',
+        answered ? {} : { reason: 'Not confirmed.' }
+      )
+    }
   }
 
   /**

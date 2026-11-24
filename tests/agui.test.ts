@@ -6,6 +6,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import type { RunningAgent } from '../src/app.js'
 import { buildAgent } from '../src/app.js'
 import { SessionStreams } from '../src/channels/agui/streams.js'
+import type { AuthenticationEntry } from '../src/config/packTypes.js'
+import type { Session } from '../src/core/types.js'
 import { createLogger } from '../src/util/logger.js'
 import { parseSse, startTestAgent, testEnv } from './helpers.js'
 
@@ -102,6 +104,36 @@ describe('descriptor (PROF-DESC-001/002)', () => {
     expect(body.sessions).toBe('http://agent.test/agui/v3/sessions')
     expect(body.binding.walletLinkTemplate).toMatch(/^https:\/\/.*\{oob\}/)
     expect(body.features.uploads.types).toContain('audio/webm')
+  })
+
+  it('declares features.visitors when a person may enter without authenticating, and only then (PROF-DESC-012)', async () => {
+    const features = async () =>
+      (await running.app.inject({ method: 'GET', url: '/.well-known/ayni-agent.json' })).json().features
+    const entry = (over: Partial<AuthenticationEntry>): AuthenticationEntry => ({
+      credential: { jsonSchemaCredentialId: 'https://ecs.example/vt/schemas-badge-jsc.json' },
+      subjectKey: ['badgeNumber'],
+      ...over,
+    })
+    const identity = running.agent.pack.identity
+    const before = identity.authentication
+    try {
+      // the dev pack names no authentication schema: everyone enters unidentified (IDENT-RES-007)
+      expect(before).toBeUndefined()
+      expect((await features()).visitors).toBe(true)
+      // offered: asked at connection, the person may enter as a visitor instead (IDENT-RES-010)
+      identity.authentication = [entry({ guests: true })]
+      expect((await features()).visitors).toBe(true)
+      // on request: nothing asked at connection
+      identity.authentication = [entry({ request: 'on-demand' })]
+      expect((await features()).visitors).toBe(true)
+      // required: nobody enters without it, and the descriptor says nothing of visitors
+      identity.authentication = [entry({})]
+      expect((await features()).visitors).toBeUndefined()
+      identity.authentication = [entry({ request: 'on-connect', guests: false })]
+      expect('visitors' in (await features())).toBe(false)
+    } finally {
+      identity.authentication = before
+    }
   })
 })
 
@@ -675,6 +707,93 @@ describe('device pairing (PROF-SESS-010..012, PROF-BIND-010, IDENT-DEV-001..005)
     expect(again.json().pairing).toBe('invalid')
   })
 
+  describe('the device secret is handed once and only its hash is kept (D51, IDENT-DEV-001, PROF-BIND-010)', () => {
+    const status = (s: { sessionId: string; sessionToken: string }) =>
+      running.app.inject({
+        method: 'GET',
+        url: `/agui/v3/sessions/${s.sessionId}`,
+        headers: { authorization: `Bearer ${s.sessionToken}` },
+      })
+    const held = async (sessionId: string) => (await running.agent.sessions.get(sessionId))?.deviceSecret
+
+    it('erases it from the session once the status handed it, and hands it no more', async () => {
+      const { body } = await createSession()
+      await bindViaPhone(body.sessionId, 'did:peer:once-status')
+      // bound with no client on the stream: the session holds it, for the status to hand
+      expect(await held(body.sessionId)).toMatch(/^dsk_/)
+      const first = (await status(body)).json() as { deviceSecret?: string }
+      expect(first.deviceSecret).toMatch(/^dsk_/)
+      expect(await held(body.sessionId)).toBeUndefined()
+      const second = (await status(body)).json() as { deviceHandle?: string; deviceSecret?: string }
+      expect(second.deviceHandle).toMatch(/^dev_/)
+      expect(second.deviceSecret).toBeUndefined()
+      // the hash on the Principal's device still binds the next session
+      const principal = await running.agent.principalOf((await running.agent.sessions.get(body.sessionId)) as never)
+      expect(principal?.devices?.[0]?.secretHash).toMatch(/^[0-9a-f]{64}$/)
+      expect(JSON.stringify(principal)).not.toContain(String(first.deviceSecret))
+      const next = await createWithProof(String(second.deviceHandle), String(first.deviceSecret))
+      expect(next.json().state).toBe('bound')
+    })
+
+    it('erases it at once when a client on the stream collected it in ayni.session.bound', async () => {
+      const { body } = await createSession()
+      const chunks: string[] = []
+      const detach = running.streams.attach(body.sessionId, { write: (c) => chunks.push(c), end: () => undefined })
+      await bindViaPhone(body.sessionId, 'did:peer:once-stream')
+      detach()
+      const bound = parseSse(chunks.join(''))
+        .map((e) => e.event)
+        .find((e) => e.type === 'CUSTOM' && e.name === 'ayni.session.bound') as { value: { deviceSecret?: string } }
+      expect(bound.value.deviceSecret).toMatch(/^dsk_/)
+      expect(await held(body.sessionId)).toBeUndefined()
+      expect(((await status(body)).json() as { deviceSecret?: string }).deviceSecret).toBeUndefined()
+    })
+
+    it('keeps none after the response of a session bound from a device proof', async () => {
+      const { first, deviceHandle, deviceSecret } = await pair('did:peer:once-proof')
+      await running.agent.sessions.close((await running.agent.sessions.get(first.sessionId)) as never, 'idle-timeout')
+      const second = (await createWithProof(deviceHandle, deviceSecret)).json() as Record<string, string>
+      expect(second.deviceSecret).toMatch(/^dsk_/)
+      expect(await held(second.sessionId)).toBeUndefined()
+      expect((await status(second as never)).json().deviceSecret).toBeUndefined()
+    })
+
+    it('erases one never collected five minutes after it was minted, and the status no longer hands it', async () => {
+      const { body } = await createSession()
+      await bindViaPhone(body.sessionId, 'did:peer:once-late')
+      const session = (await running.agent.sessions.get(body.sessionId)) as Session
+      expect(session.deviceSecret).toMatch(/^dsk_/)
+      // minted six minutes ago
+      await running.agent.store.sessions.save({
+        ...session,
+        deviceSecretAt: new Date(Date.now() - 6 * 60_000).toISOString(),
+      })
+      expect(((await status(body)).json() as { deviceSecret?: string }).deviceSecret).toBeUndefined()
+      expect(await held(body.sessionId)).toBeUndefined()
+      // and the reaper erases one the status was never asked for
+      const other = await createSession()
+      await bindViaPhone(other.body.sessionId, 'did:peer:once-reaped')
+      const otherSession = (await running.agent.sessions.get(other.body.sessionId)) as Session
+      await running.agent.store.sessions.save({
+        ...otherSession,
+        lastActivityAt: new Date().toISOString(),
+        deviceSecretAt: new Date(Date.now() - 6 * 60_000).toISOString(),
+      })
+      await running.agent.sessions.reap()
+      const reaped = await running.agent.sessions.get(other.body.sessionId)
+      expect(reaped?.state).toBe('bound')
+      expect(reaped?.deviceSecret).toBeUndefined()
+    })
+
+    it('erases it when the session closes', async () => {
+      const { body } = await createSession()
+      await bindViaPhone(body.sessionId, 'did:peer:once-closed')
+      expect(await held(body.sessionId)).toMatch(/^dsk_/)
+      await running.agent.sessions.close((await running.agent.sessions.get(body.sessionId)) as never, 'user')
+      expect(await held(body.sessionId)).toBeUndefined()
+    })
+  })
+
   it('a disconnected phone leaves no pairing', async () => {
     const { deviceHandle, deviceSecret } = await pair('did:peer:leo')
     await running.agent.onPeerDisconnected('conn-did:peer:leo')
@@ -805,7 +924,7 @@ describe('conversations (PROF-CONV-001..005, IDENT-SESS-010..013)', () => {
     expect((await list(fresh.body.sessionToken)).length).toBe(2)
   })
 
-  it('a device holds one open session per conversation; opening it again supersedes the earlier one (IDENT-SESS-014)', async () => {
+  it('a device holds one open session per conversation; opening it again replaces the earlier one (IDENT-SESS-014)', async () => {
     const { body } = await createSession()
     await bindViaPhone(body.sessionId, 'did:peer:kara')
     const status = (
@@ -830,7 +949,8 @@ describe('conversations (PROF-CONV-001..005, IDENT-SESS-010..013)', () => {
       headers: auth(body.sessionToken),
     })
     expect(earlier.statusCode).toBe(410)
-    expect((earlier.json() as { reason: string }).reason).toBe('supersede')
+    // `replaced`, not `supersede`, which names a new phone (IDENT-SESS-003)
+    expect((earlier.json() as { reason: string }).reason).toBe('replaced')
     // a different device on the same conversation is left alone
     const other = await createSession()
     await bindViaPhone(other.body.sessionId, 'did:peer:kara')

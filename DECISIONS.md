@@ -71,7 +71,7 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
 
 19. **Device pairing outlives sessions** (D51, IDENT-DEV). At every binding confirmed on the phone the
     agent mints a device secret beside the device handle, hands both to the client (bound event and
-    status) and keeps only an HMAC of the secret on the Principal's device entry. A session request
+    status, once: decision 75) and keeps only an HMAC of the secret on the Principal's device entry. A session request
     with `deviceHandle` + `deviceProof` binds at once when the hash matches, the pairing is within
     its window (`sessions.devicePairing`, 30 days sliding / 90 hard), the capability channel is live
     and the credential passes its liveness check; the secret rotates on every use and the superseded
@@ -536,7 +536,8 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       minutes, that ends accepted, not accepted with a reason, declined or unanswered. The agent decides on a
       presentation that verified before the flow closes: accepted, the flow completes; not accepted, it
       fails with the reason's code (`issuer-not-accepted`, `not-valid`, `incomplete`) and the caller asks
-      again. `another-identity` of the profile is not produced: an identified connection is asked nothing.
+      again. An identified connection asked again (to reveal its email) refuses another identity on the flow with
+      `another-identity` and asks nothing again (decision 75).
     - **At connection** (`establishPerson`): a decline refuses the peer when the credential is required
       (`authentication-declined`) and admits a guest when it is offered; no answer in time refuses in both
       (`authentication-unanswered`). No Principal exists before the outcome: a credential accepted then
@@ -1709,3 +1710,44 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       your phone, the answers' line), `notifyAuthorize.test.ts` (a non-attested rule reaches the phone with `attested:
       false`; an attested decision without authentication is refused), `connections.test.ts` (the owner's approval on
       the phone), `toolCatalog.test.ts` (each rule of TOOL-CALL-010).
+75. **The clean spec's fixes: a device secret handed once, the binding goal code, a `confirm` answered no, another
+    identity, the origin of a credential request, the reason `replaced`** (2026-11-23, Fabrice's answers to the clean
+    spec, ayni-spec PR #123: B2, B8.2, B8.3 b and c, F5, and the reason `replaced` of his second answers; the rows of
+    "Specified, not built" of its reference profile).
+    - **The device secret is handed once** (D51, IDENT-DEV-001, PROF-BIND-010). The session record kept the plaintext
+      `deviceSecret` until the client rotated it (on devnet 130 of 216 sessions held one). It is now handed once and
+      erased from the session as soon as the client collected it: by the status of the bound session
+      (`takeDeviceSecret`), by the `201` of a session bound from a grant or from a device proof, or by
+      `ayni.session.bound` written to a client on the session's stream. A client that was not listening picks it up
+      from the status. One never collected is not handed once five minutes have passed since it was minted
+      (`deviceSecretAt`), and the session reaper (every 30 seconds) erases it; a session that closes erases it too.
+      Migration 3.11.0 erases the secrets the sessions already hold. Only the hash on the Principal's device stays.
+      A client that missed both the event and the status within five minutes links again with the phone; the bound
+      event stays in the stream's replay buffer, in memory only, for a client that resumes the stream.
+    - **The binding goal code** (flow profile §4, FLOW-CONN-001): `BINDING_GOAL_CODE` is `ayni.link-session` in
+      `src/channels/didcomm/adapter.ts` and in the profile package (`INVITATION_GOAL_CODE.linkSession`); no client read
+      `ayni.bind-session`.
+    - **A `confirm` answered no closes `completed`** (flow profile §6, row `confirm`), as an `authorize` answered either
+      way does; the challenge it serves still fails, and only a carrier that failed closes the flow `failed`. The phone
+      shows the person's answer from `confirmed`.
+    - **Another identity** (FLOW-SIGNIN-004, IDENT-RES-014, IDENT-RES-019): `IdentityFlow.authenticate` takes the actor
+      identity of an identified connection (`boundTo`) and decides before the flow closes: a presentation of another
+      identity is answered with the problem report `another-identity` (`NotAcceptedCode`), so that the History shows
+      it refused, and the caller asks nothing again (`asksAgain`); nothing of it is stored. The one request on an
+      identified connection is the one that asks for the email an invitation compares (`IdentityRequests.reveal`,
+      SPACE-INV-004); a visitor's request names no identity.
+    - **The origin of a credential request** (INTX-FLOW-001): a `present` asked by the model's `request_presentation`
+      and an `issue` asked from a conversation name its AG-UI session as `origin`, and so get the flow card in that
+      conversation (the web UI's "Continue on your phone"); a request of the DIDComm chat or of the agent itself (the
+      entries asked on connect, an `authenticate`) keeps `origin: none` (`conversationOrigin`).
+    - **The reason `replaced`** (IDENT-SESS-014, AG-UI profile §3.6, §5): a device's newer session on a conversation
+      closes its earlier one with `replaced`; `supersede` names a new phone only (IDENT-SESS-003).
+    - **Not done here:** `features.visitors` (PROF-DESC-012), new in the spec's second answers, is not part of these
+      fixes.
+    - **Profile package 3.5.2:** `BINDING_GOAL_CODE` `ayni.link-session`; the closure reason `replaced`.
+    - **Tests:** `agui.test.ts` (the secret by the status once, by the stream, after a device proof's response, five
+      minutes, a closed session; `replaced`), `postgres.test.ts` (3.11.0 leaves no secret), `bindingInvitation.test.ts`
+      and the package's test (the goal code), `flows.test.ts` (a `confirm` answered no; another identity on the flow and
+      the same identity accepted), `identityOnDemand.test.ts` (`reveal` names the identity and asks once),
+      `presentationCatalog.test.ts` and `issuance.test.ts` (the origin of `present` and `issue`). Each fails with its
+      change reverted.

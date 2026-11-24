@@ -330,8 +330,8 @@ export async function buildAgent(
       evidence,
       requestIdentity: async (principal, by) => (await identityRequestsRef?.request(principal, by)) ?? 'unavailable',
       issuance: () => issuanceRef,
-      requestPresentation: async (principal, entry) =>
-        (await identityRequestsRef?.present(principal, entry, 'model')) ?? 'unavailable',
+      requestPresentation: async (principal, entry, session) =>
+        (await identityRequestsRef?.present(principal, entry, 'model', session)) ?? 'unavailable',
       media,
       rag,
       stats,
@@ -588,8 +588,8 @@ export async function buildAgent(
   identityRequestsRef = new IdentityRequests(
     pack,
     {
-      authenticate: (connectionId, peerId, flowMode, userAgentVerified) =>
-        identity.authenticate(connectionId, peerId, flowMode, userAgentVerified),
+      authenticate: (connectionId, peerId, flowMode, userAgentVerified, boundTo) =>
+        identity.authenticate(connectionId, peerId, flowMode, userAgentVerified, boundTo),
       isFlowCapable: (connectionId) => peerProfiles.isFlowCapable(connectionId),
       onIdentityPresented: async (connectionId, facts) => {
         const result = await agent.onIdentityPresented(connectionId, facts)
@@ -597,7 +597,8 @@ export async function buildAgent(
         if (result.principal) await peerStatus.resolved(connectionId, result.principal)
         return result
       },
-      present: (connectionId, name, entry, flowMode) => identity.present(connectionId, name, entry, flowMode),
+      present: (connectionId, name, entry, flowMode, origin) =>
+        identity.present(connectionId, name, entry, flowMode, origin),
       record: async (principal, input) => {
         const record = await evidence.record(principal, input)
         // a credential the agent issues by itself may now be complete (INTX-ISSUE-008)

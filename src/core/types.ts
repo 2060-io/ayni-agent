@@ -117,7 +117,10 @@ export interface Conversation {
 export type SessionState = 'provisional' | 'bound' | 'closed'
 export type ClosureReason =
   | 'user'
+  /** a new phone: the old capability channel and every session that depends on it (IDENT-SESS-003) */
   | 'supersede'
+  /** a newer session of the same device on the conversation (IDENT-SESS-014) */
+  | 'replaced'
   | 'channel-closed'
   | 'credential-invalid'
   | 'idle-timeout'
@@ -170,8 +173,13 @@ export interface Session {
   binding?: BindingState
   /** opaque device handle: inherited from the creation request or minted at binding */
   deviceHandle?: string
-  /** the pairing secret handed to the client at binding, kept until the client rotates it (D51) */
+  /**
+   * the pairing secret minted at binding, held for its client only until the client has collected it, five minutes
+   * at most; only its hash stays, on the Principal's device (D51, IDENT-DEV-001)
+   */
   deviceSecret?: string
+  /** when the secret the session holds was minted */
+  deviceSecretAt?: string
   /** the conversation this session serves (D52); AG-UI sessions only */
   conversationId?: string
   /** the request asked for a new conversation rather than continuing the latest (PROF-CONV-006) */

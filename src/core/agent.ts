@@ -276,8 +276,10 @@ export class AyniAgent {
     return session.principalId ? ((await this.principals.get(session.principalId)) ?? null) : null
   }
 
+  /** The status of a session; a device secret it holds is handed here once and erased (IDENT-DEV-001, PROF-BIND-010). */
   public async status(session: Session): Promise<SessionStatus> {
     const principal = await this.principalOf(session)
+    const deviceSecret = session.state === 'bound' ? await this.sessions.takeDeviceSecret(session) : undefined
     return {
       sessionId: session.id,
       state: session.state,
@@ -289,7 +291,7 @@ export class AyniAgent {
       binding: session.state === 'provisional' && session.binding ? this.bindingMaterial(session) : undefined,
       parentSessionId: session.parentSessionId,
       deviceHandle: session.state === 'bound' ? session.deviceHandle : undefined,
-      deviceSecret: session.state === 'bound' ? session.deviceSecret : undefined,
+      deviceSecret,
       conversationId: session.state === 'bound' ? session.conversationId : undefined,
       resumedFromSessionId: session.state === 'bound' ? session.resumedFromSessionId : undefined,
     }

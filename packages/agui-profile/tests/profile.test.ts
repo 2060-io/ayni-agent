@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest'
 import {
   ACTIVITY,
   APP_LINK_DOMAIN,
+  BINDING_GOAL_CODE,
   buildAppLink,
   CLIENT_PLATFORMS,
   CONNECTION_STATES,
@@ -78,6 +79,8 @@ describe('profile 3.5 constants', () => {
     expect(ACTIVITY.memoryUpdate).toBe('ayni.memory-update')
     expect(ACTIVITY.flow).toBe('ayni.flow')
     expect(INVITATION_GOAL_CODE.linkSession).toBe('ayni.link-session')
+    // a binding invitation carries the goal code of the flow profile §4 (FLOW-CONN-001)
+    expect(BINDING_GOAL_CODE).toBe('ayni.link-session')
     expect(CLIENT_PLATFORMS).toEqual(['web', 'ios', 'android'])
     expect(isClientPlatform('ios')).toBe(true)
     expect(isClientPlatform('Firefox on Linux')).toBe(false)
@@ -174,6 +177,9 @@ describe('schemas', () => {
     expect(validate({ ...base, features: { ...base.features, connections: 'yes' } })).toBe(false)
     expect(validate({ ...base, features: { ...base.features, notifications: true } })).toBe(true)
     expect(validate({ ...base, features: { ...base.features, notifications: 'yes' } })).toBe(false)
+    // 3.5.2: the agent lets visitors in, a boolean (PROF-DESC-012)
+    expect(validate({ ...base, features: { ...base.features, visitors: true } })).toBe(true)
+    expect(validate({ ...base, features: { ...base.features, visitors: 'yes' } })).toBe(false)
     expect(validate({ ...base, features: { ...base.features, erasure: {} } })).toBe(false)
     expect(
       validate({ ...base, binding: { modes: ['cross-device'], walletLinkTemplate: 'didcomm://x?oob={oob}' } })

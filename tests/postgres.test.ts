@@ -1500,4 +1500,54 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
       expect((await store.oauthClients.get('dynamic|https://crm.2060.io'))?.clientId).toBe('client_1')
     })
   })
+
+  describe('the device secrets an earlier version kept are erased (D51, IDENT-DEV-001, schema 3.11.0)', () => {
+    it('leaves no plaintext device secret on any session record, and the rest of the record as it was', async () => {
+      const url = await freshDatabase()
+      // a store of the previous version, whose sessions kept the secret their client had collected
+      const client = new pg.Client({ connectionString: url })
+      await client.connect()
+      await client.query(
+        'CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())'
+      )
+      for (const m of MIGRATIONS.filter((m) => olderThan(m.version, '3.11.0'))) {
+        await client.query(m.sql)
+        await client.query('INSERT INTO schema_migrations (version) VALUES ($1)', [m.version])
+      }
+      const session = (id: string, over: Partial<Session> = {}) =>
+        ({
+          id,
+          principalId: 'p-ana',
+          channelType: 'ag-ui',
+          externalRef: id,
+          state: 'bound',
+          client: { name: 'ayni-ui', version: '0.22.0', platform: 'web' },
+          deviceHandle: 'dev_1',
+          lastActivityAt: '2026-11-22T10:00:00.000Z',
+          createdAt: '2026-11-22T10:00:00.000Z',
+          streamCursor: 0,
+          ...over,
+        }) as Session
+      for (const s of [session('ses_kept', { deviceSecret: 'dsk_canary0001' }), session('ses_none')])
+        await client.query(
+          `INSERT INTO sessions (id, principal_id, channel_type, external_ref, state, last_activity_at, data)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [s.id, s.principalId, s.channelType, s.externalRef, s.state, s.lastActivityAt, JSON.stringify(s)]
+        )
+      await client.end()
+      const store = new PostgresStore(url)
+      await store.init()
+      const raw = new pg.Client({ connectionString: url })
+      await raw.connect()
+      const rows = (await raw.query('SELECT id, data::text AS data FROM sessions ORDER BY id')).rows
+      const versions = (await raw.query('SELECT version FROM schema_migrations')).rows.map((r) => r.version)
+      await raw.end()
+      expect(versions).toContain('3.11.0')
+      expect(rows.map((r) => r.id)).toEqual(['ses_kept', 'ses_none'])
+      expect(rows.map((r) => r.data).join('')).not.toContain('dsk_canary0001')
+      expect(rows.map((r) => r.data).join('')).not.toContain('deviceSecret')
+      expect(await store.sessions.get('ses_kept')).toMatchObject({ deviceHandle: 'dev_1', state: 'bound' })
+      await store.close()
+    })
+  })
 })

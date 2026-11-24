@@ -19,7 +19,7 @@ import {
 import { Ajv2020 } from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
-import { messageDeletionWindowSeconds } from '../../config/packTypes.js'
+import { admitsUnidentified, messageDeletionWindowSeconds } from '../../config/packTypes.js'
 import type { AyniAgent, QueuedRun } from '../../core/agent.js'
 import { CLIENT_METADATA_PATH, type ConnectionsChanged, OAUTH_CALLBACK_PATH } from '../../core/connections.js'
 import { conversationOf } from '../../core/conversationOf.js'
@@ -215,6 +215,10 @@ export class AgUiRoutes {
         ...(this.agent.connections?.personalSources().length ? { connections: true } : {}),
         // the Notifications of a space and of the agent: approvals, pending and past (ayni-spec D114, PROF-DESC-011)
         notifications: true,
+        // a person may enter without authenticating, as a visitor: the agent-pack names no authentication schema, or
+        // one offered or asked on request (IDENT-RES-007, IDENT-RES-010, PROF-DESC-012); an agent that requires it
+        // declares nothing
+        ...(admitsUnidentified(this.agent.pack) ? { visitors: true } : {}),
       },
       locales: [this.agent.pack.language.agent],
     }
@@ -321,6 +325,8 @@ export class AgUiRoutes {
             body.spaceId
           )
           const principal = await this.agent.principalOf(session)
+          // the response hands the device secret: the session keeps it no longer (IDENT-DEV-001)
+          const deviceSecret = await this.agent.sessions.takeDeviceSecret(session)
           await this.agent.welcome(session)
           return reply.code(201).send({
             sessionId: session.id,
@@ -329,7 +335,7 @@ export class AgUiRoutes {
             agent: { did, name: this.agent.pack.metadata.displayName },
             principal: principal ? this.agent.principalDisplay(principal) : undefined,
             deviceHandle: session.deviceHandle,
-            deviceSecret: session.deviceSecret,
+            deviceSecret,
             conversationId: session.conversationId,
             resumedFromSessionId: session.resumedFromSessionId,
             idleTimeoutSeconds: this.agent.sessions.idleTimeoutSeconds,
@@ -387,8 +393,10 @@ export class AgUiRoutes {
           body.spaceId
         )
         if (session.state === 'bound') {
-          // a paired device: bound at once, no phone round trip (PROF-SESS-010)
+          // a paired device: bound at once, no phone round trip (PROF-SESS-010); the response hands the rotated
+          // secret, which the session keeps no longer (IDENT-DEV-001)
           const principal = await this.agent.principalOf(session)
+          const deviceSecret = await this.agent.sessions.takeDeviceSecret(session)
           await this.agent.welcome(session)
           return reply.code(201).send({
             sessionId: session.id,
@@ -397,7 +405,7 @@ export class AgUiRoutes {
             agent: { did, name: this.agent.pack.metadata.displayName },
             principal: principal ? this.agent.principalDisplay(principal) : undefined,
             deviceHandle: session.deviceHandle,
-            deviceSecret: session.deviceSecret,
+            deviceSecret,
             conversationId: session.conversationId,
             resumedFromSessionId: session.resumedFromSessionId,
             idleTimeoutSeconds: this.agent.sessions.idleTimeoutSeconds,
@@ -1839,17 +1847,22 @@ export class AgUiRoutes {
   public async announceBound(session: Session): Promise<void> {
     const principal = await this.agent.principalOf(session)
     if (!principal) return
+    const deviceSecret = this.agent.sessions.heldDeviceSecret(session)
     await this.streams.publish(
       session.id,
       ev.custom(CUSTOM_EVENT.sessionBound, {
         principal: this.agent.principalDisplay(principal),
         boundAt: session.boundAt,
         deviceHandle: session.deviceHandle,
-        deviceSecret: session.deviceSecret,
+        deviceSecret,
         conversationId: session.conversationId,
         resumedFromSessionId: session.resumedFromSessionId,
       })
     )
+    // a client on the stream has collected the secret: the session keeps it no longer; one that was not listening
+    // picks it up from the status within five minutes (IDENT-DEV-001, PROF-BIND-010)
+    if (deviceSecret && this.streams.subscriberCount(session.id) > 0)
+      await this.agent.sessions.eraseDeviceSecret(session)
     await this.announceState(session)
     await this.adapter.pushState(session)
   }

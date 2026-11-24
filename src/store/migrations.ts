@@ -1,5 +1,5 @@
 /** Memory schema versions (CORE-VER-001/002). Each migration is applied once, in order. */
-export const MEMORY_SCHEMA_VERSION = '3.10.0'
+export const MEMORY_SCHEMA_VERSION = '3.11.0'
 
 export const MIGRATIONS: { version: string; sql: string }[] = [
   {
@@ -445,6 +445,14 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
   ref TEXT PRIMARY KEY,
   data JSONB NOT NULL
 );
+`,
+  },
+  {
+    // a device secret is handed to its client once and only its hash is kept (D51, IDENT-DEV-001): the secrets an
+    // earlier version left on the session records are erased
+    version: '3.11.0',
+    sql: `
+UPDATE sessions SET data = data - 'deviceSecret' - 'deviceSecretAt' WHERE data ? 'deviceSecret' OR data ? 'deviceSecretAt';
 `,
   },
 ]

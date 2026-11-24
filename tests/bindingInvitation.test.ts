@@ -244,8 +244,10 @@ describe('the binding invitation (CHAN-BIND-008)', () => {
   it('is a standalone invitation record, single use, DIDComm v1, carried as oob= on the agent public URL', async () => {
     const created = await createUiSession()
     const mint = callsOf('createInvitation').at(-1)?.args[0] as Record<string, unknown>
-    expect(mint).toMatchObject({ didcommVersion: 'v1', reusable: false, goalCode: 'ayni.bind-session' })
+    // the goal code of a web UI's binding, as the flow profile §4 names it (FLOW-CONN-001)
+    expect(mint).toMatchObject({ didcommVersion: 'v1', reusable: false, goalCode: 'ayni.link-session' })
     const record = callsOf('createInvitation').at(-1)?.result as { id: string; invitation: Record<string, unknown> }
+    expect(record.invitation.goal_code).toBe('ayni.link-session')
     expect(created.session.binding?.outOfBandId).toBe(record.id)
     expect(created.session.binding?.nonce).toBe(record.invitation['@id'])
     const url = new URL(created.binding.oobUrl)

@@ -52,12 +52,6 @@ export const PROFILE_MINOR = 5
 export const DID_SERVICE_TYPE = 'AyniAgUI'
 /** Well-known path of the descriptor on the agent origin (PROF-DESC-001). */
 export const DESCRIPTOR_PATH = '/.well-known/ayni-agent.json'
-/**
- * goal_code of the 3.0 binding invitation (profile section 4). Flow-capable wallets read the flow profile's codes
- * below instead; agents keep emitting this one for wallets without flows.
- */
-export const BINDING_GOAL_CODE = 'ayni.bind-session'
-
 /** goal_code values of the flow profile §4 (FLOW-CONN-001): what follows the invitation. */
 export const INVITATION_GOAL_CODE = {
   /** just connect */
@@ -67,6 +61,9 @@ export const INVITATION_GOAL_CODE = {
   /** a service-initiated flow follows */
   flow: 'ayni.flow',
 } as const
+
+/** goal_code of a binding invitation (profile section 4, flow profile §4, FLOW-CONN-001): `ayni.link-session`. */
+export const BINDING_GOAL_CODE = INVITATION_GOAL_CODE.linkSession
 
 export type InvitationGoalCode = (typeof INVITATION_GOAL_CODE)[keyof typeof INVITATION_GOAL_CODE]
 
@@ -125,6 +122,12 @@ export interface DescriptorFeatures {
    * Notifications of an agent that does not declare it.
    */
   notifications?: boolean
+  /**
+   * the agent lets a person in without authenticating, as a visitor (3.5.2, PROF-DESC-012): it names no authentication
+   * schema, or one that lets visitors in (offered, or on request; agent IDENT-RES-007, IDENT-RES-010). An agent that
+   * requires the authentication does not declare it. The web UI says so on the agent's page.
+   */
+  visitors?: boolean
 }
 
 export type BindingMode = 'cross-device' | 'same-device'
@@ -153,7 +156,10 @@ export type SessionState = 'provisional' | 'bound' | 'closed'
 /** Closure reasons (section 5, ayni.session.state). */
 export type ClosureReason =
   | 'user'
+  /** a new phone: the old capability channel and every session that depends on it (agent IDENT-SESS-003) */
   | 'supersede'
+  /** a newer session of the same device on the conversation (§3.6, agent IDENT-SESS-014) */
+  | 'replaced'
   | 'channel-closed'
   | 'credential-invalid'
   | 'idle-timeout'
@@ -163,6 +169,7 @@ export type ClosureReason =
 export const CLOSURE_REASONS: readonly ClosureReason[] = [
   'user',
   'supersede',
+  'replaced',
   'channel-closed',
   'credential-invalid',
   'idle-timeout',
