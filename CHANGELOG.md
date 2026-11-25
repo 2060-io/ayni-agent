@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.35.0](https://github.com/2060-io/ayni-agent/compare/v0.34.0...v0.35.0) (2026-11-25)
+
+
+### Features
+
+* **issuance:** the badge offered only when the connection holds none; issued again when the phone holds none (ayni-spec D156) ([#130](https://github.com/2060-io/ayni-agent/issues/130)) ([e704a67](https://github.com/2060-io/ayni-agent/commit/e704a67839d874ddbf0d3acb5869eeabff128e9e))
+
 ## [0.34.0](https://github.com/2060-io/ayni-agent/compare/v0.33.0...v0.34.0) (2026-11-24)
 
 
