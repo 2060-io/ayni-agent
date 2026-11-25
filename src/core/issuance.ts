@@ -15,6 +15,12 @@
  * authenticated, and is empty without one (IDENT-DIR-005). `emailId` numbers a credential by the address an `email`
  * method verified (INTX-ISSUE-020); `as: dateint` writes a date as the integer `YYYYMMDD`. A credential is held by the
  * wallet it was issued to: on another connection of the same person it is issued again (D130).
+ *
+ * Held on a connection (IDENT-AUTH-016, D156): the agent issued one of the profile on that connection, whatever Principal
+ * the connection belongs to, and it is neither revoked nor past the last day of validity its profile names
+ * (`validUntilClaim`, INTX-ISSUE-023). An automatic profile is offered only on a connection that holds none. A holder
+ * that deleted its credential asks for it again (`reissue` with reason `missing`, INTX-ISSUE-022): the agent revokes the
+ * one it issued on that connection, so that two are never valid, and issues a new one, with the same number.
  */
 import { createHmac, hkdfSync } from 'node:crypto'
 import { AUTHENTICATION_ENTRY, DOCUMENT_ENTRY, EMAIL_ENTRY } from '../config/pack.js'
@@ -25,6 +31,7 @@ import {
   challengeTypesOf,
   type IssuanceChallenge,
   type IssuanceProfile,
+  issuedAgainOnRequest,
   mustBeRevocable,
   takesClaimsFromDirectory,
 } from '../config/packTypes.js'
@@ -105,6 +112,8 @@ export interface IssuanceDeps {
     revocation?: RevocationSlot
     /** the conversation session the issuance was asked from, which the flow names as its origin (INTX-FLOW-001) */
     origin?: Session
+    /** one sentence of context on the flow: what the holder asked, for an issuance that answers a `reissue` */
+    description?: string
   }): Promise<{
     outcome: 'issued' | 'declined' | 'unanswered' | 'refused' | 'failed'
     /** why the wallet refused, when it did: the code of its problem report */
@@ -136,6 +145,11 @@ export interface IssuanceDeps {
   /** after the record of an issuance: a Principal that already is the actor of the credential holds its entry */
   issued?(principal: Principal, record: EvidenceRecord, holder: string | undefined): Promise<void>
   /**
+   * revokes the credential of an issuance record, records it and tells its holder on the connection it was issued on
+   * (D91, INTX-FLOW-007); false when it could not be revoked (INTX-ISSUE-022)
+   */
+  revoke?(record: EvidenceRecord, reason: 'issued-again'): Promise<boolean>
+  /**
    * a claim of a system of record (`{ from: record, record, field }`, INTX-ISSUE-002): the user directory, whose entry
    * is the one the Principal's authentication identified (INTX-ISSUE-021, IDENT-AUTH-003). Its resolution names the
    * entry, which the record of the issuance keeps (IDENT-DIR-006). Without it such a claim is `unavailable`
@@ -156,8 +170,23 @@ export interface IssuanceDeps {
   ): Promise<{ id: string; values: Record<string, string> } | undefined>
 }
 
-/** Who started an issuance: the model's tool, the person's menu item, or the agent by itself. */
-export type IssuanceTrigger = 'model' | 'person' | 'agent'
+/**
+ * Who started an issuance: the model's tool, the person's menu item, the agent by itself, or the holder's phone asking
+ * again for a credential it holds none of (INTX-ISSUE-022).
+ */
+export type IssuanceTrigger = 'model' | 'person' | 'agent' | 'holder'
+
+/** How a holder's request to be issued a credential again ended (INTX-ISSUE-022). */
+export interface IssueAgainResult {
+  /**
+   * what the issuance ended in, or `unknown-reference` (no profile of this agent issues the schema) or `not-eligible`
+   * (the person is not identified, the profile is not theirs or not issued again on request, or its claims do not
+   * resolve)
+   */
+  outcome: IssuanceOutcome | 'unknown-reference' | 'not-eligible'
+  profile?: string
+  reason?: string
+}
 
 /** A claim of a system of record (INTX-ISSUE-002, INTX-ISSUE-021): a field of the person's entry of the user directory. */
 export type RecordSource = Extract<ClaimSource, { from: 'record' }>
@@ -216,6 +245,27 @@ export function dateInt(value: string): string | undefined {
   return match ? `${match[1]}${match[2]}${match[3]}` : undefined
 }
 
+/**
+ * The last day of validity a claim gives, as `YYYY-MM-DD`: a calendar date, a date written as the integer `YYYYMMDD`, or
+ * a time, of which its day in UTC (INTX-ISSUE-023); undefined for anything else.
+ */
+export function validUntilOf(value: string | undefined): string | undefined {
+  const text = value?.trim() ?? ''
+  const day = /^(\d{4})-?(\d{2})-?(\d{2})$/.exec(text)
+  if (day) return `${day[1]}-${day[2]}-${day[3]}`
+  const time = Date.parse(text)
+  return /^\d{4}-\d{2}-\d{2}T/.test(text) && !Number.isNaN(time) ? new Date(time).toISOString().slice(0, 10) : undefined
+}
+
+/**
+ * Whether an issued credential still holds (IDENT-AUTH-016): it is not revoked, and its last day of validity, when its
+ * profile names one, has not passed.
+ */
+export function stillValid(record: Pick<EvidenceRecord, 'revocation' | 'validUntil'>, now = nowIso()): boolean {
+  if (record.revocation?.revokedAt) return false
+  return !record.validUntil || record.validUntil >= now.slice(0, 10)
+}
+
 /** Whether a piece of evidence is too old for a profile, or past its own retention (INTX-ISSUE-013). */
 export function evidenceTooOld(
   record: EvidenceRecord,
@@ -241,6 +291,24 @@ export function offeredProfiles(pack: AgentPack, principal: Principal): [string,
   return Object.entries(pack.issuance ?? {}).filter(
     ([, profile]) => !profile.roles?.length || profile.roles.some((r) => principal.roles.includes(r))
   )
+}
+
+/**
+ * The credentials a Principal may ask for again when its wallet holds none (`issuable` of the peer status, IDENT-STAT-009,
+ * INTX-ISSUE-022): to an identified person, the profiles offered to them that are issued again on request, one per
+ * schema, with the name a person reads.
+ */
+export function issuableAgain(
+  pack: AgentPack,
+  principal: Principal
+): { jsonSchemaCredentialId: string; label: string }[] {
+  if (!principal.identityCredentialRef) return []
+  const out = new Map<string, string>()
+  for (const [name, profile] of offeredProfiles(pack, principal)) {
+    const schema = profile.credential.jsonSchemaCredentialId
+    if (schema && issuedAgainOnRequest(profile) && !out.has(schema)) out.set(schema, profile.label ?? name)
+  }
+  return [...out].map(([jsonSchemaCredentialId, label]) => ({ jsonSchemaCredentialId, label }))
 }
 
 export class IssuanceService {
@@ -274,14 +342,7 @@ export class IssuanceService {
     const out: CredentialRequirements[] = []
     for (const [name, profile] of this.offered(principal)) {
       if (only && name !== only) continue
-      // held by the wallet it was issued to: a credential revoked since (its entry left the directory) is held no more
-      // (D91), and a connection of another wallet holds none (D130)
-      const latest = await this.evidence.latest(principal.id, issuanceEntry(name))
-      const connectionId = principal.capabilityChannelId
-      const held =
-        !!latest &&
-        !latest.revocation?.revokedAt &&
-        (!connectionId || !latest.connectionRef || latest.connectionRef === connectionId)
+      const held = await this.held(principal, name)
       const claims: ClaimRequirement[] = []
       for (const [claim, source] of Object.entries(profile.claims)) {
         const { status, action } = await this.resolveClaim(principal, name, profile, source)
@@ -317,7 +378,12 @@ export class IssuanceService {
     const profile = this.offered(principal).find(([n]) => n === name)?.[1]
     if (!profile) return { outcome: 'not-offered' }
     const trigger = profile.trigger ?? 'model'
-    const allowed = { model: trigger === 'model', person: trigger === 'request', agent: trigger === 'automatic' }[by]
+    const allowed = {
+      model: trigger === 'model',
+      person: trigger === 'request',
+      agent: trigger === 'automatic',
+      holder: false,
+    }[by]
     if (!allowed) return { outcome: 'not-offered' }
     const connectionId = principal.capabilityChannelId
     if (!connectionId) return { outcome: 'unavailable' }
@@ -325,120 +391,207 @@ export class IssuanceService {
     if (this.running.has(key)) return { outcome: 'unavailable' }
     this.running.add(key)
     try {
-      let [requirements] = await this.requirements(principal, name)
-      if (requirements.state === 'held') return { outcome: 'held', requirements }
-      if (requirements.state !== 'ready') return { outcome: 'incomplete', requirements }
-      const label = profile.label ?? name
-      // a profile that names a schema issues under the definition of this agent for it, or not at all
-      const credentialDefinitionId = await this.definitionOf(profile)
-      if (!credentialDefinitionId) return { outcome: 'not-ready' }
-      // the challenge of the profile (INTX-ISSUE-010). What a document read obtains and is still good is not asked again:
-      // a person who declined the offer, or let it pass, is not sent back to their chip
-      for (const policy of challengesOf(profile)) {
-        const obtains = (c: ClaimRequirement) =>
-          c.status !== 'available' && c.action?.type === 'issue_credential' && c.action.challenge === policy.type
-        if (policy.type === 'document' && !requirements.claims.some(obtains)) continue
-        const challenge = await this.deps.challenge(principal, session, policy, label)
-        if (!challenge.passed) return { outcome: 'challenge-failed', reason: challenge.reason }
-        // what the read gave: the claims it resolves, or what is still missing
-        if (policy.type === 'document') {
-          ;[requirements] = await this.requirements(principal, name)
-          if (requirements.state !== 'ready') return { outcome: 'incomplete', requirements }
-        }
-      }
-      // the claims are resolved now, by the code, from the sources the profile names and nothing else
-      const claims: Record<string, string> = {}
-      const evidenceRefs = new Set<string>()
-      const entries = new Set<string>()
-      for (const [claim, source] of Object.entries(profile.claims)) {
-        const resolved = await this.resolveClaim(principal, name, profile, source)
-        if (resolved.status !== 'available' || resolved.value === undefined) {
-          return { outcome: 'incomplete', requirements: (await this.requirements(principal, name))[0] }
-        }
-        claims[claim] = resolved.value
-        if (resolved.evidenceRef) evidenceRefs.add(resolved.evidenceRef)
-        if (resolved.directoryEntryId) entries.add(resolved.directoryEntryId)
-      }
-      // the claims of one credential come from one entry of the directory (IDENT-DIR-004)
-      if (entries.size > 1) {
-        this.logger.warn({ profile: name, entries: entries.size }, 'claims from several directory entries: not issued')
-        return { outcome: 'incomplete', requirements: (await this.requirements(principal, name))[0] }
-      }
-      const directoryEntryId = [...entries][0]
-      // under a revocable definition the credential takes a registry and an index; one that must be revocable is not
-      // issued without them (D91, decision 61)
-      let revocation: RevocationSlot | undefined
-      try {
-        revocation = await this.deps.allocateRevocation?.(credentialDefinitionId)
-      } catch (error) {
-        this.logger.warn({ err: error, profile: name }, 'no revocation registry for the credential: not issued')
-        return { outcome: 'not-ready' }
-      }
-      if (!revocation && (mustBeRevocable(profile) || directoryEntryId)) {
-        this.logger.error(
-          { profile: name, credentialDefinitionId },
-          'a credential from the user directory must be revocable, and its definition supports no revocation: not issued (IDENT-ROLE-013)'
-        )
-        return { outcome: 'not-ready' }
-      }
-      // the actor the credential identifies once presented: a badge from the directory that could never find its entry
-      // again is not issued (IDENT-DIR-006)
-      const holder = await this.deps.holderOf?.(name, profile, claims)
-      if (directoryEntryId && !holder) {
-        this.logger.error(
-          { profile: name },
-          'a badge from the directory must identify its holder (the home organization, the authentication schema, the subject key): not issued (IDENT-DIR-006)'
-        )
-        return { outcome: 'not-ready' }
-      }
-      // asked from a conversation, the `issue` flow names its session as its origin (INTX-FLOW-001)
-      const origin = conversationOrigin(session)
-      const offer = await this.deps.offer({
-        connectionId,
-        credentialDefinitionId,
-        claims,
-        title: label,
-        ...(revocation ? { revocation } : {}),
-        ...(origin ? { origin } : {}),
-      })
-      if (offer.outcome !== 'issued') return { outcome: offer.outcome, reason: offer.reason }
-      // one record per issuance: audit fields always, the claims only when the profile keeps them (INTX-ISSUE-014); the
-      // entry it came from, the actor it identifies (as a keyed index) and its registry and index, in the clear
-      const record = await this.evidence.record(
-        principal,
-        {
-          kind: 'issuance',
-          entry: issuanceEntry(name),
-          credentialDefinitionId,
-          values: claims,
-          requestRef: offer.exchangeId,
-          connectionRef: connectionId,
-          evidenceRefs: [...evidenceRefs],
-          ...(directoryEntryId ? { directoryEntryId } : {}),
-          ...(holder ? { holder } : {}),
-          ...(revocation ? { revocation } : {}),
-        },
-        profile.record?.storeClaims
-          ? { store: { attributes: Object.keys(claims), retention: profile.record.retention } }
-          : {}
-      )
-      this.logger.info(
-        {
-          principalId: principal.id,
-          profile: name,
-          by,
-          ...(directoryEntryId ? { directoryEntryId } : {}),
-          revocable: !!revocation,
-        },
-        'credential issued'
-      )
-      await this.deps
-        .issued?.(principal, record, holder)
-        .catch((err) => this.logger.warn({ err, principalId: principal.id }, 'what follows an issuance failed'))
-      return { outcome: 'issued' }
+      return await this.issueNow(principal, session, name, profile, by, connectionId)
     } finally {
       this.running.delete(key)
     }
+  }
+
+  /**
+   * A holder that holds no credential of a schema asks for it again (`reissue` with reason `missing`, INTX-ISSUE-022,
+   * D156): to an identified person only, for a profile offered to them that is issued again on request. The credential
+   * this agent issued of it on the connection and that still holds is revoked first, so that two are never valid; then a
+   * new one is offered, with the same number (INTX-ISSUE-016). Nothing is revoked when the new one cannot be issued.
+   */
+  public async issueAgain(
+    principal: Principal,
+    session: Session,
+    jsonSchemaCredentialId: string,
+    options: { description?: string } = {}
+  ): Promise<IssueAgainResult> {
+    const named = Object.entries(this.pack.issuance ?? {}).filter(
+      ([, p]) => !!jsonSchemaCredentialId && p.credential.jsonSchemaCredentialId === jsonSchemaCredentialId
+    )
+    if (!named.length) return { outcome: 'unknown-reference' }
+    if (principal.connectionType !== 'verifiable-user-agent' || !principal.identityCredentialRef)
+      return { outcome: 'not-eligible', reason: 'not-identified' }
+    const offered = new Set(this.offered(principal).map(([n]) => n))
+    const found = named.find(([n, p]) => offered.has(n) && issuedAgainOnRequest(p))
+    if (!found) return { outcome: 'not-eligible', reason: 'not-issued-again' }
+    const [name, profile] = found
+    const connectionId = principal.capabilityChannelId
+    if (!connectionId) return { outcome: 'unavailable', profile: name }
+    const key = `${principal.id}|${name}`
+    if (this.running.has(key)) return { outcome: 'unavailable', profile: name, reason: 'busy' }
+    this.running.add(key)
+    try {
+      // what the new credential would say must resolve before the one held is revoked
+      const [requirements] = await this.requirements(principal, name)
+      const resolves = requirements.claims.every(
+        (c) => c.status === 'available' || c.action?.type === 'issue_credential'
+      )
+      if (!resolves) return { outcome: 'not-eligible', profile: name, reason: 'incomplete' }
+      if (!(await this.definitionOf(profile))) return { outcome: 'not-ready', profile: name }
+      const entry = issuanceEntry(name)
+      for (const record of (await this.evidence.issuedOn(connectionId, entry)).filter((r) => stillValid(r))) {
+        const revoked = record.revocation && this.deps.revoke ? await this.deps.revoke(record, 'issued-again') : false
+        if (!revoked) {
+          this.logger.warn(
+            { principalId: principal.id, profile: name, evidenceId: record.id },
+            'the credential issued on this connection could not be revoked: not issued again (INTX-ISSUE-022)'
+          )
+          return { outcome: 'unavailable', profile: name, reason: 'not-revoked' }
+        }
+      }
+      const result = await this.issueNow(principal, session, name, profile, 'holder', connectionId, options)
+      return { ...result, profile: name }
+    } finally {
+      this.running.delete(key)
+    }
+  }
+
+  /** The issuance itself, once the profile, the trigger and the connection are settled and the lock is held. */
+  private async issueNow(
+    principal: Principal,
+    session: Session,
+    name: string,
+    profile: IssuanceProfile,
+    by: IssuanceTrigger,
+    connectionId: string,
+    options: { description?: string } = {}
+  ): Promise<IssuanceResult> {
+    let [requirements] = await this.requirements(principal, name)
+    if (requirements.state === 'held') return { outcome: 'held', requirements }
+    if (requirements.state !== 'ready') return { outcome: 'incomplete', requirements }
+    const label = profile.label ?? name
+    // a profile that names a schema issues under the definition of this agent for it, or not at all
+    const credentialDefinitionId = await this.definitionOf(profile)
+    if (!credentialDefinitionId) return { outcome: 'not-ready' }
+    // the challenge of the profile (INTX-ISSUE-010). What a document read obtains and is still good is not asked again:
+    // a person who declined the offer, or let it pass, is not sent back to their chip
+    for (const policy of challengesOf(profile)) {
+      const obtains = (c: ClaimRequirement) =>
+        c.status !== 'available' && c.action?.type === 'issue_credential' && c.action.challenge === policy.type
+      if (policy.type === 'document' && !requirements.claims.some(obtains)) continue
+      const challenge = await this.deps.challenge(principal, session, policy, label)
+      if (!challenge.passed) return { outcome: 'challenge-failed', reason: challenge.reason }
+      // what the read gave: the claims it resolves, or what is still missing
+      if (policy.type === 'document') {
+        ;[requirements] = await this.requirements(principal, name)
+        if (requirements.state !== 'ready') return { outcome: 'incomplete', requirements }
+      }
+    }
+    // the claims are resolved now, by the code, from the sources the profile names and nothing else
+    const claims: Record<string, string> = {}
+    const evidenceRefs = new Set<string>()
+    const entries = new Set<string>()
+    for (const [claim, source] of Object.entries(profile.claims)) {
+      const resolved = await this.resolveClaim(principal, name, profile, source)
+      if (resolved.status !== 'available' || resolved.value === undefined) {
+        return { outcome: 'incomplete', requirements: (await this.requirements(principal, name))[0] }
+      }
+      claims[claim] = resolved.value
+      if (resolved.evidenceRef) evidenceRefs.add(resolved.evidenceRef)
+      if (resolved.directoryEntryId) entries.add(resolved.directoryEntryId)
+    }
+    // the claims of one credential come from one entry of the directory (IDENT-DIR-004)
+    if (entries.size > 1) {
+      this.logger.warn({ profile: name, entries: entries.size }, 'claims from several directory entries: not issued')
+      return { outcome: 'incomplete', requirements: (await this.requirements(principal, name))[0] }
+    }
+    const directoryEntryId = [...entries][0]
+    // under a revocable definition the credential takes a registry and an index; one that must be revocable is not
+    // issued without them (D91, decision 61)
+    let revocation: RevocationSlot | undefined
+    try {
+      revocation = await this.deps.allocateRevocation?.(credentialDefinitionId)
+    } catch (error) {
+      this.logger.warn({ err: error, profile: name }, 'no revocation registry for the credential: not issued')
+      return { outcome: 'not-ready' }
+    }
+    if (!revocation && (mustBeRevocable(profile) || directoryEntryId)) {
+      this.logger.error(
+        { profile: name, credentialDefinitionId },
+        'a credential from the user directory must be revocable, and its definition supports no revocation: not issued (IDENT-ROLE-013)'
+      )
+      return { outcome: 'not-ready' }
+    }
+    // the actor the credential identifies once presented: a badge from the directory that could never find its entry
+    // again is not issued (IDENT-DIR-006)
+    const holder = await this.deps.holderOf?.(name, profile, claims)
+    if (directoryEntryId && !holder) {
+      this.logger.error(
+        { profile: name },
+        'a badge from the directory must identify its holder (the home organization, the authentication schema, the subject key): not issued (IDENT-DIR-006)'
+      )
+      return { outcome: 'not-ready' }
+    }
+    // asked from a conversation, the `issue` flow names its session as its origin (INTX-FLOW-001)
+    const origin = conversationOrigin(session)
+    const offer = await this.deps.offer({
+      connectionId,
+      credentialDefinitionId,
+      claims,
+      title: label,
+      ...(revocation ? { revocation } : {}),
+      ...(origin ? { origin } : {}),
+      ...(options.description ? { description: options.description } : {}),
+    })
+    if (offer.outcome !== 'issued') return { outcome: offer.outcome, reason: offer.reason }
+    // the last day of validity the profile names, kept with the record: past it the credential is held no more
+    // (INTX-ISSUE-023, IDENT-AUTH-016)
+    const validUntil = profile.validUntilClaim ? validUntilOf(claims[profile.validUntilClaim]) : undefined
+    if (profile.validUntilClaim && !validUntil)
+      this.logger.warn({ profile: name, claim: profile.validUntilClaim }, 'the claim of validity is not a date')
+    // one record per issuance: audit fields always, the claims only when the profile keeps them (INTX-ISSUE-014); the
+    // entry it came from, the actor it identifies (as a keyed index) and its registry and index, in the clear
+    const record = await this.evidence.record(
+      principal,
+      {
+        kind: 'issuance',
+        entry: issuanceEntry(name),
+        credentialDefinitionId,
+        values: claims,
+        requestRef: offer.exchangeId,
+        connectionRef: connectionId,
+        evidenceRefs: [...evidenceRefs],
+        ...(directoryEntryId ? { directoryEntryId } : {}),
+        ...(holder ? { holder } : {}),
+        ...(revocation ? { revocation } : {}),
+        ...(validUntil ? { validUntil } : {}),
+      },
+      profile.record?.storeClaims
+        ? { store: { attributes: Object.keys(claims), retention: profile.record.retention } }
+        : {}
+    )
+    this.logger.info(
+      {
+        principalId: principal.id,
+        profile: name,
+        by,
+        ...(directoryEntryId ? { directoryEntryId } : {}),
+        revocable: !!revocation,
+      },
+      'credential issued'
+    )
+    await this.deps
+      .issued?.(principal, record, holder)
+      .catch((err) => this.logger.warn({ err, principalId: principal.id }, 'what follows an issuance failed'))
+    return { outcome: 'issued' }
+  }
+
+  /**
+   * Whether the wallet of the Principal's connection holds a credential of the profile (IDENT-AUTH-016, D156): one this
+   * agent issued on that connection, whoever its Principal, that still holds. Without a connection, one issued to the
+   * Principal on any.
+   */
+  private async held(principal: Principal, name: string): Promise<boolean> {
+    const entry = issuanceEntry(name)
+    const connectionId = principal.capabilityChannelId
+    if (connectionId) return (await this.evidence.issuedOn(connectionId, entry)).some((r) => stillValid(r))
+    return (await this.evidence.list(principal.id)).some(
+      (r) => r.kind === 'issuance' && r.entry === entry && r.outcome === 'verified' && stillValid(r)
+    )
   }
 
   /**

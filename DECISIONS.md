@@ -2143,3 +2143,50 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       from one ending it for all; not the browser, not a session bound by the phone's device secret; not another
       Principal; the phone's handle unlinked), `postgres.test.ts` (the connection kept on a stored session). With `src/`
       before this change the eight new tests of `adminAccess.test.ts` fail.
+82. **The badge offered only when the connection holds none; issued again when the phone holds none** (2026-11-25,
+    Fabrice's decisions of 2026-11-25; ayni-spec D156: IDENT-AUTH-016, IDENT-STAT-009, INTX-ISSUE-022, INTX-ISSUE-023,
+    INTX-FLOW-006, FLOW-REISSUE-001/002, flow profile §4.1 and §6.11). Comes after entry 81 (PR #129).
+    - **Held on a connection.** A credential of a profile is held by the wallet of a connection when this agent issued
+      one of it on that connection (the issuance record's `connectionRef`), whatever Principal the connection belongs to
+      now, that is neither revoked nor past its last day of validity. Before, only the Principal's newest issuance of the
+      profile was read: a person who received the badge on a second phone was offered another on the first at each
+      sign-in. A Principal without a connection holds what was issued to it on any. The store finds the records by a
+      column, `evidence.issued_on` (schema 3.13.0, filled from the records for the issuances made before:
+      `EvidenceRepo.listIssuedOn`, `EvidenceService.issuedOn`).
+    - **The last day of validity** (`issuance.<profile>.validUntilClaim`, INTX-ISSUE-023): the name of a claim of the
+      profile, refused at start when it names none; at issuance its value, a date, a `YYYYMMDD` or a time, becomes the
+      record's `validUntil` (`YYYY-MM-DD`), and past that day the credential is held no more. An AnonCreds credential
+      carries no expiry of its own; without the key a credential holds until it is revoked.
+    - **Issued again** (`IssuanceService.issueAgain`, INTX-ISSUE-022): a `reissue/1.0` request with the reason
+      `missing` and a `reference` naming only `jsonSchemaCredentialId` (the phone holds no credential to name). The
+      reissue protocol was the one already there for a holder that asks a service for a credential, answered by an
+      `issue` flow; a holder that deleted its credential has no `credential_id`, `cred_def_id` or `issued_at` to name,
+      so the reason `missing` names the schema instead (a change to the library, below). Answered to an identified person
+      only, for a profile offered to them (roles) that names its schema and whose claims come from the directory or from
+      the identity credential (every `evidence` claim from `authentication`, or from `document` in a badge of the
+      directory: `issuedAgainOnRequest`), whatever its trigger. In order: the claims must resolve, the definition must be
+      there; then every credential of the profile still valid on the connection is revoked (`PeopleService
+      .revokeForReissue`: revoked and published, an admin audit row `credential-revocation` with reason
+      `issued-again`, the record's revocation with that reason, the holder told once on its connection), and a new one
+      is offered with the same number (`subjectId` is the same for the Principal). Nothing is offered when one cannot be
+      revoked: two valid credentials never exist on one connection. The offer's `issue` flow has `origin: none` and the
+      description "Issued again, as you asked from your phone." (FLOW-ISSUE-004). The holder's `reissue` flow is closed
+      `completed` once the credential is stored, `failed` with the person's words when the offer is declined, unanswered
+      or refused; a problem report otherwise: `unknown-reference` (no profile of the schema, or no schema named),
+      `not-eligible` (not identified, a profile not theirs or not issued again on request, claims that do not resolve),
+      `unavailable` (a new code: the earlier one not revoked, no definition, another issuance under way, the wallet out
+      of reach). A `restore` is still answered `unknown-reference` (O64).
+    - **What the phone is told** (IDENT-STAT-009): the peer status to an identified person carries `issuable`, the
+      profiles `issueAgain` would answer, one per schema, as `{ jsonSchemaCredentialId, label }` (`issuableAgain`);
+      absent when there is none and for a visitor. The phone shows "Get my badge" when the person is identified and its
+      wallet holds no credential of that schema from this service.
+    - **Library** (credo-ts-ayni-flow, not changed here): the reissue request accepts the reason `missing` with
+      `reference.json_schema_credential_id` alone, and the peer status carries `issuable`; until the VS Agent runs a
+      plugin that accepts `issuable`, its API refuses the status (`forbidNonWhitelisted`): the plugin is deployed first.
+    - **Not changed:** the AG-UI profile (no wire change, the package stays 3.5.7).
+    - **Tests:** `tests/badgeWhenMissing.test.ts` (held on the connection after a second phone, whatever its Principal;
+      offered again once revoked or past its day; the day read; issued again with the same number after the revocation,
+      with nothing revoked on a connection that holds none; the refusals; nothing issued when nothing can be revoked;
+      `issuable` and the status; the events of `reissue` with each answer; the revocation itself; the pack key),
+      `tests/postgres.test.ts` (the column, filled for earlier records), `tests/issuance.test.ts` (a second Principal
+      gets its own connection). With `src/` before this change 21 of the 24 tests of `badgeWhenMissing.test.ts` fail.

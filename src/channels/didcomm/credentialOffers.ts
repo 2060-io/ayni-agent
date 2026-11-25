@@ -54,6 +54,8 @@ export class CredentialOffers {
     revocation?: { registryDefinitionId: string; index: number }
     /** the conversation session the issuance was asked from: the flow names it as its origin (INTX-FLOW-001) */
     origin?: Session
+    /** one sentence of context on the flow: what the holder asked, for an issuance that answers a `reissue` */
+    description?: string
   }): Promise<OfferOutcome> {
     const flowMode = !!this.flows && (await this.isFlowCapable(input.connectionId))
     const handle = flowMode
@@ -61,6 +63,7 @@ export class CredentialOffers {
           connectionId: input.connectionId,
           kind: 'issue',
           title: input.title,
+          ...(input.description ? { description: input.description } : {}),
           expiresInMs: this.timeoutMs,
           ...(input.origin ? { origin: input.origin } : {}),
         })

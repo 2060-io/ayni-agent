@@ -3,11 +3,13 @@
  * connection that completes says nothing of what its peer may do on it, and the agent's decision about the peer
  * is invisible from the peer's side. One message carries it: the rule by which the agent identifies the peer, the
  * methods and combinations it accepts (D125), what an identified person may enrol and has enrolled (D129), whether the
- * peer is identified, and what is open to it on the connection. It is sent once the Principal is resolved, before the
+ * peer is identified, what is open to it on the connection, and the credentials an identified person may ask for again
+ * when their wallet holds none (D156). It is sent once the Principal is resolved, before the
  * authentication the agent asks at connection, and again whenever a field changes.
  */
 
 import { type AgentPack, authenticationModeOf, enrollableTypesOf } from '../../config/packTypes.js'
+import { issuableAgain } from '../../core/issuance.js'
 import type { ConnectionType, Principal } from '../../core/types.js'
 import type { Logger } from '../../util/logger.js'
 import { Authenticator } from './authenticate.js'
@@ -44,6 +46,11 @@ export interface PeerStatus {
   identified: boolean
   /** what the peer may use on the connection now */
   open: string[]
+  /**
+   * to an identified person: the credentials the agent issues to them again when their wallet holds none, by the JSON
+   * schema credential of their schema, with the name a person reads (IDENT-STAT-009, INTX-ISSUE-022); absent when none
+   */
+  issuable?: { jsonSchemaCredentialId: string; label: string }[]
   refusal?: { code: string; comment?: string }
 }
 
@@ -150,7 +157,9 @@ export class PeerStatusNotifier {
         (enrol as string[]).includes(type)
       )
     }
-    return { authentication, identified, open: this.openFor(principal) }
+    // what an identified person may ask for again when their wallet holds none (IDENT-STAT-009)
+    const issuable = person && identified ? issuableAgain(this.pack, principal) : []
+    return { authentication, identified, open: this.openFor(principal), ...(issuable.length ? { issuable } : {}) }
   }
 
   /**

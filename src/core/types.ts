@@ -631,6 +631,11 @@ export interface EvidenceRecord {
   holderIndex?: string
   /** an issuance under a revocable credential definition: where its status is kept, and its revocation (D91) */
   revocation?: IssuedRevocation
+  /**
+   * an issuance whose profile names the claim of its last day of validity: that day, `YYYY-MM-DD` (INTX-ISSUE-023); the
+   * credential is held no more after it (IDENT-AUTH-016)
+   */
+  validUntil?: string
   verifiedAt: string
   state: 'active' | 'archived' | 'legal-hold' | 'crypto-erased'
   /** the end of the retention of the values, and what happens then */
@@ -652,7 +657,10 @@ export interface IssuedRevocation {
   index: number
   /** when the DIDComm agent published the revocation */
   revokedAt?: string
-  /** why it is revoked: `directory-removal` (the entry left the directory) */
+  /**
+   * why it is revoked: `directory-removal` (the entry left the directory), `issued-again` (the holder asked for it again
+   * on the same connection, INTX-ISSUE-022)
+   */
   reason?: string
   /** when the holder was sent the `revocation_notification` (INTX-FLOW-007) */
   notifiedAt?: string
