@@ -440,10 +440,12 @@ issuance:
     roles: [member]                    # optional: who may receive it
     authChallenge: { type: device }    # optional: enforced before the issuance
     evidenceMaxAgeMinutes: 60          # optional: older evidence is expired for this profile
+    validUntilClaim: validUntil        # optional: the claim of the last day of validity
     claims:
       degree:   { from: evidence, entry: diploma, attribute: degree }
       name:     { from: evidence, entry: authentication, attribute: name }
       issuedOn: { from: computed, fn: today }
+      validUntil: { from: computed, fn: addDays, days: 365 }
       status:   { from: computed, fn: constant, value: active }
     record: { storeClaims: false, retention: { days: 365, onExpiry: erase } }
 ```
@@ -560,7 +562,17 @@ issuance:
   - **The trigger** (D130): `automatic` offers the badge right after an authentication that identified an entry, on a
     connection to which the agent issued no badge that is still valid; `request` (a menu item) and `model` (the tool)
     issue on demand, once the person is identified. A badge is **held by the wallet it was issued to**: a person who
-    connects a new phone authenticates and receives a badge again, with the same number.
+    connects a new phone authenticates and receives a badge again, with the same number. A person who signs in again
+    on a phone that holds its badge is offered nothing (D156).
+  - **Issued again on request** (D156, INTX-ISSUE-022): a phone whose wallet lost the badge (the person deleted it)
+    asks for it again with `reissue/1.0`, reason `missing`, naming the schema. To an identified person, for a profile
+    that names its schema (`jsonSchemaCredentialId`) and whose claims come from the directory or from the identity
+    credential (every `evidence` claim from `authentication`, or from `document` in a badge of the directory), whatever
+    its trigger: the agent revokes the one it issued on that connection, then offers a new one with the same number.
+    The peer status lists those profiles in `issuable` (schema and label) to an identified person; the phone shows
+    "Get my badge" when it holds none. Refused with `unknown-reference` (no profile of the schema), `not-eligible`
+    (not identified, not theirs, not issued again on request, claims that do not resolve) or `unavailable` (the earlier
+    one could not be revoked, or nothing can be issued now).
   - **The issuance record** keeps the entry, which the person who presents the badge then holds, with its roles; the
     badge is revoked when the entry leaves the directory.
   - **`emailId`** numbers a credential by the address an `email` method of the authentication verified, as `documentId`
@@ -588,7 +600,10 @@ issuance:
   `credential_requirements` is there in the three cases.
 - **Gates.** `roles` limits who may receive the credential. `authChallenge` runs before the offer: one challenge,
   `device` (a confirmation on the phone) or `document` (the read of a document's chip), written alone or as a list of
-  one. A credential is issued once to each wallet (connection) of a Principal, while it is still valid.
+  one. A credential is issued once to each wallet (connection), while it is still valid: what the agent issued on the
+  connection, whatever Principal it belongs to, not revoked and not past the day `validUntilClaim` names
+  (IDENT-AUTH-016, INTX-ISSUE-023). `validUntilClaim` names a claim of the profile (refused otherwise) that holds a date
+  (`YYYY-MM-DD`, `YYYYMMDD` or a time); the record keeps that day. Without it a credential holds until it is revoked.
 - **Persons only** in this version: a credential is offered on the connection of the person, as an `issue`
   flow on a flow-capable wallet.
 - **The record.** Each issuance leaves a record built as evidence is: the audit fields always (the profile,

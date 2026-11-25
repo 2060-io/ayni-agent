@@ -915,6 +915,11 @@
             "type": "integer",
             "minimum": 1
           },
+          "validUntilClaim": {
+            "description": "The claim that holds the last day the credential is valid, a date: the issuance record keeps it, and a credential past it is held no more, so that an automatic profile is offered again on the connection (IDENT-AUTH-016, INTX-ISSUE-023). Without it the credential holds until it is revoked.",
+            "type": "string",
+            "minLength": 1
+          },
           "claims": {
             "description": "Every claim of the credential with its one source (INTX-ISSUE-002). evidence: a stored attribute of the authentication, of a presentations entry, of a document read or of a verified email, `as: dateint` writing a calendar date as the integer YYYYMMDD (IDENT-DIR-005); record: a field of the person's entry of the user directory, found from their evidence (INTX-ISSUE-021); computed: today, now, addDays (days), constant (value), subjectId, documentId or emailId.",
             "type": "object",

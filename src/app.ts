@@ -798,6 +798,8 @@ export async function buildAgent(
       offer: (input) => credentialOffers.offer(input),
       definitionFor: (schema, options) => credentialDefinitions.forSchema(schema, options),
       allocateRevocation: (definition) => credentialRevocations.allocate(definition),
+      // the credential of a connection revoked before the one its holder asked for again (INTX-ISSUE-022)
+      revoke: (record) => people.revokeForReissue(record),
       // the actor the issued identity credential identifies once presented: the home organization, the schema and the
       // subject key (D59), of which its record keeps a keyed index (IDENT-ROLE-012)
       holderOf: async (_name, profile, claims) => {

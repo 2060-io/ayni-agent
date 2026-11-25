@@ -370,6 +370,11 @@ export class MemoryStore implements Store {
         .filter((e) => e.kind === 'issuance' && e.holderIndex === holderIndex)
         .sort((a, b) => b.verifiedAt.localeCompare(a.verifiedAt))
         .map(copyEvidence),
+    listIssuedOn: async (connectionRef: string) =>
+      [...this.evidenceRows.values()]
+        .filter((e) => e.kind === 'issuance' && e.connectionRef === connectionRef)
+        .sort((a, b) => a.verifiedAt.localeCompare(b.verifiedAt))
+        .map(copyEvidence),
   }
 
   public approvals = {

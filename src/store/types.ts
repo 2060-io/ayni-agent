@@ -192,6 +192,11 @@ export interface EvidenceRepo {
    * first: how a presented credential finds the entry it was issued from (IDENT-ROLE-012)
    */
   listIssuedTo(holderIndex: string): Promise<StoredEvidence[]>
+  /**
+   * the issuance records of the credentials offered on a connection, oldest first: what the wallet of that connection
+   * was issued, whatever Principal the connection belongs to (IDENT-AUTH-016, INTX-ISSUE-022)
+   */
+  listIssuedOn(connectionRef: string): Promise<StoredEvidence[]>
 }
 
 export interface ApprovalRepo {

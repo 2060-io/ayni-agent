@@ -434,6 +434,11 @@ export function issuanceChallengeErrors(pack: AgentPack): string[] {
       )
     if (usesEmail && !email?.store?.attributes.includes('address'))
       errors.push(`INTX-ISSUE-020: ${where} takes a claim from a verified address: evidence.email must store [address]`)
+    // the claim of the last day of validity is one of the profile's (INTX-ISSUE-023)
+    if (profile.validUntilClaim !== undefined && !(profile.validUntilClaim in profile.claims))
+      errors.push(
+        `INTX-ISSUE-023: ${where}.validUntilClaim names ${profile.validUntilClaim}, which is no claim of the profile`
+      )
     for (const [claim, source] of Object.entries(profile.claims)) {
       if (source.from === 'evidence' && source.as === 'dateint' && source.entry === DOCUMENT_ENTRY) {
         if (!['dateOfBirth', 'dateOfExpiry'].includes(source.attribute))

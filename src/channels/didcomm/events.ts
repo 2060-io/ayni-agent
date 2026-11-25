@@ -10,6 +10,7 @@ import type { FastifyInstance } from 'fastify'
 import { DOCUMENT_ENTRY } from '../../config/pack.js'
 import type { AyniAgent } from '../../core/agent.js'
 import { documentRefusalForPerson, readDocument } from '../../core/document.js'
+import { issuanceOutcomeForPerson } from '../../core/issuance.js'
 import type { TurnSink } from '../../core/orchestrator.js'
 import type { MessageAttachment, Principal, Session } from '../../core/types.js'
 import { attestedFor } from '../../policy/spacePolicy.js'
@@ -612,26 +613,105 @@ export class DidcommEvents {
   }
 
   /**
-   * `reissue/1.0/request` after a wallet restore (INTX-FLOW-006, FLOW-REISSUE-001): the agent answers with an `issue`
-   * flow under the pack's issuance policy, or `not-eligible` / `unknown-reference`. This agent issues no credential,
-   * so every reference is unknown to it; an issuing agent plugs its policy in here.
+   * `reissue/1.0/request` (FLOW-REISSUE-001/002, INTX-FLOW-006, INTX-ISSUE-022). With the reason `missing` the holder
+   * holds no credential of the schema its reference names (`jsonSchemaCredentialId`), and asks for it again: to an
+   * identified person, for a profile issued again on request, the agent revokes the one it issued on the connection and
+   * answers with an `issue` flow, then closes the holder's flow `completed` once the credential is stored, or `failed`
+   * with why it was not; otherwise a problem report: `unknown-reference` (no profile issues the schema), `not-eligible`
+   * (the person is not identified, the credential is not theirs or not issued again on request, its claims do not
+   * resolve), `unavailable` (it cannot be issued now). After a restore (`restore`) every reference is unknown: the agent
+   * keeps no reissue policy for a credential of another wallet (O64), and a new connection is offered its badge anyway
+   * (IDENT-AUTH-016).
    */
   private async onReissueStateChanged(exchange: CarrierExchange & { previousState?: string }): Promise<void> {
     if (exchange.state !== 'request-received') return
-    const reference = (exchange.request as { reference?: { credentialId?: string; schemaId?: string } }).reference
-    this.logger.info(
-      { connectionId: exchange.connectionId, credentialId: reference?.credentialId, schemaId: reference?.schemaId },
-      'reissue requested for a credential this agent did not issue'
-    )
-    if (exchange.flowId)
-      await this.agent.flows.problemReport(
-        exchange.flowId,
-        'unknown-reference',
-        'This agent did not issue that credential.'
+    const request = exchange.request as {
+      reference?: { credentialId?: string; schemaId?: string; jsonSchemaCredentialId?: string }
+      reason?: string
+    }
+    const reference = request.reference
+    try {
+      if (request.reason === 'missing') {
+        await this.issueAgain(exchange, reference?.jsonSchemaCredentialId)
+        return
+      }
+      this.logger.info(
+        { connectionId: exchange.connectionId, credentialId: reference?.credentialId, schemaId: reference?.schemaId },
+        'reissue requested for a credential of another wallet: unknown reference'
       )
+      if (exchange.flowId)
+        await this.agent.flows.problemReport(
+          exchange.flowId,
+          'unknown-reference',
+          'This agent did not issue that credential.'
+        )
+    } finally {
+      await this.client
+        .markReissueAnswered(exchange.threadId)
+        .catch((err) => this.logger.debug({ err, threadId: exchange.threadId }, 'reissue request not marked answered'))
+    }
+  }
+
+  /** A credential the holder holds none of, asked for again (INTX-ISSUE-022, D156). */
+  private async issueAgain(exchange: CarrierExchange, jsonSchemaCredentialId: string | undefined): Promise<void> {
+    const flowId = exchange.flowId
+    const refuse = async (code: string, description: string) => {
+      if (flowId) await this.agent.flows.problemReport(flowId, code, description)
+    }
+    const bound = await this.agent.didcommSession(exchange.connectionId)
+    const issuance = this.agent.issuance
+    if (!jsonSchemaCredentialId || !issuance)
+      return refuse('unknown-reference', 'This service issues no credential of that schema.')
+    if (!bound) return refuse('not-eligible', 'Authenticate to this service first.')
+    const result = await issuance.issueAgain(bound.principal, bound.session, jsonSchemaCredentialId, {
+      description: 'Issued again, as you asked from your phone.',
+    })
+    this.logger.info(
+      {
+        connectionId: exchange.connectionId,
+        principalId: bound.principal.id,
+        profile: result.profile,
+        outcome: result.outcome,
+        reason: result.reason,
+      },
+      'credential asked for again (INTX-ISSUE-022)'
+    )
+    switch (result.outcome) {
+      case 'issued':
+        if (flowId) await this.closeHolderFlow(flowId, 'completed')
+        return
+      case 'unknown-reference':
+        return refuse('unknown-reference', 'This service issues no credential of that schema.')
+      case 'not-eligible':
+      case 'not-offered':
+      case 'incomplete':
+        return refuse(
+          'not-eligible',
+          result.reason === 'not-identified'
+            ? 'Authenticate to this service first.'
+            : 'This service does not issue you this credential again.'
+        )
+      case 'declined':
+      case 'unanswered':
+      case 'refused':
+      case 'challenge-failed':
+        if (flowId)
+          await this.closeHolderFlow(
+            flowId,
+            'failed',
+            issuanceOutcomeForPerson(result.outcome, undefined, result.reason)
+          )
+        return
+      default:
+        return refuse('unavailable', 'This service cannot issue it right now. Try again later.')
+    }
+  }
+
+  /** Closes a flow the holder opened (a `reissue`): the agent holds no handle of it (flow profile §5.2). */
+  private async closeHolderFlow(flowId: string, outcome: 'completed' | 'failed', reason?: string): Promise<void> {
     await this.client
-      .markReissueAnswered(exchange.threadId)
-      .catch((err) => this.logger.debug({ err, threadId: exchange.threadId }, 'reissue request not marked answered'))
+      .closeFlow(flowId, { outcome, ...(reason ? { reason } : {}) })
+      .catch((err) => this.logger.debug({ err, flowId, outcome }, 'holder flow close not accepted'))
   }
 
   /** `authorize/1.0/response`: an approver's attested decision (D58, INTX-APPR-011). */

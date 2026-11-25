@@ -303,7 +303,9 @@ describe('the offer in the wallet (INTX-ISSUE-004)', () => {
     const asked = made as unknown as { origin?: Session }[]
     expect((await service.issue(person(), conversation, 'pass', 'person')).outcome).toBe('issued')
     const chat = { id: 'ses_dc', channelType: 'didcomm', state: 'bound' } as Session
-    expect((await service.issue(person({ id: 'prn_3' }), chat, 'pass', 'person')).outcome).toBe('issued')
+    // another wallet: what a connection holds is the wallet's, whatever Principal it belongs to (IDENT-AUTH-016)
+    const other = person({ id: 'prn_3', capabilityChannelId: 'conn-3' })
+    expect((await service.issue(other, chat, 'pass', 'person')).outcome).toBe('issued')
     expect(asked.map((o) => o.origin?.id)).toEqual(['ses_ui', undefined])
   })
 

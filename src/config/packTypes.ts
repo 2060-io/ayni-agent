@@ -323,11 +323,34 @@ export interface IssuanceProfile {
   claims: Record<string, ClaimSource>
   /** what is kept of an issuance beyond its audit fields: the issued claims, when asked, for the retention given */
   record?: { storeClaims?: boolean; retention?: { days?: number; onExpiry?: 'archive' | 'erase' } }
+  /**
+   * the claim that holds the last day the credential is valid (a date): its record keeps it, and a credential past it
+   * is no longer held (IDENT-AUTH-016, INTX-ISSUE-023). Without it the credential holds until it is revoked
+   */
+  validUntilClaim?: string
 }
 
 /** Whether a profile takes a claim from the user directory (`{ from: record, record: directory, field }`, INTX-ISSUE-021). */
 export function takesClaimsFromDirectory(profile: Pick<IssuanceProfile, 'claims'>): boolean {
   return Object.values(profile.claims).some((source) => source.from === 'record' && source.record === 'directory')
+}
+
+/**
+ * Whether a profile is issued again on the holder's request when it holds none (`reissue` with reason `missing`,
+ * INTX-ISSUE-022, D156): it names its schema, by which the phone finds it in its wallet, and its claims come from who the
+ * person is, the user directory or the identity credential they presented, and from nothing else they would have to
+ * present again: every claim of evidence comes from the authentication, or, in a badge of the directory, from the
+ * passport read when the person authenticated (IDENT-DIR-005).
+ */
+export function issuedAgainOnRequest(profile: Pick<IssuanceProfile, 'claims' | 'credential'>): boolean {
+  if (!profile.credential.jsonSchemaCredentialId) return false
+  const directory = takesClaimsFromDirectory(profile)
+  const sources = Object.values(profile.claims)
+  const fromIdentity = sources.some((s) => s.from === 'evidence' && s.entry === 'authentication')
+  if (!directory && !fromIdentity) return false
+  return sources.every(
+    (s) => s.from !== 'evidence' || s.entry === 'authentication' || (directory && s.entry === 'document')
+  )
 }
 
 /** The challenges a profile declares, in their order: one object or a list of them (IDENT-DIR-002). */

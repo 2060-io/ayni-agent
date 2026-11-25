@@ -308,6 +308,55 @@ export class PeopleService implements DirectoryLink {
     return revoked
   }
 
+  /**
+   * Revokes a credential this agent issued on a connection, which its holder asked to be issued again there
+   * (INTX-ISSUE-022, D156): revoked and published now, recorded in the admin audit and on the issuance record, and the
+   * holder told on that connection (INTX-FLOW-007), once: a wallet that deleted the credential has nothing to mark.
+   * False when it cannot be revoked: no registry, no DIDComm agent, or the revocation failed; nothing is issued then.
+   */
+  public async revokeForReissue(record: EvidenceRecord): Promise<boolean> {
+    const port = this.deps.revocations
+    const slot = record.revocation
+    if (!port || !slot) return false
+    let revokedAt: string
+    try {
+      revokedAt = await port.revoke(slot)
+    } catch (error) {
+      this.deps.logger.warn({ err: error, evidenceId: record.id }, 'a credential to be issued again is not revoked')
+      return false
+    }
+    const { lastError: _done, ...rest } = slot as IssuedRevocation
+    const revocation: IssuedRevocation = { ...rest, revokedAt, reason: 'issued-again' }
+    await this.deps.store.adminAudit.insert({
+      id: prefixedId('adm'),
+      ts: nowIso(),
+      action: 'credential-revocation',
+      actor: record.principalId,
+      reason: 'issued-again',
+      detail: {
+        evidenceId: record.id,
+        registryDefinitionId: slot.registryDefinitionId,
+        index: slot.index,
+        revokedAt,
+      },
+    })
+    if (record.connectionRef) {
+      revocation.notifyAttempts = 1
+      try {
+        await port.notify(record.connectionRef, slot, 'Replaced by the one you asked for again.')
+        revocation.notifiedAt = nowIso()
+      } catch (error) {
+        this.deps.logger.warn({ err: error, evidenceId: record.id }, 'the holder was not told of the revocation')
+      }
+    }
+    await this.deps.evidence.setRevocation(record.id, revocation)
+    this.deps.logger.info(
+      { evidenceId: record.id, registryDefinitionId: slot.registryDefinitionId, index: slot.index },
+      'credential revoked: its holder asked for it again (INTX-ISSUE-022)'
+    )
+    return true
+  }
+
   private async revokeOne(record: EvidenceRecord, entryId: string, holders?: Set<string>): Promise<boolean> {
     const port = this.deps.revocations
     const slot = record.revocation

@@ -1,5 +1,5 @@
 /** Memory schema versions (CORE-VER-001/002). Each migration is applied once, in order. */
-export const MEMORY_SCHEMA_VERSION = '3.12.0'
+export const MEMORY_SCHEMA_VERSION = '3.13.0'
 
 export const MIGRATIONS: { version: string; sql: string }[] = [
   {
@@ -481,6 +481,19 @@ CREATE TABLE IF NOT EXISTS governance_notices (
 );
 CREATE INDEX IF NOT EXISTS governance_notices_principal ON governance_notices (principal_id, at DESC);
 CREATE INDEX IF NOT EXISTS governance_notices_space ON governance_notices (space_id, kind) WHERE resolved_at IS NULL;
+`,
+  },
+  {
+    // a badge is offered only on a connection that holds none still valid, and issued again there on the holder's
+    // request after the one of that connection is revoked (IDENT-AUTH-016, INTX-ISSUE-022, D156): an issuance record
+    // names the connection it was offered on in a column, so that what a wallet was issued is found whatever Principal
+    // the connection belongs to
+    version: '3.13.0',
+    sql: `
+ALTER TABLE evidence ADD COLUMN IF NOT EXISTS issued_on TEXT;
+UPDATE evidence SET issued_on = data->>'connectionRef'
+  WHERE data->>'kind' = 'issuance' AND issued_on IS NULL AND data->>'connectionRef' IS NOT NULL;
+CREATE INDEX IF NOT EXISTS evidence_issued_on ON evidence (issued_on, verified_at) WHERE issued_on IS NOT NULL;
 `,
   },
 ]

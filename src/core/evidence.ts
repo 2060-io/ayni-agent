@@ -88,6 +88,8 @@ export interface EvidenceInput {
   holder?: string
   /** an issuance under a revocable definition: the registry and the index of the credential (D91) */
   revocation?: IssuedRevocation
+  /** an issuance whose profile names the claim of its last day of validity: that day (INTX-ISSUE-023) */
+  validUntil?: string
 }
 
 /** What the model is told of a record: its audit fields and the visible attributes, when it is usable. */
@@ -151,6 +153,7 @@ export class EvidenceService {
       ...(input.reference ? { reference: input.reference } : {}),
       ...(input.holder ? { holderIndex: this.holderIndex(input.holder) } : {}),
       ...(input.revocation ? { revocation: { ...input.revocation } } : {}),
+      ...(input.validUntil ? { validUntil: input.validUntil } : {}),
       verifiedAt,
       state: 'active',
       expiresAt:
@@ -205,6 +208,16 @@ export class EvidenceService {
   /** The issuances whose claims came from the directory: of one entry, or of every entry (IDENT-ROLE-013). */
   public async issuedFromDirectory(directoryEntryId?: string): Promise<EvidenceRecord[]> {
     return (await this.store.evidence.listIssuedFromDirectory(directoryEntryId)).map(auditOf)
+  }
+
+  /**
+   * The credentials of a profile issued on a connection, oldest first: the issuance records whose offer went to the
+   * wallet of that connection, whatever Principal holds it (IDENT-AUTH-016, INTX-ISSUE-022).
+   */
+  public async issuedOn(connectionId: string, entry: string): Promise<EvidenceRecord[]> {
+    return (await this.store.evidence.listIssuedOn(connectionId))
+      .filter((r) => r.entry === entry && r.outcome === 'verified')
+      .map(auditOf)
   }
 
   /** Records what became of the revocation of an issued credential: audit fields only (D91). */
