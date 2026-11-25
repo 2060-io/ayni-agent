@@ -61,6 +61,7 @@ import { LANGUAGE_PREFERENCE, ServiceLanguage } from './core/serviceLanguage.js'
 import { SessionService } from './core/sessions.js'
 import { SpaceService } from './core/spaces.js'
 import { SpaceToolService } from './core/spaceTools.js'
+import { type StartupRetry, StartupSteps, within } from './core/startupSteps.js'
 import { ToolGate } from './core/toolGate.js'
 import { AnchoringService, VeranaLedgerWriter } from './integrity/anchoring.js'
 import { createChatModel, createEmbeddings } from './llm/index.js'
@@ -92,6 +93,8 @@ import { createLogger, type Logger } from './util/logger.js'
 
 /** how long the runs whose turn is over are given to end their responses when the process stops */
 const RUNS_END_WITHIN_MS = 2000
+/** how long the start waits for the first answer of the DIDComm agent before it goes on without it */
+const FIRST_ANSWER_WAIT_MS = 5000
 
 export interface RunningAgent {
   app: FastifyInstance
@@ -117,6 +120,8 @@ export async function buildAgent(
     mailer?: Mailer
     /** how the trust graph is asked, in place of the network (the tests answer it) */
     graphFetch?: typeof fetch
+    /** the delays of the start-up steps that wait for the DIDComm agent (the tests shorten them) */
+    startupRetry?: StartupRetry
   } = {}
 ): Promise<RunningAgent> {
   const { pack, dir: packDir } = loadPack(env.agentPackPath)
@@ -560,8 +565,11 @@ export async function buildAgent(
   const uploadMax = env.uploadMaxBytes ?? pack.channels?.agui?.uploads?.maxBytes ?? 26214400
   await app.register(multipart, { limits: { fileSize: uploadMax, files: 1 } })
 
+  // what needs the DIDComm agent at start is done once it answers, in the background: it may come up after this agent
+  // (IDENT-SELF-001)
+  const startup = new StartupSteps(logger, hooks.startupRetry)
   let did = 'did:unknown'
-  try {
+  const didKnown = startup.run('the DID of the DIDComm agent', async () => {
     const info = await vsAgent.info()
     did = info.did
     ownDid = did
@@ -569,12 +577,14 @@ export async function buildAgent(
     agent.did = did
     flows.setAgentDid(did)
     logger.info({ did, vsAgent: info.version }, 'DIDComm agent reachable (IDENT-SELF-001)')
-  } catch (error) {
+    return true
+  })
+  // the start waits a moment for it, so that an agent whose DIDComm agent is up starts with its DID known
+  if (!(await within(didKnown.firstAttempt, FIRST_ANSWER_WAIT_MS)))
     logger.error(
-      { err: error, url: env.vsAgentAdminUrl },
-      'DIDComm agent not reachable; binding and trust-bound events are unavailable until it is'
+      { url: env.vsAgentAdminUrl },
+      'DIDComm agent not reachable; binding and trust-bound events are unavailable until it is, and it is asked again'
     )
-  }
 
   aguiRoutes = new AgUiRoutes(agent, agui, streams, logger)
   // a notification of a person entered, changed or ended: every bound session of theirs hears it (PROF-TOOL-025)
@@ -637,7 +647,7 @@ export async function buildAgent(
       logger.warn('admin.internal.enabled, and ADMIN_PORT is 0: the internal admin interface is off')
     else admin = buildAdmin({ service: adminService, logger, breakGlassToken: env.adminToken })
   }
-  aguiRoutes.register(app, did)
+  aguiRoutes.register(app, () => did)
   // the callback of people's sign-ins and the agent's client metadata document, public paths (D105)
   aguiRoutes.registerOAuth(app)
   // what the person sends during a turn waits in the store and is answered next (D63): its devices are told what
@@ -664,7 +674,12 @@ export async function buildAgent(
   await connections.align()
   // what a restart left waiting is answered now
   await agent.resumeWaiting()
-  if (did !== 'did:unknown') await declareAgUiService(vsAgent, did, env.publicBaseUrl, logger)
+  // the AG-UI descriptor in the DID Document, once the DID is known (IDENT-SELF-005)
+  void didKnown.done.then(() =>
+    startup.run('the AG-UI descriptor in the DID Document', () =>
+      declareAgUiService(vsAgent, did, env.publicBaseUrl, logger)
+    )
+  )
   const identity = new IdentityFlow(pack, vsAgent, resolver, env.devAllowUnidentifiedPrincipals, logger)
   identity.setFlows(flows)
   // what a person enrolled: an authenticator app's secret, sealed; a passkey's key (D129)
@@ -680,7 +695,10 @@ export async function buildAgent(
   // is known to speak the protocol (PROF-DESC-007)
   const peerStatus = new PeerStatusNotifier(pack, vsAgent, peerProfiles, logger)
   agent.peerStatus = peerStatus
-  void peerStatus.supported()
+  startup.run('the peer status of the DIDComm agent', async () => {
+    await peerStatus.supported()
+    return peerStatus.answered
+  })
   // the authentication asked on demand, by the model's tool or the person's menu item (IDENT-RES-015)
   identityRequestsRef = new IdentityRequests(
     pack,
@@ -855,9 +873,11 @@ export async function buildAgent(
     subjectIdKey(env.entryEncryptionKey)
   )
   agent.issuance = issuanceRef
-  // the definitions of the profiles that name a schema: found or created now, and again at the first issuance
-  // when the DIDComm agent was out of reach; the agent serves meanwhile (INTX-ISSUE-017)
-  void issuanceRef.prepare().catch((err) => logger.warn({ err }, 'issuance profiles not prepared'))
+  // the definitions of the profiles that name a schema: found or created now, else as soon as the DIDComm agent answers,
+  // and at the latest at the first issuance; the agent serves meanwhile, and a profile issues once its definition is
+  // established (INTX-ISSUE-017)
+  const issuance = issuanceRef
+  startup.run('the credential definitions of the issuance profiles', () => issuance.prepare())
   const didcommEvents = new DidcommEvents(
     agent,
     vsAgent,
@@ -909,7 +929,7 @@ export async function buildAgent(
   })
   didcommEvents.faceSteps = faceSteps
   registerDidcommCallbacks(app, agent, mediaLinks, logger, faceSteps)
-  if (pack.channels?.a2a?.enabled) new A2aRoutes(agent, a2a, logger).register(app, did)
+  if (pack.channels?.a2a?.enabled) new A2aRoutes(agent, a2a, logger).register(app, () => did)
 
   app.get('/health/live', async () => ({ status: 'ok' }))
   app.get('/health/ready', async (_request, reply) => {
@@ -1008,6 +1028,7 @@ export async function buildAgent(
     stop: async () => {
       // no turn starts any more; those in progress end, or are cut when their time is over (PLAT-DEPLOY-004)
       await agent.shutdown(hooks.drainMs)
+      startup.stop()
       mailer?.close?.()
       // the turns are over: their runs are given a moment to tell their clients so, before anything is closed
       await aguiRoutes?.quiet(RUNS_END_WITHIN_MS)
@@ -1071,32 +1092,30 @@ export async function start(): Promise<RunningAgent> {
 
 /**
  * The AG-UI descriptor is a service of the agent's DID Document (IDENT-SELF-005): wallets, the
- * directory and the UI discover the agent through it. Declared through the VS Agent, idempotently.
+ * directory and the UI discover the agent through it. Declared through the VS Agent, idempotently: true once it is
+ * there; a throw when the VS Agent did not answer as it needs, which the start-up step tries again.
  */
 async function declareAgUiService(
   vsAgent: VsAgentClient,
   did: string,
   publicBaseUrl: string,
   logger: Logger
-): Promise<void> {
+): Promise<boolean> {
   const serviceEndpoint = `${publicBaseUrl.replace(/\/+$/, '')}${DESCRIPTOR_PATH}`
-  try {
-    const { items } = await vsAgent.listServiceEndpoints()
-    let existing = items.find((s) => s.type === DID_SERVICE_TYPE)
-    // an entry declared under the former product name is retyped rather than duplicated
-    const legacy = items.find((s) => s.type === 'HologramAgUI')
-    if (!existing && legacy) {
-      existing = await vsAgent.updateServiceEndpoint(legacy.id, { type: DID_SERVICE_TYPE, serviceEndpoint })
-      logger.info({ did, serviceEndpoint }, 'AG-UI descriptor service renamed in the DID Document')
-    }
-    if (!existing) {
-      await vsAgent.addServiceEndpoint({ type: DID_SERVICE_TYPE, serviceEndpoint, id: '#ayni-agui' })
-      logger.info({ did, serviceEndpoint }, 'AG-UI descriptor declared in the DID Document (IDENT-SELF-005)')
-    } else if (existing.serviceEndpoint !== serviceEndpoint) {
-      await vsAgent.updateServiceEndpoint(existing.id, { serviceEndpoint })
-      logger.info({ did, serviceEndpoint }, 'AG-UI descriptor service updated in the DID Document')
-    }
-  } catch (error) {
-    logger.warn({ err: error }, 'could not declare the AG-UI descriptor in the DID Document')
+  const { items } = await vsAgent.listServiceEndpoints()
+  let existing = items.find((s) => s.type === DID_SERVICE_TYPE)
+  // an entry declared under the former product name is retyped rather than duplicated
+  const legacy = items.find((s) => s.type === 'HologramAgUI')
+  if (!existing && legacy) {
+    existing = await vsAgent.updateServiceEndpoint(legacy.id, { type: DID_SERVICE_TYPE, serviceEndpoint })
+    logger.info({ did, serviceEndpoint }, 'AG-UI descriptor service renamed in the DID Document')
   }
+  if (!existing) {
+    await vsAgent.addServiceEndpoint({ type: DID_SERVICE_TYPE, serviceEndpoint, id: '#ayni-agui' })
+    logger.info({ did, serviceEndpoint }, 'AG-UI descriptor declared in the DID Document (IDENT-SELF-005)')
+  } else if (existing.serviceEndpoint !== serviceEndpoint) {
+    await vsAgent.updateServiceEndpoint(existing.id, { serviceEndpoint })
+    logger.info({ did, serviceEndpoint }, 'AG-UI descriptor service updated in the DID Document')
+  }
+  return true
 }

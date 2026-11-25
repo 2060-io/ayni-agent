@@ -58,7 +58,7 @@ export class A2aRoutes {
     private readonly logger: Logger
   ) {}
 
-  public register(app: FastifyInstance, did: string): void {
+  public register(app: FastifyInstance, did: () => string): void {
     app.get('/.well-known/agent.json', async () => ({
       name: this.agent.pack.metadata.displayName,
       description: this.agent.pack.metadata.description ?? '',
@@ -85,7 +85,7 @@ export class A2aRoutes {
       },
       security: [{ bearer: [] }],
       extensions: [
-        { uri: 'https://2060.io/ayni/a2a/identity', description: `Peer identity through DIDComm with ${did}` },
+        { uri: 'https://2060.io/ayni/a2a/identity', description: `Peer identity through DIDComm with ${did()}` },
       ],
     }))
 

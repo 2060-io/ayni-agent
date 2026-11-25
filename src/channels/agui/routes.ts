@@ -286,7 +286,8 @@ export class AgUiRoutes {
     reply.code(500).send({ error: 'internal' })
   }
 
-  public register(app: FastifyInstance, did: string): void {
+  /** `did`: the agent's DID as the DIDComm agent reports it, known once it answers (IDENT-SELF-001) */
+  public register(app: FastifyInstance, did: () => string): void {
     // every answer of the profile, its errors and the not-found of a path no route takes included, is stored by no
     // browser and no proxy (PROF-ERR-003, decision 71); the two streams write their own: `no-store, no-transform`
     app.addHook('onSend', async (request, reply, payload) => {
@@ -294,7 +295,7 @@ export class AgUiRoutes {
         reply.header('cache-control', cacheControlOf(reply.statusCode, reply.getHeader('cache-control')))
       return payload
     })
-    app.get(DESCRIPTOR_PATH, async () => this.descriptor(did))
+    app.get(DESCRIPTOR_PATH, async () => this.descriptor(did()))
     const base = SESSIONS_BASE
 
     // PROF-SESS-001 create, PROF-SESS-007 sibling
@@ -335,7 +336,7 @@ export class AgUiRoutes {
             sessionId: session.id,
             sessionToken: newToken,
             state: session.state,
-            agent: { did, name: this.agent.pack.metadata.displayName },
+            agent: { did: did(), name: this.agent.pack.metadata.displayName },
             principal: principal ? this.agent.principalDisplay(principal) : undefined,
             deviceHandle: session.deviceHandle,
             deviceSecret,
@@ -367,7 +368,7 @@ export class AgUiRoutes {
             sessionId: session.id,
             sessionToken: newToken,
             state: session.state,
-            agent: { did, name: this.agent.pack.metadata.displayName },
+            agent: { did: did(), name: this.agent.pack.metadata.displayName },
             parentSessionId: parent.id,
             conversationId: session.conversationId,
             resumedFromSessionId: session.resumedFromSessionId,
@@ -405,7 +406,7 @@ export class AgUiRoutes {
             sessionId: session.id,
             sessionToken: newToken,
             state: session.state,
-            agent: { did, name: this.agent.pack.metadata.displayName },
+            agent: { did: did(), name: this.agent.pack.metadata.displayName },
             principal: principal ? this.agent.principalDisplay(principal) : undefined,
             deviceHandle: session.deviceHandle,
             deviceSecret,
@@ -418,7 +419,7 @@ export class AgUiRoutes {
           sessionId: session.id,
           sessionToken: newToken,
           state: session.state,
-          agent: { did, name: this.agent.pack.metadata.displayName },
+          agent: { did: did(), name: this.agent.pack.metadata.displayName },
           binding: this.agent.bindingMaterial(session),
           idleTimeoutSeconds: this.agent.sessions.idleTimeoutSeconds,
           ...(rebind ? { rebind } : {}),

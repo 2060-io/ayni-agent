@@ -86,6 +86,11 @@ export class PeerStatusNotifier {
     return this.capable === true
   }
 
+  /** Whether the DIDComm agent has answered whether it speaks the protocol, yes or no (IDENT-SELF-001). */
+  public get answered(): boolean {
+    return this.capable !== undefined
+  }
+
   /** Whether the DIDComm agent speaks the protocol; asked once, and again while the answer is no. */
   public supported(): Promise<boolean> {
     if (this.capable === true) return Promise.resolve(true)

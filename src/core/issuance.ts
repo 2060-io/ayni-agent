@@ -314,6 +314,8 @@ export function issuableAgain(
 export class IssuanceService {
   /** one issuance at a time for a Principal and a profile */
   private readonly running = new Set<string>()
+  /** the profiles by schema whose definition is established */
+  private readonly prepared = new Set<string>()
   /** the schemas whose definition must support revocation: those of a profile that must be revocable (decision 61) */
   private readonly revocableSchemas: Set<string>
 
@@ -708,13 +710,26 @@ export class IssuanceService {
     })
   }
 
-  /** Establishes the definitions of the profiles that name a schema, ahead of the first issuance. */
-  public async prepare(): Promise<void> {
+  /**
+   * Establishes the definitions of the profiles that name a schema, ahead of the first issuance: true once every one
+   * is, which the start tries again until it is (INTX-ISSUE-017, IDENT-SELF-001). A profile issues once its own is.
+   */
+  public async prepare(): Promise<boolean> {
+    let all = true
     for (const [name, profile] of Object.entries(this.pack.issuance ?? {})) {
-      if (profile.credential.credentialDefinitionId) continue
+      if (profile.credential.credentialDefinitionId || this.prepared.has(name)) continue
       const id = await this.definitionOf(profile)
-      this.logger.info({ profile: name, credentialDefinitionId: id ?? null }, 'issuance profile by schema')
+      if (!id) {
+        all = false
+        continue
+      }
+      this.prepared.add(name)
+      this.logger.info(
+        { profile: name, credentialDefinitionId: id },
+        'issuance profile by schema: its definition established'
+      )
     }
+    return all
   }
 
   /** What obtains the evidence of an entry: the request tool when the entry is asked on demand, else nothing to do. */
