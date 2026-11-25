@@ -1,11 +1,11 @@
 /**
- * The badge offered only when the connection holds none, and issued again when the holder asks for it (ayni-spec D156;
- * IDENT-AUTH-016, IDENT-STAT-009, INTX-ISSUE-022/023, INTX-FLOW-006, FLOW-REISSUE-002). What a connection holds is what
- * the agent issued on it, whatever Principal the connection belongs to, still valid: not revoked and not past the last
- * day of validity its profile names. A phone that holds none asks with `reissue` and the reason `missing`: the agent
- * revokes the one it issued on that connection and issues a new one with the same number, to an identified person
- * only and for a profile whose claims come from who they are. The peer status tells the phone which credentials it may
- * ask for so. The issuance runs on the in-memory store; the directory is a file of the test.
+ * The badge offered only to a person who holds none, and issued again when the holder asks for it (ayni-spec D156;
+ * IDENT-AUTH-016, IDENT-STAT-009, INTX-ISSUE-022/023, INTX-FLOW-006, FLOW-REISSUE-002). What a person holds is what the
+ * agent issued to their Principal, on any connection, still valid: not revoked and not past the last day of validity
+ * its profile names. A phone whose wallet holds none asks with `reissue` and the reason `missing`: the agent revokes
+ * every one it issued to the person that still holds and issues a new one with the same number, to an identified
+ * person only and for a profile whose claims come from who they are. The peer status tells the phone which credentials
+ * it may ask for so. The issuance runs on the in-memory store; the directory is a file of the test.
  */
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -156,54 +156,58 @@ async function setup(profiles: Record<string, IssuanceProfile>, options: { revok
     },
   }
   const service = new IssuanceService(pack, evidence, deps, silent as never, key)
-  const issuedOn = async (connection: string, profile = 'badge') =>
-    evidence.issuedOn(connection, issuanceEntry(profile))
-  return { pack, store, service, evidence, offers, revoked, issuedOn }
+  const issuedTo = async (principalId = 'prn-p-0042', profile = 'badge') =>
+    evidence.issuedTo(principalId, issuanceEntry(profile))
+  return { pack, store, service, evidence, offers, revoked, issuedTo }
 }
 
-describe('offered only when the connection holds none (IDENT-AUTH-016)', () => {
-  it('offers nothing on a connection that holds one, even after the person received another on a new phone', async () => {
+describe('offered only to a person who holds none (IDENT-AUTH-016)', () => {
+  it('offers nothing again after a reconnection, a sign-in by another method, or on another phone', async () => {
     const { service, offers } = await setup({ badge: badgeProfile() })
     await service.automatic(identified(), session)
-    // a new phone of the same person: its own badge
+    expect(offers.map((o) => o.connectionId)).toEqual(['conn-1'])
+    // the person signs in again on the same phone, by email, then by passport
+    await service.automatic(identified(), session)
+    await service.automatic(identified(), session)
+    // disconnected and connected again: a new connection, the person signs in with the badge they hold
     await service.automatic(identified('p-0042', 'conn-2'), session)
-    expect(offers.map((o) => o.connectionId)).toEqual(['conn-1', 'conn-2'])
-    // back on the first phone, the person signs in again by email: that wallet still holds its badge
-    await service.automatic(identified(), session)
-    await service.automatic(identified(), session)
-    expect(offers.map((o) => o.connectionId)).toEqual(['conn-1', 'conn-2'])
-    expect((await service.requirements(identified()))[0]?.state).toBe('held')
+    // another phone of the same person
+    await service.automatic(identified('p-0042', 'conn-3'), session)
+    expect(offers.map((o) => o.connectionId)).toEqual(['conn-1'])
+    expect((await service.requirements(identified('p-0042', 'conn-3')))[0]?.state).toBe('held')
   })
 
-  it('reads what the connection holds whatever Principal it belongs to now', async () => {
+  it('reads what the Principal holds, not what a connection was offered', async () => {
     const { service, offers } = await setup({ badge: badgeProfile() })
     await service.automatic(identified('p-0042', 'conn-1', 'prn-a'), session)
-    // the same wallet, now the connection of another Principal of the same entry: it holds the badge
+    // the same wallet, now the connection of another Principal, who holds none
     await service.automatic(identified('p-0042', 'conn-1', 'prn-b'), session)
-    expect(offers).toHaveLength(1)
+    expect(offers).toHaveLength(2)
+    await service.automatic(identified('p-0042', 'conn-1', 'prn-b'), session)
+    expect(offers).toHaveLength(2)
   })
 
-  it('offers it again once the one of the connection is revoked', async () => {
-    const { service, offers, evidence, issuedOn } = await setup({ badge: badgeProfile() })
+  it('offers it again once the one of the person is revoked', async () => {
+    const { service, offers, evidence, issuedTo } = await setup({ badge: badgeProfile() })
     await service.automatic(identified(), session)
-    const [record] = await issuedOn('conn-1')
+    const [record] = await issuedTo()
     await evidence.setRevocation(record?.id as string, {
       registryDefinitionId: 'revreg-1',
       index: 0,
       revokedAt: new Date().toISOString(),
     })
-    await service.automatic(identified(), session)
-    expect(offers).toHaveLength(2)
+    await service.automatic(identified('p-0042', 'conn-2'), session)
+    expect(offers.map((o) => o.connectionId)).toEqual(['conn-1', 'conn-2'])
   })
 
-  it('offers it again once the one of the connection is past its last day of validity (INTX-ISSUE-023)', async () => {
+  it('offers it again once the one of the person is past its last day of validity (INTX-ISSUE-023)', async () => {
     const expired = badgeProfile({
       validUntilClaim: 'validUntil',
       claims: { ...badgeProfile().claims, validUntil: { from: 'computed', fn: 'addDays', days: -1 } },
     })
-    const { service, offers, issuedOn } = await setup({ badge: expired })
+    const { service, offers, issuedTo } = await setup({ badge: expired })
     await service.automatic(identified(), session)
-    const [record] = await issuedOn('conn-1')
+    const [record] = await issuedTo()
     expect(record?.validUntil).toMatch(/^\d{4}-\d{2}-\d{2}$/)
     expect(stillValid(record as EvidenceRecord)).toBe(false)
     await service.automatic(identified(), session)
@@ -230,18 +234,18 @@ describe('offered only when the connection holds none (IDENT-AUTH-016)', () => {
 })
 
 describe('issued again when the holder holds none (INTX-ISSUE-022)', () => {
-  it('revokes the one of the connection and issues a new one with the same number, its flow saying why', async () => {
-    const { service, offers, revoked, issuedOn } = await setup({ badge: badgeProfile() })
+  it('revokes the one of the person and issues a new one with the same number, its flow saying why', async () => {
+    const { service, offers, revoked, issuedTo } = await setup({ badge: badgeProfile() })
     await service.automatic(identified(), session)
-    const [first] = await issuedOn('conn-1')
+    const [first] = await issuedTo()
     const result = await service.issueAgain(identified(), session, BADGE, { description: 'Issued again.' })
     expect(result).toMatchObject({ outcome: 'issued', profile: 'badge' })
     expect(revoked).toEqual([first?.id])
     expect(offers).toHaveLength(2)
     expect(offers[1]?.claims.badgeNumber).toBe(offers[0]?.claims.badgeNumber)
     expect(offers[1]).toMatchObject({ connectionId: 'conn-1', description: 'Issued again.', origin: undefined })
-    // one valid credential on the connection, never two
-    const records = await issuedOn('conn-1')
+    // one valid credential for the person, never two
+    const records = await issuedTo()
     expect(records.map((r) => stillValid(r))).toEqual([false, true])
     expect(records[0]?.revocation?.reason).toBe('issued-again')
     // and the automatic trigger does not offer a third
@@ -249,7 +253,37 @@ describe('issued again when the holder holds none (INTX-ISSUE-022)', () => {
     expect(offers).toHaveLength(2)
   })
 
-  it('issues one on a connection that holds none, revoking nothing; any trigger', async () => {
+  it('on a new phone: revokes every valid one of the person, on any connection, and issues it on this one', async () => {
+    const { service, offers, revoked, issuedTo, evidence } = await setup({ badge: badgeProfile() })
+    await service.automatic(identified(), session)
+    // the agent offers no second one to the person on another phone
+    expect((await service.issue(identified('p-0042', 'conn-2'), session, 'badge', 'agent')).outcome).toBe('held')
+    const [first] = await issuedTo()
+    // a second valid one, as two phones each received one when a badge was held by a connection
+    await evidence.record(
+      { id: 'prn-p-0042' },
+      {
+        kind: 'issuance',
+        entry: issuanceEntry('badge'),
+        values: {},
+        connectionRef: 'conn-2',
+        revocation: { registryDefinitionId: 'revreg-1', index: 99 },
+      },
+      {}
+    )
+    const [, second] = await issuedTo()
+    // the new phone holds none, and is offered none at the authentication: the person asks for it from its menu
+    await service.automatic(identified('p-0042', 'conn-3'), session)
+    expect(offers).toHaveLength(1)
+    expect((await service.issueAgain(identified('p-0042', 'conn-3'), session, BADGE)).outcome).toBe('issued')
+    expect(revoked).toEqual([first?.id, second?.id])
+    expect(offers.map((o) => o.connectionId)).toEqual(['conn-1', 'conn-3'])
+    expect(offers[1]?.claims.badgeNumber).toBe(offers[0]?.claims.badgeNumber)
+    const valid = (await issuedTo()).filter((r) => stillValid(r))
+    expect(valid.map((r) => r.connectionRef)).toEqual(['conn-3'])
+  })
+
+  it('issues one to a person who holds none, revoking nothing; any trigger', async () => {
     const { service, offers, revoked } = await setup({ badge: badgeProfile({ trigger: 'request' }) })
     expect((await service.issueAgain(identified('p-0042', 'conn-5'), session, BADGE)).outcome).toBe('issued')
     expect(revoked).toEqual([])
@@ -282,15 +316,15 @@ describe('issued again when the holder holds none (INTX-ISSUE-022)', () => {
     expect(offers).toHaveLength(1)
   })
 
-  it('issues nothing when the one of the connection cannot be revoked', async () => {
-    const { service, offers, issuedOn } = await setup({ badge: badgeProfile() }, { revokes: false })
+  it('issues nothing when the one of the person cannot be revoked', async () => {
+    const { service, offers, issuedTo } = await setup({ badge: badgeProfile() }, { revokes: false })
     await service.automatic(identified(), session)
     expect(await service.issueAgain(identified(), session, BADGE)).toMatchObject({
       outcome: 'unavailable',
       reason: 'not-revoked',
     })
     expect(offers).toHaveLength(1)
-    expect((await issuedOn('conn-1')).every((r) => stillValid(r))).toBe(true)
+    expect((await issuedTo()).every((r) => stillValid(r))).toBe(true)
   })
 
   it('is not started by the model or the menu as such: the trigger holder is the reissue only', async () => {
@@ -488,7 +522,7 @@ describe('the revocation before a credential is issued again (INTX-ISSUE-022, IN
   ) {
     const { store, evidence, service } = await setup({ badge: badgeProfile() })
     await service.automatic(identified(), session)
-    const [record] = await evidence.issuedOn('conn-1', issuanceEntry('badge'))
+    const [record] = await evidence.issuedTo('prn-p-0042', issuanceEntry('badge'))
     const people = new PeopleService({
       pack: {} as AgentPack,
       store,
@@ -513,7 +547,7 @@ describe('the revocation before a credential is issued again (INTX-ISSUE-022, IN
     expect(told).toEqual([
       ['conn-1', { registryDefinitionId: 'revreg-1', index: 0 }, 'Replaced by the one you asked for again.'],
     ])
-    const [after] = await evidence.issuedOn('conn-1', issuanceEntry('badge'))
+    const [after] = await evidence.issuedTo('prn-p-0042', issuanceEntry('badge'))
     expect(after?.revocation).toMatchObject({
       revokedAt: '2026-11-25T10:00:00.000Z',
       reason: 'issued-again',
@@ -536,9 +570,9 @@ describe('the revocation before a credential is issued again (INTX-ISSUE-022, IN
       notify: async () => undefined,
     })
     expect(await failing.people.revokeForReissue(failing.record)).toBe(false)
-    expect(stillValid((await failing.evidence.issuedOn('conn-1', issuanceEntry('badge')))[0] as EvidenceRecord)).toBe(
-      true
-    )
+    expect(
+      stillValid((await failing.evidence.issuedTo('prn-p-0042', issuanceEntry('badge')))[0] as EvidenceRecord)
+    ).toBe(true)
     const none = await revocationOf(undefined)
     expect(await none.people.revokeForReissue(none.record)).toBe(false)
   })

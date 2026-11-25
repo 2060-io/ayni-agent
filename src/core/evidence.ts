@@ -211,12 +211,12 @@ export class EvidenceService {
   }
 
   /**
-   * The credentials of a profile issued on a connection, oldest first: the issuance records whose offer went to the
-   * wallet of that connection, whatever Principal holds it (IDENT-AUTH-016, INTX-ISSUE-022).
+   * The credentials of a profile issued to a Principal, on any connection, oldest first: what the person holds of it
+   * while they still hold (IDENT-AUTH-016, INTX-ISSUE-022, D156).
    */
-  public async issuedOn(connectionId: string, entry: string): Promise<EvidenceRecord[]> {
-    return (await this.store.evidence.listIssuedOn(connectionId))
-      .filter((r) => r.entry === entry && r.outcome === 'verified')
+  public async issuedTo(principalId: string, entry: string): Promise<EvidenceRecord[]> {
+    return (await this.store.evidence.list(principalId))
+      .filter((r) => r.kind === 'issuance' && r.entry === entry && r.outcome === 'verified')
       .map(auditOf)
   }
 

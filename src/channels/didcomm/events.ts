@@ -615,13 +615,13 @@ export class DidcommEvents {
   /**
    * `reissue/1.0/request` (FLOW-REISSUE-001/002, INTX-FLOW-006, INTX-ISSUE-022). With the reason `missing` the holder
    * holds no credential of the schema its reference names (`jsonSchemaCredentialId`), and asks for it again: to an
-   * identified person, for a profile issued again on request, the agent revokes the one it issued on the connection and
-   * answers with an `issue` flow, then closes the holder's flow `completed` once the credential is stored, or `failed`
-   * with why it was not; otherwise a problem report: `unknown-reference` (no profile issues the schema), `not-eligible`
-   * (the person is not identified, the credential is not theirs or not issued again on request, its claims do not
-   * resolve), `unavailable` (it cannot be issued now). After a restore (`restore`) every reference is unknown: the agent
-   * keeps no reissue policy for a credential of another wallet (O64), and a new connection is offered its badge anyway
-   * (IDENT-AUTH-016).
+   * identified person, for a profile issued again on request, the agent revokes every one it issued to the person that
+   * still holds and answers with an `issue` flow, then closes the holder's flow `completed` once the credential is
+   * stored, or `failed` with why it was not; otherwise a problem report: `unknown-reference` (no profile issues the
+   * schema), `not-eligible` (the person is not identified, the credential is not theirs or not issued again on request,
+   * its claims do not resolve), `unavailable` (it cannot be issued now). After a restore (`restore`) every reference is
+   * unknown: the agent keeps no reissue policy for a credential of another wallet (O64); the phone asks with `missing`
+   * for what its `status` lists in `issuable` (IDENT-AUTH-016).
    */
   private async onReissueStateChanged(exchange: CarrierExchange & { previousState?: string }): Promise<void> {
     if (exchange.state !== 'request-received') return
