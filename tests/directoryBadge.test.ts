@@ -236,28 +236,28 @@ describe('the claims of the entry the authentication identified (D130, INTX-ISSU
   })
 })
 
-describe('held by the wallet it was issued to, and the automatic trigger (D130, IDENT-AUTH-016)', () => {
-  it('is held on the connection it was issued to, and issued again, with the same number, to a new wallet', async () => {
+describe('held by the person it was issued to, and the automatic trigger (D130, D156, IDENT-AUTH-016)', () => {
+  it('is held by the person on every connection: a new phone asks for it again (badgeWhenMissing.test.ts)', async () => {
     const { service, offers } = await setup(badgeProfile())
     expect((await service.issue(identified(), session, 'badge', 'model')).outcome).toBe('issued')
     expect((await service.issue(identified(), session, 'badge', 'model')).outcome).toBe('held')
-    // a new phone: another connection of the same Principal holds no badge yet
+    // a new phone: the person holds the badge already; the phone asks for it again (INTX-ISSUE-022)
     const onNewPhone = identified('p-0042', 'conn-2')
-    expect((await service.requirements(onNewPhone))[0]?.state).toBe('ready')
-    expect((await service.issue(onNewPhone, session, 'badge', 'model')).outcome).toBe('issued')
-    expect(offers.map((o) => o.connectionId)).toEqual(['conn-1', 'conn-2'])
-    expect(offers[1]?.claims.badgeNumber).toBe(offers[0]?.claims.badgeNumber)
+    expect((await service.requirements(onNewPhone))[0]?.state).toBe('held')
+    expect((await service.issue(onNewPhone, session, 'badge', 'model')).outcome).toBe('held')
+    expect(offers.map((o) => o.connectionId)).toEqual(['conn-1'])
   })
 
-  it('offers an automatic badge once an authentication identified an entry, and once per connection', async () => {
+  it('offers an automatic badge once an authentication identified an entry, and once per person', async () => {
     const { service, offers } = await setup(badgeProfile('automatic'))
     // a visitor: nothing is offered, the claims of the directory are pending
     await service.automatic(visitor, session)
     expect(offers).toEqual([])
     await service.automatic(identified(), session)
     expect(offers).toHaveLength(1)
-    // a later authentication on the same connection offers nothing: the badge issued there is still valid
+    // a later authentication offers nothing, on the same connection or another: the person's badge is still valid
     await service.automatic(identified(), session)
+    await service.automatic(identified('p-0042', 'conn-2'), session)
     expect(offers).toHaveLength(1)
     // nor may the model or the person start it (INTX-ISSUE-008)
     expect((await service.issue(identified('p-0042', 'conn-3'), session, 'badge', 'model')).outcome).toBe('not-offered')
