@@ -2216,3 +2216,27 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       revoked before the new one is offered there), `tests/directoryBadge.test.ts` (a new phone holds the badge of the
       person), `tests/postgres.test.ts` (schema 3.14.0 drops the column; the issuances found by the Principal). With
       `src/` before this change 11 of the tests of these two files fail.
+84. **The start-up steps wait for the DIDComm agent** (2026-11-25, seen on every devnet deploy that restarts the VS Agent
+    too; ayni-spec PLAT-DEPLOY-006, IDENT-SELF-005, INTX-ISSUE-017).
+    - **What happened.** The agent started before its VS Agent, logged `vs-agent call failed`, `could not declare the
+      AG-UI descriptor in the DID Document` and `credential definition not established: nothing is issued under it`,
+      and ran degraded until it was restarted by hand: each of those steps was tried once, at start.
+    - **Tried again until done** (`StartupSteps`, `src/core/startupSteps.ts`): each step that needs the VS Agent is
+      tried at once and, until it is done, again in the background after 1 s, 2 s, 4 s... up to 60 s between two
+      attempts, without holding the HTTP server or another step; the steps stop with the process. The steps: the DID
+      the VS Agent reports (`/agent/info`; the start waits at most 5 s for the first answer, then goes on with
+      `did:unknown`), the AG-UI descriptor in the DID Document (started once the DID is known), the credential
+      definitions of the profiles that name a schema (`IssuanceService.prepare`, now true once every one is
+      established; a profile established is not asked again, and a profile issues as soon as its own is), and whether
+      the VS Agent speaks the peer status (`PeerStatusNotifier.answered`). The first failure of a step is logged at
+      warn, the attempts after at debug, and its success after failures once at info (`start-up step done: the
+      DIDComm agent answered`).
+    - **The DID read when it is used:** the AG-UI and A2A routes take the DID as a function, so that the descriptor,
+      the sessions and the agent card name it once it is known; `/health/ready` already read it then.
+    - **Not changed:** the anchoring authority, read from the DID at start when anchoring is enabled, is not tried
+      again (anchoring is off on devnet); the home organization already looked itself up again every minute.
+    - **Tests:** `tests/startupWaitsForVsAgent.test.ts` (a step tried again with its logs, and stopped; a profile that
+      issues once its definition is established, which is not asked again; an agent built against a fake VS Agent that
+      answers 503 serves at once with `did:unknown`, then, once it answers, declares its descriptor once, creates the
+      definition once, names its DID and serves the peer status, with no restart). With `src/` before this change the
+      file fails: `StartupSteps` does not exist, and the descriptor is never declared.
