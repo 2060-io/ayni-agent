@@ -13,14 +13,15 @@
  * claim may come from the entry the Principal's authentication identified (`record: directory`, INTX-ISSUE-021),
  * `pending` while it identified none; a claim of the document comes from a passport of that entry read when the person
  * authenticated, and is empty without one (IDENT-DIR-005). `emailId` numbers a credential by the address an `email`
- * method verified (INTX-ISSUE-020); `as: dateint` writes a date as the integer `YYYYMMDD`. A credential is held by the
- * wallet it was issued to: on another connection of the same person it is issued again (D130).
+ * method verified (INTX-ISSUE-020); `as: dateint` writes a date as the integer `YYYYMMDD`.
  *
- * Held on a connection (IDENT-AUTH-016, D156): the agent issued one of the profile on that connection, whatever Principal
- * the connection belongs to, and it is neither revoked nor past the last day of validity its profile names
- * (`validUntilClaim`, INTX-ISSUE-023). An automatic profile is offered only on a connection that holds none. A holder
- * that deleted its credential asks for it again (`reissue` with reason `missing`, INTX-ISSUE-022): the agent revokes the
- * one it issued on that connection, so that two are never valid, and issues a new one, with the same number.
+ * Held by the Principal (IDENT-AUTH-016, D156): the agent issued one of the profile to that Principal, on any
+ * connection, and it is neither revoked nor past the last day of validity its profile names (`validUntilClaim`,
+ * INTX-ISSUE-023). An automatic profile is offered only to a Principal that holds none: not again at a reconnection,
+ * at a sign-in by another method, nor on another phone. A holder whose wallet holds none (it deleted it, a new phone)
+ * asks for it again (`reissue` with reason `missing`, INTX-ISSUE-022): the agent revokes every one of the profile it
+ * issued to the Principal that still holds, so that a person never holds two valid, and issues a new one, with the
+ * same number.
  */
 import { createHmac, hkdfSync } from 'node:crypto'
 import { AUTHENTICATION_ENTRY, DOCUMENT_ENTRY, EMAIL_ENTRY } from '../config/pack.js'
@@ -401,9 +402,10 @@ export class IssuanceService {
 
   /**
    * A holder that holds no credential of a schema asks for it again (`reissue` with reason `missing`, INTX-ISSUE-022,
-   * D156): to an identified person only, for a profile offered to them that is issued again on request. The credential
-   * this agent issued of it on the connection and that still holds is revoked first, so that two are never valid; then a
-   * new one is offered, with the same number (INTX-ISSUE-016). Nothing is revoked when the new one cannot be issued.
+   * D156): to an identified person only, for a profile offered to them that is issued again on request. Every
+   * credential of it this agent issued to the Principal, on any connection, that still holds is revoked first, so that
+   * the person never holds two valid; then a new one is offered on this connection, with the same number
+   * (INTX-ISSUE-016). Nothing is revoked when the new one cannot be issued.
    */
   public async issueAgain(
     principal: Principal,
@@ -434,13 +436,12 @@ export class IssuanceService {
       )
       if (!resolves) return { outcome: 'not-eligible', profile: name, reason: 'incomplete' }
       if (!(await this.definitionOf(profile))) return { outcome: 'not-ready', profile: name }
-      const entry = issuanceEntry(name)
-      for (const record of (await this.evidence.issuedOn(connectionId, entry)).filter((r) => stillValid(r))) {
+      for (const record of await this.heldBy(principal, name)) {
         const revoked = record.revocation && this.deps.revoke ? await this.deps.revoke(record, 'issued-again') : false
         if (!revoked) {
           this.logger.warn(
             { principalId: principal.id, profile: name, evidenceId: record.id },
-            'the credential issued on this connection could not be revoked: not issued again (INTX-ISSUE-022)'
+            'a credential issued to this person could not be revoked: not issued again (INTX-ISSUE-022)'
           )
           return { outcome: 'unavailable', profile: name, reason: 'not-revoked' }
         }
@@ -583,22 +584,22 @@ export class IssuanceService {
   }
 
   /**
-   * Whether the wallet of the Principal's connection holds a credential of the profile (IDENT-AUTH-016, D156): one this
-   * agent issued on that connection, whoever its Principal, that still holds. Without a connection, one issued to the
-   * Principal on any.
+   * The credentials of the profile the Principal holds (IDENT-AUTH-016, D156): those this agent issued to it, on any
+   * connection, that still hold (not revoked, not past their last day of validity), oldest first.
    */
+  private async heldBy(principal: Principal, name: string): Promise<EvidenceRecord[]> {
+    return (await this.evidence.issuedTo(principal.id, issuanceEntry(name))).filter((r) => stillValid(r))
+  }
+
+  /** Whether the Principal holds a credential of the profile (IDENT-AUTH-016, D156). */
   private async held(principal: Principal, name: string): Promise<boolean> {
-    const entry = issuanceEntry(name)
-    const connectionId = principal.capabilityChannelId
-    if (connectionId) return (await this.evidence.issuedOn(connectionId, entry)).some((r) => stillValid(r))
-    return (await this.evidence.list(principal.id)).some(
-      (r) => r.kind === 'issuance' && r.entry === entry && r.outcome === 'verified' && stillValid(r)
-    )
+    return (await this.heldBy(principal, name)).length > 0
   }
 
   /**
    * The profiles the agent issues by itself (trigger `automatic`): right after an authentication, once every claim
-   * resolves, on a connection to which it issued none that is still valid (IDENT-AUTH-016, INTX-ISSUE-008).
+   * resolves, to a Principal that holds none still valid, whatever connection it signs in on (IDENT-AUTH-016,
+   * INTX-ISSUE-008).
    */
   public async automatic(principal: Principal, session: Session): Promise<void> {
     for (const [name, profile] of this.offered(principal)) {

@@ -2190,7 +2190,33 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       `issuable` and the status; the events of `reissue` with each answer; the revocation itself; the pack key),
       `tests/postgres.test.ts` (the column, filled for earlier records), `tests/issuance.test.ts` (a second Principal
       gets its own connection). With `src/` before this change 21 of the 24 tests of `badgeWhenMissing.test.ts` fail.
-83. **The start-up steps wait for the DIDComm agent** (2026-11-25, seen on every devnet deploy that restarts the VS Agent
+83. **The badge held by the person, not by a connection** (2026-11-25, Fabrice's decision of 2026-11-25 after the
+    devnet test of 0.35.0; ayni-spec D156 as amended: IDENT-AUTH-016, INTX-ISSUE-022, INTX-ISSUE-023). Replaces the
+    "held on a connection" of entry 82.
+    - **What happened.** On devnet a person disconnected, connected again and authenticated with the Ayni Labs badge
+      they held; the agent offered them another (`automatic issuance {profile: 'list-badge'}`): a reconnection is a
+      new connection, and under entry 82 a new connection held nothing.
+    - **Held by the Principal.** A credential of a profile is held by a person when this agent issued one of it to their
+      Principal, on any connection, that is neither revoked nor past its last day of validity (`validUntilClaim`).
+      `automatic` offers it only to a Principal that holds none: not again at a reconnection, at a sign-in by email or
+      passport, nor on another phone. The same reading gives `held` to `credential_requirements` and to `issue` for
+      every trigger: a person holds one valid credential of a profile (one phone per person). A new phone obtains its
+      badge with Get my badge (`reissue`, reason `missing`), which `issuable` of the peer status offers as before.
+    - **Issued again.** `IssuanceService.issueAgain` revokes every credential of the profile issued to the Principal
+      that still holds, on whichever connection it was offered (the holder is told on that connection when it is still
+      there), then offers the new one on the connection that asked, with the same number; nothing is issued when one
+      cannot be revoked.
+    - **Store.** `EvidenceService.issuedTo(principalId, entry)` reads the Principal's issuance records (the
+      `evidence_principal` index). `EvidenceRepo.listIssuedOn` and `EvidenceService.issuedOn` are gone, and schema
+      3.14.0 drops the column `evidence.issued_on` and its index; the record still names the connection an issuance was
+      offered on (`connectionRef`).
+    - **Not changed:** `issuable` (IDENT-STAT-009), the reissue events, the AG-UI profile.
+    - **Tests:** `tests/badgeWhenMissing.test.ts` (no offer after a reconnection, another method or another phone; held
+      by the Principal and not by the wallet of a connection; a new phone asks, and every valid one of the person is
+      revoked before the new one is offered there), `tests/directoryBadge.test.ts` (a new phone holds the badge of the
+      person), `tests/postgres.test.ts` (schema 3.14.0 drops the column; the issuances found by the Principal). With
+      `src/` before this change 11 of the tests of these two files fail.
+84. **The start-up steps wait for the DIDComm agent** (2026-11-25, seen on every devnet deploy that restarts the VS Agent
     too; ayni-spec PLAT-DEPLOY-006, IDENT-SELF-005, INTX-ISSUE-017).
     - **What happened.** The agent started before its VS Agent, logged `vs-agent call failed`, `could not declare the
       AG-UI descriptor in the DID Document` and `credential definition not established: nothing is issued under it`,

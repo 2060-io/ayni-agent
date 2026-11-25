@@ -559,16 +559,16 @@ issuance:
     want of room matches what it holds.
   - **The number** is the subject's own (`subjectId`): the Principal of a directory entry is keyed by the entry, so the
     same person receives the same number at every issuance, on every wallet, whichever method identified them.
-  - **The trigger** (D130): `automatic` offers the badge right after an authentication that identified an entry, on a
-    connection to which the agent issued no badge that is still valid; `request` (a menu item) and `model` (the tool)
-    issue on demand, once the person is identified. A badge is **held by the wallet it was issued to**: a person who
-    connects a new phone authenticates and receives a badge again, with the same number. A person who signs in again
-    on a phone that holds its badge is offered nothing (D156).
-  - **Issued again on request** (D156, INTX-ISSUE-022): a phone whose wallet lost the badge (the person deleted it)
-    asks for it again with `reissue/1.0`, reason `missing`, naming the schema. To an identified person, for a profile
+  - **The trigger** (D130): `automatic` offers the badge right after an authentication that identified an entry, to a
+    person to whom the agent issued no badge that is still valid; `request` (a menu item) and `model` (the tool)
+    issue on demand, once the person is identified. A badge is **held by the person it was issued to** (D156): a
+    person who holds one is offered nothing at a reconnection, at a sign-in by another method, or on another phone.
+  - **Issued again on request** (D156, INTX-ISSUE-022): a phone whose wallet holds no badge (the person deleted it, or
+    it is a new phone) asks for it again with `reissue/1.0`, reason `missing`, naming the schema. To an identified person, for a profile
     that names its schema (`jsonSchemaCredentialId`) and whose claims come from the directory or from the identity
     credential (every `evidence` claim from `authentication`, or from `document` in a badge of the directory), whatever
-    its trigger: the agent revokes the one it issued on that connection, then offers a new one with the same number.
+    its trigger: the agent revokes every one it issued to the person that still holds, on any connection, then offers
+    a new one with the same number: a person holds one valid badge.
     The peer status lists those profiles in `issuable` (schema and label) to an identified person; the phone shows
     "Get my badge" when it holds none. Refused with `unknown-reference` (no profile of the schema), `not-eligible`
     (not identified, not theirs, not issued again on request, claims that do not resolve) or `unavailable` (the earlier
@@ -596,13 +596,13 @@ issuance:
   answering with the same list.
 - **Triggers.** `model`: the model calls `issue_credential`. `request`: the person asks, from a menu item
   "Get <label>"; the credential is absent from the model's list. `automatic`: the agent offers it right after an
-  authentication, or when evidence arrives, once every claim resolves, on a connection that holds none still valid.
+  authentication, or when evidence arrives, once every claim resolves, to a person who holds none still valid.
   `credential_requirements` is there in the three cases.
 - **Gates.** `roles` limits who may receive the credential. `authChallenge` runs before the offer: one challenge,
   `device` (a confirmation on the phone) or `document` (the read of a document's chip), written alone or as a list of
-  one. A credential is issued once to each wallet (connection), while it is still valid: what the agent issued on the
-  connection, whatever Principal it belongs to, not revoked and not past the day `validUntilClaim` names
-  (IDENT-AUTH-016, INTX-ISSUE-023). `validUntilClaim` names a claim of the profile (refused otherwise) that holds a date
+  one. A credential is issued once to each person, while it is still valid: what the agent issued to the Principal, on
+  any connection, not revoked and not past the day `validUntilClaim` names (IDENT-AUTH-016, INTX-ISSUE-023); a person
+  whose wallet holds none asks for it again (INTX-ISSUE-022). `validUntilClaim` names a claim of the profile (refused otherwise) that holds a date
   (`YYYY-MM-DD`, `YYYYMMDD` or a time); the record keeps that day. Without it a credential holds until it is revoked.
 - **Persons only** in this version: a credential is offered on the connection of the person, as an `issue`
   flow on a flow-capable wallet.

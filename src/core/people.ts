@@ -309,9 +309,9 @@ export class PeopleService implements DirectoryLink {
   }
 
   /**
-   * Revokes a credential this agent issued on a connection, which its holder asked to be issued again there
-   * (INTX-ISSUE-022, D156): revoked and published now, recorded in the admin audit and on the issuance record, and the
-   * holder told on that connection (INTX-FLOW-007), once: a wallet that deleted the credential has nothing to mark.
+   * Revokes a credential this agent issued to a person, who asked for it to be issued again (INTX-ISSUE-022, D156):
+   * revoked and published now, recorded in the admin audit and on the issuance record, and the holder told on the
+   * connection it was issued on (INTX-FLOW-007), once: a wallet that deleted the credential has nothing to mark.
    * False when it cannot be revoked: no registry, no DIDComm agent, or the revocation failed; nothing is issued then.
    */
   public async revokeForReissue(record: EvidenceRecord): Promise<boolean> {

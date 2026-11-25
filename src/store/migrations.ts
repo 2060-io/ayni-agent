@@ -1,5 +1,5 @@
 /** Memory schema versions (CORE-VER-001/002). Each migration is applied once, in order. */
-export const MEMORY_SCHEMA_VERSION = '3.13.0'
+export const MEMORY_SCHEMA_VERSION = '3.14.0'
 
 export const MIGRATIONS: { version: string; sql: string }[] = [
   {
@@ -494,6 +494,16 @@ ALTER TABLE evidence ADD COLUMN IF NOT EXISTS issued_on TEXT;
 UPDATE evidence SET issued_on = data->>'connectionRef'
   WHERE data->>'kind' = 'issuance' AND issued_on IS NULL AND data->>'connectionRef' IS NOT NULL;
 CREATE INDEX IF NOT EXISTS evidence_issued_on ON evidence (issued_on, verified_at) WHERE issued_on IS NOT NULL;
+`,
+  },
+  {
+    // a badge is held by the person, not by a connection (IDENT-AUTH-016, D156 as amended): what a Principal was issued
+    // is found by the Principal (evidence_principal), and the column of the connection an issuance was offered on, which
+    // the record still names, is read no more
+    version: '3.14.0',
+    sql: `
+DROP INDEX IF EXISTS evidence_issued_on;
+ALTER TABLE evidence DROP COLUMN IF EXISTS issued_on;
 `,
   },
 ]

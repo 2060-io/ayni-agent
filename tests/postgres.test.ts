@@ -1555,15 +1555,15 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
     })
   })
 
-  describe('the credentials issued on a connection (IDENT-AUTH-016, INTX-ISSUE-022, D156, schema 3.13.0)', () => {
-    it('finds them by the connection, those issued before the column included, whatever Principal holds them', async () => {
+  describe('the credentials issued to a person (IDENT-AUTH-016, INTX-ISSUE-022, D156, schema 3.14.0)', () => {
+    it('drops the column of the connection, and finds the issuances by the Principal, on any connection', async () => {
       const url = await freshDatabase()
       const client = new pg.Client({ connectionString: url })
       await client.connect()
       await client.query(
         'CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())'
       )
-      for (const m of MIGRATIONS.filter((m) => olderThan(m.version, '3.13.0'))) {
+      for (const m of MIGRATIONS.filter((m) => olderThan(m.version, '3.14.0'))) {
         await client.query(m.sql)
         await client.query('INSERT INTO schema_migrations (version) VALUES ($1)', [m.version])
       }
@@ -1583,33 +1583,44 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
         encKeyRef: null,
         ...over,
       })
-      // a badge issued before the column: the migration finds its connection in the record
-      await client.query('INSERT INTO evidence (id, principal_id, state, verified_at, data) VALUES ($1,$2,$3,$4,$5)', [
-        'evd_old',
-        'p-guest',
-        'active',
-        '2026-11-20T10:00:00.000Z',
-        JSON.stringify(issued('evd_old', 'p-guest', '2026-11-20T10:00:00.000Z')),
-      ])
+      // a badge issued while the column was read
+      await client.query(
+        'INSERT INTO evidence (id, principal_id, state, verified_at, data, issued_on) VALUES ($1,$2,$3,$4,$5,$6)',
+        [
+          'evd_old',
+          'p-ana',
+          'active',
+          '2026-11-20T10:00:00.000Z',
+          JSON.stringify(issued('evd_old', 'p-ana', '2026-11-20T10:00:00.000Z')),
+          'conn-1',
+        ]
+      )
       await client.end()
       const store = new PostgresStore(url)
       await store.init()
       await store.evidence.save({
-        ...issued('evd_new', 'p-ana', '2026-11-21T10:00:00.000Z', { validUntil: '2026-12-31' }),
+        ...issued('evd_new', 'p-ana', '2026-11-21T10:00:00.000Z', {
+          connectionRef: 'conn-2',
+          validUntil: '2026-12-31',
+        }),
         cipher: null,
       } as never)
       await store.evidence.save({
-        ...issued('evd_other', 'p-ana', '2026-11-22T10:00:00.000Z', { connectionRef: 'conn-2' }),
+        ...issued('evd_other', 'p-jonas', '2026-11-22T10:00:00.000Z'),
         cipher: null,
       } as never)
-      // a presentation on the connection is no issuance
-      await store.evidence.save({
-        ...issued('evd_pres', 'p-ana', '2026-11-23T10:00:00.000Z', { kind: 'presentation', entry: 'authentication' }),
-        cipher: null,
-      } as never)
-      expect((await store.evidence.listIssuedOn('conn-1')).map((r) => r.id)).toEqual(['evd_old', 'evd_new'])
-      expect((await store.evidence.listIssuedOn('conn-2')).map((r) => r.id)).toEqual(['evd_other'])
+      expect((await store.evidence.list('p-ana')).map((r) => [r.id, r.connectionRef])).toEqual([
+        ['evd_old', 'conn-1'],
+        ['evd_new', 'conn-2'],
+      ])
       expect((await store.evidence.get('evd_new'))?.validUntil).toBe('2026-12-31')
+      const check = new pg.Client({ connectionString: url })
+      await check.connect()
+      const { rows } = await check.query(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'evidence' AND column_name = 'issued_on'"
+      )
+      await check.end()
+      expect(rows).toEqual([])
       await store.close()
     })
   })

@@ -524,11 +524,10 @@ export class PostgresStore implements Store {
     save: async (e: StoredEvidence) => {
       const { cipher, ...data } = e
       await this.pool.query(
-        `INSERT INTO evidence (id, principal_id, state, verified_at, expires_at, data, cipher, directory_entry_id, holder_index,
-           issued_on)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+        `INSERT INTO evidence (id, principal_id, state, verified_at, expires_at, data, cipher, directory_entry_id, holder_index)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
          ON CONFLICT (id) DO UPDATE SET principal_id = $2, state = $3, expires_at = $5, data = $6, cipher = $7,
-           directory_entry_id = $8, holder_index = $9, issued_on = $10`,
+           directory_entry_id = $8, holder_index = $9`,
         [
           e.id,
           e.principalId,
@@ -539,7 +538,6 @@ export class PostgresStore implements Store {
           cipher,
           e.kind === 'issuance' ? (e.directoryEntryId ?? null) : null,
           e.kind === 'issuance' ? (e.holderIndex ?? null) : null,
-          e.kind === 'issuance' ? (e.connectionRef ?? null) : null,
         ]
       )
     },
@@ -565,12 +563,6 @@ export class PostgresStore implements Store {
           'SELECT data, cipher FROM evidence WHERE holder_index = $1 ORDER BY verified_at DESC, id DESC',
           [holderIndex]
         )
-      ).map(this.evidenceOf),
-    listIssuedOn: async (connectionRef: string) =>
-      (
-        await this.rows('SELECT data, cipher FROM evidence WHERE issued_on = $1 ORDER BY verified_at, id', [
-          connectionRef,
-        ])
       ).map(this.evidenceOf),
   }
 
