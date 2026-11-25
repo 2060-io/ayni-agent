@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.35.1](https://github.com/2060-io/ayni-agent/compare/v0.35.0...v0.35.1) (2026-11-25)
+
+
+### Bug Fixes
+
+* **issuance:** the badge is held by the person, not by a connection: not offered again at a reconnection (ayni-spec D156) ([#132](https://github.com/2060-io/ayni-agent/issues/132)) ([fc14ea0](https://github.com/2060-io/ayni-agent/commit/fc14ea02744eb098aedb736cff894c15c0d0216b))
+* **startup:** the steps that need the VS Agent are tried again until it answers, in the background (PLAT-DEPLOY-006) ([#133](https://github.com/2060-io/ayni-agent/issues/133)) ([b2b7911](https://github.com/2060-io/ayni-agent/commit/b2b7911834c55efb597217a8df63f847d90867c2))
+
 ## [0.35.0](https://github.com/2060-io/ayni-agent/compare/v0.34.0...v0.35.0) (2026-11-25)
 
 
