@@ -1409,6 +1409,30 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
       })
       expect((await store.oauthClients.get('dynamic|https://crm.2060.io'))?.clientId).toBe('client_1')
     })
+
+    it('keeps the attempt of an account several sources use: no resource, its sources, its sealed nonce (D118)', async () => {
+      const attempt = {
+        id: 'att_g1',
+        principalId: 'p-ana',
+        originSessionId: 'ses_1',
+        sourceId: 'google',
+        allow: ['drive'],
+        stateHash: 'hash-g1',
+        issuer: 'https://accounts.google.com',
+        issParameterSupported: false,
+        scopes: ['openid', 'email', 'https://www.googleapis.com/auth/drive.readonly'],
+        clientRef: 'pre-registered|https://accounts.google.com|client-of-the-tests',
+        verifierCipher: 'AA==',
+        nonceCipher: 'AQ==',
+        encKeyRef: 'k',
+        createdAt: '2026-11-25T10:00:00.000Z',
+        expiresAt: '2026-11-25T10:10:00.000Z',
+      }
+      await store.oauthAttempts.save(attempt)
+      const kept = await store.oauthAttempts.findByStateHash('hash-g1')
+      expect(kept).toEqual(attempt)
+      expect(kept?.resource).toBeUndefined()
+    })
   })
 
   describe('the device secrets an earlier version kept are erased (D51, IDENT-DEV-001, schema 3.11.0)', () => {
