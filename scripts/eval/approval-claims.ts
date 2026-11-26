@@ -375,8 +375,9 @@ async function world(packDir: string, pack: Doc, options: EvalOptions): Promise<
   Object.assign(running.agent.orchestrator, { llm: scripted })
   const { source: sourceId, tool } = postingTool(pack, options.post)
   const source = pack.tools.sources[sourceId] as Doc
+  // the template whose features name the source as a provider (D120, TOOL-AVAIL-002)
   const template = ((pack.spaces?.templates ?? []) as Doc[]).find((t) =>
-    ((t.tools ?? []) as Doc[]).some((e) => e.source === sourceId)
+    ((t.features ?? []) as Doc[]).some((e) => ((e.providers ?? []) as string[]).includes(sourceId))
   )
   if (!template) throw new Error(`no template of spaces offers ${sourceId}`)
   const accessRoles = Object.keys(source.access?.roles ?? {})

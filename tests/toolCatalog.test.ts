@@ -62,15 +62,18 @@ describe('the catalog in the agent-pack (CORE-PACK-001, TOOL-CAT-001/002)', () =
     // the defaults: an HTTP tool of the agent's account, everywhere; a bundled tool of none
     expect(catalog.source('lookup')).toMatchObject({ kind: 'http', account: { kind: 'agent' }, availability: 'agent' })
     expect(catalog.source('workingMemory')).toMatchObject({ kind: 'bundled', account: { kind: 'none' } })
-    // the defaults of a template's entry: added by the owner, not to guests (TOOL-AVAIL-002)
-    expect(catalog.templateTools('sales')).toEqual([
-      { source: 'relaticle', add: 'auto', guests: false },
-      { source: 'crm_status', add: 'owner', guests: false },
+    // the defaults of a template's entry: added by the owner, not to guests, no any value (TOOL-AVAIL-002)
+    expect(catalog.templateFeatures('sales')).toEqual([
+      { feature: 'crm', providers: ['relaticle'], add: 'auto', guests: false, any: false },
+      { feature: 'crm-status', providers: ['crm_status'], add: 'owner', guests: false, any: false },
     ])
-    expect(catalog.templateTools('comms')).toEqual([
-      { source: 'post_to_x', add: 'owner', guests: false },
-      { source: 'x_mentions', add: 'owner', guests: false },
+    expect(catalog.templateFeatures('comms')).toEqual([
+      { feature: 'social', providers: ['post_to_x'], add: 'owner', guests: false, any: false },
+      { feature: 'mentions', providers: ['x_mentions'], add: 'owner', guests: false, any: false },
     ])
+    // each source names the feature it serves, a category here (D120)
+    expect(catalog.featureOf(catalog.source('relaticle') ?? {})).toMatchObject({ id: 'crm', title: 'CRM' })
+    expect(catalog.profileOf(catalog.source('relaticle') ?? {})).toBeUndefined()
     // an account of four fields, in the agent-pack's order, sent in one header built from them (D102)
     expect(catalog.source('x_mentions')?.account).toEqual({
       kind: 'space',
@@ -117,7 +120,7 @@ describe('the catalog in the agent-pack (CORE-PACK-001, TOOL-CAT-001/002)', () =
     const agentWide = refusal(
       doc((p) => {
         p.tools.sources.post_to_x.availability = 'agent'
-        p.spaces.templates.find((t: { id: string }) => t.id === 'comms').tools = []
+        p.spaces.templates.find((t: { id: string }) => t.id === 'comms').features = []
       })
     )
     expect(agentWide).toContain('tools.sources.post_to_x.availability')
@@ -143,11 +146,27 @@ describe('the catalog in the agent-pack (CORE-PACK-001, TOOL-CAT-001/002)', () =
 
   it('refuses a template that names a source of another availability, warns of a source no template names (TOOL-AVAIL-002)', () => {
     const wrong = refusal(
-      doc((p) => p.spaces.templates.find((t: { id: string }) => t.id === 'sales').tools.push({ source: 'websearch' }))
+      doc((p) =>
+        p.spaces.templates
+          .find((t: { id: string }) => t.id === 'sales')
+          .features.push({ feature: 'search', providers: ['websearch'] })
+      )
     )
-    expect(wrong).toContain('websearch is of availability agent')
+    expect(wrong).toContain(
+      'spaces.templates.sales.features[2].providers: websearch is not of availability spaces: a template names providers of spaces only (TOOL-AVAIL-002)'
+    )
+    // and a provider of spaces of another feature
+    expect(
+      refusal(
+        doc((p) =>
+          p.spaces.templates
+            .find((t: { id: string }) => t.id === 'comms')
+            .features.push({ feature: 'crm', providers: ['post_to_x'] })
+        )
+      )
+    ).toContain('spaces.templates.comms.features[2].providers: post_to_x serves social, not crm (TOOL-AVAIL-002)')
     const unnamed = validatePackDocument(
-      doc((p) => (p.spaces.templates.find((t: { id: string }) => t.id === 'comms').tools = [])),
+      doc((p) => (p.spaces.templates.find((t: { id: string }) => t.id === 'comms').features = [])),
       env
     )
     expect(catalogWarnings(unnamed).join('\n')).toContain(

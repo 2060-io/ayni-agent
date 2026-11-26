@@ -300,10 +300,19 @@ function connectionsPack(): string {
     Object.entries(pack.tools.sources as Doc).filter(([, source]) => (source as Doc).type === 'bundled')
   )
   pack.tools = {
+    features: {
+      crm: { title: 'CRM' },
+      code: { title: 'Code and issues' },
+      tasks: { title: 'Tasks' },
+      docs: { title: 'Docs' },
+      // a second feature: two providers of one feature in Personal are refused (TOOL-FEAT-003)
+      'no-docs': { title: 'No docs' },
+    },
     sources: {
       ...bundled,
       relaticle: {
         type: 'mcp',
+        feature: 'crm',
         title: 'Relaticle CRM',
         description: "The companies, people, notes and tasks of the space's workspace",
         transport: 'streamable-http',
@@ -333,6 +342,7 @@ function connectionsPack(): string {
       },
       github: {
         type: 'mcp',
+        feature: 'code',
         title: 'GitHub',
         description: 'Code, issues and pull requests in GitHub',
         transport: 'streamable-http',
@@ -363,6 +373,7 @@ function connectionsPack(): string {
       },
       'github-project': {
         type: 'mcp',
+        feature: 'code',
         title: 'GitHub repository',
         description: "The issues of the project's repository",
         transport: 'streamable-http',
@@ -384,6 +395,7 @@ function connectionsPack(): string {
       },
       my_tasks: {
         type: 'http',
+        feature: 'tasks',
         title: 'My tasks',
         description: 'Lists your open tasks in the task tracker',
         method: 'GET',
@@ -402,6 +414,7 @@ function connectionsPack(): string {
       // a source of a client ID metadata document, and one whose server takes none: for a manager only
       docs: {
         type: 'mcp',
+        feature: 'docs',
         title: 'Docs',
         transport: 'streamable-http',
         url: docMcp.url,
@@ -411,6 +424,7 @@ function connectionsPack(): string {
       },
       nodocs: {
         type: 'mcp',
+        feature: 'no-docs',
         title: 'No docs',
         transport: 'streamable-http',
         url: noDocMcp.url,
@@ -428,7 +442,7 @@ function connectionsPack(): string {
       creators: ['manager'],
       membership: { mode: 'list' },
       rules: { allowedProviders: { default: ['stub'] }, handover: { default: true } },
-      tools: [{ source: 'relaticle', add: 'auto' }],
+      features: [{ feature: 'crm', providers: ['relaticle'], add: 'auto' }],
     },
     {
       id: 'project',
@@ -437,7 +451,7 @@ function connectionsPack(): string {
       creators: ['manager'],
       membership: { mode: 'list' },
       rules: { allowedProviders: { default: ['stub'] } },
-      tools: [{ source: 'github-project', add: 'auto' }],
+      features: [{ feature: 'code', providers: ['github-project'], add: 'auto' }],
     },
   ]
   writeFileSync(join(dir, 'agent-pack.yaml'), stringifyYaml(pack))
@@ -545,6 +559,8 @@ describe('Your accounts (TOOL-CONN-001, PROF-TOOL-014)', () => {
       account: null,
       attempt: null,
       revokesAtSource: false,
+      // the features its sources serve, each once (PROF-TOOL-035)
+      features: [{ id: 'code', title: 'Code and issues' }],
     })
     expect(listed[1]).toMatchObject({
       source: 'my_tasks',
@@ -1181,6 +1197,7 @@ describe('what the model knows, and the Connect card (TOOL-CONN-010..012, PROF-T
       description: 'Code, issues and pull requests in GitHub',
       method: 'oauth',
       why: 'reconnect',
+      feature: { id: 'code', title: 'Code and issues' },
     })
     const answers = toolAnswers()
     expect(answers.at(-2)).toMatch(/^shown: /)

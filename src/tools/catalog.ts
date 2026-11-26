@@ -14,14 +14,16 @@ import type {
   McpSource,
   SourceAccount,
   SourceBinding,
+  SourceManage,
   SpaceCallRule,
   StepUp,
-  TemplateTool,
+  TemplateFeature,
   ToolAccess,
   ToolDeclaration,
   ToolEffect,
 } from '../config/packTypes.js'
 import { BUNDLED_NAMES, BUNDLED_TOOLS, bundledSource } from '../config/packTypes.js'
+import { type FeatureProfile, knownProfile, type ProfileTool, profileTool } from '../features/profiles.js'
 
 export type SourceKind = 'mcp' | 'http' | 'bundled'
 
@@ -58,6 +60,22 @@ export interface CatalogSource {
   method?: string
   /** an MCP server's or an HTTP tool's URL: a person's account is used at the same URL only (TOOL-CAT-015) */
   url?: string
+  /** the feature it serves (D120, TOOL-FEAT-002); none for a bundled tool */
+  feature?: string
+  /** a provider of a feature with a contract: the optional capabilities it uses at most (TOOL-FEAT-004) */
+  capabilities?: string[]
+  /** a provider of Files: how a team space's folder is managed at it (TOOL-FEAT-023); not built yet */
+  manage?: SourceManage
+}
+
+/** A feature of `tools.features` (D120), with the agent's copy of its profile for a feature with a contract. */
+export interface CatalogFeature {
+  id: string
+  title: string
+  /** the agent's copy of the profile the feature names (D121); none for a category */
+  profile?: FeatureProfile
+  /** what the agent-pack says of each tool of its profile, for every provider (TOOL-FEAT-005) */
+  tools: Record<string, ToolDeclaration>
 }
 
 /**
@@ -125,8 +143,13 @@ export interface PackRule {
 
 export class ToolCatalog {
   private readonly byName = new Map<string, CatalogSource>()
+  private readonly featuresById = new Map<string, CatalogFeature>()
 
   public constructor(private readonly pack: AgentPack) {
+    for (const [id, def] of Object.entries(pack.tools?.features ?? {})) {
+      const profile = def.profile ? knownProfile(def.profile.id, def.profile.version) : undefined
+      this.featuresById.set(id, { id, title: def.title, ...(profile ? { profile } : {}), tools: def.tools ?? {} })
+    }
     for (const [id, def] of Object.entries(pack.tools?.sources ?? {})) {
       if (def.type === 'bundled') continue
       this.byName.set(id, {
@@ -145,6 +168,9 @@ export class ToolCatalog {
         access: def.access,
         ...(def.type === 'mcp' ? { transport: def.transport } : { method: def.method }),
         ...(def.url ? { url: def.url } : {}),
+        ...(def.feature ? { feature: def.feature } : {}),
+        ...(def.type === 'mcp' && def.capabilities ? { capabilities: def.capabilities } : {}),
+        ...(def.type === 'mcp' && def.manage ? { manage: def.manage } : {}),
       })
     }
     // every bundled tool is a source: the one that names it, else one of its own name with its defaults
@@ -189,9 +215,56 @@ export class ToolCatalog {
     return created
   }
 
+  // ---- features and their providers (D120 to D123) ------------------------------------------------------------------
+
+  /** Every feature of `tools.features`, in the agent-pack's order. */
+  public features(): CatalogFeature[] {
+    return [...this.featuresById.values()]
+  }
+
+  /** A feature by its id. */
+  public feature(id: string | undefined): CatalogFeature | undefined {
+    return id ? this.featuresById.get(id) : undefined
+  }
+
+  /** The feature a source serves (TOOL-FEAT-002), with its title; none for a bundled tool. */
+  public featureOf(source: Pick<CatalogSource, 'feature'>): CatalogFeature | undefined {
+    return this.feature(source.feature)
+  }
+
+  /** The profile of the feature a source provides, when the feature has a contract (D121). */
+  public profileOf(source: Pick<CatalogSource, 'feature'>): FeatureProfile | undefined {
+    return this.featureOf(source)?.profile
+  }
+
+  /** A tool of the profile of a source's feature: what the profile says of it, in place of the server (TOOL-FEAT-010). */
+  public profileToolOf(source: Pick<CatalogSource, 'feature'>, tool: string): ProfileTool | undefined {
+    const profile = this.profileOf(source)
+    return profile ? profileTool(profile, tool) : undefined
+  }
+
+  /**
+   * What the agent-pack says of a tool: of a tool of a feature profile, its feature's declaration, the same for every
+   * provider (TOOL-FEAT-005); of any other, its source's (TOOL-CAT-001).
+   */
+  public declOf(source: CatalogSource, tool: string): ToolDeclaration | undefined {
+    if (this.profileToolOf(source, tool)) return this.featureOf(source)?.tools[tool]
+    return source.tools[tool]
+  }
+
+  /** The providers of a feature a template of spaces allows, in its order (TOOL-AVAIL-002). */
+  public templateFeatures(templateId: string | undefined): TemplateFeature[] {
+    if (!templateId) return []
+    const template = (this.pack.spaces?.templates ?? []).find((t) => t.id === templateId)
+    return template?.features ?? []
+  }
+
   /** A tool's effect (TOOL-CAT-006): declared, else from its annotations or its method; none for a bundled tool. */
   public effectOf(source: CatalogSource, tool: string, annotations?: ToolAnnotations): ToolEffect | undefined {
     if (source.kind === 'bundled') return undefined
+    // the profile's, whatever annotations its server lists (TOOL-FEAT-012)
+    const ofProfile = this.profileToolOf(source, tool)
+    if (ofProfile) return ofProfile.effect
     const declared = source.tools[tool]?.effect
     if (declared) return declared
     if (source.kind === 'http') return effectFromMethod(source.method)
@@ -202,7 +275,8 @@ export class ToolCatalog {
   public packRuleOf(source: CatalogSource, tool: string, annotations?: ToolAnnotations): PackRule {
     const approvalRule = source.access?.approval?.find((r) => r.tools.includes(tool))
     if (approvalRule) return { rule: 'approval', approvalRule, from: 'approval-entry' }
-    const declared = source.tools[tool]?.call
+    // a tool of a feature profile: the rule its feature sets, for every provider (TOOL-FEAT-005, TOOL-FEAT-012)
+    const declared = this.declOf(source, tool)?.call
     if (declared) return { rule: declared, from: 'declared' }
     const effect = this.effectOf(source, tool, annotations)
     return { rule: effect ? defaultRuleOf(effect) : 'none', from: 'effect' }
@@ -215,6 +289,10 @@ export class ToolCatalog {
    */
   public untrustedOf(source: CatalogSource, tool: string, annotations?: ToolAnnotations): boolean {
     if (source.kind === 'bundled') return false
+    // a provider of a feature with a contract is untrusted unless its source says otherwise, whatever its annotations; a
+    // tool whose result holds nothing others wrote is never a read of untrusted content (TOOL-FEAT-017)
+    const ofProfile = this.profileToolOf(source, tool)
+    if (ofProfile) return source.untrusted !== false && ofProfile.othersWrote !== 'no'
     const perTool = source.tools[tool]?.untrusted
     if (perTool !== undefined) return perTool
     if (source.untrusted !== undefined) return source.untrusted
@@ -224,6 +302,9 @@ export class ToolCatalog {
 
   /** A tool's title (TOOL-CALL-003): declared, else the server's annotation title, else its name made readable. */
   public toolTitle(source: CatalogSource, tool: string, annotations?: ToolAnnotations): string {
+    // the profile's title of the tool, whatever the provider (TOOL-FEAT-018)
+    const ofProfile = this.profileToolOf(source, tool)
+    if (ofProfile) return ofProfile.title
     return source.tools[tool]?.title ?? annotations?.title ?? (source.kind === 'http' ? source.title : humanName(tool))
   }
 
@@ -232,19 +313,12 @@ export class ToolCatalog {
     return packRule.approvalRule?.approvers ?? this.pack.approvals?.approvers ?? []
   }
 
-  /** The tools a template of spaces names, in its order (TOOL-AVAIL-002). */
-  public templateTools(templateId: string | undefined): TemplateTool[] {
-    if (!templateId) return []
-    const template = (this.pack.spaces?.templates ?? []).find((t) => t.id === templateId)
-    return (template?.tools ?? []).filter((t) => this.byName.get(t.source)?.availability === 'spaces')
-  }
-
   /**
    * The step-up of a tool of a source (TOOL-CAT-010, TOOL-CALL-001): its source's `tools.<name>.stepUp`, so that a tool
    * of the same name in another source never takes it.
    */
   public stepUpOf(source: CatalogSource, tool: string): StepUp | undefined {
-    return source.tools[tool]?.stepUp
+    return this.declOf(source, tool)?.stepUp
   }
 
   /**
@@ -270,6 +344,8 @@ export class ToolCatalog {
         if (this.packRuleOf(source, tool).rule !== 'none' || this.untrustedOf(source, tool)) return true
         continue
       }
+      // a provider of a feature with a contract: its profile has tools that write
+      if (this.profileOf(source)) return true
       // an MCP server: its tools are known at discovery; only one whose every offered tool the pack declares read and
       // trusted, with no rule, asks nothing
       const names = source.offer ?? Object.keys(source.tools)

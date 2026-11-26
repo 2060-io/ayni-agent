@@ -15,6 +15,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
 import type { McpSource } from '../config/packTypes.js'
 import type { Logger } from '../util/logger.js'
 import { scrubAccount } from './accountValues.js'
@@ -188,13 +189,27 @@ function accountKey(headers: Record<string, string>): string {
   return createHash('sha256').update(JSON.stringify(entries)).digest('hex')
 }
 
-interface ListedTool {
+/** A tool as a server lists it. */
+export interface ListedTool {
   name: string
   description?: string
   inputSchema?: unknown
   annotations?: ToolAnnotations
   title?: string
 }
+
+/**
+ * What a server declares on one connection (FEAT-CORE-001): the extensions of its capabilities, read from the answer of
+ * `initialize`, and the tools it lists. One object per connection: a new connection, or a changed list of tools, gives
+ * another, which is how the agent knows to read it again (TOOL-FEAT-011).
+ */
+export interface ServerDeclaration {
+  extensions: Record<string, unknown>
+  tools: ListedTool[]
+}
+
+/** The most pages of tools a server's declaration reads. */
+const MAX_TOOL_PAGES = 10
 
 export class McpServerSource implements ToolSource {
   public readonly id: string
@@ -206,6 +221,8 @@ export class McpServerSource implements ToolSource {
   private readonly opening = new Map<string, Promise<AccountConnection>>()
   /** an offered name the server does not list is warned of once (TOOL-CAT-003) */
   private warnedMissing = false
+  /** what each connection declares, read once per connection and again when its tools change (TOOL-FEAT-011) */
+  private readonly declarations = new WeakMap<Client, Promise<ServerDeclaration>>()
 
   /** the server's name: its source's id in `tools.sources` (D101) */
   private readonly name: string
@@ -216,10 +233,56 @@ export class McpServerSource implements ToolSource {
     private readonly logger: Logger,
     private readonly idleSeconds = DEFAULT_IDLE_SECONDS,
     /** the connections of people's own accounts, shared by the sources that use one account (TOOL-ACCESS-012) */
-    private readonly personal: PersonalConnections = new PersonalConnections(logger, idleSeconds)
+    private readonly personal: PersonalConnections = new PersonalConnections(logger, idleSeconds),
+    /**
+     * a provider of a feature with a contract (D121): the model is given its profile's tools, never those it lists, so it
+     * lists none to the registry; what it declares is read with each account (TOOL-FEAT-010, TOOL-FEAT-011)
+     */
+    private readonly provider = false
   ) {
     this.name = name
     this.id = `mcp:${name}`
+  }
+
+  /** The connection a call of an account travels on: a person's, a space's, or the server's own. */
+  private async clientFor(account: CallAccountSecret | undefined): Promise<Client> {
+    if (this.personalAccount) return this.connectPersonal(account ?? { kind: 'personal' })
+    if (this.spaceAccount) return this.connectAccount(account ?? { kind: 'space' })
+    return this.connect()
+  }
+
+  /**
+   * What the server declares with an account (FEAT-CORE-001, TOOL-FEAT-011): its extensions and the tools it lists, read
+   * on the connection of that account once, and again on a new connection or once the server says its tools changed.
+   */
+  public async declaration(account: CallAccountSecret | undefined): Promise<ServerDeclaration> {
+    const client = await this.clientFor(account)
+    const found = this.declarations.get(client)
+    if (found) return found
+    const reading = (async () => {
+      const tools: ListedTool[] = []
+      let cursor: string | undefined
+      for (let page = 0; page < MAX_TOOL_PAGES; page++) {
+        const listed = await client.listTools(cursor ? { cursor } : undefined)
+        tools.push(...(listed.tools as ListedTool[]))
+        cursor = listed.nextCursor
+        if (!cursor) break
+      }
+      const extensions = (client.getServerCapabilities()?.extensions ?? {}) as Record<string, unknown>
+      return { extensions, tools }
+    })()
+    this.declarations.set(client, reading)
+    reading.catch(() => this.declarations.delete(client))
+    // a server that says its tools changed is read again at the next need (TOOL-FEAT-011)
+    client.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
+      this.declarations.delete(client)
+    })
+    return reading
+  }
+
+  /** A call of a tool of the server with the account of the call: a provider's tool of its profile, or an extra. */
+  public async callTool(name: string, args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    return this.call(name, args, ctx)
   }
 
   private get spaceAccount(): boolean {
@@ -499,7 +562,7 @@ export class McpServerSource implements ToolSource {
    */
   public async list(): Promise<ToolSpec[]> {
     if (this.cachedTools) return this.cachedTools
-    if (this.spaceAccount || this.personalAccount) return []
+    if (this.spaceAccount || this.personalAccount || this.provider) return []
     try {
       const client = await this.connect()
       const { tools } = await client.listTools()
@@ -512,7 +575,7 @@ export class McpServerSource implements ToolSource {
   }
 
   public async discover(account: CallAccountSecret): Promise<void> {
-    if (this.cachedTools || (!this.spaceAccount && !this.personalAccount)) return
+    if (this.cachedTools || this.provider || (!this.spaceAccount && !this.personalAccount)) return
     try {
       const client = this.personalAccount ? await this.connectPersonal(account) : await this.connectAccount(account)
       const { tools } = await client.listTools()
@@ -548,7 +611,9 @@ export function createMcpSources(
   defs: [string, McpSource][],
   logger: Logger,
   idleSeconds = DEFAULT_IDLE_SECONDS,
-  personal: PersonalConnections = new PersonalConnections(logger, idleSeconds)
+  personal: PersonalConnections = new PersonalConnections(logger, idleSeconds),
+  /** whether a source is the provider of a feature with a contract (D121) */
+  isProvider: (name: string) => boolean = () => false
 ): McpServerSource[] {
-  return defs.map(([name, def]) => new McpServerSource(name, def, logger, idleSeconds, personal))
+  return defs.map(([name, def]) => new McpServerSource(name, def, logger, idleSeconds, personal, isProvider(name)))
 }

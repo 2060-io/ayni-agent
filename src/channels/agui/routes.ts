@@ -680,7 +680,7 @@ export class AgUiRoutes {
         before,
         limit: Math.min(Number(limit) || 50, 200),
       })
-      const messages = [...entries].reverse().flatMap((e) => entryToMessages(e, this.titleOf))
+      const messages = [...entries].reverse().flatMap((e) => entryToMessages(e, this.titleOf, this.featureOf))
       return { messages, nextBefore: entries.length ? entries[entries.length - 1].id : null }
     })
 
@@ -873,8 +873,12 @@ export class AgUiRoutes {
       ...(name ? { member: { name } } : {}),
       ...(a.fields ? { fields: a.fields } : {}),
       ...(a.conversationId ? { conversationId: a.conversationId } : {}),
-      // the source of a change of the space's tools, never a value of its account (PROF-TOOL-006)
+      // the source of a change of the space's tools, with its feature, never a value of its account (PROF-TOOL-006)
       ...(a.sourceId ? { tool: { source: a.sourceId, title: this.titleOf(a.sourceId) } } : {}),
+      ...((feature) => (feature ? { feature: { id: feature.id, title: feature.title } } : {}))(
+        this.agent.catalog?.feature(a.featureId ?? this.agent.catalog?.source(a.sourceId ?? '')?.feature)
+      ),
+      ...(a.formerSourceId ? { formerTool: { source: a.formerSourceId, title: this.titleOf(a.formerSourceId) } } : {}),
       // how the owner changed, and a steward's reason (SPACE-MEMB-008, PROF-SPACE-009)
       ...(a.how ? { how: a.how } : {}),
       ...(a.reason ? { reason: a.reason } : {}),
@@ -897,6 +901,12 @@ export class AgUiRoutes {
 
   /** A source's title, as people read it (TOOL-CAT-001). */
   private readonly titleOf = (sourceId: string): string => this.agent.catalog?.source(sourceId)?.title ?? sourceId
+
+  /** The feature a source served, by the id a result recorded, else the source's own (TOOL-FEAT-019, PROF-TOOL-035). */
+  private readonly featureOf = (featureId: string | undefined, sourceId: string) => {
+    const feature = this.agent.catalog?.feature(featureId ?? this.agent.catalog?.source(sourceId)?.feature)
+    return feature ? { id: feature.id, title: feature.title } : undefined
+  }
 
   /**
    * Every bound session showing a conversation of the space: its header names the space again when the space's title
@@ -1160,7 +1170,7 @@ export class AgUiRoutes {
           this.agent.sessions.scopeOf(conversation),
           { before, limit: Math.min(Number(limit) || 50, 200), sourceTypes: SHARED_SOURCE_TYPES }
         )
-        const messages = [...entries].reverse().flatMap((e) => sharedEntryToMessages(e, this.titleOf))
+        const messages = [...entries].reverse().flatMap((e) => sharedEntryToMessages(e, this.titleOf, this.featureOf))
         return { messages, nextBefore: entries.length ? entries[entries.length - 1]?.id : null }
       })
     )
@@ -1366,6 +1376,15 @@ export class AgUiRoutes {
       handle(async ({ principal }, request) => {
         const { spaceId, source } = request.params as Params
         return { tool: await tools().clearAccount(principal, spaceId, source) }
+      })
+    )
+    // PROF-TOOL-023: the locations of a provider of a feature with a contract, read with the owner's own calls' account
+    app.get(
+      `${base}/spaces/:spaceId/tools/:source/list/choices`,
+      handle(async ({ principal }, request) => {
+        const { spaceId, source } = request.params as Params
+        const { text } = (request.query ?? {}) as { text?: unknown }
+        return { choices: await tools().choices(principal, spaceId, source, text) }
       })
     )
     // PROF-TOOL-005: remove the source at once; withdraw the pending change

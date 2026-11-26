@@ -41,8 +41,11 @@ const urls = { crmUrl: 'https://crm.example/mcp', searchUrl: 'https://search.exa
 /** The sources of architecture §10.8: Relaticle in Sales spaces, GitHub in Personal and a Project space, a task tracker. */
 function phase2(pack: Doc): void {
   pack.identity.directory = { file: 'directory.yaml' }
+  pack.tools.features.code = { title: 'Code and issues' }
+  pack.tools.features.tasks = { title: 'Tasks' }
   pack.tools.sources.relaticle = {
     type: 'mcp',
+    feature: 'crm',
     title: 'Relaticle CRM',
     description: "The companies, people, notes and tasks of the space's workspace",
     transport: 'streamable-http',
@@ -70,6 +73,7 @@ function phase2(pack: Doc): void {
   }
   pack.tools.sources.github = {
     type: 'mcp',
+    feature: 'code',
     title: 'GitHub',
     description: 'Code, issues and pull requests in GitHub',
     transport: 'streamable-http',
@@ -96,6 +100,7 @@ function phase2(pack: Doc): void {
   }
   pack.tools.sources['github-project'] = {
     type: 'mcp',
+    feature: 'code',
     title: 'GitHub repository',
     transport: 'streamable-http',
     url: 'https://api.githubcopilot.com/mcp/',
@@ -110,6 +115,7 @@ function phase2(pack: Doc): void {
   }
   pack.tools.sources.my_tasks = {
     type: 'http',
+    feature: 'tasks',
     title: 'My tasks',
     description: 'Lists your open tasks in the task tracker',
     method: 'GET',
@@ -129,9 +135,9 @@ function phase2(pack: Doc): void {
     kind: 'team',
     creators: ['manager'],
     membership: { mode: 'list' },
-    tools: [{ source: 'github-project', add: 'auto' }],
+    features: [{ feature: 'code', providers: ['github-project'], add: 'auto' }],
   })
-  pack.spaces.templates.find((t: Doc) => t.id === 'sales').tools.push({ source: 'relaticle', add: 'owner' })
+  pack.spaces.templates.find((t: Doc) => t.id === 'sales').features.push({ feature: 'crm', providers: ['relaticle'] })
   Reflect.deleteProperty(pack.tools.sources.relaticle.account, 'fields')
 }
 
@@ -141,7 +147,9 @@ function doc(edit?: (pack: Doc) => void): Doc {
     edit: (p) => {
       // the CRM of phase 1 gives its place to Relaticle of phase 2
       Reflect.deleteProperty(p.tools.sources, 'relaticle')
-      p.spaces.templates.find((t: Doc) => t.id === 'sales').tools = [{ source: 'crm_status' }]
+      p.spaces.templates.find((t: Doc) => t.id === 'sales').features = [
+        { feature: 'crm-status', providers: ['crm_status'] },
+      ]
       phase2(p)
       edit?.(p)
     },
@@ -176,7 +184,9 @@ describe("each person's own account in the agent-pack (TOOL-CAT-002, TOOL-CAT-01
         for (const id of ['relaticle', 'github', 'github-project', 'my_tasks'])
           Reflect.deleteProperty(p.tools.sources, id)
         p.spaces.templates = p.spaces.templates.filter((t: Doc) => t.id !== 'project-gh')
-        p.spaces.templates.find((t: Doc) => t.id === 'sales').tools = [{ source: 'crm_status' }]
+        p.spaces.templates.find((t: Doc) => t.id === 'sales').features = [
+          { feature: 'crm-status', providers: ['crm_status'] },
+        ]
       }),
       env
     )

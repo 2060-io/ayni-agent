@@ -79,11 +79,16 @@ rag:
       path: ./knowledge
       visibility: public
 
-# the tool catalog (ayni-spec D101): one entry per source, keyed by its id; an HTTP tool is one tool, named by its id
+# the tool catalog (ayni-spec D101, D120): the features, in the words people use, and one entry per source, keyed by its
+# id, each MCP server or HTTP tool naming the feature it serves; an HTTP tool is one tool, named by its id
 tools:
+  features:
+    echo: { title: Echo }
+    payments: { title: Payments }
   sources:
     echo:
       type: http
+      feature: echo
       description: Echoes the given text through a public HTTP echo service.
       method: POST
       url: https://httpbin.org/post
@@ -99,6 +104,7 @@ tools:
           support: ["*"]
     wire_money:
       type: http
+      feature: payments
       description: Transfers money (development stand-in for a sensitive action).
       method: POST
       url: https://httpbin.org/post

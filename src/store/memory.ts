@@ -5,6 +5,7 @@ import type {
   Conversation,
   DigestAnchor,
   ElevationGrant,
+  FeatureMarkRecord,
   GovernanceNotice,
   LifecycleState,
   MemoryAccessLog,
@@ -614,6 +615,17 @@ export class MemoryStore implements Store {
       this.spaceAccountRows.delete(`${spaceId}\n${sourceId}`)
     },
     listAll: async () => clone([...this.spaceAccountRows.values()]),
+  }
+
+  private readonly featureMarkRows = new Map<string, FeatureMarkRecord>()
+  public featureMarks = {
+    get: async (spaceId: string, featureId: string) => clone(this.featureMarkRows.get(`${spaceId}\n${featureId}`)),
+    save: async (r: FeatureMarkRecord) => {
+      this.featureMarkRows.set(`${r.spaceId}\n${r.featureId}`, clone(r))
+    },
+    delete: async (spaceId: string, featureId: string) => {
+      this.featureMarkRows.delete(`${spaceId}\n${featureId}`)
+    },
   }
 
   private readonly allowanceRows = new Map<string, ToolAllowance>()

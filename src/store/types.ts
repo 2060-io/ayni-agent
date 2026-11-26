@@ -12,6 +12,7 @@ import type {
   DigestAnchor,
   ElevationGrant,
   EvidenceRecord,
+  FeatureMarkRecord,
   GovernanceNotice,
   LifecycleState,
   MemoryAccessLog,
@@ -366,6 +367,13 @@ export interface SpaceToolRepo {
 }
 
 /** The accounts of the spaces (D97, TOOL-ACCESS-004): a token only as ciphertext, its key with the row. */
+/** The marks of the providers of the features with a contract, by space and feature (TOOL-FEAT-016). */
+export interface FeatureMarkRepo {
+  get(spaceId: string, featureId: string): Promise<FeatureMarkRecord | undefined>
+  save(record: FeatureMarkRecord): Promise<void>
+  delete(spaceId: string, featureId: string): Promise<void>
+}
+
 export interface SpaceAccountRepo {
   get(spaceId: string, sourceId: string): Promise<SpaceAccountRecord | undefined>
   save(record: SpaceAccountRecord): Promise<void>
@@ -486,6 +494,7 @@ export interface Store {
   governanceNotices: GovernanceNoticeRepo
   spaceTools: SpaceToolRepo
   spaceAccounts: SpaceAccountRepo
+  featureMarks: FeatureMarkRepo
   toolAllowances: ToolAllowanceRepo
   toolCalls: ToolCallRepo
   personKeys: PersonKeyRepo

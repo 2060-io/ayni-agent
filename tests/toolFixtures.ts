@@ -245,10 +245,21 @@ export function toolsPack(options: ToolsPackOptions): string {
     Object.entries(pack.tools.sources as Doc).filter(([, source]) => (source as Doc).type === 'bundled')
   )
   pack.tools = {
+    // the features of the catalog, in the words people use (D120): each a category, its provider's own tools
+    features: {
+      search: { title: 'Web search' },
+      crm: { title: 'CRM' },
+      'crm-status': { title: 'CRM status' },
+      social: { title: 'Social posting' },
+      mentions: { title: 'Mentions' },
+      lookup: { title: 'Lookup' },
+      purge: { title: 'Purge' },
+    },
     sources: {
       ...bundled,
       websearch: {
         type: 'mcp',
+        feature: 'search',
         title: 'Web search',
         transport: 'streamable-http',
         url: options.searchUrl,
@@ -262,6 +273,7 @@ export function toolsPack(options: ToolsPackOptions): string {
       },
       relaticle: {
         type: 'mcp',
+        feature: 'crm',
         title: 'Relaticle CRM',
         description: "The sales team's accounts, contacts and notes",
         transport: 'streamable-http',
@@ -288,6 +300,7 @@ export function toolsPack(options: ToolsPackOptions): string {
       },
       post_to_x: {
         type: 'http',
+        feature: 'social',
         title: 'Post on X',
         description: 'Posts a message on the X account of the space',
         method: 'POST',
@@ -308,6 +321,7 @@ export function toolsPack(options: ToolsPackOptions): string {
       // echoes the header, whole and split at its colons
       x_mentions: {
         type: 'http',
+        feature: 'mentions',
         title: 'X mentions',
         description: 'Reads the mentions of the X account of the space',
         method: 'GET',
@@ -320,6 +334,7 @@ export function toolsPack(options: ToolsPackOptions): string {
       },
       crm_status: {
         type: 'http',
+        feature: 'crm-status',
         title: 'CRM status',
         description: 'The status of the CRM.',
         method: 'GET',
@@ -330,6 +345,7 @@ export function toolsPack(options: ToolsPackOptions): string {
       },
       lookup: {
         type: 'http',
+        feature: 'lookup',
         title: 'Lookup',
         description: 'Looks a word up.',
         method: 'GET',
@@ -339,6 +355,7 @@ export function toolsPack(options: ToolsPackOptions): string {
       },
       purge: {
         type: 'http',
+        feature: 'purge',
         title: 'Purge',
         description: 'Purges the cache.',
         method: 'DELETE',
@@ -358,7 +375,10 @@ export function toolsPack(options: ToolsPackOptions): string {
       creators: ['manager', 'sales'],
       membership: { mode: 'list' },
       rules: { allowedProviders: { default: ['stub'] }, handover: { default: true } },
-      tools: [{ source: 'relaticle', add: 'auto' }, { source: 'crm_status' }],
+      features: [
+        { feature: 'crm', providers: ['relaticle'], add: 'auto' },
+        { feature: 'crm-status', providers: ['crm_status'] },
+      ],
     },
     {
       id: 'comms',
@@ -367,9 +387,9 @@ export function toolsPack(options: ToolsPackOptions): string {
       creators: ['comms'],
       membership: { mode: 'list' },
       rules: { allowedProviders: { default: ['stub'] } },
-      tools: [
-        { source: 'post_to_x', add: 'owner', guests: false },
-        { source: 'x_mentions', add: 'owner' },
+      features: [
+        { feature: 'social', providers: ['post_to_x'], add: 'owner', guests: false },
+        { feature: 'mentions', providers: ['x_mentions'], add: 'owner' },
       ],
     },
   ]

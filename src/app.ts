@@ -63,6 +63,7 @@ import { SpaceService } from './core/spaces.js'
 import { SpaceToolService } from './core/spaceTools.js'
 import { type StartupRetry, StartupSteps, within } from './core/startupSteps.js'
 import { ToolGate } from './core/toolGate.js'
+import { FeatureService } from './features/service.js'
 import { AnchoringService, VeranaLedgerWriter } from './integrity/anchoring.js'
 import { createChatModel, createEmbeddings } from './llm/index.js'
 import { createImageGenerators } from './media/imageGen.js'
@@ -85,7 +86,7 @@ import { createStore } from './store/postgres.js'
 import { BundledToolSource } from './tools/bundled.js'
 import { ToolCatalog } from './tools/catalog.js'
 import { HttpToolSource } from './tools/http.js'
-import { createMcpSources, DEFAULT_IDLE_SECONDS, PersonalConnections } from './tools/mcp.js'
+import { createMcpSources, DEFAULT_IDLE_SECONDS, type McpServerSource, PersonalConnections } from './tools/mcp.js'
 import { OAuthClient } from './tools/oauth.js'
 import { ToolRegistry } from './tools/registry.js'
 import { schedule } from './util/async.js'
@@ -370,9 +371,20 @@ export async function buildAgent(
     sourcesOfType(pack, 'mcp'),
     logger,
     env.toolConnectionIdleSeconds ?? DEFAULT_IDLE_SECONDS,
-    personalConnections
+    personalConnections,
+    // a provider of a feature with a contract lists nothing to the registry: the model is given its profile's tools (D123)
+    (name) => !!catalog.profileOf({ feature: catalog.source(name)?.feature })
   ))
     registry.add(source, false)
+  // the features with a contract: what each provider declares, the marks of its references, its calls (D121 to D123)
+  const featureService = new FeatureService({
+    pack,
+    store,
+    catalog,
+    logger,
+    server: (sourceId) => registry.sourceById(`mcp:${sourceId}`) as McpServerSource | undefined,
+    textOf: (bytes, mediaType, name) => media.textOf(bytes, mediaType, name),
+  })
 
   const orchestrator = new Orchestrator(
     pack,
@@ -425,6 +437,7 @@ export async function buildAgent(
   connectionsRef = connections
   connections.spaceTools = spaceTools
   spaceTools.connections = connections
+  spaceTools.features = featureService
   const gate = new ToolGate({
     pack,
     store,
@@ -440,6 +453,7 @@ export async function buildAgent(
     logger,
     connections,
     router,
+    features: featureService,
   })
   orchestrator.gate = gate
   gateRef = gate

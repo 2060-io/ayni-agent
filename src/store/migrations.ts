@@ -1,5 +1,5 @@
 /** Memory schema versions (CORE-VER-001/002). Each migration is applied once, in order. */
-export const MEMORY_SCHEMA_VERSION = '3.14.0'
+export const MEMORY_SCHEMA_VERSION = '3.15.0'
 
 export const MIGRATIONS: { version: string; sql: string }[] = [
   {
@@ -504,6 +504,24 @@ CREATE INDEX IF NOT EXISTS evidence_issued_on ON evidence (issued_on, verified_a
     sql: `
 DROP INDEX IF EXISTS evidence_issued_on;
 ALTER TABLE evidence DROP COLUMN IF EXISTS issued_on;
+`,
+  },
+  {
+    // features and providers (ayni-spec D120 to D123): the mark of the provider of each feature with a contract, in each
+    // space and in each person's Personal, written before every reference the model reads and renewed whenever the
+    // feature's provider changes (TOOL-FEAT-016). The tools of a space stay keyed by their source, each the provider of
+    // its feature: at the first start with features, a space that held two sources of one feature keeps the template's
+    // default and the other leaves it (TOOL-FEAT-006, done by the agent's code, which knows the features)
+    version: '3.15.0',
+    sql: `
+CREATE TABLE IF NOT EXISTS feature_marks (
+  space_id TEXT NOT NULL,
+  feature_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  mark TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (space_id, feature_id)
+);
 `,
   },
 ]

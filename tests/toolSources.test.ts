@@ -101,8 +101,10 @@ describe('a step-up belongs to one tool of one source (TOOL-CAT-010)', () => {
     const pack = validatePackDocument(
       doc((p) => {
         // a second CRM, of the whole agent, whose tools have the same names as the first's
+        p.tools.features['crm-us'] = { title: 'CRM US' }
         p.tools.sources['crm-us'] = {
           type: 'mcp',
+          feature: 'crm-us',
           title: 'CRM US',
           transport: 'streamable-http',
           url: 'https://crm-us.example/mcp',

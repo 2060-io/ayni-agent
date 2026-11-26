@@ -337,6 +337,8 @@ export interface CallAccount {
 /** What a tool result records of where it came from (TOOL-PROV-001, D100). */
 export interface ToolProvenance {
   sourceId: string
+  /** the feature the source served when the call was made (TOOL-FEAT-019) */
+  featureId?: string
   /** what the source is: a bundled tool acts on the agent's own records and is no source of a reply (TOOL-PROV-002) */
   sourceKind?: 'mcp' | 'http' | 'bundled'
   toolName: string
@@ -351,6 +353,8 @@ export interface ToolProvenance {
 /** A source a turn's tools read, with whose account (TOOL-PROV-002). */
 export interface TurnSource {
   sourceId: string
+  /** the feature the source served when the call was made (TOOL-FEAT-019, PROF-TOOL-035) */
+  featureId?: string
   accountKind: CallAccount['kind']
   spaceId?: string
 }
@@ -467,6 +471,7 @@ export type SpaceActivityAction =
   | 'tool-added'
   | 'tool-changed'
   | 'tool-removed'
+  | 'provider-changed'
   | 'account-set'
   | 'account-cleared'
   | 'created'
@@ -498,6 +503,10 @@ export interface SpaceActivity {
   conversationId?: string
   /** the tool source a change of the space's tools concerns (TOOL-SPACE-010); never a value of its account */
   sourceId?: string
+  /** the feature it concerns (PROF-TOOL-006) */
+  featureId?: string
+  /** a `provider-changed`: the provider it replaced (TOOL-FEAT-007) */
+  formerSourceId?: string
   /** an `owner-changed`: how (SPACE-MEMB-012), and the reason a steward gave */
   how?: OwnerChange
   reason?: string
@@ -680,7 +689,10 @@ export type ApprovalKind = 'sensitivity' | 'elevation' | 'confirmation'
  */
 export interface ToolAction {
   title: string
-  source: { id: string; title: string }
+  /** the source, and the feature it serves (PROF-TOOL-035): a client shows "Files · Nextcloud" */
+  source: { id: string; title: string; feature?: { id: string; title: string } }
+  /** the addresses outside the organization that made the call `external` (TOOL-FEAT-013, PROF-TOOL-007) */
+  outsideOrganization?: string[]
   /** a `personal` account carries no label here: the requester's own card adds it, and no other (PROF-TOOL-021) */
   account: { kind: CallAccount['kind']; space?: { id: string; title: string }; label?: string }
   fields: { label: string; value: string; pinned?: boolean }[]
@@ -948,9 +960,14 @@ export const TRUST_BOUND_KINDS: readonly string[] = [
 /** What waits for the owner's phone (TOOL-SPACE-008): the change, the code the screen shows, and its challenge. */
 export interface PendingToolChange {
   id: string
-  kind: 'add' | 'patch' | 'account'
+  /** `provider`: the feature's provider in use replaced by `source` (TOOL-FEAT-007) */
+  kind: 'add' | 'patch' | 'account' | 'provider'
+  /** a change of provider: the new provider, the change waiting on the record of the provider in use (TOOL-FEAT-007) */
+  source?: string
   /** what the change sets: bindings, rules; never a value of the account, which is sealed apart */
   bindings?: Record<string, string>
+  /** the location list of a feature with a contract the change sets, whole (TOOL-SPACE-014, TOOL-FEAT-014) */
+  list?: SpaceToolList
   calls?: Record<string, 'none' | 'confirm' | 'approval' | 'off'>
   /** the approval policies the change sets, each whole, by tool (TOOL-SPACE-018, TOOL-SPACE-019) */
   approvals?: Record<string, SpaceApprovalPolicy>
@@ -990,9 +1007,36 @@ export interface SpaceToolRecord {
   calls: Record<string, 'none' | 'confirm' | 'approval' | 'off'>
   /** the owner's approval policies, by tool, for a tool whose rule is `approval`; none: the pack's default (TOOL-SPACE-018) */
   approvals?: Record<string, SpaceApprovalPolicy>
+  /**
+   * the provider of a feature with a contract: its locations, the entries the owner picked from what the provider listed,
+   * each with the title it read, or any location (TOOL-SPACE-014, TOOL-FEAT-014)
+   */
+  list?: SpaceToolList
   pendingChange?: PendingToolChange
   updatedAt: string
   updatedBy?: string
+}
+
+/**
+ * The locations of a feature with a contract in a space (TOOL-FEAT-014): entries in the owner's order, each the value of the
+ * location argument and the title the provider gave it, or any location.
+ */
+export interface SpaceToolList {
+  any?: true
+  entries?: { values: Record<string, string>; label: string }[]
+}
+
+/**
+ * The mark of the provider of a feature with a contract in a space, or in a person's Personal (TOOL-FEAT-016): a random
+ * value written before every reference the model reads, renewed whenever the feature's provider changes.
+ */
+export interface FeatureMarkRecord {
+  spaceId: string
+  featureId: string
+  /** the provider it is the mark of: another provider is another mark */
+  sourceId: string
+  mark: string
+  createdAt: string
 }
 
 /** The space's account of a source (D97, TOOL-ACCESS-004): its token sealed under a key of its own. */
@@ -1162,6 +1206,12 @@ export type ToolCallOutcome =
   | 'not-connected'
   /** the server asked the person's own account for more scopes (TOOL-OAUTH-009) */
   | 'more-access-needed'
+  /** a reference of another provider of the feature, or of none, in the call: it reached no provider (TOOL-FEAT-016) */
+  | 'stale-reference'
+  /** a location outside the space's list in the call: it reached no provider (TOOL-CALL-012, TOOL-FEAT-014) */
+  | 'outside-list'
+  /** approved after the feature's provider in the space changed: it did not run (TOOL-FEAT-009) */
+  | 'provider-changed'
 
 /** One call the model asked for (TOOL-PROV-004, D100): no argument, no result, no account value. */
 export interface ToolCallRecord {
@@ -1171,6 +1221,8 @@ export interface ToolCallRecord {
   conversationId: string
   spaceId: string
   sourceId: string
+  /** the feature the source served when the call was made (TOOL-FEAT-019) */
+  featureId?: string
   toolName: string
   account: CallAccount
   rule: 'none' | 'confirm' | 'approval'
