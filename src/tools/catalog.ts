@@ -64,7 +64,7 @@ export interface CatalogSource {
   feature?: string
   /** a provider of a feature with a contract: the optional capabilities it uses at most (TOOL-FEAT-004) */
   capabilities?: string[]
-  /** a provider of Files: how a team space's folder is managed at it (TOOL-FEAT-023); not built yet */
+  /** a provider of Files: how a team space's folder is managed at it (TOOL-FEAT-023 to 034, `ManagedFolders`) */
   manage?: SourceManage
 }
 

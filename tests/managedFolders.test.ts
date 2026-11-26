@@ -204,8 +204,8 @@ beforeAll(async () => {
       const manage = {
         as: 'manager',
         apply: [
-          { header: 'Ayni-Dav-Username', value: '${AYNI_TEST_MANAGER_NAME}' },
-          { header: 'Ayni-Dav-Password', value: '${AYNI_TEST_MANAGER_PASSWORD}' },
+          { header: 'Ayni-Dav-Username', value: '$' + '{AYNI_TEST_MANAGER_NAME}' },
+          { header: 'Ayni-Dav-Password', value: '$' + '{AYNI_TEST_MANAGER_PASSWORD}' },
         ],
       }
       p.tools.sources['cloud-team'] = {
