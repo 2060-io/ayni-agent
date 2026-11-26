@@ -1024,6 +1024,28 @@ describe("a shared drive managed with the owner's own account (TOOL-FEAT-025, TO
   })
 })
 
+describe('a folder of the managing account at a change of owner (TOOL-FEAT-029)', () => {
+  it("is unchanged but for the members' roles", async () => {
+    const zeta = await space('Project Zeta', 'managed-only')
+    await addMember(zeta.id, mia.principal.id)
+    await confirmed(jonas, () => call(jonas, 'POST', `/spaces/${zeta.id}/tools`, { source: 'cloud-team' }))
+    await until(async () => (await folderOf(zeta.id))?.state === 'ready')
+    const before = await folderOf(zeta.id)
+    const from = cloud.calls.length
+    expect(
+      (await call(jonas, 'POST', `/spaces/${zeta.id}/owner`, { memberId: `mem_${zeta.id}_${mia.principal.id}` })).status
+    ).toBe(200)
+    const after = await folderOf(zeta.id)
+    expect(after).toMatchObject({ state: 'ready', managedWith: 'manager', ref: before?.ref, name: 'Project Zeta' })
+    expect(cloud.calls.slice(from).filter((c) => c.name !== 'files_share' && c.name !== 'files_shares')).toEqual([])
+    expect(cloud.calls.slice(from).every((c) => c.headers['ayni-dav-username'] === 'ayni-manager')).toBe(true)
+    expect(await membersAtStore(cloud, zeta.id)).toMatchObject({
+      'jonas@example.org': 'editor',
+      'mia@example.org': 'editor',
+    })
+  })
+})
+
 describe('releasing the folder (TOOL-FEAT-032)', () => {
   it('stops managing it when the provider changes, says so on the phone, and leaves it as it is at the store', async () => {
     const before = await membersAtStore(cloud, alpha.id)
@@ -1044,7 +1066,7 @@ describe('releasing the folder (TOOL-FEAT-032)', () => {
     await until(async () => !(await folderOf(alpha.id)))
     await folders.tick(Date.now() + REREAD_EVERY + 1000)
     await call(jonas, 'DELETE', `/spaces/${alpha.id}/members/mem_${alpha.id}_${mia.principal.id}`)
-    expect(cloud.calls.slice(from)).toEqual([])
+    expect(cloud.calls.slice(from).filter((c) => c.args.root === ref)).toEqual([])
     expect(await membershipsOf(alpha.id)).toEqual([])
     expect(cloud.teamRoots.get(ref)?.title).toBe('Alpha Files')
     expect(
