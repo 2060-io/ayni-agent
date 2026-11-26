@@ -2240,3 +2240,97 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       answers 503 serves at once with `did:unknown`, then, once it answers, declares its descriptor once, creates the
       definition once, names its DID and serves the peer status, with no restart). With `src/` before this change the
       file fails: `StartupSteps` does not exist, and the descriptor is never declared.
+85. **Features and providers, without a team space's managed folder** (2026-11-25; ayni-spec D120 to D124, D151,
+    architecture §10.11, TOOL-FEAT-001 to TOOL-FEAT-023, AG-UI profile §3.10; Fabrice's choices: tools by feature, one
+    provider per feature per space, Files and Calendar first, public contracts, no backward compatibility). The first of
+    two changes: the managed folder of a team space (TOOL-FEAT-024 to 034) is the second.
+    - **The agent-pack.** `tools.features` (a title, and for a feature with a contract the `profile` it names), a
+      `feature` on every MCP server and HTTP tool, `capabilities` and `manage` on a provider of a feature with a contract,
+      `spaces.templates[].features` (`feature`, `providers`, `default`, `add`, `guests`, `any`, `location`) in place of
+      `tools`, and `identity.organization.emailDomains`. Everything TOOL-FEAT-001 to 005 and 023 and TOOL-AVAIL-002 refuse
+      is refused at start, naming the feature, the source or the template and the field (`src/config/featureRules.ts`);
+      a template's `tools` and a managing value that is not one `${VAR}` are refused in words on the document as
+      written, before its placeholders are resolved. A pack of the earlier shape does not start: no compatibility.
+      A profile's version is taken for any minor of a major the agent knows (TOOL-FEAT-001 says "id or major"; the
+      reference profile's "a version the copy does not hold" is read as the major).
+    - **The profiles.** `src/features/profiles.ts` is the agent's copy of Files 1.0 and Calendar 1.0, transcribed from
+      the documents, which are vendored in `src/features/spec/` (ayni-spec `f85c136`); `tests/featureProfiles.test.ts`
+      parses their tables and pins every tool's name, title, description, effect, capability and mark of content written
+      by others, and every argument's title, requiredness and capability. The input schemas are the tables' types made
+      JSON Schema, with each argument's title and no description of the agent's own. No machine-readable form of the
+      profiles is published yet (`2060-io/ayni-feature-profiles` does not exist): when it is, it replaces this copy.
+    - **What a provider declares.** On every new connection with an account (the account of a space, a person's own,
+      or the agent's) the agent reads the server's `capabilities.extensions` from `initialize` and its tools, once per
+      connection and again when the server says its tools changed (`McpServerSource.declaration`); a provider that
+      does not declare the feature's major version, lacks a core tool, or whose schema of a core tool does not take the
+      profile's required arguments, is not used with that account, its reason logged once (TOOL-FEAT-011). The
+      capabilities in use are those the server declares, the source's `capabilities` leaves in and whose tools it lists;
+      `team-roots` is never the model's. A provider lists nothing to the registry: the model is given the profile's
+      tools, built from the copy (`FeatureService.specsFor`), after the other tools (which keep the order of their
+      names), in the profile's order, then the extras `offer` names as the server lists them.
+    - **A space's tools by feature.** The record of a feature in a space stays keyed by its provider's source, one
+      provider added at a time; a change of provider waits on the record of the provider in use and replaces it in one
+      step (`applyProvider`): the former record, with its bindings, list, rules and policies, goes, its space account's
+      key is destroyed and the allowances of its tools end, the new provider comes in `setup` or `ready`, the feature's
+      mark is renewed, the activity records `provider-changed` and the event carries `formerSource`. Nothing is called at
+      either provider (TOOL-FEAT-008). A request about the provider the template allows that is not the one in use
+      answers `409 provider-not-used`; another provider sent with no `replaces` `409 feature-has-provider`; a wrong
+      `replaces` `400` with `field: "replaces"`; one change per feature at a time. Approved after a change of provider, a
+      call ends `provider-changed` and the conversation is told that it needs a new call (TOOL-FEAT-009).
+    - **The first start with features: kept, not reset** (TOOL-FEAT-006). Schema 3.15.0 adds the table `feature_marks`
+      only: the records of a space's tools are those of before, each source now the provider of its feature. At start
+      (`SpaceToolService.align`), where a space holds two providers of one feature the template's default is kept (else
+      the first of the entry's providers) and the other leaves as a removal does. On devnet, once the Dev Agent's pack
+      names its features, Sales EU keeps Relaticle, its workspace and its members' accounts, and Test repo its repository.
+    - **The location of a feature with a contract** is the list of TOOL-SPACE-014 for that feature only (the lists of
+      categories, D111, are still not built): at most ten entries, each one the provider listed to the owner. The
+      choices are the profile's tool that lists locations, called with `query` (the owner's text) and `limit: 50`, with
+      the account the owner's own calls would use, outside any conversation and with no record, for any provider the
+      template allows (the list of a change of provider is picked before the change is sent); their `title` is an
+      entry's label. A `PATCH` takes an entry the list holds, or one of the choices read in the last 30 minutes, which the
+      code reads again then with the same text; anything else is `422 bad-binding` at `list.entries.<i>.<argument>`. An
+      entry that is not `portable` is `422 not-portable` for a provider of each person's own account. A list of one sets
+      the location in code (the argument leaves the model's schema); with several, the model names one and the code
+      checks it (`outside-list`), and the line of the limits gives each location's marked reference beside its title,
+      since the model has no other way to name one (the spec gives the titles only). `any` (where the template's entry
+      allows it) gives the model the tool that lists locations, as in Personal.
+    - **A call** of a profile's tool: its references unmarked (another mark, or none: `stale-reference`, reaching no
+      provider and asking nothing), its location set or checked, then the addresses of the arguments the profile marks
+      compared with `identity.organization.emailDomains` without regard to case, and `audience: "anyone"`: such a call
+      takes the effect `external` and, unless the feature sets the tool's rule, the strictest of its rule and
+      `approval`; its card carries `outsideOrganization`. The card's title and labels are the profile's, the location
+      first by its entry's title, the source with its feature. The result is read as the profile's (its members and
+      their types; an error in its place otherwise, recorded `failed`), its items outside the location dropped, every
+      reference marked, and a content of bytes replaced by the text the media service makes of it (a PDF's text, an
+      image's description, a recording's transcript), its credentials masked, with the name, type and size; the model
+      reads the JSON of that, never the server's own text, and the bytes are kept in no store. A provider of a feature
+      with a contract is untrusted unless its source says `untrusted: false`, and a tool marked `no` never counts as a
+      read of untrusted content.
+    - **The marks:** six characters of 62 (about 35.7 bits), one per space and feature and per person's Personal and
+      feature (`feature_marks`), made at first use and renewed when the provider it was made for is another (a change of
+      the agent-pack's provider in Personal, at the next call after the start) and at every change of provider in a space.
+    - **What the model reads:** "Limits of this space's tools, kept by the code:" and one line per feature with a contract
+      whose tools it has, in the record of the person (Personal too, with no location); the platform rules (add-on 3.10.0)
+      say that a provider can change and that a reference of a former one is refused.
+    - **The wire** (`@ayni.org/ayni-agui-profile` 3.5.8): one item per feature (`feature`, `providers` to the owner,
+      `source`/`title` `null` while none is chosen, `conformant`, `capabilities`, `list`), `replaces`, `list` in `POST`
+      and `PATCH`, `…/list/choices`, `feature` and `formerSource` on `ayni.space.tools.changed`, `provider-changed`,
+      `feature` and `tool.formerSource` in the activity, `feature` on every source (cards, `metadata.sources`, the sources of a
+      conversation, the Connect card), `features` on a connection, `outsideOrganization` on a card, and the errors
+      `feature-has-provider`, `provider-not-used`, `not-portable`, `too-many-entries`, `any-not-allowed`,
+      `not-connected`, `space-account-not-set`. Not additive.
+    - **Left for the second change** (TOOL-FEAT-024 to 034): `manage` and `location` are validated and warned at start,
+      and a provider is always used in the existing mode. The seams: `TemplateFeature.location` and
+      `CatalogSource.manage` are read; `SpaceToolService.add` takes no `location` yet (where PROF-TOOL-040 adds it);
+      `FILES_1_0` holds `files_create_team_root` and `files_rename_root`, which `CODE_ONLY_CAPABILITIES` keeps from every
+      model; `McpServerSource.callTool` calls a tool with a given account outside any turn, as the choices do;
+      `applyProvider` and `remove` are where a managed folder is released (TOOL-FEAT-032).
+    - **Not built here:** the lists of categories (D111), `tools.accounts` and the scopes of each tool (D118), the
+      examination of every tool result for credentials (TOOL-ACCESS-019; only the text made of bytes is examined).
+    - **Tests:** `tests/featureProfiles.test.ts` (the copy against the documents), `tests/featurePack.test.ts` (what the
+      agent starts on and refuses), `tests/features.test.ts` (two fake providers of Files 1.0 and Calendar 1.0 over
+      streamable HTTP, `tests/featureFixtures.ts`: the owner's and a member's Tools, the choices, the list, what the model
+      is given, the marks and `stale-reference`, items of another folder dropped, bytes, a result not of the profile, the
+      card, an invitation outside the organization, a provider that does not conform, the change of provider and an
+      approval that outlived it, Personal, the first start with features, the wire), `tests/postgres.test.ts` (schema
+      3.15.0). With `src/` before this change none of the four files loads: `src/features/` does not exist.

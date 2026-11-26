@@ -49,6 +49,10 @@ identity:
       # - [passport]               # the passport alone, without a face match in this version (D127)
       # - [email, otp]
       # - [passkey]
+  # the domains of Northwind's people's addresses: a call that shares a file with, or invites, an address of another
+  # domain is external, and asks an approval (D123, TOOL-FEAT-013)
+  organization:
+    emailDomains: [northwind.example]
   # home is Northwind itself, the organization of this agent's own Organization credential: it is never listed.
   # Every other organization is recognized by a pattern over its verified attributes, first match wins (D64).
   organizations:
@@ -226,11 +230,21 @@ issuance:
 #       attributes: [documentNumber, issuingState, nationality, lastName, firstName, dateOfBirth, portrait]
 #       retention: { days: 1, onExpiry: erase }
 
-# the tool catalog (ayni-spec D101): one entry per source, keyed by its id, with everything said of it in one place
+# the tool catalog (ayni-spec D101, D120): the features, in the words people use, then one entry per source, keyed by
+# its id, with everything said of it in one place; every MCP server and HTTP tool names the feature it serves
 tools:
+  features:
+    shipments: { title: Shipments }                  # a category: its provider's own tools, under its title
+    crm: { title: CRM }
+    files:                                           # a contract (D121): the same tools whatever the provider
+      title: Files
+      profile: { id: org.ayni/files, version: "1.0" }
+      tools:
+        files_trash: { call: approval }              # set once, for every provider (TOOL-FEAT-005)
   sources:
     track_shipment:                                  # an HTTP tool: one tool, named by its source's id
       type: http
+      feature: shipments
       description: Current status and ETA of a shipment by tracking number.
       method: GET
       url: https://api.northwind.example/shipments/{trackingNumber}
@@ -248,6 +262,7 @@ tools:
 
     crm:
       type: mcp
+      feature: crm
       transport: streamable-http
       url: ${CRM_MCP_URL}
       headers: { Authorization: "Bearer ${CRM_MCP_TOKEN}" }   # the agent's account, deployment-held (TOOL-ACCESS-002)
@@ -277,6 +292,29 @@ tools:
         read_customer_record:
           stepUp:
             authChallenge: { type: device, onChannelUnavailable: fail }
+
+    # Files in a Project space: a folder of the company's Nextcloud with an account of the space, through the Nextcloud
+    # connector run beside the agent (the feature profiles' providers.md); the owner sets the account, then picks the
+    # folder from what the connector lists (D123, TOOL-FEAT-014). The model is given Files 1.0's tools, never the server's.
+    nextcloud:
+      type: mcp
+      feature: files
+      title: Nextcloud
+      description: A folder of Northwind's Nextcloud, with an account of the space
+      transport: streamable-http
+      url: ${NEXTCLOUD_CONNECTOR_URL:-http://connector-nextcloud.internal:8000/mcp}
+      headers: { Ayni-Nextcloud: "${NEXTCLOUD_URL:-https://cloud.northwind.example}" }   # fixed: nobody types an address
+      account:
+        kind: space
+        fields:
+          - { name: username, label: User name, pattern: "^[\\x21-\\x7E]{1,128}$" }
+          - { name: password, label: App password, pattern: "^[\\x21-\\x7E]{8,255}$" }
+        apply:
+          - { header: Ayni-Dav-Username, value: "{username}" }
+          - { header: Ayni-Dav-Password, value: "{password}" }
+      availability: spaces
+      capabilities: [folders, search, trash]         # at most these, of what the server declares (TOOL-FEAT-004)
+      access: { roles: { employee: ["*"] } }
 
     # the bundled tools that act on the person's own records (on by default; declared here to be explicit)
     principalCredentials: { type: bundled, bundled: principalCredentials }
@@ -332,6 +370,8 @@ spaces:
         lawfulBasis: { default: contract }
         allowedProviders: { default: [openai] }
         handover: { default: true, allowed: [true, false] }
+      features:                                            # in the order the clients show them (TOOL-AVAIL-002)
+        - { feature: files, providers: [nextcloud], add: owner }
     - id: finance                                          # everyone of the finance department
       title: Finance
       kind: team

@@ -185,6 +185,21 @@
             }
           }
         },
+        "organization": {
+          "description": "The home organization's own words about itself (D123): the domains of its people's email addresses. An address of another domain is outside the organization, which makes a call that names it external (TOOL-FEAT-013); with no list, every address is outside.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "emailDomains": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$"
+              }
+            }
+          }
+        },
         "organizations": {
           "description": "Patterns over the verified attributes of an organization's ECS Organization credential, evaluated in order, first match wins; no match is unrecognized (D64, IDENT-ROLE-008). A pattern never sets home: home is the agent's own organization only (IDENT-ROLE-011).",
           "type": "array",
@@ -987,10 +1002,20 @@
       }
     },
     "tools": {
-      "description": "The catalog of tool sources (D96, D101, TOOL-CAT): one map keyed by the source id. mcp.servers, tools.http, tools.bundled, tools.access and actions are withdrawn and refused at start (TOOL-CAT-011).",
+      "description": "The tool catalog (D96, D101, D120, TOOL-CAT, TOOL-FEAT): the features, in the words people use, and the sources, one map keyed by the source id, each MCP server or HTTP tool naming the feature it serves. mcp.servers, tools.http, tools.bundled, tools.access and actions are withdrawn and refused at start (TOOL-CAT-011).",
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "features": {
+          "description": "The features (D120, TOOL-FEAT-001), keyed by the feature's id. A feature with profile has a contract, a feature profile the agent knows (org.ayni/files 1.0, org.ayni/calendar 1.0), whose tools every provider gives the model; one without is a category, its provider's own tools shown under its title.",
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/featureId"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/feature"
+          }
+        },
         "sources": {
           "type": "object",
           "propertyNames": {
@@ -1712,17 +1737,37 @@
                   }
                 }
               },
-              "tools": {
+              "features": {
                 "type": "array",
-                "description": "The sources of availability spaces the spaces of the template may use (TOOL-AVAIL-002).",
+                "description": "The features the spaces of the template may use, in the order the clients show them (D120, TOOL-AVAIL-002), each with the providers it allows: sources of availability spaces that serve it.",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["source"],
+                  "required": ["feature", "providers"],
                   "properties": {
-                    "source": { "type": "string", "minLength": 1 },
+                    "feature": { "$ref": "#/$defs/featureId" },
+                    "providers": {
+                      "type": "array",
+                      "minItems": 1,
+                      "uniqueItems": true,
+                      "items": { "$ref": "#/$defs/sourceId" }
+                    },
+                    "default": {
+                      "$ref": "#/$defs/sourceId",
+                      "description": "The default provider: the only one when there is one; required with add: auto when there are several."
+                    },
                     "add": { "type": "string", "enum": ["auto", "owner"], "default": "owner" },
-                    "guests": { "type": "boolean", "default": false }
+                    "guests": { "type": "boolean", "default": false },
+                    "any": {
+                      "type": "boolean",
+                      "default": false,
+                      "description": "Whether the owner may let each member's own account reach any location in place of a list (TOOL-SPACE-014): for an entry one of whose providers has a personal account and serves a feature with a contract."
+                    },
+                    "location": {
+                      "type": "string",
+                      "enum": ["managed", "existing", "either"],
+                      "description": "For Files: whether the agent makes and keeps the space's folder (managed), the owner picks one that exists (existing), or either (TOOL-FEAT-023). The managed mode is not built in this version."
+                    }
                   }
                 }
               }
@@ -1734,9 +1779,38 @@
   },
   "$defs": {
     "availability": {
-      "description": "Where a source is available (TOOL-AVAIL-001): the whole agent, Personal only, or the spaces of the templates that name it.",
+      "description": "Where a source is available (TOOL-AVAIL-001): the whole agent, Personal only, or the spaces of the templates that name it as a provider of its feature.",
       "type": "string",
       "enum": ["agent", "personal", "spaces"]
+    },
+    "featureId": {
+      "description": "The id of a feature (TOOL-FEAT-001): the key of tools.features, which a source's feature, a template's entries and the AG-UI profile name.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,31}$"
+    },
+    "feature": {
+      "description": "One feature (D120, D121, TOOL-FEAT-001, TOOL-FEAT-005): the title people read; the profile of a feature with a contract; and, for a tool of that profile, its rule, step-up and approval bounds, set once for every provider.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "profile": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "version"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "version": { "type": "string", "pattern": "^\\d+\\.\\d+$" }
+          }
+        },
+        "tools": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/toolName" },
+          "additionalProperties": { "$ref": "#/$defs/toolDeclaration" },
+          "description": "What the agent-pack says of a tool of the profile, for every provider: call, stepUp and approval only (TOOL-FEAT-005); its effect, title and trust are the profile's."
+        }
+      }
     },
     "toolEffect": {
       "description": "What a tool does (TOOL-CAT-006): it gives its default rule.",
@@ -2012,6 +2086,10 @@
           "type": "string",
           "enum": ["mcp", "http", "bundled"]
         },
+        "feature": {
+          "$ref": "#/$defs/featureId",
+          "description": "The feature the source serves, a key of tools.features (D120, TOOL-FEAT-002): every MCP server and HTTP tool names one and is a provider of it; a bundled tool names none."
+        },
         "title": {
           "type": "string",
           "minLength": 1,
@@ -2143,6 +2221,22 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 300
+        },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 },
+          "description": "A provider of a feature with a contract: the optional capabilities of its profile it uses at most; every one the server declares when absent (TOOL-FEAT-004)."
+        },
+        "manage": {
+          "description": "A provider of Files: the agent may make and keep a team space's folder at it (D145, TOOL-FEAT-023), with the space owner's own account (as: owner) or the managing account apply builds from the deployment's secrets (as: manager, D150). The managed mode is not built in this version: validated, and Files works in the existing mode.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["as"],
+          "properties": {
+            "as": { "type": "string", "enum": ["owner", "manager"] },
+            "apply": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/accountHeader" } }
+          }
         }
       },
       "allOf": [

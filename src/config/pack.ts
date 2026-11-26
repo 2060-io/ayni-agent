@@ -16,6 +16,7 @@ import {
   timeoutBoundsOf,
 } from '../policy/spacePolicy.js'
 import { fieldsNamedBy } from '../tools/accountValues.js'
+import { featureDocumentErrors, featureErrors, featureWarnings } from './featureRules.js'
 import type {
   AgentPack,
   BundledName,
@@ -629,9 +630,9 @@ export function catalogValueErrors(doc: unknown): string[] {
   if (Array.isArray(templates))
     for (const template of templates) {
       const t = isObject(template) ? template : {}
-      if (!Array.isArray(t.tools)) continue
-      for (const [i, entry] of (t.tools as Doc[]).entries())
-        one(`spaces.templates.${String(t.id)}.tools[${i}]`, 'add', entry?.add, ['auto', 'owner'])
+      if (!Array.isArray(t.features)) continue
+      for (const [i, entry] of (t.features as Doc[]).entries())
+        one(`spaces.templates.${String(t.id)}.features[${i}]`, 'add', entry?.add, ['auto', 'owner'])
     }
   return errors
 }
@@ -918,11 +919,9 @@ export function declaredToolsOf(id: string, source: ToolSourceDef): readonly str
  */
 export function catalogErrors(pack: AgentPack): string[] {
   const errors: string[] = []
-  const availabilityOf = new Map<string, string>()
   for (const [id, source] of Object.entries(pack.tools?.sources ?? {})) {
     const where = `tools.sources.${id}`
     errors.push(...sourceErrors(where, source))
-    availabilityOf.set(id, source.availability ?? 'agent')
     if (source.type === 'mcp' && source.offer && new Set(source.offer).size !== source.offer.length)
       errors.push(`${where}.offer names a tool twice (TOOL-CAT-003)`)
     // a tool of the spaces is approved by the space's owner, never by roles (TOOL-CAT-009)
@@ -934,22 +933,9 @@ export function catalogErrors(pack: AgentPack): string[] {
   }
   // the accounts of other sources, and the check of the email (TOOL-CAT-015, TOOL-CAT-017)
   errors.push(...personalAccountErrors(pack))
-  // the templates name sources of spaces only (TOOL-AVAIL-002)
-  for (const template of pack.spaces?.templates ?? []) {
-    const named = new Set<string>()
-    for (const [i, entry] of (template.tools ?? []).entries()) {
-      const where = `spaces.templates.${template.id}.tools[${i}]`
-      const availability = availabilityOf.get(entry.source)
-      if (availability === undefined)
-        errors.push(`${where}.source: ${entry.source} is not a key of tools.sources (TOOL-AVAIL-002)`)
-      else if (availability !== 'spaces')
-        errors.push(
-          `${where}.source: ${entry.source} is of availability ${availability}: a template names sources of availability spaces only (TOOL-AVAIL-002)`
-        )
-      if (named.has(entry.source)) errors.push(`${where}.source: ${entry.source} is named twice in the template`)
-      named.add(entry.source)
-    }
-  }
+  // the features, the feature each source serves, one provider of a feature in a space, the templates' features
+  // (TOOL-FEAT-001 to 005, TOOL-FEAT-023, TOOL-AVAIL-002)
+  errors.push(...featureErrors(pack))
   // the policies of the tools of spaces, their bounds and the timeouts of a space (TOOL-CAT-023)
   errors.push(...spaceApprovalErrors(pack))
   // the roles that approve a tool of the whole agent or of Personal (TOOL-CAT-009)
@@ -1012,6 +998,14 @@ export function spaceApprovalErrors(pack: AgentPack): string[] {
       entries(`${where}.default`, decl.approval.default)
       check(`${where}.default`, decl.approval)
     }
+  // a tool of a feature profile is bounded once, on its feature (TOOL-FEAT-005)
+  for (const [id, feature] of Object.entries(pack.tools?.features ?? {}))
+    for (const [tool, decl] of Object.entries(feature.tools ?? {})) {
+      if (!decl.approval) continue
+      const where = `tools.features.${id}.tools.${tool}.approval`
+      entries(`${where}.default`, decl.approval.default)
+      check(`${where}.default`, decl.approval)
+    }
   return errors
 }
 
@@ -1020,14 +1014,9 @@ export function spaceApprovalErrors(pack: AgentPack): string[] {
  * names, and a tool whose rule the agent-pack sets to approval with no approver, whose calls are refused (`no-approver`).
  */
 export function catalogWarnings(pack: AgentPack): string[] {
-  const warnings: string[] = []
-  const named = new Set((pack.spaces?.templates ?? []).flatMap((t) => (t.tools ?? []).map((e) => e.source)))
+  // a source of spaces no template names as a provider, a managed mode not built (TOOL-AVAIL-002, TOOL-FEAT-023)
+  const warnings: string[] = featureWarnings(pack)
   const sources = Object.entries(pack.tools?.sources ?? {})
-  for (const [id, source] of sources)
-    if (source.type !== 'bundled' && source.availability === 'spaces' && !named.has(id))
-      warnings.push(
-        `tools.sources.${id}: a source of availability spaces that no template of spaces names: no space can use it (TOOL-AVAIL-002)`
-      )
   const fallback = pack.approvals?.approvers ?? []
   const noApprover = (where: string, tool: string) =>
     warnings.push(
@@ -1260,6 +1249,12 @@ export function crossFieldErrors(pack: AgentPack): string[] {
     for (const [tool, decl] of Object.entries(source.tools ?? {}))
       errors.push(...stepUpAuthenticationErrors(pack, `tools.sources.${id}.tools.${tool}`, decl.stepUp?.authentication))
   }
+  // the step-up of a tool of a feature profile, declared once on its feature (TOOL-FEAT-005)
+  for (const [id, feature] of Object.entries(pack.tools?.features ?? {}))
+    for (const [tool, decl] of Object.entries(feature.tools ?? {}))
+      errors.push(
+        ...stepUpAuthenticationErrors(pack, `tools.features.${id}.tools.${tool}`, decl.stepUp?.authentication)
+      )
 
   const hasMcp = sources.some(([, s]) => s.type === 'mcp')
   for (const m of pack.persona.menu ?? []) {
@@ -1393,6 +1388,10 @@ export interface LoadedPack {
 }
 
 export function validatePackDocument(doc: unknown, env: Record<string, string | undefined>): AgentPack {
+  // D120, TOOL-FEAT-023: a template's withdrawn `tools`, and a managing account not read from the deployment's secrets,
+  // refused in words on the document as written, before its placeholders are resolved
+  const written = featureDocumentErrors(doc)
+  if (written.length) throw new PackError('agent-pack declares its features in a form this version refuses', written)
   const schema = loadSchema()
   const substituted = substitutePlaceholders(doc, env)
   const coerced = coerceBySchema(substituted, schema, schema) as Record<string, unknown>

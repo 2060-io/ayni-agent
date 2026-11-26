@@ -304,8 +304,20 @@ describe('the tools of a space (TOOL-SPACE-001..010, PROF-TOOL-001..006, TOOL-AC
     await addMember(salesEu.id, ana.principal.id)
     const owner = await call(jonas, 'GET', `/spaces/${salesEu.id}/tools`)
     expect(owner.status).toBe(200)
+    // one item per feature of the template, in its order (PROF-TOOL-033)
+    expect(owner.body.tools.map((t: { feature: { id: string } }) => t.feature.id)).toEqual(['crm', 'crm-status'])
     const crmTool = owner.body.tools.find((t: { source: string }) => t.source === 'relaticle')
     expect(crmTool).toMatchObject({
+      feature: { id: 'crm', title: 'CRM', profile: null },
+      providers: [
+        {
+          source: 'relaticle',
+          title: 'Relaticle CRM',
+          description: "The sales team's accounts, contacts and notes",
+          account: { kind: 'space' },
+          default: true,
+        },
+      ],
       source: 'relaticle',
       title: 'Relaticle CRM',
       description: "The sales team's accounts, contacts and notes",
@@ -338,10 +350,25 @@ describe('the tools of a space (TOOL-SPACE-001..010, PROF-TOOL-001..006, TOOL-AC
       effect: 'delete',
       rule: 'approval',
     })
-    // the source of spaces the template offers, not added
-    expect(owner.body.tools.find((t: { source: string }) => t.source === 'crm_status')).toMatchObject({
+    // the feature the template offers, with no provider chosen: no account, bindings or tools (PROF-TOOL-033)
+    const status = owner.body.tools.find((t: { feature: { id: string } }) => t.feature.id === 'crm-status')
+    expect(status).toEqual({
+      feature: { id: 'crm-status', title: 'CRM status', profile: null },
+      providers: [
+        {
+          source: 'crm_status',
+          title: 'CRM status',
+          description: 'The status of the CRM.',
+          account: { kind: 'agent' },
+          default: true,
+        },
+      ],
+      source: null,
+      title: null,
       state: 'available',
       add: 'owner',
+      guests: false,
+      pending: null,
     })
     expect((await call(ana, 'GET', `/spaces/${salesEu.id}/tools`)).body).toEqual({ tools: [] })
     expect((await call(jonas, 'GET', `/spaces/${personalSpaceId(jonas.principal.id)}/tools`)).body).toEqual({
@@ -432,6 +459,7 @@ describe('the tools of a space (TOOL-SPACE-001..010, PROF-TOOL-001..006, TOOL-AC
       .filter((e) => e.type === 'CUSTOM' && e.name === CUSTOM_EVENT.spaceToolsChanged)
     expect(changed.at(-1)?.value).toEqual({
       spaceId: salesEu.id,
+      feature: 'crm',
       source: 'relaticle',
       state: 'setup',
       changeId: change.changeId,
@@ -505,6 +533,7 @@ describe('the tools of a space (TOOL-SPACE-001..010, PROF-TOOL-001..006, TOOL-AC
     const member = (await call(ana, 'GET', `/spaces/${salesEu.id}/tools`)).body.tools
     expect(member.map((t: { source: string }) => t.source)).toEqual(['relaticle', 'crm_status'])
     expect(member[0]).toEqual({
+      feature: { id: 'crm', title: 'CRM', profile: null },
       source: 'relaticle',
       title: 'Relaticle CRM',
       description: "The sales team's accounts, contacts and notes",
@@ -1003,7 +1032,13 @@ describe('the rules of the owner, and the approval of a tool of a space (TOOL-SP
       .body
     await addMember(comms.id, ana.principal.id)
     const listed = (await call(jonas, 'GET', `/spaces/${comms.id}/tools`)).body.tools
-    expect(listed[0]).toMatchObject({ source: 'post_to_x', state: 'available', add: 'owner' })
+    expect(listed[0]).toMatchObject({
+      feature: { id: 'social', title: 'Social posting' },
+      providers: [{ source: 'post_to_x', default: true }],
+      source: null,
+      state: 'available',
+      add: 'owner',
+    })
     expect((await call(ana, 'POST', `/spaces/${comms.id}/tools`, { source: 'post_to_x' })).body.error).toBe('not-owner')
     expect((await call(jonas, 'POST', `/spaces/${comms.id}/tools`, { source: 'relaticle' })).status).toBe(404)
     await confirmed(jonas, () =>
@@ -1210,7 +1245,10 @@ describe('provenance and the record of each call (TOOL-PROV-001..006, PROF-TOOL-
     const firstReply = (await call(anaSales, 'GET', `/${anaSales.sessionId}/messages?limit=100`)).body.messages
       .filter((m: { role: string }) => m.role === 'assistant')
       .at(-1)
-    expect(firstReply.metadata.sources).toEqual([{ source: 'relaticle', title: 'Relaticle CRM', account: 'space' }])
+    // each source with the feature it served (PROF-TOOL-010, PROF-TOOL-035)
+    expect(firstReply.metadata.sources).toEqual([
+      { source: 'relaticle', title: 'Relaticle CRM', feature: { id: 'crm', title: 'CRM' }, account: 'space' },
+    ])
     model.script = [{ calls: [{ name: 'list-companies', arguments: {} }] }, { text: 'listed' }]
     await run(anaSales, 'second')
     model.script = [
@@ -1225,8 +1263,8 @@ describe('provenance and the record of each call (TOOL-PROV-001..006, PROF-TOOL-
     const history = (await call(anaSales, 'GET', `/${anaSales.sessionId}/messages?limit=100`)).body.messages
     const replies = history.filter((m: { role: string }) => m.role === 'assistant')
     expect(replies.at(-1).metadata.sources).toEqual([
-      { source: 'websearch', title: 'Web search', account: 'agent' },
-      { source: 'relaticle', title: 'Relaticle CRM', account: 'space' },
+      { source: 'websearch', title: 'Web search', feature: { id: 'search', title: 'Web search' }, account: 'agent' },
+      { source: 'relaticle', title: 'Relaticle CRM', feature: { id: 'crm', title: 'CRM' }, account: 'space' },
     ])
     expect(JSON.stringify(history)).not.toContain('list-companies')
     const sources = await call(anaSales, 'GET', `/conversations/${conversationId}/sources`)
@@ -1236,6 +1274,7 @@ describe('provenance and the record of each call (TOOL-PROV-001..006, PROF-TOOL-
         expect.objectContaining({
           source: 'relaticle',
           title: 'Relaticle CRM',
+          feature: { id: 'crm', title: 'CRM' },
           account: { kind: 'space', space: { id: salesEu.id, title: 'Sales EU' } },
           results: 3,
         }),
@@ -1250,6 +1289,7 @@ describe('provenance and the record of each call (TOOL-PROV-001..006, PROF-TOOL-
     const row = rows.find((r) => r.sourceType === 'tool-call' && r.provenance?.toolName === 'list-companies')
     expect(row?.provenance).toMatchObject({
       sourceId: 'relaticle',
+      featureId: 'crm',
       toolName: 'list-companies',
       account: { kind: 'space', spaceId: salesEu.id },
       untrusted: false,
@@ -1263,8 +1303,8 @@ describe('provenance and the record of each call (TOOL-PROV-001..006, PROF-TOOL-
     const shared = await call(jonas, 'GET', `/spaces/${salesEu.id}/shared/${conversationId}/messages?limit=100`)
     const replies = shared.body.messages.filter((m: { role: string }) => m.role === 'assistant')
     expect(replies.at(-1).metadata.sources).toEqual([
-      { source: 'websearch', title: 'Web search', account: 'agent' },
-      { source: 'relaticle', title: 'Relaticle CRM', account: 'space' },
+      { source: 'websearch', title: 'Web search', feature: { id: 'search', title: 'Web search' }, account: 'agent' },
+      { source: 'relaticle', title: 'Relaticle CRM', feature: { id: 'crm', title: 'CRM' }, account: 'space' },
     ])
   })
 
@@ -1323,8 +1363,10 @@ describe('the life of the tools of a space (TOOL-SPACE-007/011, TOOL-CALL-001)',
       call(jonas, 'PUT', `/spaces/${us}/tools/relaticle/account`, { values: { token: CRM_TOKEN_2 } })
     )
     const removed = await call(jonas, 'DELETE', `/spaces/${us}/tools/relaticle`)
-    expect(removed.body.tool).toMatchObject({ state: 'off', account: { set: false } })
-    expect(removed.body.tool.bindings[0].value).toBeNull()
+    // off, with no provider: nothing of it is shown (PROF-TOOL-033)
+    expect(removed.body.tool).toMatchObject({ feature: { id: 'crm' }, source: null, state: 'off' })
+    expect(removed.body.tool.bindings).toBeUndefined()
+    expect(removed.body.tool.account).toBeUndefined()
     expect(await running.agent.store.spaceAccounts.get(us, 'relaticle')).toBeUndefined()
     await confirmed(jonas, () => call(jonas, 'POST', `/spaces/${us}/tools`, { source: 'relaticle' }))
     expect((await call(jonas, 'GET', `/spaces/${us}/tools`)).body.tools[0]).toMatchObject({
@@ -1806,7 +1848,7 @@ describe('a source the template no longer names (TOOL-SPACE-011)', () => {
     expect(await running.agent.store.spaceAccounts.get(salesEu.id, 'relaticle')).toBeDefined()
     const sales = running.agent.pack.spaces?.templates?.find((t) => t.id === 'sales')
     if (!sales) throw new Error('no sales template')
-    sales.tools = (sales.tools ?? []).filter((t) => t.source !== 'relaticle')
+    sales.features = (sales.features ?? []).filter((e) => !e.providers.includes('relaticle'))
     // what the next start does with the pack it reads
     await running.agent.spaceTools?.align()
     expect(await running.agent.store.spaceAccounts.get(salesEu.id, 'relaticle')).toBeUndefined()

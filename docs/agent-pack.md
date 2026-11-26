@@ -39,7 +39,7 @@ Relative paths (`rag.sources[].path`) resolve from the pack directory.
 | `presentations` | | the credentials the agent may ask for, with what is kept and what the model reads | D69, INTX-PRES, PRIV-EVID |
 | `evidence` | | what is kept of a document read, and what the model reads of it | D73, PRIV-EVID |
 | `issuance` | | the credentials the agent may issue, each claim with its source | D70, INTX-ISSUE |
-| `tools` | | `tools.sources`: the catalog of tool sources, one map keyed by source id (MCP servers, HTTP tools, bundled tools), each with its connection, account, availability, access tiers and what it says of each tool, step-up included | D96 to D101, TOOL-CAT, TOOL-MCP, TOOL-HTTP |
+| `tools` | | `tools.features`: what the tools are for (Files, Calendar, CRM), a feature with a contract naming its feature profile; `tools.sources`: the catalog of tool sources, one map keyed by source id (MCP servers, HTTP tools, bundled tools), each naming the feature it serves, with its connection, account, availability, access tiers and what it says of each tool, step-up included | D96 to D101, D120 to D124, TOOL-CAT, TOOL-FEAT, TOOL-MCP, TOOL-HTTP |
 | `purposes` | | governance list for elevation | D14, D15 |
 | `approvals` | | default approval and elevation policy | INTX-APPR |
 | `sessions` | | idle timeout, binding expiry, liveness TTL, sibling sessions, device pairing window | D6, D7, D36, D51 |
@@ -59,6 +59,8 @@ Relative paths (`rag.sources[].path`) resolve from the pack directory.
 identity:
   homeBackingIdentity: did:webvh:...          # the DID of this agent, the service its operator runs
   userAgentGate: required                     # required | optional
+  organization:                               # the home organization's own words about itself (D123)
+    emailDomains: [northwind.example]         # an address of another domain is outside: its share or invitation is external
   authentication:                             # how a person authenticates, on the phone only (D125, D128)
     request: on-connect                       # or on-demand: nothing is asked at connection
     visitors: false                           # true: the person may continue as a visitor (with on-connect)
@@ -620,6 +622,96 @@ issuance:
 
 ## tools: the catalog of tool sources
 
+### Features and providers: `tools.features`
+
+A **feature** is what a set of tools is for, in the words people use: Files, Calendar, CRM (ayni-spec D120). The pack
+declares the features in `tools.features`, keyed by the feature's id (`^[a-z][a-z0-9-]{0,31}$`), each with the `title`
+people read; every MCP server and HTTP tool of `tools.sources` names the one feature it serves (`feature`) and is a
+**provider** of it; a bundled tool names none (TOOL-FEAT-001, 002).
+
+| | A feature with a contract | A category |
+|---|---|---|
+| Declared by | `profile: { id, version }`, a feature profile this agent knows: `org.ayni/files` 1.x, `org.ayni/calendar` 1.x | no `profile` |
+| Its provider | an MCP server of availability `spaces` or `personal` that declares the profile (an MCP extension in its capabilities): the service's own, or a connector | any MCP server or HTTP tool |
+| The model's tools | the profile's, from the agent's own copy: the core, the tools of the capabilities in use, and the extras `offer` names | the provider's own, as `offer` gives them |
+| Effects and rules | the profile's, the same for every provider; `tools.features.<id>.tools.<tool>` sets `call`, `stepUp` and `approval` once | the provider's annotations and `tools.sources.<id>.tools` |
+| Its binding in a space | its location (folders, calendars), a list the owner picks from what the provider lists | `bindings`, as before |
+
+```yaml
+identity:
+  organization:
+    emailDomains: [example.org]        # an address of another domain is outside: a call that names one is external
+
+tools:
+  features:
+    files:
+      title: Files
+      profile: { id: org.ayni/files, version: "1.0" }
+    calendar:
+      title: Calendar
+      profile: { id: org.ayni/calendar, version: "1.0" }
+      tools:
+        calendar_cancel_event: { call: confirm }     # once, for every provider (TOOL-FEAT-005)
+    search: { title: Web search }                    # categories: their providers' own tools
+    crm: { title: CRM }
+  sources:
+    nextcloud:                         # a provider of Files: the organization's Nextcloud, with the space's account
+      type: mcp
+      feature: files
+      title: Nextcloud
+      transport: streamable-http
+      url: http://connector-nextcloud.internal:8000/mcp
+      headers: { Ayni-Nextcloud: "https://cloud.example.org" }
+      account:
+        kind: space
+        fields:
+          - { name: username, label: User name }
+          - { name: password, label: App password }
+        apply:
+          - { header: Ayni-Dav-Username, value: "{username}" }
+          - { header: Ayni-Dav-Password, value: "{password}" }
+      availability: spaces
+      capabilities: [folders, search]  # the optional capabilities used, at most; all the server declares when absent
+      access: { roles: { employee: ["*"] } }
+
+spaces:
+  templates:
+    - id: project
+      title: Project
+      kind: team
+      creators: [manager]
+      membership: { mode: list }
+      features:                        # in the order the clients show them
+        - { feature: files, providers: [nextcloud, drive], default: nextcloud, add: owner }
+        - { feature: calendar, providers: [nextcloud-calendar], add: owner }
+```
+
+- **One provider of a feature in a space**, Personal included (TOOL-FEAT-003): two sources of one feature of
+  availability `agent` or `personal` between them, or one of `agent` and a template that names a provider of that
+  feature, are refused at start. In a space the provider is the one its owner chose among those the template's entry
+  allows; in Personal it is the source of that feature of availability `personal` or `agent`.
+- **A template's entry** (`spaces.templates[].features`, TOOL-AVAIL-002): `feature`, `providers` (sources of
+  availability `spaces` that serve it), `default` (required with `add: auto` and several providers), `add` (`auto` or
+  `owner`), `guests`, `any` (each member's own account reaches any location in place of a list: for an entry with a
+  provider of a personal account of a feature with a contract) and, for Files, `location` (`managed`, `existing`,
+  `either`; validated, the managed mode not being built in this version). The withdrawn `tools` of a template is refused
+  in words.
+- **A provider of a feature with a contract** (TOOL-FEAT-004) is an MCP server of availability `spaces` or `personal`;
+  its `capabilities` are capabilities of the profile; its `offer` and `tools.<name>` name only its extras (no name with
+  the profile's prefix); it declares no binding named as the profile's location (`root`, `calendar`). At the first
+  connection with an account, and on every new connection, the agent reads the profile the server declares and the tools
+  it lists; a server that declares another major version, or lacks a core tool, is not used with that account
+  (`conformant: false` in the owner's Tools, TOOL-FEAT-011). The model reads the profile's names, descriptions and
+  schemas, never the server's; every reference it reads carries the mark of the feature's provider in the space, which a
+  change of provider renews (TOOL-FEAT-016); the folder or calendar of a space is set in code from a list of one, and
+  checked against a longer list (TOOL-FEAT-014); a call that names an address outside `identity.organization.emailDomains`
+  is `external` (TOOL-FEAT-013).
+- **`manage`** (`as: owner`, or `as: manager` with `apply`, each value one `${VAR}`, D150) on a provider of Files of
+  availability `spaces` and a personal account says that the agent may make and keep a team space's folder: validated
+  (TOOL-FEAT-023), warned at start, and not built in this version (Files is always in the existing mode).
+
+### The sources: `tools.sources`
+
 Every tool source is one entry of the map `tools.sources`, keyed by the source's **id** (ayni-spec D101, TOOL-CAT-001):
 an MCP server, an HTTP tool or a bundled tool, with everything the pack says of it in that one entry. The id is what the
 AG-UI profile carries as `source`, what a template of spaces names, and, for an HTTP tool, the name of its one tool. It
@@ -628,12 +720,15 @@ starts with a letter or a digit, then letters, digits, `_` and `-`, 64 at most.
 | Key | Sources | What it says | Default |
 |---|---|---|---|
 | `type` | all | `mcp`, `http` or `bundled` | required |
+| `feature` | `mcp`, `http` | the feature it serves, a key of `tools.features` (TOOL-FEAT-002); a bundled tool names none | required |
+| `capabilities` | `mcp` | a provider of a feature with a contract: the optional capabilities of its profile it uses, at most | every one the server declares |
+| `manage` | `mcp` | a provider of Files: how a team space's folder would be managed (TOOL-FEAT-023, not built) | none |
 | `transport`, `url`, `command`, `args`, `env`, `headers` | `mcp` | the connection: `stdio` needs `command`, `sse` and `streamable-http` need `url`; `headers` and `env` hold the agent's account as placeholders; the agent connects on first need and again after a drop (TOOL-MCP-003) | none |
 | `description`, `method`, `url`, `headers`, `parameters`, `bodyTemplate`, `timeoutSeconds` | `http` | the request: `description` is what the model reads of the tool (required), `parameters` the JSON Schema of its arguments, `{param}` placeholders in `url` and `bodyTemplate` | `timeoutSeconds: 30` |
 | `bundled`, `enabled` | `bundled` | the bundled tool it names (below), and `enabled: false` to turn off one that is on by default; `endpoint` and `defaultStatClass` for `statistics`, `provider` for `generateImage` | `enabled: true` |
 | `title`, `description` | all | what people read on the cards, in the sources and in a space's settings | the id; none |
 | `account` | `mcp`, `http` | whose account its calls run with: `none`, `agent`, `space`, `personal` (below) | `agent` |
-| `availability` | all | `agent` (every conversation, Personal included), `personal` (Personal only), `spaces` (the spaces whose template names it) | `agent` |
+| `availability` | all | `agent` (every conversation, Personal included), `personal` (Personal only), `spaces` (the spaces whose template names it as a provider of its feature) | `agent` |
 | `offer` | `mcp` | the tools of the server the model is given | every tool it lists |
 | `bindings` | `mcp`, `http` | the parameters the agent pins (below) | none |
 | `untrusted` | `mcp`, `http` | what it returns was written outside the organization | from `openWorldHint` for an MCP tool; `false` for an HTTP tool |
@@ -671,10 +766,15 @@ approvals:
   confirmation: { timeoutSeconds: 300 } # how long a confirmation card waits
 
 tools:
+  features:
+    search: { title: Web search }
+    crm: { title: CRM }
+    social: { title: Social posting }
   sources:
     # An HTTP tool on the agent's account, in every conversation. Its one tool is named websearch.
     websearch:
       type: http
+      feature: search
       title: Web search
       description: Searches the public web and answers the title, the link and a snippet of the first results.
       method: GET                       # effect read, rule none: nothing to declare under tools
@@ -692,6 +792,7 @@ tools:
     # An MCP server on a space's account of a single token: each Sales space binds its workspace and sets its own token.
     relaticle:
       type: mcp
+      feature: crm
       title: Relaticle CRM
       description: The sales team's accounts, contacts and notes
       transport: streamable-http        # a space account reaches a remote server only, never stdio
@@ -718,6 +819,7 @@ tools:
     # An MCP server on a space's account of four keys: one X account per space, named by a binding the agent pins.
     x:
       type: mcp
+      feature: social
       title: X
       description: Posts, replies and mentions of the X account of the space
       transport: streamable-http
@@ -757,15 +859,15 @@ spaces:
       kind: team
       creators: [manager]
       membership: { mode: list }
-      tools:
-        - { source: relaticle, add: auto }        # in every Sales space; its owner binds it and sets its account
+      features:
+        - { feature: crm, providers: [relaticle], add: auto }   # in every Sales space; its owner binds it, sets its account
     - id: comms
       title: Communication
       kind: team
       creators: [comms]
       membership: { mode: list }
-      tools:
-        - { source: x, add: owner, guests: false } # offered; the owner adds it, binds the X account, sets its keys
+      features:
+        - { feature: social, providers: [x], add: owner, guests: false }   # the owner adds it, binds the account, sets its keys
 ```
 
 Two sources may each have a tool of one name, a `delete` for instance: their `tools.delete` are two declarations, each
@@ -961,9 +1063,13 @@ identity:
   directory: { file: /secrets/directory/directory.yaml }   # check.email compares with the person's entry
 
 tools:
+  features:
+    crm: { title: CRM }
+    code: { title: Code and issues }
   sources:
     relaticle:                          # each member's own Relaticle account, for the space's workspace
       type: mcp
+      feature: crm
       title: Relaticle CRM
       description: The companies, people, notes and tasks of the space's workspace
       transport: streamable-http        # a personal account reaches a remote server, never stdio
@@ -993,6 +1099,7 @@ tools:
 
     github:                             # GitHub's remote MCP server, in Personal, with each person's GitHub
       type: mcp
+      feature: code                     # in Personal; github-project is the provider of code in a Project space
       title: GitHub
       description: Code, issues and pull requests in GitHub
       transport: streamable-http
@@ -1019,6 +1126,7 @@ tools:
 
     github-project:                     # the same server, bound to the repository of a Project space
       type: mcp
+      feature: code
       title: GitHub repository
       description: The issues of the project's repository
       transport: streamable-http
@@ -1038,9 +1146,9 @@ tools:
 spaces:
   templates:
     - { id: sales, title: Sales, kind: team, creators: [manager], membership: { mode: list },
-        tools: [{ source: relaticle, add: auto }] }       # its owner binds the workspace from an account of their own
+        features: [{ feature: crm, providers: [relaticle], add: auto }] }       # the owner binds the workspace
     - { id: project, title: Project, kind: team, creators: [manager], membership: { mode: list },
-        tools: [{ source: github-project, add: auto }] }  # its owner binds the repository
+        features: [{ feature: code, providers: [github-project], add: auto }] } # the owner binds the repository
 ```
 
 How it works:
@@ -1098,16 +1206,35 @@ How it works:
 - a `space` account of an availability other than `spaces`, or on a `stdio` server (TOOL-AVAIL-003);
 - a binding of a source of availability `agent` or `personal` without a `value`; a value that does not match its
   pattern; a pattern that is not a regular expression (TOOL-CAT-004/005);
-- a template tool that names an id that is not a key of `tools.sources`, or a source of another availability
-  (TOOL-AVAIL-002);
+- a feature with no `title` or a malformed id; a `profile` whose id or major version this agent does not know; two
+  features of one profile (TOOL-FEAT-001);
+- an MCP server or an HTTP tool with no `feature`, or one that is not a key of `tools.features`; a bundled tool that
+  names one (TOOL-FEAT-002);
+- two sources of one feature of availability `agent` or `personal` between them; one of `agent` and a template that
+  names a provider of its feature; a template that names a feature twice (TOOL-FEAT-003);
+- a provider of a feature with a contract that is an HTTP tool or of availability `agent`; a capability its profile's
+  version lacks; an `offer` that names a tool with the profile's prefix; a `tools` entry of a profile's tool on the
+  source; a binding named as the profile's location (TOOL-FEAT-004); `capabilities` or `manage` on a provider of a
+  category;
+- on a feature, a tool its profile's version lacks, or its `effect`, `title` or `untrusted`; `tools` on a category
+  (TOOL-FEAT-005);
+- `manage` on a provider of another feature than Files, of another availability than `spaces` or of another account
+  than `personal`; `as: manager` without `apply`, or a value that is not one `${VAR}` (in words, before the
+  placeholders are resolved); `as: owner` on an account with no OAuth; `location: managed` with no provider that
+  manages; a `location` other than `existing` in a template of kind `organization`, or on another feature than Files
+  (TOOL-FEAT-023);
+- a template's entry that names an unknown feature, an unknown source, a source of another availability or of another
+  feature, a `default` that is not among its `providers`, an `add: auto` entry of several providers with no `default`,
+  `any: true` where no provider can take it; a template that still declares `tools` (in words) (TOOL-AVAIL-002);
 - an `access.approval` entry in a source of availability `spaces`, whose owner approves its tools (TOOL-CAT-009);
 - a role of `approvals.approvers` that is not declared or has no `canApprove`;
 - a step-up whose `authChallenge` is not `device` (in words, before the schema), or whose `authentication` names a
   method `identity.authentication.methods` does not enable, a method twice, or no method, or in a pack that lists no
   accepted combination (TOOL-CAT-010, IDENT-AUTH-015).
 
-Warned at start: a source of `spaces` that no template names, and a tool whose rule the pack sets to `approval` with no
-role to approve it (its calls are refused as `no-approver`; the same is warned at discovery when the annotations set it).
+Warned at start: a source of `spaces` that no template names as a provider of its feature, a provider that declares
+`manage` (not built), and a tool whose rule the pack sets to `approval` with no role to approve it (its calls are refused
+as `no-approver`; the same is warned at discovery when the annotations set it).
 
 MCP servers connect lazily by default.
 
@@ -1308,15 +1435,20 @@ spaces:
   `guest` of the space. A person the agent knows already is compared on the email their stored evidence holds, and
   asked nothing; one whose evidence holds none is asked once for their badge again. For this the authentication should
   ask for and store `email`, which the agent says at start when a list template exists and it does not.
-- **Tools (D98; tools, phase 1).** A template's `tools` names the sources of availability `spaces` its spaces may use:
-  `add: auto` puts one in every space of the template from its creation (and, for a space created before the template
-  named it, from the next start), `add: owner` (the default) offers it to each owner; `guests: true` opens it to people
-  of other organizations. In a space a source is `available`, `setup` (a binding without a value or its account not
-  set), `ready` (its tools reach the model) or `off` (an `add: auto` one its owner removed). The owner manages them on
-  the web and on the phone (`{sessions}/spaces/{id}/tools`, profile §3.10); a change that grants something (adding,
-  binding, setting the account, loosening a rule) waits for the owner's phone, a `confirm` flow whose code the screen
-  shows; a change that only narrows applies at once. A source the template no longer names leaves its spaces at the next
-  start, its account's key destroyed. Personal takes no tool from a template.
+- **Tools, by feature (D98, D120, D122).** A template's `features` names the features its spaces may use, each with the
+  providers of availability `spaces` it allows and the default among them: `add: auto` puts the feature in every space
+  of the template from its creation, with its default provider (and, for a space created before the template named it,
+  from the next start), `add: owner` (the default) offers it to each owner, who chooses its provider; `guests: true`
+  opens it to people of other organizations. In a space a feature is `available` (no provider chosen), `setup` (a
+  binding without a value, a location list without an entry, or its account not set), `ready` (its tools reach the
+  model) or `off` (an `add: auto` one its owner removed), with one provider at a time. The owner manages them on the web
+  and on the phone (`{sessions}/spaces/{id}/tools`, profile §3.10); a change that grants something (choosing or
+  changing the provider, binding, picking a location, setting the account, loosening a rule) waits for the owner's
+  phone, a `confirm` flow whose code the screen shows; a change that only narrows applies at once. Changing the provider
+  (`replaces`) copies nothing from one provider to the other and deletes nothing at either; the former provider's
+  bindings, list, rules and space account go with it. A source the template no longer names leaves its spaces at the
+  next start, its account's key destroyed; where a space held two providers of one feature, as at the first start with
+  features, the template's default stays and the other leaves. Personal takes no tool from a template.
 
 ## privacy
 
@@ -1387,4 +1519,6 @@ resolution, role rules over verified facts, no admin bypass); `accessMode: user-
 `userConfig` are gone (deployment-held credentials, and from tools phase 1 a space's account set by its owner in the space's settings); `imageGeneration`, `speechToText` and
 `vision` moved under `media`; `integrations` is gone (deployment values are environment variables);
 `privacy`, `purposes`, `sessions`, `channels`, `integrity` and `features` are new; MCP servers, HTTP tools and bundled
-tools are one map, `tools.sources` (ayni-spec D101).
+tools are one map, `tools.sources` (ayni-spec D101). From 0.36 every MCP server and HTTP tool names its feature
+(`tools.features`, D120) and a template names features with their providers (`spaces.templates[].features`) in place of
+its sources (`tools`, refused); there is no compatibility with the earlier shape.

@@ -147,6 +147,7 @@ beforeAll(async () => {
         ),
         ledger: {
           type: 'http',
+          feature: 'lookup',
           title: 'Ledger',
           description: 'Reads the ledger of a customer.',
           method: 'GET',
@@ -160,6 +161,7 @@ beforeAll(async () => {
       }
       pack.tools.sources.payroll = {
         type: 'http',
+        feature: 'purge',
         title: 'Payroll',
         description: 'Reads the payroll.',
         method: 'GET',

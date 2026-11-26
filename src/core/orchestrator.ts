@@ -188,6 +188,8 @@ export function personRecord(about: {
   channel: string
   elevated: Pick<ElevatedTool, 'name' | 'granted' | 'until'>[]
   toConnect?: string
+  /** the limits of the space's tools the code keeps, one line per feature with a contract (TOOL-SPACE-017, TOOL-FEAT-021) */
+  limits?: string[]
 }): string {
   const lines = [`${about.who} Channel: ${about.channel}.`]
   if (about.elevated.length)
@@ -201,6 +203,7 @@ export function personRecord(about: {
         .join('; ')}`
     )
   if (about.toConnect) lines.push(about.toConnect)
+  if (about.limits?.length) lines.push(["Limits of this space's tools, kept by the code:", ...about.limits].join('\n'))
   return `[system record, written by the system, not by the person and not by you: who the person is, as it stands at this message:\n${lines.join('\n')}]`
 }
 
@@ -319,6 +322,8 @@ export class Orchestrator {
       toolsMayAsk: new ToolCatalog(pack).mayAsk(),
       // each person's own accounts: never a credential in a conversation, the Connect card instead (TOOL-CONN-012)
       personalAccounts: hasPersonalSource(pack),
+      // a feature's provider can change, and a reference of a former one is refused (TOOL-FEAT-021)
+      featureProviders: ((catalog) => catalog.sources().some((s) => !!catalog.profileOf(s)))(new ToolCatalog(pack)),
     })
     const tokens = addonTokenCount(this.addon)
     if (tokens > 500) logger.warn({ tokens }, 'system-prompt add-on exceeds its 500-token target (CORE-PROMPT-004)')
@@ -346,7 +351,7 @@ export class Orchestrator {
     principal: Principal,
     session: Session,
     spaceId: string,
-    about: { toConnect: ToConnect[]; elevated: ElevatedTool[] }
+    about: { toConnect: ToConnect[]; elevated: ElevatedTool[]; limits: string[] }
   ): Promise<{ messages: ChatMessage[]; person: string; kept: string | undefined; used: UsedMemory }> {
     const features = featuresOf(this.pack)
     const prefs = features.preferences ? await this.memory.preferences(principal, session) : []
@@ -375,6 +380,7 @@ export class Orchestrator {
         elevated: about.elevated,
         // the accounts the person can connect here, one line each and never their tools (TOOL-CONN-010)
         toConnect: ConnectionService.record(about.toConnect),
+        limits: about.limits,
       }),
       kept: keptRecord(prefs, notes),
       used,
@@ -573,7 +579,7 @@ export class Orchestrator {
     // grant (D112), so that the start of the request stays the same from one turn to the next (MEM-CTX-001,
     // LLM-CACHE-003); and what changes about the person, which the record of the person names after the history: the
     // accounts they can connect (TOOL-CONN-010), the tools that need an elevation (RBAC-TOOL-004)
-    const { tools: turnTools, toConnect, elevated } = await this.gateOf().turnTools(principal, spaceId, grants)
+    const { tools: turnTools, toConnect, elevated, limits } = await this.gateOf().turnTools(principal, spaceId, grants)
     const {
       messages: system,
       person,
@@ -582,6 +588,7 @@ export class Orchestrator {
     } = await this.systemMessages(principal, session, spaceId, {
       toConnect,
       elevated,
+      limits,
     })
     const tools = turnTools.map((t) => t.definition)
     const userTurn = await this.userTurn(inbounds, imageBytes)

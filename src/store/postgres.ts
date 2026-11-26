@@ -6,6 +6,7 @@ import type {
   Conversation,
   DigestAnchor,
   ElevationGrant,
+  FeatureMarkRecord,
   GovernanceNotice,
   LifecycleState,
   MemoryAccessLog,
@@ -896,6 +897,34 @@ export class PostgresStore implements Store {
       await this.pool.query('DELETE FROM space_accounts WHERE space_id = $1 AND source_id = $2', [spaceId, sourceId])
     },
     listAll: async () => (await this.rows('SELECT * FROM space_accounts', [])).map((r) => this.accountFromRow(r)),
+  }
+
+  public featureMarks = {
+    get: async (spaceId: string, featureId: string) => {
+      const [row] = await this.rows('SELECT * FROM feature_marks WHERE space_id = $1 AND feature_id = $2', [
+        spaceId,
+        featureId,
+      ])
+      return row
+        ? {
+            spaceId: String(row.space_id),
+            featureId: String(row.feature_id),
+            sourceId: String(row.source_id),
+            mark: String(row.mark),
+            createdAt: new Date(row.created_at as string).toISOString(),
+          }
+        : undefined
+    },
+    save: async (r: FeatureMarkRecord) => {
+      await this.pool.query(
+        `INSERT INTO feature_marks (space_id, feature_id, source_id, mark, created_at) VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (space_id, feature_id) DO UPDATE SET source_id=$3, mark=$4, created_at=$5`,
+        [r.spaceId, r.featureId, r.sourceId, r.mark, r.createdAt]
+      )
+    },
+    delete: async (spaceId: string, featureId: string) => {
+      await this.pool.query('DELETE FROM feature_marks WHERE space_id = $1 AND feature_id = $2', [spaceId, featureId])
+    },
   }
 
   public toolAllowances = {

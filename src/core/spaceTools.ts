@@ -1,9 +1,15 @@
 /**
- * Tools in spaces (ayni-spec D97, D98; TOOL-SPACE-001..011, TOOL-ACCESS-003..007; AG-UI profile 3.4 §3.10). A template
- * names the sources of availability `spaces` its spaces may use; in each space a source is `available`, `setup`, `ready`
- * or `off`. Its owner, on the web or on the phone, adds a source, binds it, sets the space's account, tightens or loosens
- * its rules within the agent-pack's, and removes it. A change that grants something waits for the owner's device (a
- * `confirm` flow, attested, whose code is the screen's); a change that only narrows applies at once.
+ * Tools in spaces, by feature (ayni-spec D97, D98, D120 to D123; TOOL-SPACE-001..021, TOOL-FEAT-006..009, TOOL-FEAT-014;
+ * AG-UI profile §3.10). A template names the features its spaces may use, each with the providers it allows; in each space
+ * a feature is `available`, `setup`, `ready` or `off`, with at most one provider, the one its owner chose. The owner, on
+ * the web or on the phone, chooses the provider, binds it, picks the locations of a feature with a contract, sets the
+ * space's account, tightens or loosens the rules within the agent-pack's, changes the provider, and removes it. A change
+ * that grants something waits for the owner's device (a `confirm` flow, attested, whose code is the screen's); a change
+ * that only narrows applies at once.
+ *
+ * The record of a feature in a space is kept by its provider's source: one record per (space, source), at most one of a
+ * feature's providers added at a time. A change of provider waits on the record of the provider in use and, once
+ * confirmed, replaces it in one step: nothing is copied from one provider to the other, nothing deleted at either.
  *
  * The space's account is what the owner types in the space's settings and nowhere else: one value for each field its
  * source declares (D102). The values are trimmed and checked, then sealed together as they arrive, as one record under a
@@ -12,8 +18,10 @@
  * its key. No answer, event, activity or log carries a value of it.
  */
 import { randomInt } from 'node:crypto'
-import type { AccountField, AgentPack, CallRule, SpaceCallRule, TemplateTool } from '../config/packTypes.js'
-import { SPACE_CALL_RULES } from '../config/packTypes.js'
+import type { AccountField, AgentPack, CallRule, SpaceCallRule, TemplateFeature } from '../config/packTypes.js'
+import { defaultProviderOf, SPACE_CALL_RULES } from '../config/packTypes.js'
+import { CODE_ONLY_CAPABILITIES, type FeatureProfile, toolsInUse } from '../features/profiles.js'
+import { FeatureService, type ProviderState } from '../features/service.js'
 import { type EntryCrypto, openJson, sealJson } from '../memory/crypto.js'
 import {
   boundsOf,
@@ -25,7 +33,7 @@ import {
 } from '../policy/spacePolicy.js'
 import type { Store } from '../store/types.js'
 import { accountSecrets, buildAccountHeaders, fitsFields } from '../tools/accountValues.js'
-import { type CatalogSource, looser, strictest, type ToolCatalog } from '../tools/catalog.js'
+import { type CatalogFeature, type CatalogSource, looser, strictest, type ToolCatalog } from '../tools/catalog.js'
 import type { ToolRegistry } from '../tools/registry.js'
 import type { CallAccountSecret, ToolSpec } from '../tools/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
@@ -42,6 +50,7 @@ import type {
   Space,
   SpaceAccountRecord,
   SpaceApprovalPolicy,
+  SpaceToolList,
   SpaceToolRecord,
 } from './types.js'
 
@@ -50,6 +59,15 @@ export type ChangeOutcome = 'applied' | 'declined' | 'expired' | 'failed' | 'can
 
 /** The longest value of a field of an account the owner may send, once trimmed (TOOL-SPACE-005). */
 export const MAX_VALUE_LENGTH = 4096
+
+/** The most entries a list holds (TOOL-SPACE-014). */
+export const MAX_LIST_ENTRIES = 10
+
+/** The most choices of a location the owner's search answers (TOOL-SPACE-015). */
+export const MAX_CHOICES = 50
+
+/** How long the choices the owner was given stand for a `PATCH` that picks one (TOOL-FEAT-014). */
+const CHOICES_SECONDS = 30 * 60
 
 /** What a value of an account may not hold inside it, once trimmed: whitespace or a control character (TOOL-SPACE-005). */
 const INNER_WHITESPACE_OR_CONTROL = /[\s\p{Cc}]/u
@@ -60,21 +78,51 @@ type AccountValues = Record<string, string>
 /** `ayni.space.tools.changed` (PROF-TOOL-006). */
 export interface SpaceToolsChanged {
   spaceId: string
+  /** the feature the change concerns (PROF-TOOL-006) */
+  feature: string
   source: string
   state: SpaceToolState
   changeId?: string
   outcome: ChangeOutcome
+  /** a change of provider: the provider it replaced (PROF-TOOL-034) */
+  formerSource?: string
 }
 
-/** What the owner, or a member, reads of a source in a space (PROF-TOOL-001). */
+/** The location list of a feature with a contract, as the owner or a member reads it (PROF-TOOL-022, PROF-TOOL-033). */
+export interface SpaceToolListView {
+  label: string
+  any: boolean
+  entries?: { values?: Record<string, string>; label: string }[]
+  anyAllowed?: boolean
+  anyLabel?: string
+  choices?: boolean
+  typed?: false
+  maxEntries?: number
+}
+
+/** What the owner, or a member, reads of a feature in a space (PROF-TOOL-001, PROF-TOOL-033). */
 export interface SpaceToolView {
-  source: string
-  title: string
-  description?: string
+  feature: { id: string; title: string; profile: { id: string; version: string } | null }
+  /** the owner's: the providers the template allows for the feature, in its order */
+  providers?: {
+    source: string
+    title: string
+    description?: string
+    account: { kind: 'none' | 'agent' | 'space' | 'personal' }
+    default: boolean
+  }[]
+  /** the provider in use: null while none is chosen */
+  source: string | null
+  title: string | null
+  description?: string | null
   state: SpaceToolState
   add?: 'auto' | 'owner'
   guests: boolean
-  account: {
+  /** a feature with a contract: whether its provider offered the profile at its last connection, absent before one */
+  conformant?: boolean
+  /** a feature with a contract: the optional capabilities of its profile in use */
+  capabilities?: string[]
+  account?: {
     kind: 'none' | 'agent' | 'space' | 'personal'
     /** the owner's, for a `space` account: the fields to fill, in the agent-pack's order (D102) */
     fields?: { name: string; label: string; pattern?: string }[]
@@ -86,7 +134,7 @@ export interface SpaceToolView {
     /** a `personal` account of another source (`account.from`): the source Your accounts lists it under */
     source?: string
   }
-  bindings: {
+  bindings?: {
     name?: string
     label: string
     value: string | null
@@ -99,7 +147,9 @@ export interface SpaceToolView {
     /** the owner's: the value and name of each of the owner's own accounts of the source */
     choices?: { value: string; valueLabel: string | null }[]
   }[]
-  tools: {
+  /** a feature with a contract: its location (TOOL-FEAT-014) */
+  list?: SpaceToolListView
+  tools?: {
     name?: string
     title: string
     effect: string | null
@@ -112,10 +162,10 @@ export interface SpaceToolView {
   pending?: { changeId: string; summary: string; code: string; expiresAt: string } | null
 }
 
-/** A source ready in a space, as a turn takes it (TOOL-SPACE-001, RBAC-FILTER-004). */
+/** A provider ready in a space, as a turn takes it (TOOL-SPACE-001, RBAC-FILTER-004). */
 export interface ReadySource {
   source: CatalogSource
-  entry: TemplateTool
+  entry: TemplateFeature
   record: SpaceToolRecord
   /** the values of its bindings, the pack's and the owner's */
   bindings: Record<string, string>
@@ -134,6 +184,20 @@ export interface SpaceToolsHooks {
   nameOf?: (principalId: string) => Promise<string>
 }
 
+/** A feature of a space: its template's entry, the provider in use and the records of its providers (TOOL-SPACE-001). */
+interface FeatureSlot {
+  entry: TemplateFeature
+  feature: CatalogFeature
+  /** the provider in use, and its record */
+  inUse?: { source: CatalogSource; record: SpaceToolRecord }
+  /** the choice of a first provider that waits for the owner's phone */
+  pendingAdd?: { source: CatalogSource; record: SpaceToolRecord }
+  /** an `add: auto` feature whose provider its owner removed */
+  off: boolean
+  /** every record of the feature's providers in the space */
+  records: SpaceToolRecord[]
+}
+
 const RULE_WORDS: Record<SpaceCallRule, string> = {
   none: 'runs without asking',
   confirm: 'asks the person to confirm',
@@ -147,12 +211,34 @@ function newCode(): string {
   return `${pad(randomInt(0, 100))} ${pad(randomInt(0, 100))}`
 }
 
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  !!value && typeof value === 'object' && !Array.isArray(value)
+
+/** Whether every entry of a list is one of another's: a list that only narrows (TOOL-SPACE-014). */
+function narrowsList(next: SpaceToolList | undefined, inForce: SpaceToolList | undefined): boolean {
+  if (next?.any) return !!inForce?.any
+  if (inForce?.any) return true
+  const held = new Set((inForce?.entries ?? []).map((e) => JSON.stringify(e.values)))
+  return (next?.entries ?? []).every((e) => held.has(JSON.stringify(e.values)))
+}
+
+function sameList(a: SpaceToolList | undefined, b: SpaceToolList | undefined): boolean {
+  return JSON.stringify(a ?? {}) === JSON.stringify(b ?? {})
+}
+
 export class SpaceToolService {
   public hooks: SpaceToolsHooks = {}
   /** each person's own accounts (D104): whether a reader's is connected, the owner's choices of a binding (D110) */
   public connections?: ConnectionService
   /** the approval policies of the tools (D137): whom they name, their checks, warnings and attention */
   public governance?: Governance
+  /** the features with a contract: their providers' declarations and marks (D121 to D123) */
+  public features?: FeatureService
+  /** the locations the owner was last given, by space and source, for the `PATCH` that picks one (TOOL-FEAT-014) */
+  private readonly choicesRead = new Map<
+    string,
+    Map<string, { label: string; portable: boolean; text: string; at: number }>
+  >()
 
   public constructor(
     private readonly store: Store,
@@ -167,35 +253,60 @@ export class SpaceToolService {
     private readonly confirmationSeconds = 300
   ) {}
 
-  // ---- the template, the state ----------------------------------------------------------------------------------
+  /** The agent's name, as the phone's text of a change of provider names it (TOOL-FEAT-007). */
+  private get agentName(): string {
+    return this.pack.metadata.displayName
+  }
 
-  /** The sources a space's template names (TOOL-AVAIL-002): none for Personal. */
-  public entriesOf(space: Pick<Space, 'id' | 'templateId'>): TemplateTool[] {
+  // ---- the template, the features, the state ------------------------------------------------------------------------
+
+  /** The features a space's template names, in its order (TOOL-AVAIL-002): none for Personal. */
+  public entriesOf(space: Pick<Space, 'id' | 'templateId'>): TemplateFeature[] {
     if (isPersonalSpace(space.id)) return []
-    return this.catalog.templateTools(space.templateId)
+    return this.catalog.templateFeatures(space.templateId)
   }
 
-  private entryOf(space: Space, sourceId: string): { entry: TemplateTool; source: CatalogSource } {
-    const entry = this.entriesOf(space).find((e) => e.source === sourceId)
-    const source = entry ? this.catalog.source(sourceId) : undefined
-    if (!entry || !source) throw new SpaceError('this source is not one of the space template', 'not-found')
-    return { entry, source }
+  /** The entry of the template that allows a source as a provider of its feature. */
+  public entryOfSource(space: Pick<Space, 'id' | 'templateId'>, sourceId: string): TemplateFeature | undefined {
+    return this.entriesOf(space).find((e) => e.providers.includes(sourceId))
   }
 
-  /** The record of a source in a space; an `add: auto` source has one from the space's creation (TOOL-SPACE-001). */
-  private async recordOf(space: Space, entry: TemplateTool): Promise<SpaceToolRecord> {
-    const found = await this.store.spaceTools.get(space.id, entry.source)
-    if (found) return found
-    const record: SpaceToolRecord = {
-      spaceId: space.id,
-      sourceId: entry.source,
-      added: entry.add === 'auto',
-      bindings: {},
-      calls: {},
-      updatedAt: nowIso(),
+  /**
+   * A feature of a space: the provider in use, a first choice that waits, or nothing (TOOL-SPACE-001). An `add: auto`
+   * feature with no record has its default provider from the space's creation.
+   */
+  private async slotOf(space: Space, entry: TemplateFeature): Promise<FeatureSlot | undefined> {
+    const feature = this.catalog.feature(entry.feature)
+    if (!feature) return undefined
+    const records = (await this.store.spaceTools.listBySpace(space.id)).filter((r) =>
+      entry.providers.includes(r.sourceId)
+    )
+    const sourceOf = (record: SpaceToolRecord) => this.catalog.source(record.sourceId)
+    if (!records.length && entry.add === 'auto') {
+      const provider = defaultProviderOf(entry)
+      if (provider && this.catalog.source(provider)) {
+        const record: SpaceToolRecord = {
+          spaceId: space.id,
+          sourceId: provider,
+          added: true,
+          bindings: {},
+          calls: {},
+          updatedAt: nowIso(),
+        }
+        await this.store.spaceTools.save(record)
+        records.push(record)
+      }
     }
-    if (entry.add === 'auto') await this.store.spaceTools.save(record)
-    return record
+    const added = records.find((r) => r.added && sourceOf(r))
+    const waiting = added ? undefined : records.find((r) => !r.added && r.pendingChange && sourceOf(r))
+    return {
+      entry,
+      feature,
+      ...(added ? { inUse: { source: sourceOf(added) as CatalogSource, record: added } } : {}),
+      ...(waiting ? { pendingAdd: { source: sourceOf(waiting) as CatalogSource, record: waiting } } : {}),
+      off: !added && records.some((r) => r.removed),
+      records,
+    }
   }
 
   /** The values of a source's bindings in a space: the pack's, then the owner's (TOOL-CAT-005). */
@@ -211,7 +322,10 @@ export class SpaceToolService {
     return values
   }
 
-  /** `available`, `setup`, `ready` or `off` (TOOL-SPACE-001). */
+  /**
+   * `available`, `setup`, `ready` or `off` (TOOL-SPACE-001): a provider added is `setup` while a binding has no value, the
+   * location list of a feature with a contract no entry and no any value (TOOL-FEAT-014), or its space account is not set.
+   */
   public stateOf(
     source: CatalogSource,
     record: SpaceToolRecord,
@@ -221,17 +335,18 @@ export class SpaceToolService {
     const values = this.bindingValues(source, record)
     const unbound = source.bindings.some((b) => values[b.name] === undefined)
     const noAccount = source.account.kind === 'space' && !account
-    return unbound || noAccount ? 'setup' : 'ready'
+    const noLocation = !!this.catalog.profileOf(source) && !record.list?.any && !record.list?.entries?.length
+    return unbound || noAccount || noLocation ? 'setup' : 'ready'
   }
 
-  /** The sources ready in a space, for a turn (TOOL-SPACE-001, RBAC-FILTER-004). */
+  /** The providers ready in a space, for a turn (TOOL-SPACE-001, RBAC-FILTER-004): one at most per feature. */
   public async readyIn(space: Space): Promise<ReadySource[]> {
     const out: ReadySource[] = []
     for (const entry of this.entriesOf(space)) {
-      const source = this.catalog.source(entry.source)
-      if (!source) continue
-      const record = await this.recordOf(space, entry)
-      const account = await this.store.spaceAccounts.get(space.id, entry.source)
+      const slot = await this.slotOf(space, entry)
+      if (!slot?.inUse) continue
+      const { source, record } = slot.inUse
+      const account = await this.store.spaceAccounts.get(space.id, source.name)
       if (this.stateOf(source, record, account) !== 'ready') continue
       out.push({
         source,
@@ -242,6 +357,12 @@ export class SpaceToolService {
       })
     }
     return out
+  }
+
+  /** The provider in use of a feature in a space, ready or not: none while none is chosen (TOOL-FEAT-006, TOOL-FEAT-009). */
+  public async providerOf(space: Space, featureId: string): Promise<CatalogSource | undefined> {
+    const entry = this.entriesOf(space).find((e) => e.feature === featureId)
+    return entry ? (await this.slotOf(space, entry))?.inUse?.source : undefined
   }
 
   /** The values of an account, opened from what is sealed; none when they do not fit the fields its source declares. */
@@ -269,20 +390,78 @@ export class SpaceToolService {
     return { kind: 'space', spaceId, headers, secrets: accountSecrets(values, headers) }
   }
 
-  // ---- what the settings show (PROF-TOOL-001) ---------------------------------------------------------------------
+  /**
+   * The account the owner's own calls of a source would use in a space (TOOL-SPACE-015): the owner's own for a personal
+   * source, the space's for a space one, the agent's otherwise; refused while the one it needs is missing.
+   */
+  private async ownersAccount(owner: Principal, space: Space, source: CatalogSource): Promise<CallAccountSecret> {
+    if (source.account.kind === 'personal') {
+      const opened = await this.connections?.open(owner, source, space.id, false)
+      if (opened?.status !== 'connected')
+        throw new SpaceError(`connect your own account of ${source.title} first`, 'not-connected')
+      return opened.account
+    }
+    if (source.account.kind === 'space') {
+      const account = await this.openAccount(space.id, source.name)
+      if (!account?.headers) throw new SpaceError(`set the account of ${source.title} first`, 'space-account-not-set')
+      return account
+    }
+    return { kind: source.account.kind }
+  }
+
+  // ---- the provider of a feature with a contract: its declaration (TOOL-FEAT-011) ---------------------------------
+
+  /**
+   * What a provider declares with the account a reader's calls use in the space, read when that account is there; what is
+   * known otherwise (the core and the source's `capabilities`, before any connection).
+   */
+  private async providerState(source: CatalogSource, space: Space, reader?: Principal): Promise<ProviderState> {
+    const features = this.features
+    if (!features) return { capabilities: [], extras: [] }
+    let account: CallAccountSecret | undefined
+    if (source.account.kind === 'space') {
+      const opened = await this.openAccount(space.id, source.name)
+      if (opened?.headers) account = opened
+    } else if (source.account.kind === 'personal') {
+      const opened = reader ? await this.connections?.open(reader, source, space.id, false) : undefined
+      if (opened?.status === 'connected') account = opened.account
+    } else account = { kind: source.account.kind }
+    if (!account) return features.known(source, FeatureService.keyOf({ kind: source.account.kind, spaceId: space.id }))
+    return features.declared(source, account, FeatureService.keyOf(account))
+  }
+
+  // ---- what the settings show (PROF-TOOL-001, PROF-TOOL-033) --------------------------------------------------------
 
   /**
    * The tools a source offers, with what the pack and its server say of them; with `discover` false, from what the
-   * registry knows and the agent-pack only, with no connection.
+   * registry knows and the agent-pack only, with no connection. A provider of a feature with a contract offers its
+   * profile's tools, of the capabilities in use, then its offered extras (TOOL-FEAT-010, TOOL-FEAT-011).
    */
   private async toolsOf(
     source: CatalogSource,
-    spaceId?: string,
-    discover = true
-  ): Promise<{ name: string; spec?: ToolSpec }[]> {
+    space?: Space,
+    discover = true,
+    reader?: Principal
+  ): Promise<{ name: string; spec?: Pick<ToolSpec, 'annotations'> }[]> {
+    const profile = this.catalog.profileOf(source)
+    if (profile) {
+      const state =
+        discover && space
+          ? await this.providerState(source, space, reader)
+          : (this.features?.known(source, FeatureService.keyOf({ kind: source.account.kind, spaceId: space?.id })) ?? {
+              capabilities: [],
+              extras: [],
+            })
+      if (state.conformant === false) return []
+      const capabilities = state.capabilities.filter((c) => !CODE_ONLY_CAPABILITIES.includes(c))
+      return [
+        ...toolsInUse(profile, capabilities).map((t) => ({ name: t.name })),
+        ...state.extras.map((e) => ({ name: e.name, spec: e.annotations ? { annotations: e.annotations } : {} })),
+      ]
+    }
     let specs = (await this.registry.all()).filter((s) => s.source === source.name)
-    if (discover && !specs.length && source.kind === 'mcp' && source.account.kind === 'space' && spaceId) {
-      const account = await this.openAccount(spaceId, source.name)
+    if (discover && !specs.length && source.kind === 'mcp' && source.account.kind === 'space' && space) {
+      const account = await this.openAccount(space.id, source.name)
       if (account?.headers) {
         await this.registry.discover(source.name, account)
         specs = (await this.registry.all()).filter((s) => s.source === source.name)
@@ -300,22 +479,22 @@ export class SpaceToolService {
     record: Pick<SpaceToolRecord, 'approvals'>,
     tool: string
   ): SpaceApprovalPolicy {
-    return record.approvals?.[tool] ?? defaultPolicyOf(this.pack, source.tools[tool]?.approval)
+    return record.approvals?.[tool] ?? defaultPolicyOf(this.pack, this.catalog.declOf(source, tool)?.approval)
   }
 
-  /** The agent-pack's bounds of a tool's policy (TOOL-CAT-023). */
+  /** The agent-pack's bounds of a tool's policy (TOOL-CAT-023), on its feature for a tool of a profile (TOOL-FEAT-005). */
   public boundsFor(source: CatalogSource, tool: string): PolicyBounds {
-    return boundsOf(this.pack, source.tools[tool]?.approval)
+    return boundsOf(this.pack, this.catalog.declOf(source, tool)?.approval)
   }
 
-  /** The policies in force of a space's tools whose rule is `approval`, of every source added to it; no connection made. */
+  /** The policies in force of a space's tools whose rule is `approval`, of every provider in use in it; no connection made. */
   public async policiesOf(space: Space): Promise<PolicyInForce[]> {
     const out: PolicyInForce[] = []
     for (const entry of this.entriesOf(space)) {
-      const source = this.catalog.source(entry.source)
-      const record = source ? await this.store.spaceTools.get(space.id, entry.source) : undefined
-      if (!source || !record?.added) continue
-      for (const { name, spec } of await this.toolsOf(source, space.id, false)) {
+      const slot = await this.slotOf(space, entry)
+      if (!slot?.inUse) continue
+      const { source, record } = slot.inUse
+      for (const { name, spec } of await this.toolsOf(source, space, false)) {
         const packRule = this.catalog.packRuleOf(source, name, spec?.annotations).rule
         const owner = record.calls[name]
         const rule = owner ? strictest<SpaceCallRule>(packRule, owner) : packRule
@@ -342,22 +521,93 @@ export class SpaceToolService {
     return Object.keys(kept).length ? { ...rest, approvals: kept } : rest
   }
 
+  /** The location list of a provider of a feature with a contract, as the owner or a member reads it (PROF-TOOL-033). */
+  private listView(profile: FeatureProfile, entry: TemplateFeature, record: SpaceToolRecord, owner: boolean) {
+    const list = record.list
+    const any = list?.any === true
+    if (!owner)
+      return {
+        label: profile.location.labels.list,
+        any,
+        ...(any
+          ? { anyLabel: profile.location.labels.any }
+          : { entries: (list?.entries ?? []).map((e) => ({ label: e.label })) }),
+      }
+    return {
+      label: profile.location.labels.list,
+      any,
+      ...(any ? {} : { entries: (list?.entries ?? []).map((e) => ({ values: { ...e.values }, label: e.label })) }),
+      anyAllowed: entry.any === true,
+      anyLabel: profile.location.labels.any,
+      choices: true,
+      typed: false as const,
+      maxEntries: MAX_LIST_ENTRIES,
+    }
+  }
+
   private async view(
     space: Space,
-    entry: TemplateTool,
+    entry: TemplateFeature,
     owner: boolean,
     reader?: Principal,
     /** the warnings of the policies a request sent, for the answer of that request (TOOL-SPACE-020) */
     warningsFor?: Record<string, PolicyWarning[]>
   ): Promise<SpaceToolView | undefined> {
-    const source = this.catalog.source(entry.source)
-    if (!source) return undefined
-    const record = await this.recordOf(space, entry)
-    const account = await this.store.spaceAccounts.get(space.id, entry.source)
-    const state = this.stateOf(source, record, account)
+    const slot = await this.slotOf(space, entry)
+    if (!slot) return undefined
+    const { feature } = slot
+    const profile = feature.profile
+    const inUse = slot.inUse
+    const account = inUse ? await this.store.spaceAccounts.get(space.id, inUse.source.name) : undefined
+    const state: SpaceToolState = inUse
+      ? this.stateOf(inUse.source, inUse.record, account)
+      : slot.off
+        ? 'off'
+        : 'available'
     if (!owner && state !== 'ready') return undefined
+    const head: SpaceToolView = {
+      feature: {
+        id: feature.id,
+        title: feature.title,
+        profile: profile ? { id: profile.id, version: profile.version } : null,
+      },
+      ...(owner
+        ? {
+            providers: entry.providers.flatMap((id) => {
+              const source = this.catalog.source(id)
+              if (!source) return []
+              return [
+                {
+                  source: source.name,
+                  title: source.title,
+                  ...(source.description ? { description: source.description } : {}),
+                  account: { kind: source.account.kind },
+                  default: defaultProviderOf(entry) === source.name,
+                },
+              ]
+            }),
+          }
+        : {}),
+      source: inUse?.source.name ?? null,
+      title: inUse?.source.title ?? null,
+      ...(inUse ? { description: inUse.source.description ?? null } : {}),
+      state,
+      ...(owner ? { add: entry.add ?? 'owner' } : {}),
+      guests: entry.guests === true,
+    }
+    const pendingOf = (record: SpaceToolRecord | undefined) => {
+      const pending = record?.pendingChange
+      return pending
+        ? { changeId: pending.id, summary: pending.summary, code: pending.code, expiresAt: pending.expiresAt }
+        : null
+    }
+    // an item with no provider carries no account, bindings, list or tools, and a pending only while the choice of its
+    // provider waits (PROF-TOOL-033)
+    if (!inUse) return owner ? { ...head, pending: pendingOf(slot.pendingAdd?.record) } : head
+    const { source, record } = inUse
+    const providerState = profile ? await this.providerState(source, space, reader) : undefined
     const tools = []
-    for (const { name, spec } of await this.toolsOf(source, space.id)) {
+    for (const { name, spec } of await this.toolsOf(source, space, true, reader)) {
       const packRule = this.catalog.packRuleOf(source, name, spec?.annotations).rule
       const ownerRule = record.calls[name]
       const rule: SpaceCallRule = ownerRule ? strictest<SpaceCallRule>(packRule, ownerRule) : packRule
@@ -403,7 +653,7 @@ export class SpaceToolService {
           }
         : { label: b.label, value: values[b.name] ?? null, ...valueLabel }
     })
-    const accountView: SpaceToolView['account'] = { kind: source.account.kind }
+    const accountView: NonNullable<SpaceToolView['account']> = { kind: source.account.kind }
     // a person's own account (TOOL-SPACE-012): whether the reader's is connected for this space, never a label; and, for
     // a source that uses another's account, the source Your accounts lists it under (TOOL-CAT-015)
     if (source.account.kind === 'personal') {
@@ -424,30 +674,21 @@ export class SpaceToolService {
       accountView.setAt = account?.setAt ?? null
       accountView.setBy = account ? { name: (await this.hooks.nameOf?.(account.setByPrincipalId)) ?? '' } : null
     }
-    const pending = record.pendingChange
     return {
-      source: source.name,
-      title: source.title,
-      ...(source.description ? { description: source.description } : {}),
-      state,
-      ...(owner ? { add: entry.add ?? 'owner' } : {}),
-      guests: entry.guests === true,
+      ...head,
+      ...(providerState?.conformant !== undefined ? { conformant: providerState.conformant } : {}),
+      ...(profile ? { capabilities: providerState?.capabilities ?? [] } : {}),
       account: accountView,
       bindings,
+      ...(profile ? { list: this.listView(profile, entry, record, owner) } : {}),
       tools,
-      ...(owner
-        ? {
-            pending: pending
-              ? { changeId: pending.id, summary: pending.summary, code: pending.code, expiresAt: pending.expiresAt }
-              : null,
-          }
-        : {}),
+      ...(owner ? { pending: pendingOf(record) } : {}),
     }
   }
 
   /**
-   * `GET {sessions}/spaces/{id}/tools` (TOOL-SPACE-002): to the owner every source of the template, to another active
-   * member the `ready` ones; Personal has none; anyone else gets 404.
+   * `GET {sessions}/spaces/{id}/tools` (TOOL-SPACE-002, PROF-TOOL-033): one item per feature, to the owner every feature
+   * of the template, to another active member the `ready` ones; Personal has none; anyone else gets 404.
    */
   public async list(principal: Principal, spaceId: string): Promise<SpaceToolView[]> {
     const access = await this.spaces.access(principal, spaceId)
@@ -462,27 +703,54 @@ export class SpaceToolService {
     return out
   }
 
-  /** One source of a space, as its owner reads it. */
+  /** The feature a provider serves in a space, as its owner reads it. */
   public async ownerView(
     space: Space,
     sourceId: string,
     reader?: Principal,
     warningsFor?: Record<string, PolicyWarning[]>
   ): Promise<SpaceToolView> {
-    const { entry } = this.entryOf(space, sourceId)
+    const entry = this.entryOfSource(space, sourceId)
+    if (!entry) throw new SpaceError('this source is no provider of a feature of the space template', 'not-found')
     return (await this.view(space, entry, true, reader, warningsFor)) as SpaceToolView
   }
 
   // ---- what the owner changes -------------------------------------------------------------------------------------
 
-  /** The owner of a space, and the source its template names; Personal's tools change never (`409 personal-space`). */
+  /**
+   * The owner of a space, and the feature of the source its template names; Personal's tools change never (`409
+   * personal-space`); a source the template names as a provider of no feature is not found (`404`).
+   */
   private async owned(
     principal: Principal,
     spaceId: string,
     sourceId: string
-  ): Promise<{ space: Space; entry: TemplateTool; source: CatalogSource }> {
+  ): Promise<{ space: Space; slot: FeatureSlot; source: CatalogSource }> {
     const access = await this.spaces.owned(principal, spaceId)
-    return { space: access.space, ...this.entryOf(access.space, sourceId) }
+    const entry = this.entryOfSource(access.space, sourceId)
+    const source = entry ? this.catalog.source(sourceId) : undefined
+    const slot = entry && source ? await this.slotOf(access.space, entry) : undefined
+    if (!entry || !source || !slot) throw new SpaceError('this source is not one of the space template', 'not-found')
+    return { space: access.space, slot, source }
+  }
+
+  /**
+   * The provider a request about a source of a feature names, when it is the one in use (TOOL-FEAT-006): `409 not-added`
+   * while the feature has none, `409 provider-not-used` for another provider the template allows.
+   */
+  private inUse(slot: FeatureSlot, source: CatalogSource): { source: CatalogSource; record: SpaceToolRecord } {
+    if (!slot.inUse) throw new SpaceError('add the source to the space first', 'not-added')
+    if (slot.inUse.source.name !== source.name)
+      throw new SpaceError(
+        `${slot.feature.title} uses ${slot.inUse.source.title} in this space, not ${source.title}`,
+        'provider-not-used'
+      )
+    return slot.inUse
+  }
+
+  /** Whether a change of the feature waits for the phone, whichever provider it concerns (TOOL-SPACE-009, TOOL-FEAT-007). */
+  private pendingOf(slot: FeatureSlot): SpaceToolRecord | undefined {
+    return slot.records.find((r) => r.pendingChange)
   }
 
   /**
@@ -535,12 +803,13 @@ export class SpaceToolService {
   private async checkCalls(
     space: Space,
     source: CatalogSource,
-    calls: unknown
+    calls: unknown,
+    reader?: Principal
   ): Promise<Record<string, SpaceCallRule>> {
     if (calls === undefined || calls === null) return {}
     if (typeof calls !== 'object' || Array.isArray(calls))
       throw new SpaceError('calls is an object of rules', 'bad-request', 'calls')
-    const tools = await this.toolsOf(source, space.id)
+    const tools = await this.toolsOf(source, space, true, reader)
     const out: Record<string, SpaceCallRule> = {}
     for (const [name, rule] of Object.entries(calls as Record<string, unknown>)) {
       const field = `calls.${name}`
@@ -556,12 +825,111 @@ export class SpaceToolService {
     return out
   }
 
+  /**
+   * The location list the owner sends for a provider of a feature with a contract (TOOL-SPACE-014, TOOL-FEAT-014): any value
+   * where the template allows it, or at most ten entries, each one location the provider answered for the account the
+   * owner's own calls use, read again now and kept with the title read, and portable for a provider of each person's own
+   * account in a team space. Undefined when the request sends none.
+   */
+  private async checkList(
+    principal: Principal,
+    space: Space,
+    entry: TemplateFeature,
+    source: CatalogSource,
+    list: unknown,
+    inForce: SpaceToolList | undefined
+  ): Promise<SpaceToolList | undefined> {
+    if (list === undefined || list === null) return undefined
+    const profile = this.catalog.profileOf(source)
+    if (!profile)
+      throw new SpaceError(`${source.title} declares no list: its bindings take one value each`, 'bad-request', 'list')
+    if (!isObject(list)) throw new SpaceError('list is { entries } or { any: true }', 'bad-request', 'list')
+    if (list.any !== undefined) {
+      if (list.any !== true || list.entries !== undefined)
+        throw new SpaceError('list is { entries } or { any: true }', 'bad-request', 'list.any')
+      if (!entry.any)
+        throw new SpaceError(
+          `the template does not allow ${profile.location.labels.any}`,
+          'any-not-allowed',
+          'list.any'
+        )
+      return { any: true }
+    }
+    if (!Array.isArray(list.entries)) throw new SpaceError('list.entries is a list', 'bad-request', 'list.entries')
+    if (list.entries.length > MAX_LIST_ENTRIES)
+      throw new SpaceError(`a list holds at most ${MAX_LIST_ENTRIES} entries`, 'too-many-entries', 'list.entries')
+    const argument = profile.location.argument
+    const held = new Map((inForce?.entries ?? []).map((e) => [e.values[argument], e.label]))
+    const read = this.choicesRead.get(`${space.id}|${source.name}`)
+    const out: { values: Record<string, string>; label: string }[] = []
+    const seen = new Set<string>()
+    const fresh = new Map<string, { label: string; portable: boolean }>()
+    for (const [i, raw] of list.entries.entries()) {
+      const at = `list.entries.${i}`
+      if (!isObject(raw) || Object.keys(raw).some((k) => k !== argument) || !(argument in raw))
+        throw new SpaceError(
+          `an entry names one ${profile.location.labels.one.toLowerCase()}, as ${argument}`,
+          'bad-binding',
+          at
+        )
+      const value = typeof raw[argument] === 'string' ? (raw[argument] as string).trim() : ''
+      if (!value)
+        throw new SpaceError(`${profile.location.labels.one} is a reference`, 'bad-binding', `${at}.${argument}`)
+      if (seen.has(value)) throw new SpaceError('this entry is already in the list', 'repeated-entry', at)
+      seen.add(value)
+      const label = held.get(value)
+      if (label !== undefined) {
+        out.push({ values: { [argument]: value }, label })
+        continue
+      }
+      // a location the provider listed to the owner: read again now with the owner's account, never a value the code cannot
+      // read (TOOL-FEAT-014, PROF-TOOL-023)
+      const choice = read?.get(value)
+      if (!choice || Date.now() - choice.at > CHOICES_SECONDS * 1000)
+        throw new SpaceError(
+          `pick the ${profile.location.labels.one.toLowerCase()} from those ${source.title} lists`,
+          'bad-binding',
+          `${at}.${argument}`
+        )
+      if (!fresh.has(value)) {
+        const again = await this.readChoices(principal, space, source, profile, choice.text)
+        for (const c of again) fresh.set(c.value, { label: c.label, portable: c.portable })
+      }
+      const now = fresh.get(value)
+      if (!now)
+        throw new SpaceError(
+          `${source.title} no longer lists this ${profile.location.labels.one.toLowerCase()}`,
+          'bad-binding',
+          `${at}.${argument}`
+        )
+      // a location that names the same place for every account, for a provider of each person's own (TOOL-FEAT-014)
+      if (source.account.kind === 'personal' && !now.portable)
+        throw new SpaceError(
+          `this ${profile.location.labels.one.toLowerCase()} does not name the same place for every member's account`,
+          'not-portable',
+          at
+        )
+      out.push({ values: { [argument]: value }, label: now.label })
+    }
+    return { entries: out }
+  }
+
   /** The rule in force for a tool in a space: the owner's, never looser than the pack's (TOOL-CALL-002). */
   private async ruleInForce(space: Space, source: CatalogSource, record: SpaceToolRecord, tool: string) {
-    const spec = (await this.toolsOf(source, space.id)).find((t) => t.name === tool)?.spec
+    const spec = (await this.toolsOf(source, space, false)).find((t) => t.name === tool)?.spec
     const packRule = this.catalog.packRuleOf(source, tool, spec?.annotations).rule
     const owner = record.calls[tool]
     return owner ? strictest<SpaceCallRule>(packRule, owner) : packRule
+  }
+
+  /** "Folders: /Projects/Alpha, /Projects/Beta", or the label of any value (TOOL-SPACE-014). */
+  private listWords(source: CatalogSource, list: SpaceToolList | undefined): string | undefined {
+    const profile = this.catalog.profileOf(source)
+    if (!profile || !list) return undefined
+    if (list.any)
+      return `${profile.location.labels.any}. Each member's calls use their own account, but what ${this.agentName} reads with it goes into this space's conversations, which the other members read once they are shared.`
+    if (!list.entries?.length) return `${profile.location.labels.list}: none`
+    return `${profile.location.labels.list}: ${list.entries.map((e) => e.label).join(', ')}`
   }
 
   /** The words of a change: the space, the source and every value but the account's (TOOL-SPACE-008). */
@@ -576,12 +944,15 @@ export class SpaceToolService {
       labels?: Record<string, string>
       /** the policies a change sets, with those in force (TOOL-SPACE-019) */
       approvals?: Record<string, { before: SpaceApprovalPolicy; after: SpaceApprovalPolicy }>
+      list?: SpaceToolList
     }
   ): Promise<string> {
     const parts: string[] = []
     for (const [name, value] of Object.entries(change.bindings ?? {}))
       parts.push(`${source.bindings.find((b) => b.name === name)?.label ?? name}: ${change.labels?.[name] ?? value}`)
-    const tools = await this.toolsOf(source, space.id)
+    const words = this.listWords(source, change.list)
+    if (words) parts.push(words)
+    const tools = await this.toolsOf(source, space, false)
     const title = (name: string) =>
       this.catalog.toolTitle(source, name, tools.find((t) => t.name === name)?.spec?.annotations)
     for (const [name, rule] of Object.entries(change.calls ?? {})) parts.push(`${title(name)}: ${RULE_WORDS[rule]}`)
@@ -608,8 +979,8 @@ export class SpaceToolService {
   }
 
   /**
-   * Holds a change that grants something until the owner's device confirms it (TOOL-SPACE-008): one per source
-   * (TOOL-SPACE-009), with a code and its expiry; refused with no capability channel to serve it.
+   * Holds a change that grants something until the owner's device confirms it (TOOL-SPACE-008): one per feature
+   * (TOOL-SPACE-009, TOOL-FEAT-007), with a code and its expiry; refused with no capability channel to serve it.
    */
   private async hold(
     principal: Principal,
@@ -618,7 +989,7 @@ export class SpaceToolService {
     record: SpaceToolRecord,
     change: Omit<PendingToolChange, 'id' | 'code' | 'expiresAt' | 'sessionId' | 'requestedBy'>
   ): Promise<SpaceToolRecord> {
-    if (record.pendingChange) throw new SpaceError('a change of this source waits for the phone', 'change-pending')
+    if (record.pendingChange) throw new SpaceError('a change of this feature waits for the phone', 'change-pending')
     const pending: PendingToolChange = {
       ...change,
       id: prefixedId('chg'),
@@ -667,53 +1038,95 @@ export class SpaceToolService {
     return (await this.store.spaceTools.get(space.id, record.sourceId)) ?? held
   }
 
-  /** `POST {sessions}/spaces/{id}/tools` (TOOL-SPACE-003): add an `available` source, or switch an `off` one back on. */
+  /**
+   * `POST {sessions}/spaces/{id}/tools` (TOOL-SPACE-003, TOOL-FEAT-006, TOOL-FEAT-007): the owner chooses the provider of an
+   * `available` feature, or of an `off` one, with values for its bindings, its location list and rules for its tools; with
+   * `replaces`, the provider in use, the same request changes the provider of a feature that has one.
+   */
   public async add(
     principal: Principal,
     session: Session,
     spaceId: string,
-    body: { source?: unknown; bindings?: unknown; calls?: unknown }
+    body: { source?: unknown; replaces?: unknown; bindings?: unknown; list?: unknown; calls?: unknown }
   ): Promise<SpaceToolView> {
     if (typeof body.source !== 'string' || !body.source)
       throw new SpaceError('source is required', 'bad-request', 'source')
-    const { space, entry, source } = await this.owned(principal, spaceId, body.source)
-    const record = await this.recordOf(space, entry)
-    if (record.added) throw new SpaceError('the source is in the space already', 'already-added')
+    const { space, slot, source } = await this.owned(principal, spaceId, body.source)
+    const { feature } = slot
+    if (slot.inUse) {
+      if (slot.inUse.source.name === source.name)
+        throw new SpaceError('the source is in the space already', 'already-added')
+      if (body.replaces === undefined || body.replaces === null)
+        throw new SpaceError(
+          `${feature.title} uses ${slot.inUse.source.title} in this space: change its provider with replaces`,
+          'feature-has-provider'
+        )
+    }
+    if (body.replaces !== undefined && body.replaces !== null && body.replaces !== slot.inUse?.source.name)
+      throw new SpaceError(`replaces names the provider of ${feature.title} in use`, 'bad-request', 'replaces')
+    if (this.pendingOf(slot)) throw new SpaceError(`a change of ${feature.title} waits for the phone`, 'change-pending')
     const { values: bindings, labels } = await this.checkBindings(principal, source, body.bindings)
-    const calls = await this.checkCalls(space, source, body.calls)
-    const summary = await this.summaryOf(`Add ${source.title} to ${space.title}`, space, source, {
+    const list = await this.checkList(principal, space, slot.entry, source, body.list, undefined)
+    const calls = await this.checkCalls(space, source, body.calls, principal)
+    const extra = {
+      ...(Object.keys(labels).length ? { bindingLabels: labels } : {}),
+      ...(list ? { list } : {}),
+    }
+    if (slot.inUse) {
+      // a change of provider (TOOL-FEAT-007): it waits on the record of the provider in use, which stays in force until then
+      const former = slot.inUse.source
+      const head = `Use ${source.title} for ${feature.title} in ${space.title}, in place of ${former.title}`
+      const values = await this.summaryOf(head, space, source, { bindings, labels, list })
+      const summary = `${values}. ${this.agentName} stops using ${former.title} in this space. Nothing is copied from ${former.title} to ${source.title}.`
+      await this.hold(principal, session, space, slot.inUse.record, {
+        kind: 'provider',
+        source: source.name,
+        bindings,
+        calls,
+        summary,
+        ...extra,
+      })
+      return this.ownerView(space, former.name, principal)
+    }
+    const record: SpaceToolRecord = slot.records.find((r) => r.sourceId === source.name) ?? {
+      spaceId: space.id,
+      sourceId: source.name,
+      added: false,
+      bindings: {},
+      calls: {},
+      updatedAt: nowIso(),
+    }
+    const summary = await this.summaryOf(`Use ${source.title} for ${feature.title} in ${space.title}`, space, source, {
       bindings,
       calls,
       labels,
+      list,
     })
-    await this.hold(principal, session, space, record, {
-      kind: 'add',
-      bindings,
-      calls,
-      summary,
-      ...(Object.keys(labels).length ? { bindingLabels: labels } : {}),
-    })
+    await this.hold(principal, session, space, record, { kind: 'add', bindings, calls, summary, ...extra })
     return this.ownerView(space, source.name, principal)
   }
 
   /**
-   * `PATCH {sessions}/spaces/{id}/tools/{source}` (TOOL-SPACE-004/006): a change that only makes rules stricter applies at
-   * once (`200`); one that sets a binding or loosens a rule waits whole for the phone (`202`).
+   * `PATCH {sessions}/spaces/{id}/tools/{source}` (TOOL-SPACE-004/006/014): a change that only makes rules stricter or a
+   * list narrower applies at once (`200`); one that sets a binding, widens a list or loosens a rule waits whole for the
+   * phone (`202`).
    */
   public async patch(
     principal: Principal,
     session: Session,
     spaceId: string,
     sourceId: string,
-    body: { bindings?: unknown; calls?: unknown; approvals?: unknown }
+    body: { bindings?: unknown; calls?: unknown; approvals?: unknown; list?: unknown }
   ): Promise<{ status: 200 | 202; tool: SpaceToolView }> {
-    const { space, entry, source } = await this.owned(principal, spaceId, sourceId)
-    const record = await this.recordOf(space, entry)
-    if (!record.added) throw new SpaceError('add the source to the space first', 'not-added')
+    const { space, slot, source } = await this.owned(principal, spaceId, sourceId)
+    const { record } = this.inUse(slot, source)
     const { values: bindings, labels } = await this.checkBindings(principal, source, body.bindings)
-    const calls = await this.checkCalls(space, source, body.calls)
+    const calls = await this.checkCalls(space, source, body.calls, principal)
+    const list = await this.checkList(principal, space, slot.entry, source, body.list, record.list)
     const changedBindings = Object.fromEntries(Object.entries(bindings).filter(([k, v]) => record.bindings[k] !== v))
     let grants = Object.keys(changedBindings).length > 0
+    const changedList = list && !sameList(list, record.list) ? list : undefined
+    if (changedList && !narrowsList(changedList, record.list)) grants = true
     const changedCalls: Record<string, SpaceCallRule> = {}
     for (const [tool, rule] of Object.entries(calls)) {
       const inForce = await this.ruleInForce(space, source, record, tool)
@@ -737,24 +1150,31 @@ export class SpaceToolService {
     if (
       !Object.keys(changedBindings).length &&
       !Object.keys(changedCalls).length &&
-      !Object.keys(changedApprovals).length
+      !Object.keys(changedApprovals).length &&
+      !changedList
     )
       return { status: 200, tool: await this.ownerView(space, source.name, principal, warningsFor) }
     if (grants) {
       // one granting change at a time; one that only narrows applies whatever waits (TOOL-SPACE-009)
-      if (record.pendingChange) throw new SpaceError('a change of this source waits for the phone', 'change-pending')
+      if (this.pendingOf(slot))
+        throw new SpaceError(`a change of ${slot.feature.title} waits for the phone`, 'change-pending')
       const changedLabels = Object.fromEntries(Object.entries(labels).filter(([k]) => k in changedBindings))
-      const summary = await this.summaryOf(`Change ${source.title} in ${space.title}`, space, source, {
+      const head = changedList
+        ? `Limit ${source.title} in ${space.title} to`
+        : `Change ${source.title} in ${space.title}`
+      const summary = await this.summaryOf(head, space, source, {
         bindings: changedBindings,
         calls: changedCalls,
         labels: changedLabels,
         approvals: policyChanges,
+        ...(changedList ? { list: changedList } : {}),
       })
       await this.hold(principal, session, space, record, {
         kind: 'patch',
         bindings: changedBindings,
         calls: changedCalls,
         ...(Object.keys(changedApprovals).length ? { approvals: changedApprovals } : {}),
+        ...(changedList ? { list: changedList } : {}),
         summary,
         ...(Object.keys(changedLabels).length ? { bindingLabels: changedLabels } : {}),
       })
@@ -768,15 +1188,25 @@ export class SpaceToolService {
         ...current,
         calls: { ...current.calls, ...changedCalls },
         ...(Object.keys(approvals).length ? { approvals } : {}),
+        ...(changedList ? { list: changedList } : {}),
         updatedAt: nowIso(),
         updatedBy: principal.id,
       })
     )
     await this.hooks.endAllowances?.(space.id, source.name)
-    await this.spaces.record(space.id, principal.id, 'tool-changed', { sourceId: source.name })
+    await this.spaces.record(space.id, principal.id, 'tool-changed', {
+      sourceId: source.name,
+      featureId: slot.feature.id,
+    })
     await this.governance?.review(space)
     const tool = await this.ownerView(space, source.name, principal, warningsFor)
-    await this.announce(space, { spaceId: space.id, source: source.name, state: tool.state, outcome: 'applied' })
+    await this.announce(space, {
+      spaceId: space.id,
+      feature: slot.feature.id,
+      source: source.name,
+      state: tool.state,
+      outcome: 'applied',
+    })
     return { status: 200, tool }
   }
 
@@ -795,7 +1225,7 @@ export class SpaceToolService {
     if (typeof approvals !== 'object' || Array.isArray(approvals))
       throw new SpaceError('approvals is an object of policies by tool', 'bad-request', 'approvals')
     if (!this.governance) throw new SpaceError('this agent sets no approval policy', 'bad-request', 'approvals')
-    const tools = await this.toolsOf(source, space.id)
+    const tools = await this.toolsOf(source, space)
     const out: Record<string, SpaceApprovalPolicy> = {}
     for (const [name, raw] of Object.entries(approvals as Record<string, unknown>)) {
       const field = `approvals.${name}`
@@ -854,12 +1284,12 @@ export class SpaceToolService {
     sourceId: string,
     values: unknown
   ): Promise<SpaceToolView> {
-    const { space, entry, source } = await this.owned(principal, spaceId, sourceId)
+    const { space, slot, source } = await this.owned(principal, spaceId, sourceId)
     if (source.account.kind !== 'space')
       throw new SpaceError('the calls of this source do not run with an account of the space', 'no-space-account')
-    const record = await this.recordOf(space, entry)
-    if (!record.added) throw new SpaceError('add the source to the space first', 'not-added')
-    if (record.pendingChange) throw new SpaceError('a change of this source waits for the phone', 'change-pending')
+    const { record } = this.inUse(slot, source)
+    if (this.pendingOf(slot))
+      throw new SpaceError(`a change of ${slot.feature.title} waits for the phone`, 'change-pending')
     const checked = this.checkValues(source.account.fields ?? [], values)
     // the values of every field together, as one record under one key (TOOL-ACCESS-004)
     const keyRef = this.crypto.newWrappedKey()
@@ -876,54 +1306,165 @@ export class SpaceToolService {
 
   /** `DELETE …/account` (TOOL-SPACE-005): cleared at once, its key destroyed. */
   public async clearAccount(principal: Principal, spaceId: string, sourceId: string): Promise<SpaceToolView> {
-    const { space, source } = await this.owned(principal, spaceId, sourceId)
+    const { space, slot, source } = await this.owned(principal, spaceId, sourceId)
     if (source.account.kind !== 'space')
       throw new SpaceError('the calls of this source do not run with an account of the space', 'no-space-account')
+    if (slot.inUse && slot.inUse.source.name !== source.name) this.inUse(slot, source)
     if (await this.store.spaceAccounts.get(space.id, source.name)) {
       await this.destroyAccount(space.id, source.name)
       await this.hooks.endAllowances?.(space.id, source.name)
-      await this.spaces.record(space.id, principal.id, 'account-cleared', { sourceId: source.name })
+      await this.spaces.record(space.id, principal.id, 'account-cleared', {
+        sourceId: source.name,
+        featureId: slot.feature.id,
+      })
     }
     const tool = await this.ownerView(space, source.name, principal)
-    await this.announce(space, { spaceId: space.id, source: source.name, state: tool.state, outcome: 'applied' })
+    await this.announce(space, {
+      spaceId: space.id,
+      feature: slot.feature.id,
+      source: source.name,
+      state: tool.state,
+      outcome: 'applied',
+    })
     return tool
   }
 
   /**
    * `DELETE {sessions}/spaces/{id}/tools/{source}` (TOOL-SPACE-007): at once, `available` again or `off`, its bindings,
-   * rules and account dropped, its pending change withdrawn, the allowances of its tools ended.
+   * list, rules and account dropped, its pending change withdrawn, the allowances of its tools ended.
    */
   public async remove(principal: Principal, spaceId: string, sourceId: string): Promise<SpaceToolView> {
-    const { space, entry, source } = await this.owned(principal, spaceId, sourceId)
-    const record = await this.recordOf(space, entry)
-    const wasAdded = record.added
-    if (record.pendingChange) await this.drop(space, record, 'cancelled', true)
-    await this.store.spaceTools.save({
-      spaceId: space.id,
-      sourceId: source.name,
-      added: false,
-      ...(entry.add === 'auto' ? { removed: true } : {}),
-      bindings: {},
-      calls: {},
-      updatedAt: nowIso(),
-      updatedBy: principal.id,
-    })
+    const { space, slot, source } = await this.owned(principal, spaceId, sourceId)
+    if (slot.inUse && slot.inUse.source.name !== source.name) this.inUse(slot, source)
+    const wasAdded = !!slot.inUse
+    for (const record of slot.records) if (record.pendingChange) await this.drop(space, record, 'cancelled', true)
+    // the provider removed leaves a record only to say that an `add: auto` feature is `off` (TOOL-SPACE-001)
+    for (const record of slot.records)
+      if (record.sourceId !== source.name || slot.entry.add !== 'auto')
+        await this.store.spaceTools.delete(space.id, record.sourceId)
+    if (slot.entry.add === 'auto')
+      await this.store.spaceTools.save({
+        spaceId: space.id,
+        sourceId: source.name,
+        added: false,
+        removed: true,
+        bindings: {},
+        calls: {},
+        updatedAt: nowIso(),
+        updatedBy: principal.id,
+      })
     await this.destroyAccount(space.id, source.name)
     await this.hooks.endAllowances?.(space.id, source.name)
-    if (wasAdded) await this.spaces.record(space.id, principal.id, 'tool-removed', { sourceId: source.name })
+    if (wasAdded)
+      await this.spaces.record(space.id, principal.id, 'tool-removed', {
+        sourceId: source.name,
+        featureId: slot.feature.id,
+      })
     // its policies left with it: a notice of one that needed attention ends (TOOL-SPACE-018)
     await this.governance?.review(space)
     const tool = await this.ownerView(space, source.name, principal)
-    await this.announce(space, { spaceId: space.id, source: source.name, state: tool.state, outcome: 'applied' })
+    await this.announce(space, {
+      spaceId: space.id,
+      feature: slot.feature.id,
+      source: source.name,
+      state: tool.state,
+      outcome: 'applied',
+    })
     return tool
   }
 
-  /** `DELETE …/pending` (TOOL-SPACE-009): the change is withdrawn, its flow closed as cancelled, its token destroyed. */
+  /**
+   * `DELETE …/pending` (TOOL-SPACE-009, PROF-TOOL-034): the change of the feature is withdrawn, whichever of its providers
+   * the request names, its flow closed as cancelled, its account's values destroyed.
+   */
   public async withdraw(principal: Principal, spaceId: string, sourceId: string): Promise<void> {
-    const { space, entry } = await this.owned(principal, spaceId, sourceId)
-    const record = await this.recordOf(space, entry)
-    if (!record.pendingChange) throw new SpaceError('nothing of this source waits for the phone', 'not-found')
+    const { space, slot } = await this.owned(principal, spaceId, sourceId)
+    const record = this.pendingOf(slot)
+    if (!record) throw new SpaceError('nothing of this feature waits for the phone', 'not-found')
     await this.drop(space, record, 'cancelled', true)
+  }
+
+  // ---- the choices of a feature's location (TOOL-SPACE-015, TOOL-FEAT-014) -------------------------------------------
+
+  /** The locations the provider answers to a text, read with an account, outside any conversation and with no record. */
+  private async readChoices(
+    owner: Principal,
+    space: Space,
+    source: CatalogSource,
+    profile: FeatureProfile,
+    text: string
+  ): Promise<{ value: string; label: string; portable: boolean }[]> {
+    const account = await this.ownersAccount(owner, space, source)
+    const server = this.registry.sourceById(`mcp:${source.name}`) as
+      | {
+          callTool?: (
+            name: string,
+            args: Record<string, unknown>,
+            ctx: never
+          ) => Promise<{ data?: unknown; isError?: boolean }>
+        }
+      | undefined
+    if (!server?.callTool) throw new SpaceError(`${source.title} cannot be reached`, 'source-unavailable')
+    let answer: { data?: unknown; isError?: boolean }
+    try {
+      answer = await server.callTool(profile.location.listTool, { query: text, limit: MAX_CHOICES }, {
+        principal: owner,
+        roles: owner.roles,
+        logger: this.logger,
+        language: this.pack.language.agent,
+        spaceId: space.id,
+        account,
+      } as never)
+    } catch (error) {
+      this.logger.warn(
+        { spaceId: space.id, source: source.name, err: error instanceof Error ? error.message : String(error) },
+        'the choices of a location could not be read'
+      )
+      throw new SpaceError(`${source.title} did not answer`, 'source-unavailable')
+    }
+    const data = isObject(answer.data) ? answer.data[profile.location.listMember] : undefined
+    if (answer.isError || !Array.isArray(data))
+      throw new SpaceError(
+        `${source.title} did not list its ${profile.location.labels.list.toLowerCase()}`,
+        'source-unavailable'
+      )
+    const out: { value: string; label: string; portable: boolean }[] = []
+    for (const item of data) {
+      if (!isObject(item) || typeof item.ref !== 'string' || !item.ref) continue
+      if (out.some((o) => o.value === item.ref)) continue
+      const label = typeof item.title === 'string' && item.title ? item.title : item.ref
+      out.push({ value: item.ref, label, portable: item.portable === true })
+      if (out.length >= MAX_CHOICES) break
+    }
+    return out
+  }
+
+  /**
+   * `GET {sessions}/spaces/{id}/tools/{source}/list/choices?text=` (TOOL-SPACE-015, PROF-TOOL-023): for the owner alone,
+   * the locations of a provider of a feature with a contract that its tool listing locations answers to the text, read with
+   * the account the owner's own calls would use in the space; nothing of it reaches a model or a record. Any provider the
+   * template allows answers, the one in use or another: the list of a change of provider is picked before it is sent
+   * (PROF-TOOL-034).
+   */
+  public async choices(
+    principal: Principal,
+    spaceId: string,
+    sourceId: string,
+    text: unknown
+  ): Promise<{ values: Record<string, string>; label: string }[]> {
+    const { space, slot, source } = await this.owned(principal, spaceId, sourceId)
+    const profile = this.catalog.profileOf(source)
+    if (!profile) throw new SpaceError(`${source.title} declares no list to search`, 'not-found')
+    if (!slot.inUse && slot.off) throw new SpaceError(`${slot.feature.title} is off in this space`, 'not-found')
+    if (typeof text !== 'string' || text.length < 1 || text.length > 100)
+      throw new SpaceError('text is 1 to 100 characters', 'bad-request', 'text')
+    const read = await this.readChoices(principal, space, source, profile, text)
+    const key = `${space.id}|${source.name}`
+    const kept = this.choicesRead.get(key) ?? new Map()
+    const at = Date.now()
+    for (const choice of read) kept.set(choice.value, { label: choice.label, portable: choice.portable, text, at })
+    this.choicesRead.set(key, kept)
+    return read.map((c) => ({ values: { [profile.location.argument]: c.value }, label: c.label }))
   }
 
   // ---- what the phone decides ---------------------------------------------------------------------------------------
@@ -948,11 +1489,17 @@ export class SpaceToolService {
     await this.drop(space, record, outcome, false)
   }
 
+  /** The feature of a source in a space, by its template (D120). */
+  private featureIdOf(space: Space, sourceId: string): string {
+    return this.entryOfSource(space, sourceId)?.feature ?? this.catalog.source(sourceId)?.feature ?? ''
+  }
+
   /** The change the phone confirmed applies at once (TOOL-SPACE-008), and is recorded in the space's activity. */
   private async apply(space: Space, record: SpaceToolRecord): Promise<void> {
     const change = record.pendingChange as PendingToolChange
     const source = this.catalog.source(record.sourceId)
     if (!source) return
+    if (change.kind === 'provider') return this.applyProvider(space, record, change)
     // an account whose values no longer fit its source's fields (the agent-pack changed while it waited) is not set
     if (
       change.kind === 'account' &&
@@ -978,15 +1525,26 @@ export class SpaceToolService {
       updatedAt: nowIso(),
       updatedBy: change.requestedBy,
     }
+    const featureId = this.featureIdOf(space, record.sourceId)
     if (change.kind === 'add') {
       next.added = true
       next.bindings = { ...(change.bindings ?? {}) }
       next.calls = { ...(change.calls ?? {}) }
       next.bindingLabels = change.bindingLabels ? { ...change.bindingLabels } : undefined
+      next.list = change.list
+      // the feature's other providers, an `off` one among them, leave it: one provider at a time (TOOL-FEAT-003)
+      const entry = this.entryOfSource(space, record.sourceId)
+      for (const other of await this.store.spaceTools.listBySpace(space.id))
+        if (other.sourceId !== record.sourceId && entry?.providers.includes(other.sourceId)) {
+          if (other.pendingChange) await this.drop(space, other, 'cancelled', true)
+          await this.store.spaceTools.delete(space.id, other.sourceId)
+          await this.destroyAccount(space.id, other.sourceId)
+        }
     } else if (change.kind === 'patch') {
       next.bindings = { ...record.bindings, ...(change.bindings ?? {}) }
       next.calls = { ...record.calls, ...(change.calls ?? {}) }
       if (change.approvals) next.approvals = { ...(record.approvals ?? {}), ...change.approvals }
+      if (change.list) next.list = change.list
       // the name of a value the change sets comes with it; a value set otherwise has none
       const changed = new Set(Object.keys(change.bindings ?? {}))
       const labels = {
@@ -1014,7 +1572,7 @@ export class SpaceToolService {
       space.id,
       change.requestedBy,
       change.kind === 'add' ? 'tool-added' : change.kind === 'account' ? 'account-set' : 'tool-changed',
-      { sourceId: record.sourceId }
+      { sourceId: record.sourceId, featureId }
     )
     const state = this.stateOf(source, next, await this.store.spaceAccounts.get(space.id, record.sourceId))
     this.logger.info(
@@ -1023,7 +1581,62 @@ export class SpaceToolService {
     )
     await this.announce(space, {
       spaceId: space.id,
+      feature: featureId,
       source: record.sourceId,
+      state,
+      changeId: change.id,
+      outcome: 'applied',
+    })
+  }
+
+  /**
+   * A change of provider, confirmed (TOOL-FEAT-007), as one step: the former provider's bindings, list, rules and policies
+   * dropped with its record, the key of its space account destroyed, the allowances of its tools ended; the new provider
+   * put in, `setup` or `ready`, with the bindings, list and rules the change carried; the feature's mark renewed, so that a
+   * reference the model read of the former provider reaches no provider (TOOL-FEAT-016). Each member's own account of the
+   * former provider stays theirs (TOOL-CONN-009); nothing is copied from one provider to the other, nothing deleted at
+   * either (TOOL-FEAT-008).
+   */
+  private async applyProvider(space: Space, record: SpaceToolRecord, change: PendingToolChange): Promise<void> {
+    const former = this.catalog.source(record.sourceId)
+    const next = change.source ? this.catalog.source(change.source) : undefined
+    const entry = this.entryOfSource(space, record.sourceId)
+    if (!former || !next || !entry?.providers.includes(next.name)) return this.drop(space, record, 'failed', false)
+    for (const other of await this.store.spaceTools.listBySpace(space.id))
+      if (entry.providers.includes(other.sourceId)) {
+        await this.store.spaceTools.delete(space.id, other.sourceId)
+        await this.destroyAccount(space.id, other.sourceId)
+        await this.hooks.endAllowances?.(space.id, other.sourceId)
+      }
+    const added: SpaceToolRecord = {
+      spaceId: space.id,
+      sourceId: next.name,
+      added: true,
+      bindings: { ...(change.bindings ?? {}) },
+      calls: { ...(change.calls ?? {}) },
+      ...(change.bindingLabels ? { bindingLabels: { ...change.bindingLabels } } : {}),
+      ...(change.list ? { list: change.list } : {}),
+      updatedAt: nowIso(),
+      updatedBy: change.requestedBy,
+    }
+    await this.store.spaceTools.save(added)
+    if (this.catalog.profileOf(next)) await this.features?.renewMark(space.id, entry.feature, next.name)
+    await this.governance?.review(space)
+    await this.spaces.record(space.id, change.requestedBy, 'provider-changed', {
+      sourceId: next.name,
+      featureId: entry.feature,
+      formerSourceId: former.name,
+    })
+    const state = this.stateOf(next, added, await this.store.spaceAccounts.get(space.id, next.name))
+    this.logger.info(
+      { spaceId: space.id, feature: entry.feature, source: next.name, formerSource: former.name, changeId: change.id },
+      'the provider of a feature of a space changed'
+    )
+    await this.announce(space, {
+      spaceId: space.id,
+      feature: entry.feature,
+      source: next.name,
+      formerSource: former.name,
       state,
       changeId: change.id,
       outcome: 'applied',
@@ -1035,7 +1648,9 @@ export class SpaceToolService {
     const change = record.pendingChange
     if (!change) return
     const { pendingChange: _dropped, ...next } = record
-    await this.store.spaceTools.save(next)
+    // the record of a first choice that never applied leaves nothing behind
+    if (!next.added && !next.removed) await this.store.spaceTools.delete(space.id, record.sourceId)
+    else await this.store.spaceTools.save(next)
     if (withdraw && change.challengeId) await this.challenges.withdraw(change.challengeId)
     const source = this.catalog.source(record.sourceId)
     const state = source
@@ -1045,7 +1660,15 @@ export class SpaceToolService {
       { spaceId: space.id, source: record.sourceId, changeId: change.id, outcome },
       'a change of a space tool dropped'
     )
-    await this.announce(space, { spaceId: space.id, source: record.sourceId, state, changeId: change.id, outcome })
+    // a change of provider dropped leaves the provider in use as it was: the event names it
+    await this.announce(space, {
+      spaceId: space.id,
+      feature: this.featureIdOf(space, record.sourceId),
+      source: record.sourceId,
+      state,
+      changeId: change.id,
+      outcome,
+    })
   }
 
   private async destroyAccount(spaceId: string, sourceId: string): Promise<void> {
@@ -1061,9 +1684,9 @@ export class SpaceToolService {
 
   // ---- the life of a space --------------------------------------------------------------------------------------------
 
-  /** A new space: the sources its template adds by itself come with it (TOOL-SPACE-001). */
+  /** A new space: the features its template adds by itself come with it, with their default provider (TOOL-SPACE-001). */
   public async onCreated(space: Space): Promise<void> {
-    for (const entry of this.entriesOf(space)) if (entry.add === 'auto') await this.recordOf(space, entry)
+    for (const entry of this.entriesOf(space)) if (entry.add === 'auto') await this.slotOf(space, entry)
   }
 
   /** The space passed to another owner: its tools stay, its pending changes are dropped (TOOL-SPACE-011). */
@@ -1073,26 +1696,45 @@ export class SpaceToolService {
   }
 
   /**
-   * At start (TOOL-SPACE-001/011): the `add: auto` sources of each template reach the spaces created before it named them,
-   * and a source the template no longer names leaves its spaces, its account's key destroyed; a change left pending by
-   * the previous process expires when its time is over.
+   * At start (TOOL-SPACE-001/011, TOOL-FEAT-006): a source the template no longer names as a provider of a feature leaves
+   * its spaces, its account's key destroyed; where a space holds two providers of one feature, as it may at the first start
+   * with features, the template's default is kept, else the first of its providers, and the other leaves as a removal does;
+   * the `add: auto` features of each template reach the spaces created before it named them; a change left pending by the
+   * previous process expires when its time is over.
    */
   public async align(): Promise<void> {
-    for (const record of await this.store.spaceTools.listAll()) {
-      const space = await this.spaces.find(record.spaceId)
-      const named = space ? this.entriesOf(space).some((e) => e.source === record.sourceId) : false
-      if (!named) {
-        await this.store.spaceTools.delete(record.spaceId, record.sourceId)
-        await this.destroyAccount(record.spaceId, record.sourceId)
-        this.logger.info(
-          { spaceId: record.spaceId, source: record.sourceId },
-          'a source the template no longer names left the space'
-        )
+    const leave = async (record: SpaceToolRecord, why: string) => {
+      await this.store.spaceTools.delete(record.spaceId, record.sourceId)
+      await this.destroyAccount(record.spaceId, record.sourceId)
+      await this.hooks.endAllowances?.(record.spaceId, record.sourceId)
+      this.logger.info({ spaceId: record.spaceId, source: record.sourceId }, why)
+    }
+    const bySpace = new Map<string, SpaceToolRecord[]>()
+    for (const record of await this.store.spaceTools.listAll())
+      bySpace.set(record.spaceId, [...(bySpace.get(record.spaceId) ?? []), record])
+    for (const [spaceId, records] of bySpace) {
+      const space = await this.spaces.find(spaceId)
+      const entries = space ? this.entriesOf(space) : []
+      for (const record of records)
+        if (!entries.some((e) => e.providers.includes(record.sourceId)) || !this.catalog.source(record.sourceId))
+          await leave(record, 'a source the template no longer names left the space')
+      for (const entry of entries) {
+        const ofFeature = records.filter((r) => entry.providers.includes(r.sourceId) && this.catalog.source(r.sourceId))
+        const added = ofFeature.filter((r) => r.added)
+        if (!added.length) continue
+        // one provider per feature (TOOL-FEAT-003, TOOL-FEAT-006): the default kept, else the first of the providers
+        const keep =
+          added.find((r) => r.sourceId === defaultProviderOf(entry)) ??
+          [...added].sort((a, b) => entry.providers.indexOf(a.sourceId) - entry.providers.indexOf(b.sourceId))[0]
+        for (const record of ofFeature)
+          if (record !== keep)
+            await leave(record, `a second provider of ${entry.feature} left the space: one provider per feature`)
       }
     }
     for (const account of await this.store.spaceAccounts.listAll()) {
       const space = await this.spaces.find(account.spaceId)
-      if (!space || !this.entriesOf(space).some((e) => e.source === account.sourceId)) {
+      const record = await this.store.spaceTools.get(account.spaceId, account.sourceId)
+      if (!space || !record?.added) {
         await this.destroyAccount(account.spaceId, account.sourceId)
         continue
       }

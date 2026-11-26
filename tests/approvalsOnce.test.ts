@@ -244,8 +244,10 @@ beforeAll(async () => {
     xUrl: x.url,
     edit: (p) => {
       // a tool reached only through an elevation, decided by a manager (D14)
+      p.tools.features.payments = { title: 'Payments' }
       p.tools.sources.wire = {
         type: 'http',
+        feature: 'payments',
         title: 'Wire money',
         description: 'Wires money.',
         method: 'POST',

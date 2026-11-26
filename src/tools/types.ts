@@ -37,6 +37,8 @@ export interface ConnectCard {
   why: 'connect' | 'reconnect'
   binding?: { label: string; value: string; valueLabel: string | null }
   spaceId?: string
+  /** the feature of the source the card is for (PROF-TOOL-035) */
+  feature?: { id: string; title: string }
 }
 
 /**

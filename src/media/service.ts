@@ -131,6 +131,23 @@ export class MediaService {
     return attachment
   }
 
+  /**
+   * The text the agent makes of bytes of a type, as it does of an attachment of that type (MEM-ATT-001, MEDIA-STT-001,
+   * MEDIA-STT-003): a PDF's text, an image's description, a recording's transcript; undefined for a type it makes no text
+   * of. Nothing of the bytes is stored: a file a provider of Files answers is read so (TOOL-FEAT-020).
+   */
+  public async textOf(bytes: Buffer, mimeType: string, filename?: string): Promise<string | undefined> {
+    const type = attachmentTypeOf(mimeType)
+    if (mimeType === 'application/pdf') return (await extractPdfText(bytes)) || undefined
+    if (type === 'image' && this.describer) return (await this.describer.describe(bytes, mimeType)) || undefined
+    if (type === 'voice' && this.canTranscribe && this.transcriber)
+      return (
+        (await this.transcriber.transcribe(bytes, mimeType, filename ?? 'recording', this._pack.language.agent)) ||
+        undefined
+      )
+    return undefined
+  }
+
   /** Voice notes are offered only when a real transcriber is configured (the stub only labels them). */
   public get canTranscribe(): boolean {
     return !!this.transcriber && !(this.transcriber instanceof StubTranscriber)

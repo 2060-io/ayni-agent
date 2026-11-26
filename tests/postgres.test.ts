@@ -13,7 +13,8 @@
  * 3.8.0, reused by a new process),
  * tools phase 1 (ayni-spec D97 to D100: the migration to 3.9.0, a space's account only as ciphertext and destroyed with its
  * row, the allowances of a conversation, the record of each call by space, source and period, the action of an approval
- * sealed).
+ * sealed), features and providers (ayni-spec D120 to D123: the migration to 3.15.0, the tools a space held kept by
+ * their source, the mark of each feature's provider by space).
  */
 import { rmSync } from 'node:fs'
 import pg from 'pg'
@@ -1621,6 +1622,91 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
       )
       await check.end()
       expect(rows).toEqual([])
+      await store.close()
+    })
+  })
+
+  describe('features and providers in the store (ayni-spec D120 to D123, TOOL-FEAT-006, TOOL-FEAT-016, schema 3.15.0)', () => {
+    it("keeps the tools a space held before features, and the mark of each feature's provider, renewed in place", async () => {
+      const url = await freshDatabase()
+      const client = new pg.Client({ connectionString: url })
+      await client.connect()
+      await client.query(
+        'CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())'
+      )
+      for (const m of MIGRATIONS.filter((m) => olderThan(m.version, '3.15.0'))) {
+        await client.query(m.sql)
+        await client.query('INSERT INTO schema_migrations (version) VALUES ($1)', [m.version])
+      }
+      // a source a space held before features: kept by its source, the provider of its feature (TOOL-FEAT-006)
+      const held = {
+        spaceId: 'spc_sales',
+        sourceId: 'relaticle',
+        added: true,
+        bindings: { workspace: 'sales-eu' },
+        calls: { 'create-note': 'approval' },
+        updatedAt: '2026-11-20T10:00:00.000Z',
+      }
+      await client.query('INSERT INTO space_tools (space_id, source_id, data) VALUES ($1,$2,$3)', [
+        held.spaceId,
+        held.sourceId,
+        JSON.stringify(held),
+      ])
+      await client.end()
+      const store = new PostgresStore(url)
+      await store.init()
+      expect(await store.spaceTools.get('spc_sales', 'relaticle')).toEqual(held)
+      // the location list of a feature with a contract, in the record of its provider
+      const files = {
+        spaceId: 'spc_alpha',
+        sourceId: 'nextcloud',
+        added: true,
+        bindings: {},
+        calls: {},
+        list: { entries: [{ values: { root: '48213' }, label: '/Projects/Alpha' }] },
+        updatedAt: '2026-11-25T10:00:00.000Z',
+      }
+      await store.spaceTools.save(files)
+      expect(await store.spaceTools.get('spc_alpha', 'nextcloud')).toEqual(files)
+      // one mark per space and feature: a new provider overwrites it (TOOL-FEAT-016)
+      expect(await store.featureMarks.get('spc_alpha', 'files')).toBeUndefined()
+      const at = '2026-11-25T10:00:00.000Z'
+      await store.featureMarks.save({
+        spaceId: 'spc_alpha',
+        featureId: 'files',
+        sourceId: 'nextcloud',
+        mark: 'k7QdXy',
+        createdAt: at,
+      })
+      await store.featureMarks.save({
+        spaceId: personalSpaceId('prn-ana'),
+        featureId: 'files',
+        sourceId: 'my-drive',
+        mark: 'Pq4Rs9',
+        createdAt: at,
+      })
+      await store.featureMarks.save({
+        spaceId: 'spc_alpha',
+        featureId: 'files',
+        sourceId: 'drive',
+        mark: 'Zz81Bc',
+        createdAt: at,
+      })
+      expect(await store.featureMarks.get('spc_alpha', 'files')).toEqual({
+        spaceId: 'spc_alpha',
+        featureId: 'files',
+        sourceId: 'drive',
+        mark: 'Zz81Bc',
+        createdAt: at,
+      })
+      expect((await store.featureMarks.get(personalSpaceId('prn-ana'), 'files'))?.mark).toBe('Pq4Rs9')
+      await store.featureMarks.delete('spc_alpha', 'files')
+      expect(await store.featureMarks.get('spc_alpha', 'files')).toBeUndefined()
+      const check = new pg.Client({ connectionString: url })
+      await check.connect()
+      const { rows } = await check.query('SELECT version FROM schema_migrations ORDER BY applied_at, version')
+      await check.end()
+      expect(rows.map((r) => r.version)).toContain('3.15.0')
       await store.close()
     })
   })

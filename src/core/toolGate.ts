@@ -17,6 +17,8 @@ import { Ajv2020 } from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
 import type { AgentPack, CallRule, SpaceCallRule, StepUpAuthentication, ToolEffect } from '../config/packTypes.js'
 import { confirmationTimeoutSeconds } from '../config/packTypes.js'
+import type { FeatureProfile, ProfileTool } from '../features/profiles.js'
+import { FeatureService, type LocationScope } from '../features/service.js'
 import type { ToolCallRequest, ToolDefinition } from '../llm/types.js'
 import type { MemoryService } from '../memory/service.js'
 import type { StatsSink } from '../platform/stats.js'
@@ -30,7 +32,7 @@ import {
 import { needsGrant, runsNow, type TierResolution } from '../policy/rbac.js'
 import type { Store } from '../store/types.js'
 import { scrubAccount } from '../tools/accountValues.js'
-import { type CatalogSource, type PackRule, strictest, type ToolCatalog } from '../tools/catalog.js'
+import { type CatalogSource, defaultRuleOf, type PackRule, strictest, type ToolCatalog } from '../tools/catalog.js'
 import type { ToolRegistry } from '../tools/registry.js'
 import type { CallAccountSecret, ToolContext, ToolResult, ToolSpec } from '../tools/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
@@ -92,6 +94,23 @@ export interface TurnTool {
   personal?: boolean
   /** what the model receives: the input schema without the pinned arguments (TOOL-CAT-004) */
   definition: ToolDefinition
+  /** the feature its source serves (D120); for a tool of a feature profile, what the code does of its calls (D123) */
+  feature?: TurnFeature
+}
+
+/** The feature of a tool of a turn (D120, D123), and for a tool of its profile what the code keeps of its calls. */
+export interface TurnFeature {
+  id: string
+  title: string
+  /** a tool of the feature's profile: the agent's copy of the profile and of the tool (TOOL-FEAT-010) */
+  profile?: FeatureProfile
+  tool?: ProfileTool
+  /** where its calls may go: the space's list or any location (TOOL-FEAT-014, TOOL-FEAT-022) */
+  scope?: LocationScope
+  /** the mark of its provider in the space, or the Personal (TOOL-FEAT-016) */
+  mark?: string
+  /** a conversation of Personal */
+  personal: boolean
 }
 
 /** What a turn keeps of its calls (TOOL-CALL-008, TOOL-PROV-002). */
@@ -155,6 +174,8 @@ export interface ToolGateDeps {
   connections?: ConnectionService
   /** the routed status of a step-up's re-authentication, to the session the call was asked from (INTX-AUTH-004) */
   router?: Pick<CapabilityRouter, 'notifyOrigin'>
+  /** the features with a contract: their providers' declarations, the marks, what a call goes through (D121 to D123) */
+  features?: FeatureService
 }
 
 /** The step of a turn while a step-up waits on the phone: a label, never a tool's name (PROF-MAP-005). */
@@ -162,6 +183,16 @@ export const STEP_UP_LABEL = "Waiting for you to confirm it's you on your phone"
 
 /** The tool that shows the Connect card (D108, TOOL-CONN-011): given only while an account is to connect. */
 export const OFFER_CONNECTION = 'offer_connection'
+
+/** What the code made of a call of a tool of a feature profile before it runs (TOOL-FEAT-013, TOOL-FEAT-014). */
+export interface PreparedFeatureCall {
+  /** the location of the call, set by the code or checked against the space's list */
+  location?: string
+  /** the title of its entry in the space's list */
+  locationLabel?: string
+  /** the addresses outside the organization the call names */
+  outside?: string[]
+}
 
 /** A tool of a turn that needs an elevation (RBAC-TOOL-004): whether a grant is held, and until when. */
 export interface ElevatedTool {
@@ -300,19 +331,126 @@ export class ToolGate {
     principal: Principal,
     spaceId: string,
     grants: ElevationGrant[]
-  ): Promise<{ tools: TurnTool[]; toConnect: ToConnect[]; elevated: ElevatedTool[] }> {
+  ): Promise<{ tools: TurnTool[]; toConnect: ToConnect[]; elevated: ElevatedTool[]; limits: string[] }> {
     const connections = this.deps.connections
     const toConnect = connections ? await connections.toConnect(principal, spaceId, grants) : []
     const tools = (await this.allTools(principal, spaceId, grants)).filter(
       (t) => t.spec.rawName !== OFFER_CONNECTION || t.source.kind !== 'bundled' || toConnect.length > 0
     )
+    // one line per feature with a contract whose tools the model has, in the order of tools.sources (TOOL-FEAT-021)
+    const limits: string[] = []
+    const seen = new Set<string>()
+    for (const t of tools) {
+      const f = t.feature
+      if (!f?.profile || !f.mark || seen.has(f.id)) continue
+      seen.add(f.id)
+      const line = this.deps.features?.limitsLine(
+        f.id,
+        f.title,
+        t.source.title,
+        f.profile,
+        f.personal ? undefined : f.scope,
+        f.mark
+      )
+      if (line) limits.push(line)
+    }
     const elevated = tools
       .filter((t) => needsGrant(t.resolution))
       .map((t) => {
         const grant = runsNow(t.resolution) ? grantOf(t, grants) : undefined
         return { name: t.name, granted: runsNow(t.resolution), ...(grant ? { until: grant.expiresAt } : {}) }
       })
-    return { tools, toConnect, elevated }
+    return { tools, toConnect, elevated, limits }
+  }
+
+  /**
+   * The tools of the providers of features with a contract in a conversation (TOOL-FEAT-010, TOOL-FEAT-022): in a space,
+   * the provider of each `ready` feature; in Personal, the provider of availability `personal`; each read with the account
+   * of the conversation, and given only when it conforms with that account (TOOL-FEAT-011).
+   */
+  private async providerTools(
+    principal: Principal,
+    spaceId: string,
+    grants: ElevationGrant[],
+    ready: Map<string, ReadySource>,
+    personalReady: Map<string, string>,
+    guest: boolean
+  ): Promise<TurnTool[]> {
+    const { catalog, spaceTools, registry, connections, features } = this.deps
+    if (!features) return []
+    const personal = isPersonalSpace(spaceId)
+    const out: TurnTool[] = []
+    for (const source of catalog.sources()) {
+      const profile = catalog.profileOf(source)
+      const feature = catalog.featureOf(source)
+      if (!profile || !feature || source.kind !== 'mcp') continue
+      let scope: LocationScope | undefined
+      let r: ReadySource | undefined
+      if (personal) {
+        if (source.availability !== 'personal') continue
+      } else {
+        if (source.availability !== 'spaces') continue
+        r = ready.get(source.name)
+        if (!r || (guest && r.entry.guests !== true)) continue
+        scope = FeatureService.scopeOf(profile, r.record.list)
+        if (!scope) continue
+      }
+      if (source.account.kind === 'personal' && !personalReady.has(source.name)) continue
+      let account: CallAccountSecret | undefined
+      if (source.account.kind === 'personal') {
+        const opened = await connections?.open(principal, source, spaceId, false)
+        if (opened?.status !== 'connected') continue
+        account = opened.account
+      } else if (source.account.kind === 'space') {
+        account = await spaceTools.openAccount(spaceId, source.name)
+        if (!account?.headers) continue
+      } else account = { kind: source.account.kind }
+      const state = await features.declared(source, account, FeatureService.keyOf(account))
+      if (state.conformant === false) continue
+      const mark = await features.markOf(spaceId, feature.id, source.name)
+      const where: LocationScope = scope ?? { kind: 'any' }
+      const accountSetAt = source.account.kind === 'personal' ? personalReady.get(source.name) : r?.accountSetAt
+      for (const spec of features.specsFor(source, state, where)) {
+        const resolution = await registry.resolve(spec, principal.roles, grants)
+        if (resolution.tier === 'DENY') continue
+        const ownerRule = r?.record.calls[spec.rawName]
+        if (ownerRule === 'off') continue
+        const packRule = catalog.packRuleOf(source, spec.rawName, spec.annotations)
+        const rule = (ownerRule ? strictest<SpaceCallRule>(packRule.rule, ownerRule) : packRule.rule) as CallRule
+        const ofProfile = catalog.profileToolOf(source, spec.rawName)
+        out.push({
+          name: spec.name,
+          spec,
+          source,
+          resolution,
+          effect: catalog.effectOf(source, spec.rawName, spec.annotations),
+          packRule,
+          rule,
+          untrusted: catalog.untrustedOf(source, spec.rawName, spec.annotations),
+          spaceTool: source.availability === 'spaces',
+          bindings: r ? r.bindings : spaceTools.bindingValues(source, undefined),
+          ...(accountSetAt ? { accountSetAt } : {}),
+          ...(source.account.kind === 'personal' ? { personal: true } : {}),
+          definition: {
+            name: spec.name,
+            description: spec.description,
+            parameters: withoutPinned(
+              ofProfile ? features.forModel(profile, spec.parameters, where) : spec.parameters,
+              source
+            ),
+          },
+          feature: {
+            id: feature.id,
+            title: feature.title,
+            scope: where,
+            mark,
+            personal,
+            ...(ofProfile ? { profile, tool: ofProfile } : {}),
+          },
+        })
+      }
+    }
+    return out
   }
 
   private async allTools(principal: Principal, spaceId: string, grants: ElevationGrant[]): Promise<TurnTool[]> {
@@ -343,11 +481,17 @@ export class ToolGate {
         if (opened?.status === 'connected') await registry.discover(source.name, opened.account)
       }
     }
+    // the providers of features with a contract give their profile's tools (TOOL-FEAT-010), in the profile's order, after
+    // the others, which keep the order of their names
+    const providers = await this.providerTools(principal, spaceId, grants, ready, personalReady, guest)
+    const theirs = new Set(providers.map((t) => t.name))
     const out: TurnTool[] = []
     // every tool the roles reach, by role or through a grant they may hold (RBAC-TOOL-004, D112)
     for (const visible of await registry.reachable(principal.roles, grants, principal)) {
       const spec = visible.spec
+      if (theirs.has(spec.name)) continue
       const source = catalog.sourceOf(spec.source, spec.rawName)
+      if (catalog.profileOf(source)) continue
       let bindings: Record<string, string> = {}
       let ownerRule: SpaceCallRule | undefined
       let accountSetAt: string | undefined
@@ -367,6 +511,7 @@ export class ToolGate {
       if (source.account.kind === 'personal') accountSetAt = personalReady.get(source.name)
       const packRule = catalog.packRuleOf(source, spec.rawName, spec.annotations)
       const rule = (ownerRule ? strictest<SpaceCallRule>(packRule.rule, ownerRule) : packRule.rule) as CallRule
+      const feature = catalog.featureOf(source)
       // a rule of approval the annotations give, with nobody to approve it: warned at discovery (TOOL-CAT-009)
       if (
         packRule.rule === 'approval' &&
@@ -398,9 +543,10 @@ export class ToolGate {
           description: spec.description,
           parameters: withoutPinned(spec.parameters, source),
         },
+        ...(feature ? { feature: { id: feature.id, title: feature.title, personal } } : {}),
       })
     }
-    return out.sort((a, b) => a.name.localeCompare(b.name))
+    return [...out.sort((a, b) => a.name.localeCompare(b.name)), ...providers]
   }
 
   // ---- one call (TOOL-CALL-001) --------------------------------------------------------------------------------------
@@ -432,13 +578,22 @@ export class ToolGate {
     ctx: CallContext,
     record: ToolCallRecord
   ): Promise<string> {
-    const tool = tools.find((t) => t.name === call.name)
-    if (!tool) {
+    const found = tools.find((t) => t.name === call.name)
+    if (!found) {
       // not offered, not available here, or not the Principal's: unknown (TOOL-CAT-003, TOOL-AVAIL-001)
       await this.finish(record, 'not-available')
       return `Tool ${call.name} is not available to this person.`
     }
-    const title = this.deps.catalog.toolTitle(tool.source, tool.spec.rawName, tool.spec.annotations)
+    const title = this.deps.catalog.toolTitle(found.source, found.spec.rawName, found.spec.annotations)
+    // a tool of a feature profile: every reference without the mark in force and the location set or checked, before
+    // anything is asked or reaches a provider (TOOL-FEAT-014, TOOL-FEAT-016); the people it names outside the
+    // organization make it external (TOOL-FEAT-013)
+    const ready = this.prepareFeatureCall(found, call.arguments ?? {})
+    if (!ready.ok) {
+      await this.finish(record, ready.outcome)
+      return ready.text
+    }
+    const { tool, prepared } = ready
     // a tool the roles reach only through an elevation runs only while a grant is held, read at the call, whatever the
     // turn's start said (RBAC-TOOL-004, D112); nothing else of the call is asked or run before
     if (needsGrant(tool.resolution)) {
@@ -448,7 +603,7 @@ export class ToolGate {
         return notGrantedForModel(title)
       }
     }
-    const args = this.pinned(tool, call.arguments ?? {}, tool.bindings)
+    const args = this.pinned(tool, ready.args, tool.bindings)
     // a call that is not a read, in a turn that read untrusted content, asks the person (TOOL-CALL-008)
     const raised = !!tool.effect && tool.effect !== 'read' && state.untrustedRead.size > 0
     record.raisedByUntrusted = raised
@@ -483,6 +638,7 @@ export class ToolGate {
         const outcome = await this.confirm(tool, title, args, state, ctx, record, {
           allowForConversation: rule === 'confirm' && !raised,
           raised,
+          prepared,
         })
         if (outcome) return askedAnswer(outcome)
       }
@@ -494,11 +650,47 @@ export class ToolGate {
         await this.finish(record, 'failed')
         return `The arguments of ${title} are not valid (${invalid}): nothing was asked and nothing ran.`
       }
-      return askedAnswer(await this.askApproval(tool, title, args, state, ctx, record))
+      return askedAnswer(await this.askApproval(tool, title, args, state, ctx, record, prepared))
     }
     record.rule = tool.rule
-    const answer = await this.run(tool, title, args, state, ctx, record, undefined, asked)
+    const answer = await this.run(tool, title, args, state, ctx, record, undefined, asked, prepared)
     return asked ? askedAnswer(answer) : answer
+  }
+
+  /**
+   * A call of a tool of a feature profile, as the code prepares it (TOOL-FEAT-013, 014, 016): its references without the
+   * mark in force (another mark, or none, stops it: `stale-reference`), its location set from a list of one or checked
+   * against a longer list (`outside-list`); and the tool as the call takes it, `external`, with the rule of that effect
+   * unless the feature sets one, when it names people outside the organization. Any other tool goes as it is.
+   */
+  private prepareFeatureCall(
+    tool: TurnTool,
+    args: Record<string, unknown>
+  ):
+    | { ok: true; tool: TurnTool; args: Record<string, unknown>; prepared?: PreparedFeatureCall }
+    | { ok: false; outcome: 'stale-reference' | 'outside-list'; text: string } {
+    const f = tool.feature
+    const features = this.deps.features
+    if (!f?.profile || !f.tool || !f.mark || !features) return { ok: true, tool, args }
+    const ready = features.prepare(f.profile, f.tool, args, {
+      mark: f.mark,
+      scope: f.scope ?? { kind: 'any' },
+      featureTitle: f.title,
+      providerTitle: tool.source.title,
+      personal: f.personal,
+    })
+    if (!ready.ok) return ready
+    const outside = features.outside(f.tool, ready.args)
+    const prepared: PreparedFeatureCall = {
+      ...(ready.location !== undefined ? { location: ready.location } : {}),
+      ...(ready.locationLabel !== undefined ? { locationLabel: ready.locationLabel } : {}),
+      ...(outside.addresses.length ? { outside: outside.addresses } : {}),
+    }
+    if (!outside.external || tool.effect === 'external') return { ok: true, tool, args: ready.args, prepared }
+    // the effect of this call, and the rule of that effect, unless the feature sets the tool's rule (TOOL-FEAT-012/013)
+    const declared = this.deps.catalog.declOf(tool.source, tool.spec.rawName)?.call
+    const rule = declared ? tool.rule : strictest<CallRule>(tool.rule, defaultRuleOf('external'))
+    return { ok: true, tool: { ...tool, effect: 'external', rule }, args: ready.args, prepared }
   }
 
   /**
@@ -589,7 +781,9 @@ export class ToolGate {
     record: ToolCallRecord,
     approvalId?: string,
     /** the call asked the person or an approver: the model reads after its result what TOOL-CALL-015 says */
-    asked = false
+    asked = false,
+    /** a call of a tool of a feature profile: the location the code set or checked (TOOL-FEAT-015) */
+    prepared?: PreparedFeatureCall
   ): Promise<string> {
     const { principals, challenges, memory } = this.deps
     // the step-up of this tool of this source, never of a tool of the same name elsewhere (TOOL-CAT-010)
@@ -682,6 +876,19 @@ export class ToolGate {
       content = scrubAccount(`tool failed: ${error instanceof Error ? error.message : String(error)}`, secrets())
       isError = true
     }
+    // a tool of a feature profile: read as the profile's, its items outside the location dropped, its references marked,
+    // a content of bytes made text, before anything records the result or the model reads it (TOOL-FEAT-015/016/020)
+    const f = tool.feature
+    if (f?.profile && f.tool && f.mark && this.deps.features && !accountOutcome) {
+      const read = await this.deps.features.read(f.profile, f.tool, prepared?.location, f.mark, {
+        content,
+        data,
+        isError,
+      })
+      content = read.content
+      data = read.data
+      isError = read.isError
+    }
     await ctx.sink.emit({ type: 'step-finished', label })
     // the person's account was not connected, or asked for more access, when the call was to run (TOOL-CALL-011)
     if (accountOutcome) {
@@ -720,6 +927,7 @@ export class ToolGate {
       // in the clear, beside the sealed arguments and result (TOOL-PROV-001)
       provenance: {
         sourceId: tool.source.name,
+        ...(tool.feature ? { featureId: tool.feature.id } : {}),
         sourceKind: tool.source.kind,
         toolName: tool.spec.rawName,
         account: callAccount,
@@ -734,6 +942,7 @@ export class ToolGate {
       const key = `${tool.source.name}|${callAccount.kind}|${callAccount.spaceId ?? ''}`
       state.sources.set(key, {
         sourceId: tool.source.name,
+        ...(tool.feature ? { featureId: tool.feature.id } : {}),
         accountKind: callAccount.kind,
         ...(callAccount.spaceId ? { spaceId: callAccount.spaceId } : {}),
       })
@@ -763,7 +972,9 @@ export class ToolGate {
 
   /** Why arguments do not validate against the tool's input schema, if they do not (TOOL-CALL-003). */
   private invalid(tool: TurnTool, args: Record<string, unknown>): string | undefined {
-    let validate = this.validators.get(tool.spec.key)
+    // a tool of a profile has the schema of the capabilities in use with the account of the call (TOOL-FEAT-010)
+    const key = tool.feature?.profile ? `${tool.spec.key}|${JSON.stringify(tool.spec.parameters)}` : tool.spec.key
+    let validate = this.validators.get(key)
     if (validate === undefined) {
       try {
         // a server's draft-07 schema validates as 2020-12 for what a call's arguments use
@@ -772,7 +983,7 @@ export class ToolGate {
       } catch {
         validate = null
       }
-      this.validators.set(tool.spec.key, validate)
+      this.validators.set(key, validate)
     }
     if (!validate || validate(args)) return undefined
     return ajv.errorsText(validate.errors)
@@ -782,13 +993,27 @@ export class ToolGate {
 
   /** The action as its card shows it: the source, whose account, every argument whole, the pinned ones first. */
   public async actionOf(
-    tool: Pick<TurnTool, 'source' | 'spec'>,
+    tool: Pick<TurnTool, 'source' | 'spec' | 'feature'>,
     title: string,
     args: Record<string, unknown>,
-    spaceId: string
+    spaceId: string,
+    prepared?: PreparedFeatureCall
   ): Promise<ToolAction> {
     const fields: ToolAction['fields'] = []
     const pinnedArgs = new Set<string>()
+    // a tool of a feature profile: its location first, by the title of its entry, the code having set or checked it
+    // (TOOL-FEAT-018); every argument under the profile's title of it, a reference without its mark
+    const profile = tool.feature?.tool ? tool.feature.profile : undefined
+    if (profile) {
+      const argument = profile.location.argument
+      const value = args[argument]
+      if (value !== undefined) {
+        pinnedArgs.add(argument)
+        const label =
+          tool.feature?.tool?.arguments.find((a) => a.name === argument)?.title ?? profile.location.labels.one
+        fields.push({ label, value: prepared?.locationLabel ?? fieldValue(value), pinned: true })
+      }
+    }
     for (const binding of tool.source.bindings) {
       if (binding.argument) pinnedArgs.add(binding.argument)
       const value = binding.argument ? args[binding.argument] : undefined
@@ -808,11 +1033,18 @@ export class ToolGate {
     }
     const kind = tool.source.account.kind
     const space = kind === 'space' ? await this.deps.spaces.find(spaceId) : undefined
+    const feature = tool.feature ?? this.deps.catalog.featureOf(tool.source)
     return {
       title,
-      source: { id: tool.source.name, title: tool.source.title },
+      // the source with the feature it serves (PROF-TOOL-035): "Files · Nextcloud"
+      source: {
+        id: tool.source.name,
+        title: tool.source.title,
+        ...(feature ? { feature: { id: feature.id, title: feature.title } } : {}),
+      },
       account: { kind, ...(space ? { space: { id: space.id, title: space.title } } : {}) },
       fields,
+      ...(prepared?.outside?.length ? { outsideOrganization: [...prepared.outside] } : {}),
     }
   }
 
@@ -851,7 +1083,7 @@ export class ToolGate {
     state: TurnToolState,
     ctx: CallContext,
     record: ToolCallRecord,
-    options: { allowForConversation: boolean; raised: boolean }
+    options: { allowForConversation: boolean; raised: boolean; prepared?: PreparedFeatureCall }
   ): Promise<string | undefined> {
     // a card is asked only of a session that can show it (TOOL-CALL-005)
     const sessions = (await this.hooks.cardSessions?.(state.conversationId)) ?? []
@@ -859,7 +1091,7 @@ export class ToolGate {
       await this.finish(record, 'unavailable')
       return `${title} needs the person's confirmation, which could not be asked here: it did not run.`
     }
-    const action = await this.actionOf(tool, title, args, state.spaceId)
+    const action = await this.actionOf(tool, title, args, state.spaceId, options.prepared)
     // the person's own card names their account at its service: a confirmation is theirs alone (PROF-TOOL-021)
     if (tool.source.account.kind === 'personal') {
       const label = await this.deps.connections?.labelIn(ctx.principal, tool.source, state.spaceId)
@@ -1201,9 +1433,10 @@ export class ToolGate {
     args: Record<string, unknown>,
     state: TurnToolState,
     ctx: CallContext,
-    record: ToolCallRecord
+    record: ToolCallRecord,
+    prepared?: PreparedFeatureCall
   ): Promise<string> {
-    const action = await this.actionOf(tool, title, args, state.spaceId)
+    const action = await this.actionOf(tool, title, args, state.spaceId, prepared)
     const approvers = tool.spaceTool ? [] : this.deps.catalog.approversOf(tool.packRule)
     // a tool of a space: the policy in force in the space, and the space's timeout of a call's approval (D137, D138)
     const space = tool.spaceTool ? await this.spacePolicyOf(tool, state) : undefined
@@ -1400,6 +1633,27 @@ export class ToolGate {
     }
     const session = await this.store.sessions.get(record.originSessionId)
     const principal = await this.deps.principals.get(record.requesterId)
+    const known = this.deps.catalog.source(record.sourceId)
+    // a provider of a feature whose provider in the space changed while the approval waited: it does not run, and the
+    // model is told that the action needs a new call (TOOL-FEAT-009)
+    if (session?.state === 'bound' && principal && call && known?.feature && known.availability === 'spaces') {
+      const space = await this.deps.spaces.find(call.spaceId)
+      const inUse = space ? await this.deps.spaceTools.providerOf(space, known.feature) : undefined
+      if (inUse && inUse.name !== known.name) {
+        const feature = this.deps.catalog.featureOf(known)
+        await this.finish(call, 'provider-changed')
+        await this.tell(
+          session,
+          principal,
+          `The approved action ${record.action?.title ?? record.toolName} did not run: this space now uses ${inUse.title} for ${feature?.title ?? known.feature}, in place of ${known.title}. ${ONE_CALL}`,
+          []
+        )
+        return
+      }
+    }
+    // a tool of a feature profile: as a turn takes it now, with the list, the mark and the account in force
+    if (known && this.deps.catalog.profileOf(known) && session?.state === 'bound' && principal && call)
+      return this.runApprovedFeatureCall(record, call, session, principal, sinkFor)
     const spec = (await this.deps.registry.all()).find(
       (s) => s.source === record.sourceId && s.rawName === record.toolName
     )
@@ -1482,6 +1736,89 @@ export class ToolGate {
     )
   }
 
+  /**
+   * An approved call of a tool of a feature profile (TOOL-CALL-009, TOOL-CALL-012): the tool as a turn of the requester
+   * takes it now, its location checked again against the list in force, then run with the arguments approved.
+   */
+  private async runApprovedFeatureCall(
+    record: ApprovalRecord,
+    call: ToolCallRecord,
+    session: Session,
+    principal: Principal,
+    sinkFor: (session: Session) => TurnSink
+  ): Promise<void> {
+    const spaceId = call.spaceId
+    const grants = await this.deps.approvals.activeGrants(principal.id)
+    const tool = (await this.allTools(principal, spaceId, grants)).find(
+      (t) => t.source.name === record.sourceId && t.spec.rawName === record.toolName
+    )
+    const title = record.action?.title ?? record.toolName
+    if (!tool?.feature?.profile || !tool.feature.tool) {
+      await this.finish(call, 'failed')
+      await this.tell(
+        session,
+        principal,
+        `The approved action ${title} did not run: the tool is no longer ready in this space.`,
+        []
+      )
+      return
+    }
+    const args = { ...(record.actionArgs ?? {}) }
+    const argument = tool.feature.profile.location.argument
+    const scope = tool.feature.scope
+    let prepared: PreparedFeatureCall | undefined
+    if (args[argument] !== undefined) {
+      const entry = scope?.kind === 'list' ? scope.entries.find((e) => e.value === args[argument]) : undefined
+      if (scope?.kind === 'list' && !entry) {
+        await this.finish(call, 'outside-list')
+        await this.tell(
+          session,
+          principal,
+          `The approved action ${title} did not run: its ${tool.feature.profile.location.labels.one.toLowerCase()} is no longer one of this space's. ${ONE_CALL}`,
+          []
+        )
+        return
+      }
+      prepared = { location: String(args[argument]), ...(entry ? { locationLabel: entry.label } : {}) }
+    }
+    const state = {
+      conversationId: call.conversationId,
+      spaceId,
+      untrustedRead: new Map<string, string>(),
+      sources: new Map<string, TurnSource>(),
+    }
+    const toolCtx: ToolContext = {
+      principal,
+      session,
+      roles: principal.roles,
+      logger: this.deps.logger,
+      language: this.deps.pack.language.agent,
+      spaceId,
+      ...(record.inboundId ? { inboundId: record.inboundId, inboundIds: [record.inboundId] } : {}),
+    }
+    await this.run(
+      { ...tool, rule: 'approval' },
+      title,
+      this.pinned(tool, args, tool.bindings),
+      state,
+      { session, principal, toolCtx, sink: sinkFor(session) },
+      call,
+      record.id,
+      false,
+      prepared
+    )
+    const outcome = (await this.store.toolCalls.get(call.id))?.outcome
+    await this.tell(
+      session,
+      principal,
+      outcome === 'completed'
+        ? `The approved action ${title} ran.`
+        : `The approved action ${title} did not run: ${outcome === 'failed' ? 'it failed' : 'a check did not pass'}.`,
+      [...state.sources.values()],
+      record.inboundId
+    )
+  }
+
   /** A message of the agent to the conversation, outside a turn, with the sources its tools read (TOOL-PROV-002). */
   private async tell(
     session: Session,
@@ -1519,6 +1856,7 @@ export class ToolGate {
       conversationId: state.conversationId,
       spaceId: state.spaceId,
       sourceId: tool?.source.name ?? '',
+      ...(tool?.feature ? { featureId: tool.feature.id } : {}),
       toolName: tool?.spec.rawName ?? name,
       account: kind === 'space' ? { kind, spaceId: state.spaceId } : { kind },
       rule: tool?.rule ?? 'none',
@@ -1542,7 +1880,10 @@ export class ToolGate {
    */
   public async conversationSources(conversationId: string) {
     const rows = await this.store.entries.listAll({ conversationId, limit: 100_000 })
-    const groups = new Map<string, { sourceId: string; account: CallAccount; results: number; lastAt: string }>()
+    const groups = new Map<
+      string,
+      { sourceId: string; featureId?: string; account: CallAccount; results: number; lastAt: string }
+    >()
     for (const row of rows) {
       if (row.sourceType !== 'tool-call' || !row.provenance) continue
       if (row.state === 'crypto-erased' || row.state === 'deleted') continue
@@ -1551,7 +1892,16 @@ export class ToolGate {
       const kind = p.sourceKind ?? this.deps.catalog.source(p.sourceId)?.kind ?? 'bundled'
       if (kind === 'bundled') continue
       const key = `${p.sourceId}|${p.account.kind}|${p.account.spaceId ?? ''}`
-      const group = groups.get(key) ?? { sourceId: p.sourceId, account: p.account, results: 0, lastAt: row.createdAt }
+      const group = groups.get(key) ?? {
+        sourceId: p.sourceId,
+        // the feature it served when the call was made, else the one it serves now (TOOL-FEAT-019)
+        ...((p.featureId ?? this.deps.catalog.source(p.sourceId)?.feature)
+          ? { featureId: p.featureId ?? this.deps.catalog.source(p.sourceId)?.feature }
+          : {}),
+        account: p.account,
+        results: 0,
+        lastAt: row.createdAt,
+      }
       group.results++
       if (row.createdAt > group.lastAt) group.lastAt = row.createdAt
       groups.set(key, group)
@@ -1560,9 +1910,11 @@ export class ToolGate {
     for (const g of groups.values()) {
       const space =
         g.account.kind === 'space' && g.account.spaceId ? await this.deps.spaces.find(g.account.spaceId) : undefined
+      const feature = this.deps.catalog.feature(g.featureId)
       out.push({
         source: g.sourceId,
         title: this.deps.catalog.source(g.sourceId)?.title ?? g.sourceId,
+        ...(feature ? { feature: { id: feature.id, title: feature.title } } : {}),
         account: { kind: g.account.kind, ...(space ? { space: { id: space.id, title: space.title } } : {}) },
         results: g.results,
         lastAt: g.lastAt,

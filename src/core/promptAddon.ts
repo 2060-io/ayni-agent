@@ -5,7 +5,7 @@
 import type { Features } from '../config/packTypes.js'
 import { estimateTokens } from '../util/tokens.js'
 
-export const PROMPT_ADDON_VERSION = '3.9.0'
+export const PROMPT_ADDON_VERSION = '3.10.0'
 export const PROMPT_ADDON_TOKEN_BUDGET = 500
 
 export interface AddonContext {
@@ -25,6 +25,8 @@ export interface AddonContext {
   toolsMayAsk?: boolean
   /** the agent-pack declares a source of each person's own account (TOOL-CONN-012) */
   personalAccounts?: boolean
+  /** the agent-pack declares a provider of a feature with a contract (TOOL-FEAT-021) */
+  featureProviders?: boolean
 }
 
 /** The destinations of the AG-UI profile §10 the model may link to (relative to the app-link base). */
@@ -84,6 +86,11 @@ export function renderPromptAddon(ctx: AddonContext): string {
   if (ctx.personalAccounts)
     lines.push(
       "Accounts: never ask for a password, a token or a key in a conversation; a credential the person pastes is held back from you. When a tool needs the person's own account and it is not connected, offer its Connect card with offer_connection."
+    )
+  // the provider of a feature can change, and a reference of a former one is refused in code (TOOL-FEAT-021, D122)
+  if (ctx.featureProviders)
+    lines.push(
+      "Features (files, calendars): the provider of a feature can change; a reference from an earlier result of another provider is refused as stale-reference, so look an item up again instead of reusing one. The limits of a space's tools in the record on the latest message, such as its folders, are kept by the code; only the space's owner changes them."
     )
   // a tool reachable only through an elevation is listed, and refused while none is granted (RBAC-TOOL-004, D112)
   if (ctx.hasRequestableTools && ctx.features.elevation) {

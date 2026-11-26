@@ -409,6 +409,11 @@ export interface PackIdentity {
   perActorOverrides?: { actor: string; roles: string[]; comment?: string }[]
   /** the people of the home organization and their roles, typed by hand (D79, D87, IDENT-ROLE-012) */
   directory?: UserDirectoryRef
+  /**
+   * the home organization's own words about itself: the domains of its people's email addresses, an address of another
+   * domain being outside the organization (D123, TOOL-FEAT-013)
+   */
+  organization?: { emailDomains?: string[] }
   /** Credentials requested on DIDComm connect (addition over schema 3.0, see docs/agent-pack.md). */
   credentials?: {
     userAgent?: CredentialRef
@@ -713,6 +718,11 @@ export interface SpaceApprovalBounds {
 /** What every source of `tools.sources` may declare (D101, TOOL-CAT-001), whatever its type. */
 export interface SourceFields {
   type: SourceType
+  /**
+   * the feature it serves, a key of `tools.features`: an MCP server and an HTTP tool name one, and are its providers; a
+   * bundled tool names none (D120, TOOL-FEAT-002)
+   */
+  feature?: string
   /** what people read on the cards, in the sources and in a space's settings; the source's id by default */
   title?: string
   description?: string
@@ -739,6 +749,23 @@ export interface McpSource extends SourceFields {
   offer?: string[]
   bindings?: SourceBinding[]
   untrusted?: boolean
+  /**
+   * a provider of a feature with a contract: the optional capabilities of its profile it uses, at most; every one the
+   * server declares when absent (TOOL-FEAT-004)
+   */
+  capabilities?: string[]
+  /**
+   * a provider of Files: the agent may make and keep a team space's folder at it, with the owner's own account or the
+   * managing account `apply` builds (D145, D150, TOOL-FEAT-023). Validated here; the managed mode itself is not built yet.
+   */
+  manage?: SourceManage
+}
+
+/** How the agent manages a team space's folder at a provider of Files (D145, D147, D150, TOOL-FEAT-023). */
+export interface SourceManage {
+  as: 'owner' | 'manager'
+  /** `as: manager`: the headers of the managing account, each value a `${VAR}` of the deployment's secrets */
+  apply?: AccountHeader[]
 }
 
 /** An HTTP tool (TOOL-HTTP-001): one tool, named by the source's id, and its request. */
@@ -769,6 +796,30 @@ export interface BundledSource extends SourceFields {
 }
 
 export type ToolSourceDef = McpSource | HttpSource | BundledSource
+
+/** The id of a feature: a lower-case letter, then lower-case letters, digits or `-` (TOOL-FEAT-001). */
+export const FEATURE_ID = /^[a-z][a-z0-9-]{0,31}$/
+
+/**
+ * What the agent-pack says of a tool of a feature's profile, once for every provider (TOOL-FEAT-005): its rule, its
+ * step-up and its approval's bounds in a space; never its effect, title or trust, which are the profile's.
+ */
+export interface FeatureToolDeclaration {
+  call?: CallRule
+  stepUp?: StepUp
+  approval?: ToolApprovalBounds
+}
+
+/**
+ * A feature of `tools.features` (D120, TOOL-FEAT-001): what a set of tools is for, in the words people use. With
+ * `profile` it has a contract, a feature profile the agent knows; without, it is a category, its provider's own tools
+ * shown under it.
+ */
+export interface FeatureDef {
+  title: string
+  profile?: { id: string; version: string }
+  tools?: Record<string, FeatureToolDeclaration>
+}
 
 /** The sources of one type, each with its id: the key of `tools.sources` (D101). */
 export function sourcesOfType<T extends SourceType>(
@@ -860,18 +911,31 @@ export interface SpaceTemplate {
     allowedProviders?: { default?: string[]; allowed?: string[] }
     handover?: { default?: boolean; allowed?: boolean[] }
   }
-  /** the sources of availability `spaces` its spaces may use (TOOL-AVAIL-002) */
-  tools?: TemplateTool[]
+  /** the features its spaces may use, each with the providers it allows, in the order the clients show them (TOOL-AVAIL-002) */
+  features?: TemplateFeature[]
 }
 
 /**
- * A source a template of spaces offers (TOOL-AVAIL-002): in every space of the template from its creation (`auto`), or
- * when the owner of each space adds it (`owner`, the default); used by people of other organizations only with `guests`.
+ * A feature a template of spaces offers (D120, TOOL-AVAIL-002): the providers its spaces may use for it, sources of
+ * availability `spaces` that serve it, and the default among them; in every space of the template from its creation, with
+ * the default provider (`auto`), or when the owner of each space adds it and chooses its provider (`owner`, the default);
+ * used by people of other organizations only with `guests`; with `any`, the owner may let the members' own accounts reach
+ * any location in place of a list (TOOL-SPACE-014); for Files, whether the agent makes and keeps the space's folder
+ * (`location`, TOOL-FEAT-023).
  */
-export interface TemplateTool {
-  source: string
+export interface TemplateFeature {
+  feature: string
+  providers: string[]
+  default?: string
   add?: 'auto' | 'owner'
   guests?: boolean
+  any?: boolean
+  location?: 'managed' | 'existing' | 'either'
+}
+
+/** The default provider of a template's feature: the declared one, else the only one (TOOL-AVAIL-002). */
+export function defaultProviderOf(entry: Pick<TemplateFeature, 'default' | 'providers'>): string | undefined {
+  return entry.default ?? (entry.providers.length === 1 ? entry.providers[0] : undefined)
 }
 
 /** The rules of every Personal space (SPACE-DEF-002): 365 days, the conversation memory's basis, the agent's provider. */
@@ -924,7 +988,7 @@ export interface AgentPack {
    * tool or a bundled tool with everything the four questions ask of it. `mcp.servers`, `tools.http`, `tools.bundled`,
    * `tools.access` and `actions` are withdrawn, and refused at start in words (TOOL-CAT-011).
    */
-  tools?: { sources?: Record<string, ToolSourceDef> }
+  tools?: { features?: Record<string, FeatureDef>; sources?: Record<string, ToolSourceDef> }
   purposes?: { id: string; label: string; description?: string; permittedRoles?: string[] }[]
   approvals?: {
     timeoutMinutes?: number

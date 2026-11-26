@@ -237,8 +237,10 @@ describe('the approval policies of the tools of spaces, their bounds and the ste
   }
   const withX = (approval: Record<string, unknown>) => {
     const pack = dev()
+    pack.tools.features = { ...pack.tools.features, social: { title: 'Social posting' } }
     pack.tools.sources.post = {
       type: 'http',
+      feature: 'social',
       title: 'Post on X',
       description: 'Posts.',
       method: 'POST',

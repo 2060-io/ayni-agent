@@ -2,6 +2,21 @@
  * Ayni AG-UI Profile 3.5 (2060-io/ayni-spec, v4/ayni-agui-profile/profile.md).
  * Every name below cites the section or the PROF-* requirement it implements.
  *
+ * 3.5, package 3.5.8 (features and providers, agent D120 to D124): the tools of a space are one item per feature of its
+ * template, never one per source (PROF-TOOL-033): `SpaceTool` carries `feature` (`id`, `title`, `profile`), to the owner
+ * the `providers` the template allows, `source`, `title` and `description` of the provider in use (`null` while none is
+ * chosen), and, for a feature with a contract, `conformant`, `capabilities` and its location as `list`
+ * (`SpaceToolList`, `typed: false`); `account`, `bindings`, `list` and `tools` only once a provider is chosen. A change of
+ * provider is `POST {sessions}/spaces/{id}/tools` with `replaces` (PROF-TOOL-034); the choices of a location are
+ * `GET {sessions}/spaces/{id}/tools/{source}/list/choices?text=` (`SpaceToolChoicesResponse`, PROF-TOOL-023).
+ * `ayni.space.tools.changed` carries `feature` and, for a change of provider, `formerSource`; the activity has
+ * `provider-changed`, `feature` and `tool.formerSource`. Every source a client is given carries its `feature` (PROF-TOOL-035): a
+ * card's `action.source`, `metadata.sources`, the sources of a conversation, the Connect card; a connection of Your
+ * accounts carries `features`. A card's `action.outsideOrganization` lists the addresses that made a call external
+ * (PROF-TOOL-007). New errors: `feature-has-provider`, `provider-not-used`, `not-portable`, `too-many-entries`,
+ * `any-not-allowed`, `not-connected`, `space-account-not-set`. Not additive: a client that reads one item per source
+ * reads one per feature.
+ *
  * 3.5, package 3.5.7 (admin access, after 3.5.6): a person found by name for the filters of Audit that take a
  * Principal, `GET {sessions}/admin/audit/people?q=&reason=` (`AuditPerson`, `AuditPeopleResponse`; `400 bad-request`
  * with `field: 'q'` for an empty `q`). The admin grant of the phone holds across its sessions made through a session
@@ -363,7 +378,12 @@ export type SpaceToolChangeOutcome = 'applied' | 'declined' | 'expired' | 'faile
  */
 export interface SpaceToolsChangedValue {
   spaceId: string
+  /** the feature the change concerns (3.5.8, PROF-TOOL-006) */
+  feature: string
+  /** the provider it concerns: for a change of provider, the new one */
   source: string
+  /** a change of provider: the provider it replaced (3.5.8, PROF-TOOL-034) */
+  formerSource?: string
   state: SpaceToolState
   changeId?: string
   outcome: SpaceToolChangeOutcome
@@ -481,8 +501,12 @@ export type AccountKind = 'none' | 'agent' | 'space' | 'personal'
  * for it is deleted within the window, `fields` is empty and `erased` true (agent INTX-APPR-015).
  */
 export interface ToolAction {
+  /** for a tool of a feature profile, the profile's title of the tool (3.5.8, PROF-TOOL-035) */
   title: string
-  source: { id: string; title: string }
+  /** the source, with the feature it serves (3.5.8, PROF-TOOL-035) */
+  source: { id: string; title: string; feature?: FeatureRef }
+  /** the addresses outside the organization that made the call external (3.5.8, PROF-TOOL-007, agent TOOL-FEAT-013) */
+  outsideOrganization?: string[]
   /**
    * whose account: with the space for `space`; for `personal` (3.5, PROF-TOOL-021), `label`, the name of the account at its
    * service, on the card of the person whose account it is, and on no other card
@@ -646,7 +670,15 @@ export interface MessageMetadata {
 export interface MessageSource {
   source: string
   title: string
+  /** the feature the source served when the reply was made (3.5.8, PROF-TOOL-035): shown as "Files · Nextcloud" */
+  feature?: FeatureRef
   account: AccountKind
+}
+
+/** A feature a source serves (3.5.8, agent D120): its id and the title people read. */
+export interface FeatureRef {
+  id: string
+  title: string
 }
 
 export type ReceiptState = 'received' | 'viewed'
@@ -1146,6 +1178,20 @@ export const ERROR_STATUS = {
   'threshold-below-required': 422,
   /** 3.5 (D140): attestation turned off where the agent-pack requires it, with `field` (§3.10) */
   'attestation-required': 422,
+  /** 3.5.8: another provider of a feature that has one, sent with no `replaces` (§3.10, PROF-TOOL-034) */
+  'feature-has-provider': 409,
+  /** 3.5.8: a provider the template allows for a feature that uses another provider in the space (§3.10) */
+  'provider-not-used': 409,
+  /** 3.5.8: an entry of a feature's location that does not name the same place for every account, with `field` (§3.10) */
+  'not-portable': 422,
+  /** 3.5.8: more entries than a list holds, with `field: "list.entries"` (§3.10, PROF-TOOL-022) */
+  'too-many-entries': 422,
+  /** 3.5.8: any value where the template does not allow it, with `field: "list.any"` (§3.10, PROF-TOOL-022) */
+  'any-not-allowed': 422,
+  /** 3.5.8: the choices of a location read with the owner's own account, which is not connected (PROF-TOOL-023) */
+  'not-connected': 409,
+  /** 3.5.8: the choices of a location read with the space's account, which is not set (PROF-TOOL-023) */
+  'space-account-not-set': 409,
   /** 3.5.5: a call of Audit or Operations while the device holds no open admin grant (§3.14, PROF-ADMIN-007) */
   'admin-closed': 403,
   /** 3.5.5: a call of Audit by a person who does not hold `auditor` (§3.14) */
@@ -1432,6 +1478,8 @@ export type SpaceActivityKind =
   | 'tool-added'
   | 'tool-changed'
   | 'tool-removed'
+  /** 3.5.8: the provider of a feature changed, `tool` the new one, its `formerSource` the one it replaced (PROF-TOOL-006) */
+  | 'provider-changed'
   | 'account-set'
   | 'account-cleared'
   | 'created'
@@ -1456,8 +1504,13 @@ export interface SpaceActivityItem {
   /** the names of the fields a `rules-changed` changed */
   fields?: string[]
   conversationId?: string
-  /** the source a change of the space's tools concerns (3.4); never a value of its account */
-  tool?: { source: string; title: string }
+  /**
+   * the source a change of the space's tools concerns (3.4); never a value of its account. A `provider-changed` names the
+   * provider it replaced as `formerSource` (3.5.8), its title given by the feature's `providers`
+   */
+  tool?: { source: string; title: string; formerSource?: string }
+  /** the feature it concerns (3.5.8, PROF-TOOL-006) */
+  feature?: FeatureRef
   /** an `owner-changed`: how, the new owner being `member`, and a steward's reason (PROF-SPACE-009) */
   how?: OwnerChange
   reason?: string
@@ -1592,21 +1645,69 @@ export const SPACE_CALL_RULES: readonly SpaceCallRule[] = ['none', 'confirm', 'a
 export type SpaceToolState = 'available' | 'setup' | 'ready' | 'off'
 export const SPACE_TOOL_STATES: readonly SpaceToolState[] = ['available', 'setup', 'ready', 'off']
 
-/**
- * A source of a space, as `GET {sessions}/spaces/{id}/tools` gives it (PROF-TOOL-001). To the owner, every source the
- * template names, with every field; to another active member, the `ready` sources, without `add`, the bindings' `name`,
- * `setBy` and `pattern`, the tools' `name` and `packRule`, the account's fields and status, and `pending`. No answer
- * carries a value of an account.
- */
-export interface SpaceTool {
+/** A provider the template allows for a feature, as its owner chooses among them (3.5.8, PROF-TOOL-033). */
+export interface SpaceToolProvider {
   source: string
   title: string
   description?: string
+  account: { kind: AccountKind }
+  /** the template's default, which a client marks "Suggested" */
+  default: boolean
+}
+
+/**
+ * The location of a feature with a contract in a space (3.5.8, PROF-TOOL-022, PROF-TOOL-033): its folders or calendars,
+ * each an entry the owner picked from the provider's `choices`, or any location. To a member: `label`, `any`, the entries'
+ * `label` and `anyLabel` when `any` is true.
+ */
+export interface SpaceToolList {
+  /** the profile's label of a list ("Folders") */
+  label: string
+  any: boolean
+  /** in the owner's order; absent with `any` */
+  entries?: { values?: Record<string, string>; label: string }[]
+  /** the owner's: whether the template allows any location */
+  anyAllowed?: boolean
+  /** the profile's label of any location ("Any folder you can reach") */
+  anyLabel?: string
+  /** the owner's: whether the owner may search the provider for entries (`…/list/choices`) */
+  choices?: boolean
+  /** the owner's: `false`, an entry being always one of the choices, never a typed value */
+  typed?: false
+  /** the owner's: the most entries the list holds */
+  maxEntries?: number
+}
+
+/**
+ * A feature of a space, as `GET {sessions}/spaces/{id}/tools` gives it (PROF-TOOL-001, PROF-TOOL-033): one item per
+ * feature of the template. To the owner, every feature in every state, with the `providers` the template allows and every
+ * field; to another active member, the `ready` features, without `providers`, `add`, the bindings' `name`, `setBy` and
+ * `pattern`, the tools' `name` and `packRule`, the account's fields and status, and `pending`. An item with no provider in
+ * use carries no `account`, `bindings`, `list` or `tools`. No answer carries a value of an account.
+ */
+export interface SpaceTool {
+  /** what the item is for: a feature with a contract carries its `profile`, a category `null` (3.5.8) */
+  feature: { id: string; title: string; profile: { id: string; version: string } | null }
+  /** the owner's: the providers the template allows for the feature, in its order (3.5.8) */
+  providers?: SpaceToolProvider[]
+  /** the provider in use, `null` while none is chosen, also while the choice of a first one waits (3.5.8) */
+  source: string | null
+  title: string | null
+  description?: string | null
   state: SpaceToolState
   /** the owner's: added to every space of the template (`auto`) or by each owner (`owner`) */
   add?: 'auto' | 'owner'
   guests: boolean
-  account: {
+  /**
+   * a feature with a contract: `false` when its provider did not offer the profile at its last connection (agent
+   * TOOL-FEAT-011), `true` when it did, absent before any connection (3.5.8)
+   */
+  conformant?: boolean
+  /** a feature with a contract: the optional capabilities of its profile in use (3.5.8) */
+  capabilities?: string[]
+  /** a feature with a contract: its location (3.5.8, PROF-TOOL-033) */
+  list?: SpaceToolList
+  account?: {
     kind: AccountKind
     /**
      * the owner's, for a `space` account: the fields to fill, one masked field each, in the agent-pack's order (agent
@@ -1628,7 +1729,7 @@ export interface SpaceTool {
      */
     source?: string
   }
-  bindings: {
+  bindings?: {
     name?: string
     label: string
     value: string | null
@@ -1641,7 +1742,8 @@ export interface SpaceTool {
     /** the owner's (3.5): the value and name of each of the owner's own accounts of the source */
     choices?: { value: string; valueLabel: string | null }[]
   }[]
-  tools: {
+  /** for a feature with a contract, the profile's tools by the profile's titles and in its order, then the extras */
+  tools?: {
     name?: string
     title: string
     effect: ToolEffect | null
@@ -1662,16 +1764,31 @@ export interface SpaceToolsResponse {
   tools: SpaceTool[]
 }
 
-/** `POST {sessions}/spaces/{id}/tools` (PROF-TOOL-002): answered `202 { tool }` with its `pending` change. */
+/** A location list as the owner sends it, whole (3.5.8, PROF-TOOL-022): entries of a choice's `values`, or any. */
+export type SpaceToolListInput = { entries: Record<string, string>[] } | { any: true }
+
+/**
+ * `POST {sessions}/spaces/{id}/tools` (PROF-TOOL-002): the provider chosen for its feature, answered `202 { tool }` with
+ * its `pending` change; with `replaces`, the provider in use, it changes the feature's provider (3.5.8, PROF-TOOL-034).
+ */
 export interface AddSpaceToolRequest {
   source: string
+  replaces?: string
   bindings?: Record<string, string>
+  list?: SpaceToolListInput
   calls?: Record<string, SpaceCallRule>
+}
+
+/** `GET {sessions}/spaces/{id}/tools/{source}/list/choices?text=` (3.5.8, PROF-TOOL-023): at most fifty. */
+export interface SpaceToolChoicesResponse {
+  choices: { values: Record<string, string>; label: string }[]
 }
 
 /** `PATCH {sessions}/spaces/{id}/tools/{source}` (PROF-TOOL-003): `200` applied, or `202` with `pending`. */
 export interface SpaceToolPatch {
   bindings?: Record<string, string>
+  /** the whole location list of a feature with a contract (3.5.8, PROF-TOOL-022) */
+  list?: SpaceToolListInput
   calls?: Record<string, SpaceCallRule>
   /** a whole policy for each tool it names (PROF-TOOL-036); a looser one waits for the phone (`202`) */
   approvals?: Record<string, SpaceApprovalPolicyInput>
@@ -1742,6 +1859,8 @@ export interface SpaceToolResponse {
 export interface ConversationSource {
   source: string
   title: string
+  /** the feature it served (3.5.8, PROF-TOOL-035) */
+  feature?: FeatureRef
   account: { kind: AccountKind; space?: { id: string; title: string } }
   /** how many results of it the conversation holds */
   results: number
@@ -1799,6 +1918,8 @@ export interface Connection {
   attempt: { id: string; expiresAt: string } | null
   /** whether a Disconnect also ends the agent's access at the service */
   revokesAtSource: boolean
+  /** the features the sources that use the account serve, each once (3.5.8, PROF-TOOL-035): "For Files, Calendar" */
+  features: FeatureRef[]
 }
 
 export interface ConnectionsResponse {
@@ -1861,6 +1982,8 @@ export interface ConnectActivity {
   why: 'connect' | 'reconnect'
   binding?: { label: string; value: string; valueLabel: string | null }
   spaceId?: string
+  /** the feature of the source the card is for (3.5.8, PROF-TOOL-035) */
+  feature?: FeatureRef
 }
 
 // ---------------------------------------------------------------------------------------------

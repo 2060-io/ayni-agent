@@ -86,6 +86,8 @@ export interface ConnectionView {
   account: { id: string; label: string | null; connectedAt: string; lastUsedAt: string | null } | null
   attempt: { id: string; expiresAt: string } | null
   revokesAtSource: boolean
+  /** the features the sources that use the account serve, each once (PROF-TOOL-035) */
+  features: { id: string; title: string }[]
 }
 
 /** `ayni.connections.changed` (PROF-TOOL-019). */
@@ -112,6 +114,8 @@ export interface ToConnect {
   why: 'connect' | 'reconnect'
   binding?: { label: string; value: string; valueLabel: string | null }
   spaceId?: string
+  /** the feature of the source the card is for (PROF-TOOL-035) */
+  feature?: { id: string; title: string }
 }
 
 /** What the callback answers the browser (TOOL-OAUTH-006): a redirection, or a page. */
@@ -462,7 +466,18 @@ export class ConnectionService {
         : null,
       attempt: attempt ? { id: attempt.id, expiresAt: attempt.expiresAt } : null,
       revokesAtSource: await this.revokesAtSource(declaring),
+      features: this.featuresOf(declaring),
     }
+  }
+
+  /** The features the sources that use an account serve, each once, in the order of tools.sources (PROF-TOOL-035). */
+  private featuresOf(declaring: CatalogSource): { id: string; title: string }[] {
+    const out: { id: string; title: string }[] = []
+    for (const consumer of this.consumersOf(declaring)) {
+      const feature = this.deps.catalog.featureOf(consumer)
+      if (feature && !out.some((f) => f.id === feature.id)) out.push({ id: feature.id, title: feature.title })
+    }
+    return out
   }
 
   /**
@@ -547,7 +562,7 @@ export class ConnectionService {
       throw new ConnectionError('this source cannot be connected in that space', 'not-found')
     for (const consumer of consumers) {
       if (consumer.availability !== 'spaces' || !(await this.givesATool(principal, consumer))) continue
-      const entry = this.spaceTools.entriesOf(access.space).find((e) => e.source === consumer.name)
+      const entry = this.spaceTools.entryOfSource(access.space, consumer.name)
       if (!entry) continue
       if (access.role === 'guest' && entry.guests !== true) continue
       const ready = (await this.spaceTools.readyIn(access.space)).find((r) => r.source.name === consumer.name)
@@ -1555,6 +1570,9 @@ export class ConnectionService {
           ? { binding: { label: binding.label, value: found.value, valueLabel: found.label ?? null } }
           : {}),
         ...(source.availability === 'spaces' ? { spaceId } : {}),
+        ...((feature) => (feature ? { feature: { id: feature.id, title: feature.title } } : {}))(
+          this.deps.catalog.featureOf(source)
+        ),
       })
     }
     return out

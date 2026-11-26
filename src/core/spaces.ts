@@ -101,6 +101,19 @@ export type SpaceErrorCode =
   | 'below-pack-minimum'
   | 'threshold-below-required'
   | 'attestation-required'
+  // features and providers (profile 3.5.8, agent D120 to D123)
+  /** another provider of a feature that has one, sent with no `replaces` (TOOL-SPACE-003, PROF-TOOL-034) */
+  | 'feature-has-provider'
+  /** a provider the template allows for a feature that uses another provider in the space (TOOL-FEAT-006) */
+  | 'provider-not-used'
+  /** an entry of a feature's location that does not name the same place for every account (TOOL-FEAT-014) */
+  | 'not-portable'
+  | 'too-many-entries'
+  | 'any-not-allowed'
+  /** the choices of a location, read with the owner's own account, which is not connected (TOOL-SPACE-015) */
+  | 'not-connected'
+  /** the choices of a location, read with the space's account, which is not set (TOOL-SPACE-015) */
+  | 'space-account-not-set'
 
 /** The status of each refusal (profile 3.3 §9); `ERROR_STATUS` of the profile package lists the same. */
 export const SPACE_ERROR_STATUS: Record<SpaceErrorCode, number> = {
@@ -146,6 +159,13 @@ export const SPACE_ERROR_STATUS: Record<SpaceErrorCode, number> = {
   'below-pack-minimum': 422,
   'threshold-below-required': 422,
   'attestation-required': 422,
+  'feature-has-provider': 409,
+  'provider-not-used': 409,
+  'not-portable': 422,
+  'too-many-entries': 422,
+  'any-not-allowed': 422,
+  'not-connected': 409,
+  'space-account-not-set': 409,
 }
 
 export class SpaceError extends Error {
@@ -1191,7 +1211,16 @@ export class SpaceService {
     action: SpaceActivity['action'],
     detail: Pick<
       SpaceActivity,
-      'fields' | 'memberId' | 'conversationId' | 'principalId' | 'directoryId' | 'sourceId' | 'how' | 'reason'
+      | 'fields'
+      | 'memberId'
+      | 'conversationId'
+      | 'principalId'
+      | 'directoryId'
+      | 'sourceId'
+      | 'featureId'
+      | 'formerSourceId'
+      | 'how'
+      | 'reason'
     >
   ): Promise<void> {
     await this.store.spaceActivity.insert({ id: prefixedId('act'), spaceId, at: nowIso(), actorId, action, ...detail })

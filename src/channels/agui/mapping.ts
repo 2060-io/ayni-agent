@@ -68,16 +68,25 @@ function texts(value: unknown): string[] | undefined {
  */
 export function messageSources(
   entry: Pick<MessageEntry, 'sources'>,
-  titleOf: (sourceId: string) => string
-): { source: string; title: string; account: string }[] | undefined {
+  titleOf: (sourceId: string) => string,
+  featureOf: (featureId: string | undefined, sourceId: string) => { id: string; title: string } | undefined = () =>
+    undefined
+): { source: string; title: string; feature?: { id: string; title: string }; account: string }[] | undefined {
   if (!entry.sources?.length) return undefined
   const seen = new Set<string>()
-  const out: { source: string; title: string; account: string }[] = []
+  const out: { source: string; title: string; feature?: { id: string; title: string }; account: string }[] = []
   for (const s of entry.sources) {
     const key = `${s.sourceId}|${s.accountKind}`
     if (seen.has(key)) continue
     seen.add(key)
-    out.push({ source: s.sourceId, title: titleOf(s.sourceId), account: s.accountKind })
+    // the feature the source served when the reply was made (TOOL-FEAT-019, PROF-TOOL-010)
+    const feature = featureOf(s.featureId, s.sourceId)
+    out.push({
+      source: s.sourceId,
+      title: titleOf(s.sourceId),
+      ...(feature ? { feature } : {}),
+      account: s.accountKind,
+    })
   }
   return out
 }
@@ -85,7 +94,9 @@ export function messageSources(
 /** One entry becomes one or more AG-UI messages (text and activities), transcript order preserved. */
 export function entryToMessages(
   entry: MessageEntry,
-  titleOf: (sourceId: string) => string = (id) => id
+  titleOf: (sourceId: string) => string = (id) => id,
+  /** the feature a source served, by the id a reply recorded, else the source's own (PROF-TOOL-035) */
+  featureOf?: (featureId: string | undefined, sourceId: string) => { id: string; title: string } | undefined
 ): Record<string, unknown>[] {
   const out: Record<string, unknown>[] = []
   const reactionMap = (entry.payload?.reactions ?? {}) as Record<string, { emoji: string; by: string }>
@@ -97,7 +108,7 @@ export function entryToMessages(
   const usedMemories = reply ? (texts(entry.payload?.usedMemories) ?? []) : undefined
   const usedPreferences = reply ? (texts(entry.payload?.usedPreferences) ?? []) : undefined
   // the sources the turn's tools read (PROF-TOOL-010): on a message of the agent whose turn ran tools, and on no other
-  const sources = entry.role === 'agent' ? messageSources(entry, titleOf) : undefined
+  const sources = entry.role === 'agent' ? messageSources(entry, titleOf, featureOf) : undefined
   const meta = {
     createdAt: entry.createdAt,
     initiatedAt: entry.initiatedAt,
@@ -275,12 +286,13 @@ const SHARED_TYPES = ['text', 'voice', 'media']
  */
 export function sharedEntryToMessages(
   entry: MessageEntry,
-  titleOf: (sourceId: string) => string = (id) => id
+  titleOf: (sourceId: string) => string = (id) => id,
+  featureOf?: (featureId: string | undefined, sourceId: string) => { id: string; title: string } | undefined
 ): Record<string, unknown>[] {
   if (!SHARED_TYPES.includes(entry.sourceType) || (entry.role !== 'principal' && entry.role !== 'agent')) return []
   if (entry.payload?.menuId !== undefined && entry.payload?.items) return []
   // the sources of a reply stay: the members read where what is shared came from (PROF-TOOL-010)
-  return entryToMessages(entry, titleOf).map((message) => {
+  return entryToMessages(entry, titleOf, featureOf).map((message) => {
     const { usedMemories: _m, usedPreferences: _p, ...metadata } = (message.metadata ?? {}) as Record<string, unknown>
     return { ...message, metadata }
   })
