@@ -2334,3 +2334,92 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       card, an invitation outside the organization, a provider that does not conform, the change of provider and an
       approval that outlived it, Personal, the first start with features, the wire), `tests/postgres.test.ts` (schema
       3.15.0). With `src/` before this change none of the four files loads: `src/features/` does not exist.
+
+86. **A team space's managed folder** (2026-11-25; ayni-spec D145 to D151, architecture §10.13, TOOL-FEAT-023 to 034,
+    PROF-TOOL-040 to 043, Files 1.0 §4.4 and §4.7; the second of the two changes of decision 85). `manage` and
+    `location` are in force: the start-up warning of decision 85 is gone.
+    - **Where it lives.** `src/features/managedFolders.ts` (`ManagedFolders`): the folder made, its members kept in step,
+      tried again, read back, handed over at a change of owner, renamed, checked again and released; it calls the tools
+      of `team-roots` and `share` with the managing account through `McpServerSource.callTool`, outside any conversation,
+      with no card and no call record. `SpaceToolService` takes `location` (`add`), `folder` (`patch`), refuses a `list`
+      of a managed folder, says the words of the phone, makes the folder once the change that adds Files has been
+      announced (so that its event reads `setup` and the folder's own events follow), and releases it in `remove` and
+      `applyProvider`. The stores `managed_folders` and `folder_memberships` (schema 3.16.0, JSON by key, no address), and
+      a notice of kind `folder-access` in `governance_notices`. A job every minute (`managed-folders`) makes a folder that
+      waits, tries each change that is due, reads every folder back every six hours, and checks again a folder that
+      needs a manager; the hooks of a space's people (an addition, an invitation that binds, a removal, a person who left
+      the directory), a change of the space's rules of Files and every reload of the directory bring them in step at once.
+    - **The managing account.** `as: manager`: the headers `apply` builds, as a personal account `manage:<source>`.
+      `as: owner`: the own account of the Principal who manages the drive now (`ManagedFolder.managerPrincipalId`, the
+      owner, then whoever it was handed to), opened like any person's account. The scopes of each tool (TOOL-CAT-021,
+      D118) are not built in this agent (decision 85), so "grants the scopes of files_create_team_root…" (TOOL-FEAT-025)
+      is read as: the account is connected, and the store does not ask it for more access; a `403 insufficient_scope`
+      (`more-access-needed`) is `scope-missing`, a `not-connected` outcome or `account-refused` is `not-connected`. The
+      pack's `oauth.scopes` must therefore ask what the store needs (Google: `…/auth/drive`). Such a refusal is kept with
+      what named the account then (`refusedAccount`: the account's id and connection time, or the agent's start for
+      `as: manager`), and nothing is tried with it again until that changes or the owner checks again: no call every
+      minute to a store that already refused.
+    - **The folder.** `requestId` is `ayni-<space id>-<feature id>` (characters outside `A-Za-z0-9_-` made `-`, 128 at
+      most), fixed by the space and the feature as TOOL-FEAT-024 says: a re-add after a release asks the store for the
+      same request, which answers the former folder where the store still keeps the request (O90 stays open; noted for
+      Fabrice). Its name is the space's title, at most 100 characters; `webUrl` is read with `files_get` on the root (the
+      Root of `files_create_team_root` has none). What `files_shares` lists right after it is made is the account that
+      made it: with `as: owner`, the owner's membership, recorded with that share's id so that a change of owner can end
+      it; with `as: manager`, a `baseline` never counted as added outside and never changed. `folder.reason` is also given
+      while it is `creating` (`not-connected`, `scope-missing`, `unavailable`), so that the owner's line can read "Allow
+      <provider> to manage this space's folder" (the profile names `reason` for `needs-manager` and `failed`; the 3.5.9
+      type allows it on any state). A creation the store refuses for any other code is `failed`, `permission-denied`.
+    - **Its members.** "A tool of the provider" (TOOL-FEAT-026) is a tool of the profile in use: the core and the
+      capabilities the server declares for the managing account that the source's `capabilities` leaves in, `team-roots`
+      left out; the core alone while that account is not there. The successor is a `manager` only of a drive managed
+      `as: owner` and only where the store has managers (D147); in a folder of the managing account the owner is a
+      `manager` where the store has the role, an `editor` or a `reader` otherwise. `recipient-refused` with no known
+      reason is `no-account`; any code but those that pass and those of the account is `permission-denied`. A member's
+      reason `not-connected` (the 3.5.9 type's, which profile.md does not list) stands for a managing account that cannot
+      act, a missing scope included. A membership recorded with no share id is ended by the share the store lists for
+      the member's address; with none found, its record ends (logged). The people added outside are shown by their name
+      at the store, else the audience, else "a person": never an address; an inherited share is never counted.
+    - **Retries.** 1, 5 and 30 minutes, then every hour, while the first failure is less than 24 hours old, then
+      `failed`; `rate-limited` waits `retryAfterSeconds` instead when given. A failure that stays waits for what it depends
+      on: an address that comes (`no-address`), a managing account that can act again (`not-connected`), or Check again,
+      which tries every failed member at once whatever it answered before. A removal is never given up.
+    - **A change of owner.** A folder still `creating` or `failed` is made with the new owner's account. With no new
+      owner (no successor eligible), or when the hand-over fails and the new owner's own account does not manage it
+      already, the folder is `needs-manager`, `manager-gone`, recorded once (`manager-needed`). It is `ready` again when
+      the owner's own account is listed as a `manager` of it (an administrator made them one): checked at each change of
+      the space, every six hours and at Check again.
+    - **The owner's requests.** `PATCH …/tools/{source}` with `folder: { title }`: the name of the profile (1 to 100
+      characters after trimming, no `/`, no control character, not `.` or `..`) else `422 bad-name`, `field:
+      "folder.title"`, also for the store's `invalid-argument`; a folder not made yet `409 not-managed`; a store that does
+      not answer, or a managing account that cannot act, `502 source-unavailable`. `folder: { check: true }` does the
+      check within the request and answers `202` with the item as it is after it. `folder` with neither `400`. A
+      `location` on a feature other than Files `400 bad-request`, `field: "location"`; `managed` with a `list` `400`,
+      `field: "list"`; `managed` for a provider with no `manage`, where the template allows it, `409 cannot-manage`, and
+      where it does not, `422 location-not-allowed`; `existing` for a provider with no `manage` is taken whatever the
+      template says (TOOL-FEAT-023). While the managing account is not there to read the server with, a provider that
+      declares `manage` is offered in both modes; `409 cannot-manage` once the server is read without `team-roots` and
+      `share`.
+    - **Words.** Adding: "Use <provider> for Files in <space>. <agent> makes a <shared drive | team folder> named <space>,
+      owned by your organization[, with you as its manager], and gives each member of the space access to it.[ People
+      outside your organization included.]": a shared drive and "with you as its manager" for `as: owner`, a team folder
+      for `as: manager` (the store's declaration of managers is not known before the owner's account is read). A change
+      of provider from a managed folder adds "<agent> stops managing the <kind> <name>. It stays at <provider> with its
+      members and its files." The removal of Files applies at once with no words of the agent's (decision 85): the
+      words TOOL-FEAT-032 asks of a removal are the client's, before its `DELETE`. The model reads, for a member whose
+      access is not in place, "- files: Files, provided by <provider>: the person's access to this space's files is not
+      ready yet", and, for its share of the folder itself, "managed-root: who belongs to this space's folder follows the
+      space's members, which only the space's owner changes. Share an item inside the folder instead."
+    - **The activity.** `folder-created` and `folder-renamed` name the owner; `folder-released` whoever removed Files
+      or changed its provider; `access-failed` (with the member) and `manager-needed` name no one: the agent's own code
+      did them (`AGENT_ACTOR`, like the directory's).
+    - **Not built here:** the scopes of each tool (above); the words of a removal (the client's); O86 (Nextcloud's
+      team folder of a Team), O88 (what becomes of a released folder), O90 (adopting a folder that exists).
+    - **Tests:** `tests/managedFolders.test.ts` (fake providers of Files 1.0 that keep team roots, `tests/featureFixtures.ts`:
+      the modes and their errors, the phone's words, the folder made with the managing account, its location, its
+      members and their roles, a guest, a member with no address, what the owner and a member read, the notices, the
+      members kept in step and read back, the retries, a refusal that stays, Check again, a removal tried again, what the
+      model is given and `managed-root`, the rename, the rules of Files, a shared drive of the owner's account and its
+      hand-over, `needs-manager`, an account refused, a scope missing, the release at a change of provider and at a
+      removal, and the events to the owner and the member), `tests/featurePack.test.ts` (the managed mode in force),
+      `tests/postgres.test.ts` (schema 3.16.0). The directory's email of a person is stood in for in the test (the agent
+      reads it from the directory entry, `app.ts`), as is the owner's sign-in of the shared drive.
