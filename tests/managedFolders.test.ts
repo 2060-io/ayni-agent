@@ -602,7 +602,7 @@ describe('a change of the members that fails (TOOL-FEAT-028, PROF-TOOL-041, PROF
     model.script = [{ text: 'Not yet.' }]
     await run(zoeAlpha, 'what is in the folder?')
     expect(definitionNames()).not.toContain('files_list')
-    expect(lastUserText()).toContain("the person's access to this space's folder is not ready yet")
+    expect(lastUserText()).toContain("the person's access to this space's files is not ready yet")
     // not due: not tried
     const tries = () => sharesFor(cloud, 'zoe@example.org').length
     await folders.tick()

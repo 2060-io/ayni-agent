@@ -411,7 +411,7 @@ export class ToolGate {
           (await this.deps.folders.accessOf(spaceId, feature.id, principal.id)) !== 'in-place'
         ) {
           waiting?.push(
-            `- ${feature.id}: ${feature.title}, provided by ${source.title}: the person's access to this space's folder is not ready yet`
+            `- ${feature.id}: ${feature.title}, provided by ${source.title}: the person's access to this space's files is not ready yet`
           )
           continue
         }
