@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.38.0](https://github.com/2060-io/ayni-agent/compare/v0.37.0...v0.38.0) (2026-11-26)
+
+
+### Features
+
+* **tools:** an account that several sources use, scopes per tool, and the check of the ID token (TOOL-CAT-020, 021, TOOL-OAUTH-012 to 018) ([#139](https://github.com/2060-io/ayni-agent/issues/139)) ([34a6404](https://github.com/2060-io/ayni-agent/commit/34a6404a098385e5994deb327f0153d0b22410d6))
+
 ## [0.37.0](https://github.com/2060-io/ayni-agent/compare/v0.36.0...v0.37.0) (2026-11-26)
 
 
