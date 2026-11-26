@@ -16,6 +16,7 @@ other agents reach it over A2A. Identity comes from Verifiable Trust v4 credenti
 | `src/store/` | the persistence interface, PostgreSQL (+pgvector) and in-memory stores, memory schema migrations | TOOL-HTTP-004, PRIV-SCOPE-005, CORE-VER |
 | `src/policy/` | tool tiers (RBAC) and the approval workflow | RBAC, INTX-APPR, PRIV-ELEV |
 | `src/tools/` | tool registry, HTTP tools, bundled tools, MCP client | TOOL |
+| `src/features/` | features and providers: the agent's copy of the feature profiles Files 1.0 and Calendar 1.0 (`profiles.ts`, pinned to the documents vendored in `spec/`), what each provider declares, the marks of references, a call of a profile's tool and its result (`service.ts`) | TOOL-FEAT, D120 to D124 |
 | `src/llm/` | chat model adapters (OpenAI, generic chat-completions, Anthropic, Ollama, Azure, Bedrock, Vertex, stub) and embeddings | LLM |
 | `src/media/` | object store, speech-to-text, vision, image generation, the media service | MEDIA, MEM-ATT |
 | `src/channels/didcomm/` | VS Agent client, identity flow, DIDComm adapter, webhook events, face-match and WebRTC callbacks | CHAN-ADP, IDENT-RES, INTX-AUTH |
