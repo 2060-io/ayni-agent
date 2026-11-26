@@ -13,8 +13,10 @@ import type {
   ElevationGrant,
   EvidenceRecord,
   FeatureMarkRecord,
+  FolderMembershipRecord,
   GovernanceNotice,
   LifecycleState,
+  ManagedFolderRecord,
   MemoryAccessLog,
   MessageEntry,
   OAuthAttemptRecord,
@@ -366,7 +368,22 @@ export interface SpaceToolRepo {
   listAll(): Promise<SpaceToolRecord[]>
 }
 
-/** The accounts of the spaces (D97, TOOL-ACCESS-004): a token only as ciphertext, its key with the row. */
+/** The managed folders of team spaces, one per space and feature (D145, TOOL-FEAT-034). */
+export interface ManagedFolderRepo {
+  get(spaceId: string, featureId: string): Promise<ManagedFolderRecord | undefined>
+  save(record: ManagedFolderRecord): Promise<void>
+  delete(spaceId: string, featureId: string): Promise<void>
+  listAll(): Promise<ManagedFolderRecord[]>
+}
+
+/** The memberships of a managed folder the agent made, by member (D146, TOOL-FEAT-034). */
+export interface FolderMembershipRepo {
+  listByFolder(spaceId: string, featureId: string): Promise<FolderMembershipRecord[]>
+  save(record: FolderMembershipRecord): Promise<void>
+  delete(spaceId: string, featureId: string, principalId: string): Promise<void>
+  deleteByFolder(spaceId: string, featureId: string): Promise<void>
+}
+
 /** The marks of the providers of the features with a contract, by space and feature (TOOL-FEAT-016). */
 export interface FeatureMarkRepo {
   get(spaceId: string, featureId: string): Promise<FeatureMarkRecord | undefined>
@@ -374,6 +391,7 @@ export interface FeatureMarkRepo {
   delete(spaceId: string, featureId: string): Promise<void>
 }
 
+/** The accounts of the spaces (D97, TOOL-ACCESS-004): a token only as ciphertext, its key with the row. */
 export interface SpaceAccountRepo {
   get(spaceId: string, sourceId: string): Promise<SpaceAccountRecord | undefined>
   save(record: SpaceAccountRecord): Promise<void>
@@ -495,6 +513,8 @@ export interface Store {
   spaceTools: SpaceToolRepo
   spaceAccounts: SpaceAccountRepo
   featureMarks: FeatureMarkRepo
+  managedFolders: ManagedFolderRepo
+  folderMemberships: FolderMembershipRepo
   toolAllowances: ToolAllowanceRepo
   toolCalls: ToolCallRepo
   personKeys: PersonKeyRepo

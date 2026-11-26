@@ -114,6 +114,17 @@ export type SpaceErrorCode =
   | 'not-connected'
   /** the choices of a location, read with the space's account, which is not set (TOOL-SPACE-015) */
   | 'space-account-not-set'
+  // a team space's managed folder (profile 3.5.9, agent D145 to D150)
+  /** a mode of Files the template does not allow (PROF-TOOL-040) */
+  | 'location-not-allowed'
+  /** the managed mode with a provider the agent cannot manage a folder at (TOOL-FEAT-033) */
+  | 'cannot-manage'
+  /** a list of Files while its folder is managed (TOOL-FEAT-024) */
+  | 'managed-location'
+  /** `folder` on Files in the existing mode (PROF-TOOL-043) */
+  | 'not-managed'
+  /** a name of the managed folder the profile does not take (PROF-TOOL-043) */
+  | 'bad-name'
 
 /** The status of each refusal (profile 3.3 §9); `ERROR_STATUS` of the profile package lists the same. */
 export const SPACE_ERROR_STATUS: Record<SpaceErrorCode, number> = {
@@ -166,6 +177,11 @@ export const SPACE_ERROR_STATUS: Record<SpaceErrorCode, number> = {
   'any-not-allowed': 422,
   'not-connected': 409,
   'space-account-not-set': 409,
+  'location-not-allowed': 422,
+  'cannot-manage': 409,
+  'managed-location': 409,
+  'not-managed': 409,
+  'bad-name': 422,
 }
 
 export class SpaceError extends Error {
@@ -362,8 +378,20 @@ export class SpaceService {
    * dropped (TOOL-SPACE-011), its members are told, the approvals that wait for its owner move
    */
   public onOwnerChanged?: (space: Space, change: OwnerChanged) => Promise<void>
-  /** the people of a space changed (a member removed, a successor cleared): what its policies name is read again */
+  /**
+   * the people of a space changed (a member added, made active, removed or gone from the directory, a successor cleared):
+   * what its policies name is read again, and its managed folder's members follow (D146)
+   */
   public onMembersChanged?: (space: Space) => Promise<void>
+
+  /** Tells the hook of the people of a space that they changed; a failure of what follows is logged, never thrown. */
+  public async membersChanged(spaceId: string): Promise<void> {
+    const space = await this.find(spaceId)
+    if (!space) return
+    await this.onMembersChanged?.(space).catch((err) =>
+      this.logger.warn({ err, spaceId }, 'what follows the people of a space was not brought in line')
+    )
+  }
 
   public constructor(
     private readonly store: Store,
@@ -835,6 +863,7 @@ export class SpaceService {
     }
     await this.members.save(row)
     await this.record(space.id, principal.id, holder ? 'joined' : 'invited', { memberId: row.id, directoryId })
+    if (holder) await this.membersChanged(space.id)
     this.logger.info(
       { spaceId: space.id, memberId: row.id, directoryId, state: row.state },
       'a person of the directory added to a space'
@@ -853,6 +882,7 @@ export class SpaceService {
       if (row.state !== 'invited' || !(await this.find(row.spaceId))) continue
       await this.members.save({ ...row, principalId: principal.id, state: 'active', updatedAt: nowIso() })
       await this.record(row.spaceId, principal.id, 'joined', { memberId: row.id, directoryId: row.directoryId })
+      await this.membersChanged(row.spaceId)
       bound++
     }
     if (bound) this.logger.info({ principalId: principal.id, spaces: bound }, 'invitations of the directory bound')
@@ -1076,6 +1106,7 @@ export class SpaceService {
           ...(row.principalId ? { principalId: row.principalId } : {}),
           ...(row.directoryId ? { directoryId: row.directoryId } : {}),
         })
+        if (space.ownerPrincipalId !== principal.id) await this.membersChanged(space.id)
       }
       let current = (await this.find(space.id)) ?? space
       if (current.successorPrincipalId === principal.id) current = await this.clearSuccessor(current, DIRECTORY_ACTOR)

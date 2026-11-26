@@ -17,6 +17,7 @@ import { Ajv2020 } from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
 import type { AgentPack, CallRule, SpaceCallRule, StepUpAuthentication, ToolEffect } from '../config/packTypes.js'
 import { confirmationTimeoutSeconds } from '../config/packTypes.js'
+import type { ManagedFolders } from '../features/managedFolders.js'
 import type { FeatureProfile, ProfileTool } from '../features/profiles.js'
 import { FeatureService, type LocationScope } from '../features/service.js'
 import type { ToolCallRequest, ToolDefinition } from '../llm/types.js'
@@ -111,6 +112,8 @@ export interface TurnFeature {
   mark?: string
   /** a conversation of Personal */
   personal: boolean
+  /** the reference of the space's folder the agent manages, when it does (TOOL-FEAT-031) */
+  managedRoot?: string
 }
 
 /** What a turn keeps of its calls (TOOL-CALL-008, TOOL-PROV-002). */
@@ -176,6 +179,8 @@ export interface ToolGateDeps {
   router?: Pick<CapabilityRouter, 'notifyOrigin'>
   /** the features with a contract: their providers' declarations, the marks, what a call goes through (D121 to D123) */
   features?: FeatureService
+  /** a team space's folders the agent manages: whose access is in place (D145, TOOL-FEAT-028) */
+  folders?: ManagedFolders
 }
 
 /** The step of a turn while a step-up waits on the phone: a label, never a tool's name (PROF-MAP-005). */
@@ -334,7 +339,9 @@ export class ToolGate {
   ): Promise<{ tools: TurnTool[]; toConnect: ToConnect[]; elevated: ElevatedTool[]; limits: string[] }> {
     const connections = this.deps.connections
     const toConnect = connections ? await connections.toConnect(principal, spaceId, grants) : []
-    const tools = (await this.allTools(principal, spaceId, grants)).filter(
+    // a member whose access to a managed folder is not in place reads why, in place of its tools (TOOL-FEAT-028)
+    const waiting: string[] = []
+    const tools = (await this.allTools(principal, spaceId, grants, waiting)).filter(
       (t) => t.spec.rawName !== OFFER_CONNECTION || t.source.kind !== 'bundled' || toConnect.length > 0
     )
     // one line per feature with a contract whose tools the model has, in the order of tools.sources (TOOL-FEAT-021)
@@ -354,6 +361,7 @@ export class ToolGate {
       )
       if (line) limits.push(line)
     }
+    limits.push(...waiting)
     const elevated = tools
       .filter((t) => needsGrant(t.resolution))
       .map((t) => {
@@ -374,7 +382,8 @@ export class ToolGate {
     grants: ElevationGrant[],
     ready: Map<string, ReadySource>,
     personalReady: Map<string, string>,
-    guest: boolean
+    guest: boolean,
+    waiting?: string[]
   ): Promise<TurnTool[]> {
     const { catalog, spaceTools, registry, connections, features } = this.deps
     if (!features) return []
@@ -394,6 +403,18 @@ export class ToolGate {
         if (!r || (guest && r.entry.guests !== true)) continue
         scope = FeatureService.scopeOf(profile, r.record.list)
         if (!scope) continue
+        // a member whose access to the space's managed folder is not in place is given none of its tools, and the model
+        // reads that it is not ready yet (TOOL-FEAT-028)
+        if (
+          r.record.location === 'managed' &&
+          this.deps.folders &&
+          (await this.deps.folders.accessOf(spaceId, feature.id, principal.id)) !== 'in-place'
+        ) {
+          waiting?.push(
+            `- ${feature.id}: ${feature.title}, provided by ${source.title}: the person's access to this space's folder is not ready yet`
+          )
+          continue
+        }
       }
       if (source.account.kind === 'personal' && !personalReady.has(source.name)) continue
       let account: CallAccountSecret | undefined
@@ -446,6 +467,10 @@ export class ToolGate {
             mark,
             personal,
             ...(ofProfile ? { profile, tool: ofProfile } : {}),
+            // the folder the agent manages: who belongs to it is the space's (TOOL-FEAT-031)
+            ...(r?.record.location === 'managed' && where.kind === 'list' && where.entries[0]
+              ? { managedRoot: where.entries[0].value }
+              : {}),
           },
         })
       }
@@ -453,7 +478,12 @@ export class ToolGate {
     return out
   }
 
-  private async allTools(principal: Principal, spaceId: string, grants: ElevationGrant[]): Promise<TurnTool[]> {
+  private async allTools(
+    principal: Principal,
+    spaceId: string,
+    grants: ElevationGrant[],
+    waiting?: string[]
+  ): Promise<TurnTool[]> {
     const { catalog, spaceTools, registry, connections } = this.deps
     const personal = isPersonalSpace(spaceId)
     const access = personal ? undefined : await this.deps.spaces.access(principal, spaceId)
@@ -483,7 +513,7 @@ export class ToolGate {
     }
     // the providers of features with a contract give their profile's tools (TOOL-FEAT-010), in the profile's order, after
     // the others, which keep the order of their names
-    const providers = await this.providerTools(principal, spaceId, grants, ready, personalReady, guest)
+    const providers = await this.providerTools(principal, spaceId, grants, ready, personalReady, guest, waiting)
     const theirs = new Set(providers.map((t) => t.name))
     const out: TurnTool[] = []
     // every tool the roles reach, by role or through a grant they may hold (RBAC-TOOL-004, D112)
@@ -668,7 +698,7 @@ export class ToolGate {
     args: Record<string, unknown>
   ):
     | { ok: true; tool: TurnTool; args: Record<string, unknown>; prepared?: PreparedFeatureCall }
-    | { ok: false; outcome: 'stale-reference' | 'outside-list'; text: string } {
+    | { ok: false; outcome: 'stale-reference' | 'outside-list' | 'managed-root'; text: string } {
     const f = tool.feature
     const features = this.deps.features
     if (!f?.profile || !f.tool || !f.mark || !features) return { ok: true, tool, args }
@@ -680,6 +710,13 @@ export class ToolGate {
       personal: f.personal,
     })
     if (!ready.ok) return ready
+    // the model shares items inside the managed folder, never the folder itself (TOOL-FEAT-031)
+    if (f.managedRoot && ['files_share', 'files_unshare'].includes(f.tool.name) && ready.args.ref === f.managedRoot)
+      return {
+        ok: false,
+        outcome: 'managed-root',
+        text: "managed-root: who belongs to this space's folder follows the space's members, which only the space's owner changes. Share an item inside the folder instead.",
+      }
     const outside = features.outside(f.tool, ready.args)
     const prepared: PreparedFeatureCall = {
       ...(ready.location !== undefined ? { location: ready.location } : {}),

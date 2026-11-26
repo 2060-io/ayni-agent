@@ -472,6 +472,12 @@ export type SpaceActivityAction =
   | 'tool-changed'
   | 'tool-removed'
   | 'provider-changed'
+  /** the managed folder of a team space (D145 to D149, PROF-TOOL-043) */
+  | 'folder-created'
+  | 'folder-renamed'
+  | 'folder-released'
+  | 'access-failed'
+  | 'manager-needed'
   | 'account-set'
   | 'account-cleared'
   | 'created'
@@ -552,7 +558,13 @@ export interface ApprovalProgress {
   waitingFor: { kind: ApproverKind; name?: string; role?: string; department?: string; required: boolean }[]
 }
 
-export type GovernanceNoticeKind = 'owner-changed' | 'policy-attention' | 'no-approver' | 'space-without-owner'
+export type GovernanceNoticeKind =
+  | 'owner-changed'
+  | 'policy-attention'
+  | 'no-approver'
+  | 'space-without-owner'
+  /** a member's access to the space's managed folder failed: to the owner, while it is not in place (TOOL-FEAT-028) */
+  | 'folder-access'
 
 /**
  * A notice of a space's governance in a person's Notifications (INTX-APPR-027, D142): read-only, carrying no content of
@@ -576,12 +588,23 @@ export interface GovernanceNotice {
     requester?: { displayName: string }
     template?: { id: string; title: string }
     formerOwner?: { name: string } | null
+    /** `folder-access`: the member, the feature and its provider, the folder, and why (PROF-TOOL-042) */
+    member?: { name: string }
+    feature?: { id: string; title: string }
+    source?: { id: string; title: string }
+    folder?: { title: string }
+    folderReason?: FolderAccessReason
+    /** `folder-access`: the Principal whose access it is, to resolve it once in place */
+    memberPrincipalId?: string
   }
   resolvedAt?: string
 }
 
 /** The actor of what a reload of the user directory does in a space (SPACE-MEMB-008). */
 export const DIRECTORY_ACTOR = 'directory'
+
+/** The actor of what the agent's own code does in a space by itself: a managed folder's members kept in step (D146). */
+export const AGENT_ACTOR = 'agent'
 
 export interface PrincipalPreference {
   principalId: string
@@ -968,6 +991,8 @@ export interface PendingToolChange {
   bindings?: Record<string, string>
   /** the location list of a feature with a contract the change sets, whole (TOOL-SPACE-014, TOOL-FEAT-014) */
   list?: SpaceToolList
+  /** Files: the mode the owner chose with the provider, a folder the agent makes or one that exists (TOOL-FEAT-024) */
+  location?: 'managed' | 'existing'
   calls?: Record<string, 'none' | 'confirm' | 'approval' | 'off'>
   /** the approval policies the change sets, each whole, by tool (TOOL-SPACE-018, TOOL-SPACE-019) */
   approvals?: Record<string, SpaceApprovalPolicy>
@@ -1012,9 +1037,80 @@ export interface SpaceToolRecord {
    * each with the title it read, or any location (TOOL-SPACE-014, TOOL-FEAT-014)
    */
   list?: SpaceToolList
+  /** Files: the mode in use, `managed` when the agent made and keeps the space's folder (D145, TOOL-FEAT-024) */
+  location?: 'managed' | 'existing'
   pendingChange?: PendingToolChange
   updatedAt: string
   updatedBy?: string
+}
+
+/** Why a managed folder is not ready, as the owner reads it (PROF-TOOL-041). */
+export type ManagedFolderReason =
+  | 'not-connected'
+  | 'scope-missing'
+  | 'manager-gone'
+  | 'permission-denied'
+  | 'unavailable'
+
+/**
+ * A team space's folder the agent made at a provider of Files and keeps (D145, TOOL-FEAT-034): its reference, its name as
+ * last read, the `requestId` that makes a retry make no second one, its state and whose account manages it. No address.
+ */
+export interface ManagedFolderRecord {
+  spaceId: string
+  featureId: string
+  sourceId: string
+  /** the team root's reference at the store, once made */
+  ref?: string
+  name: string
+  requestId: string
+  state: 'creating' | 'ready' | 'needs-manager' | 'failed'
+  reason?: ManagedFolderReason
+  /** `owner`: the space owner's own account (a shared drive); `manager`: the managing account (D147, D150) */
+  managedWith: 'owner' | 'manager'
+  /** `owner`: the Principal whose own account manages it now */
+  managerPrincipalId?: string
+  /** whether the store has the role `manager` on a team root (files §4.7) */
+  managers?: boolean
+  webUrl?: string
+  /** the people the store lists that the agent did not add, by their names only, as last read (D146) */
+  addedOutside: { name: string }[]
+  /** the ids of the shares the store listed right after the folder was made: the account that made it (files §4.7) */
+  baseline?: string[]
+  attempts: number
+  firstFailedAt?: string
+  nextAttemptAt?: string
+  lastReadAt?: string
+  createdAt: string
+  updatedAt: string
+}
+
+/** Why a member has no access to a managed folder (TOOL-FEAT-026, TOOL-FEAT-028, PROF-SPACE-003). */
+export type FolderAccessReason =
+  | 'no-address'
+  | 'no-account'
+  | 'not-allowed'
+  | 'too-many'
+  | 'permission-denied'
+  | 'unavailable'
+  | 'not-connected'
+
+/**
+ * A membership of a managed folder the agent made, or is making (D146, TOOL-FEAT-034): the member, the role, the share's
+ * id at the store, its state, its reason and its attempts; never the member's address, read at each change.
+ */
+export interface FolderMembershipRecord {
+  spaceId: string
+  featureId: string
+  principalId: string
+  role: 'reader' | 'editor' | 'manager'
+  shareId?: string
+  state: 'pending' | 'in-place' | 'failed' | 'removing'
+  reason?: FolderAccessReason
+  attempts: number
+  firstFailedAt?: string
+  nextAttemptAt?: string
+  updatedAt: string
 }
 
 /**
@@ -1212,6 +1308,8 @@ export type ToolCallOutcome =
   | 'outside-list'
   /** approved after the feature's provider in the space changed: it did not run (TOOL-FEAT-009) */
   | 'provider-changed'
+  /** a share of a space's managed folder itself, asked by the model: who belongs to it is the space's (TOOL-FEAT-031) */
+  | 'managed-root'
 
 /** One call the model asked for (TOOL-PROV-004, D100): no argument, no result, no account value. */
 export interface ToolCallRecord {

@@ -263,6 +263,7 @@ export class InvitationService implements OutsiderInvitations {
     const next: SpaceMember = { ...row, principalId: principal.id, state: 'active', role: 'guest', updatedAt: nowIso() }
     await this.deps.spaces.saveMember(next)
     await this.deps.spaces.record(row.spaceId, principal.id, 'joined', { memberId: row.id, principalId: principal.id })
+    await this.deps.spaces.membersChanged(row.spaceId)
     this.deps.logger.info(
       { spaceId: row.spaceId, memberId: row.id, principalId: principal.id },
       'an invitation of another organization bound (SPACE-INV-003)'

@@ -63,6 +63,7 @@ import { SpaceService } from './core/spaces.js'
 import { SpaceToolService } from './core/spaceTools.js'
 import { type StartupRetry, StartupSteps, within } from './core/startupSteps.js'
 import { ToolGate } from './core/toolGate.js'
+import { ManagedFolders } from './features/managedFolders.js'
 import { FeatureService } from './features/service.js'
 import { AnchoringService, VeranaLedgerWriter } from './integrity/anchoring.js'
 import { createChatModel, createEmbeddings } from './llm/index.js'
@@ -438,6 +439,29 @@ export async function buildAgent(
   connections.spaceTools = spaceTools
   spaceTools.connections = connections
   spaceTools.features = featureService
+  // a team space's folders the agent makes and keeps (D145 to D150)
+  const folders = new ManagedFolders({
+    store,
+    pack,
+    catalog,
+    spaces,
+    features: featureService,
+    logger,
+    server: (sourceId) => registry.sourceById(`mcp:${sourceId}`) as McpServerSource | undefined,
+    // a member is named to the store by the email of their directory entry (D146); a guest by their invitation's
+    emailOf: (principal) =>
+      principal.directoryEntryId ? directory?.entry(principal.directoryEntryId)?.email : undefined,
+    nameOf: (principal) =>
+      (principal.directoryEntryId ? directory?.view(principal.directoryEntryId)?.name : undefined) ??
+      displayNameOf(principal),
+  })
+  folders.connections = connections
+  spaceTools.folders = folders
+  folders.hooks = {
+    changed: (space, featureId, sourceId, principalIds) =>
+      spaceTools.folderChanged(space, featureId, sourceId, principalIds),
+    noticeChanged: (notice) => agentRef?.notifications.noticeChanged(notice) ?? Promise.resolve(),
+  }
   const gate = new ToolGate({
     pack,
     store,
@@ -454,6 +478,7 @@ export async function buildAgent(
     connections,
     router,
     features: featureService,
+    folders,
   })
   orchestrator.gate = gate
   gateRef = gate
@@ -482,10 +507,23 @@ export async function buildAgent(
   spaces.onCreated = (space) => spaceTools.onCreated(space)
   // the owner changed: the tools' pending changes are dropped, the members told, the approvals moved (SPACE-MEMB-012)
   spaces.onOwnerChanged = async (space, change) => {
+    // the managed folders first, before anything ends the former owner's accounts (TOOL-FEAT-029)
+    await folders
+      .ownerChanged(space, {
+        ...(change.formerId ? { formerId: change.formerId } : {}),
+        ...(change.newId ? { newId: change.newId } : {}),
+      })
+      .catch((err) =>
+        logger.error({ err, spaceId: space.id }, 'the managed folders of a space did not follow its owner')
+      )
     await spaceTools.onOwnerChanged(space)
     await governance.ownerChanged(space, change)
   }
-  spaces.onMembersChanged = (space) => governance.review(space)
+  spaces.onMembersChanged = async (space) => {
+    await governance.review(space)
+    // the members of its managed folder follow the space's (TOOL-FEAT-027)
+    await folders.reconcile(space)
+  }
   memory.hooks.approvalsErased = (records) => gate.onTurnErased(records)
   spaceTools.hooks = {
     accountEnded: (spaceId, sourceId) => registry.closeAccount(sourceId, spaceId),
@@ -495,6 +533,7 @@ export async function buildAgent(
       return principal ? displayNameOf(principal) : ''
     },
     announce: async (space, value) => aguiRoutes?.announceSpaceTools(space, value),
+    announceTo: async (principalId, value) => aguiRoutes?.announceSpaceToolsTo(principalId, value),
   }
   connections.hooks = {
     announce: async (principalId, value) => aguiRoutes?.announceConnections(principalId, value),
@@ -1000,6 +1039,8 @@ export async function buildAgent(
     schedule('expire-approvals', 60_000, async () => void (await approvals.expirePending()), onJobError),
     // a change of a space's tools whose phone never answered is dropped as expired (TOOL-SPACE-008)
     schedule('expire-tool-changes', 30_000, async () => void (await spaceTools.expirePending()), onJobError),
+    // the managed folders: made, their members kept in step and tried again, read back every six hours (TOOL-FEAT-027/028)
+    schedule('managed-folders', 60_000, async () => folders.tick(), onJobError),
     // a sign-in nobody finished in its time ends as expired, and the person's devices are told (TOOL-OAUTH-005)
     schedule('expire-oauth-attempts', 30_000, async () => void (await connections.expireAttempts()), onJobError),
     schedule('retention', 6 * 3_600_000, () => retention.tick(), onJobError),

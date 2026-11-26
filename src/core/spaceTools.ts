@@ -20,7 +20,8 @@
 import { randomInt } from 'node:crypto'
 import type { AccountField, AgentPack, CallRule, SpaceCallRule, TemplateFeature } from '../config/packTypes.js'
 import { defaultProviderOf, SPACE_CALL_RULES } from '../config/packTypes.js'
-import { CODE_ONLY_CAPABILITIES, type FeatureProfile, toolsInUse } from '../features/profiles.js'
+import { type FolderView, ManagedFolders } from '../features/managedFolders.js'
+import { CODE_ONLY_CAPABILITIES, type FeatureProfile, FILES_1_0, toolsInUse } from '../features/profiles.js'
 import { FeatureService, type ProviderState } from '../features/service.js'
 import { type EntryCrypto, openJson, sealJson } from '../memory/crypto.js'
 import {
@@ -110,6 +111,8 @@ export interface SpaceToolView {
     description?: string
     account: { kind: 'none' | 'agent' | 'space' | 'personal' }
     default: boolean
+    /** Files: the modes this provider is offered in (PROF-TOOL-040) */
+    locations?: ('managed' | 'existing')[]
   }[]
   /** the provider in use: null while none is chosen */
   source: string | null
@@ -149,6 +152,12 @@ export interface SpaceToolView {
   }[]
   /** a feature with a contract: its location (TOOL-FEAT-014) */
   list?: SpaceToolListView
+  /** Files, to the owner: the modes the template allows for the provider (PROF-TOOL-040) */
+  locations?: ('managed' | 'existing')[]
+  /** Files, to the owner: the mode in use (PROF-TOOL-040) */
+  location?: 'managed' | 'existing'
+  /** Files in the managed mode: the folder the agent made and keeps (PROF-TOOL-041) */
+  folder?: FolderView
   tools?: {
     name?: string
     title: string
@@ -176,6 +185,8 @@ export interface ReadySource {
 export interface SpaceToolsHooks {
   /** a change applied or was dropped: every bound session of the space's owners hears it (TOOL-SPACE-010) */
   announce?: (space: Space, value: SpaceToolsChanged) => Promise<void>
+  /** a member's access to the managed folder changed: that member's sessions hear it too (PROF-TOOL-041) */
+  announceTo?: (principalId: string, value: SpaceToolsChanged) => Promise<void>
   /** the account of a source ended or changed: its connection closes (TOOL-ACCESS-007) */
   accountEnded?: (spaceId: string, sourceId: string) => Promise<void>
   /** the rules, bindings or account of a source changed: the allowances of its tools end (TOOL-CALL-006) */
@@ -234,6 +245,8 @@ export class SpaceToolService {
   public governance?: Governance
   /** the features with a contract: their providers' declarations and marks (D121 to D123) */
   public features?: FeatureService
+  /** a team space's folders the agent makes and keeps (D145 to D150) */
+  public folders?: ManagedFolders
   /** the locations the owner was last given, by space and source, for the `PATCH` that picks one (TOOL-FEAT-014) */
   private readonly choicesRead = new Map<
     string,
@@ -533,15 +546,17 @@ export class SpaceToolService {
           ? { anyLabel: profile.location.labels.any }
           : { entries: (list?.entries ?? []).map((e) => ({ label: e.label })) }),
       }
+    // the managed folder is the one entry, which the owner does not change (TOOL-FEAT-024)
+    const managed = record.location === 'managed'
     return {
       label: profile.location.labels.list,
       any,
       ...(any ? {} : { entries: (list?.entries ?? []).map((e) => ({ values: { ...e.values }, label: e.label })) }),
-      anyAllowed: entry.any === true,
+      anyAllowed: !managed && entry.any === true,
       anyLabel: profile.location.labels.any,
-      choices: true,
+      choices: !managed,
       typed: false as const,
-      maxEntries: MAX_LIST_ENTRIES,
+      maxEntries: managed ? 1 : MAX_LIST_ENTRIES,
     }
   }
 
@@ -601,10 +616,24 @@ export class SpaceToolService {
         ? { changeId: pending.id, summary: pending.summary, code: pending.code, expiresAt: pending.expiresAt }
         : null
     }
+    // Files: the modes each provider allows, to the owner, and those of the provider in use, or of the default while none
+    // is chosen, on the item (PROF-TOOL-040)
+    if (owner && profile?.id === FILES_1_0.id && this.folders && head.providers) {
+      for (const provider of head.providers) {
+        const source = this.catalog.source(provider.source)
+        const locations = source ? await this.folders.locationsOf(space, entry, source) : undefined
+        if (locations) provider.locations = locations
+      }
+      const shown = head.providers.find((p) => p.source === (inUse?.source.name ?? defaultProviderOf(entry)))
+      if (shown?.locations) head.locations = shown.locations
+    }
     // an item with no provider carries no account, bindings, list or tools, and a pending only while the choice of its
     // provider waits (PROF-TOOL-033)
     if (!inUse) return owner ? { ...head, pending: pendingOf(slot.pendingAdd?.record) } : head
     const { source, record } = inUse
+    if (owner && record.location) head.location = record.location
+    const folder = record.location === 'managed' ? await this.folders?.folderOf(space.id, entry.feature) : undefined
+    if (folder && this.folders) head.folder = await this.folders.view(space, folder, owner, reader?.id)
     const providerState = profile ? await this.providerState(source, space, reader) : undefined
     const tools = []
     for (const { name, spec } of await this.toolsOf(source, space, true, reader)) {
@@ -1047,7 +1076,14 @@ export class SpaceToolService {
     principal: Principal,
     session: Session,
     spaceId: string,
-    body: { source?: unknown; replaces?: unknown; bindings?: unknown; list?: unknown; calls?: unknown }
+    body: {
+      source?: unknown
+      replaces?: unknown
+      bindings?: unknown
+      list?: unknown
+      calls?: unknown
+      location?: unknown
+    }
   ): Promise<SpaceToolView> {
     if (typeof body.source !== 'string' || !body.source)
       throw new SpaceError('source is required', 'bad-request', 'source')
@@ -1065,19 +1101,24 @@ export class SpaceToolService {
     if (body.replaces !== undefined && body.replaces !== null && body.replaces !== slot.inUse?.source.name)
       throw new SpaceError(`replaces names the provider of ${feature.title} in use`, 'bad-request', 'replaces')
     if (this.pendingOf(slot)) throw new SpaceError(`a change of ${feature.title} waits for the phone`, 'change-pending')
+    // Files: a folder the agent makes, or one that exists (TOOL-FEAT-024, PROF-TOOL-040)
+    const location = await this.locationOf(space, slot.entry, source, body)
     const { values: bindings, labels } = await this.checkBindings(principal, source, body.bindings)
     const list = await this.checkList(principal, space, slot.entry, source, body.list, undefined)
     const calls = await this.checkCalls(space, source, body.calls, principal)
     const extra = {
       ...(Object.keys(labels).length ? { bindingLabels: labels } : {}),
       ...(list ? { list } : {}),
+      ...(location ? { location } : {}),
     }
+    const managedWords = location === 'managed' ? ` ${this.managedWords(space, slot.entry, source)}` : ''
     if (slot.inUse) {
       // a change of provider (TOOL-FEAT-007): it waits on the record of the provider in use, which stays in force until then
       const former = slot.inUse.source
       const head = `Use ${source.title} for ${feature.title} in ${space.title}, in place of ${former.title}`
       const values = await this.summaryOf(head, space, source, { bindings, labels, list })
-      const summary = `${values}. ${this.agentName} stops using ${former.title} in this space. Nothing is copied from ${former.title} to ${source.title}.`
+      const released = await this.releaseWords(space, slot.entry, former, slot.inUse.record)
+      const summary = `${values}.${managedWords} ${this.agentName} stops using ${former.title} in this space. Nothing is copied from ${former.title} to ${source.title}.${released}`
       await this.hold(principal, session, space, slot.inUse.record, {
         kind: 'provider',
         source: source.name,
@@ -1096,14 +1137,76 @@ export class SpaceToolService {
       calls: {},
       updatedAt: nowIso(),
     }
-    const summary = await this.summaryOf(`Use ${source.title} for ${feature.title} in ${space.title}`, space, source, {
+    const values = await this.summaryOf(`Use ${source.title} for ${feature.title} in ${space.title}`, space, source, {
       bindings,
       calls,
       labels,
       list,
     })
+    const summary = managedWords ? `${values}.${managedWords}` : values
     await this.hold(principal, session, space, record, { kind: 'add', bindings, calls, summary, ...extra })
     return this.ownerView(space, source.name, principal)
+  }
+
+  /**
+   * The mode of Files a request asks (TOOL-FEAT-023, TOOL-FEAT-024, TOOL-FEAT-033, PROF-TOOL-040): required where the
+   * template allows both and the provider manages; one the template does not allow `422 location-not-allowed`; `managed`
+   * with a provider the agent cannot manage `409 cannot-manage`, and with a `list` `400`. A provider that declares no
+   * `manage` is in the existing mode whatever the template says. None for another feature.
+   */
+  private async locationOf(
+    space: Space,
+    entry: TemplateFeature,
+    source: CatalogSource,
+    body: { location?: unknown; list?: unknown }
+  ): Promise<'managed' | 'existing' | undefined> {
+    const given = body.location
+    if (this.catalog.profileOf(source)?.id !== FILES_1_0.id || !this.folders) {
+      if (given !== undefined) throw new SpaceError('a location mode is for Files only', 'bad-request', 'location')
+      return undefined
+    }
+    if (given !== undefined && given !== 'managed' && given !== 'existing')
+      throw new SpaceError('location is managed or existing', 'bad-request', 'location')
+    const allowed = ManagedFolders.allowed(entry, space)
+    const manages = this.folders.managesAt(source)
+    if (given === undefined) {
+      if (allowed.length > 1 && manages)
+        throw new SpaceError('choose a folder the agent makes, or one that exists', 'bad-request', 'location')
+      return manages ? allowed[0] : 'existing'
+    }
+    if (!allowed.includes(given))
+      throw new SpaceError(`the template allows ${allowed.join(' or ')}`, 'location-not-allowed', 'location')
+    if (given === 'existing') return given
+    if (!manages || (await this.folders.mayManage(space, source)) === false)
+      throw new SpaceError(`${this.agentName} cannot make a folder at ${source.title}`, 'cannot-manage')
+    if (body.list !== undefined)
+      throw new SpaceError('a folder the agent makes is the one location: send no list', 'bad-request', 'list')
+    return given
+  }
+
+  /** What the kind of a managed folder is called on the phone (TOOL-FEAT-024): a shared drive of an owner's account. */
+  private folderKind(source: CatalogSource): string {
+    return source.manage?.as === 'owner' ? 'shared drive' : 'team folder'
+  }
+
+  /** The words of adding Files in the managed mode (TOOL-FEAT-024, architecture §10.13). */
+  private managedWords(space: Space, entry: TemplateFeature, source: CatalogSource): string {
+    const manager = source.manage?.as === 'owner' ? ', with you as its manager' : ''
+    const guests = entry.guests ? ' People outside your organization included.' : ''
+    return `${this.agentName} makes a ${this.folderKind(source)} named ${space.title}, owned by your organization${manager}, and gives each member of the space access to it.${guests}`
+  }
+
+  /** The words of a change that ends the management of a folder (TOOL-FEAT-032): empty when none is managed. */
+  private async releaseWords(
+    space: Space,
+    entry: TemplateFeature,
+    source: CatalogSource,
+    record: SpaceToolRecord
+  ): Promise<string> {
+    if (record.location !== 'managed') return ''
+    const folder = await this.folders?.folderOf(space.id, entry.feature)
+    if (!folder) return ''
+    return ` ${this.agentName} stops managing the ${this.folderKind(source)} ${folder.name}. It stays at ${source.title} with its members and its files.`
   }
 
   /**
@@ -1116,10 +1219,14 @@ export class SpaceToolService {
     session: Session,
     spaceId: string,
     sourceId: string,
-    body: { bindings?: unknown; calls?: unknown; approvals?: unknown; list?: unknown }
+    body: { bindings?: unknown; calls?: unknown; approvals?: unknown; list?: unknown; folder?: unknown }
   ): Promise<{ status: 200 | 202; tool: SpaceToolView }> {
     const { space, slot, source } = await this.owned(principal, spaceId, sourceId)
     const { record } = this.inUse(slot, source)
+    // the managed folder: renamed at once, or checked again (PROF-TOOL-043); its location is the agent's (TOOL-FEAT-024)
+    if (body.folder !== undefined) return this.patchFolder(principal, space, slot, source, record, body.folder)
+    if (body.list !== undefined && record.location === 'managed')
+      throw new SpaceError(`${this.agentName} manages this folder: it cannot be changed`, 'managed-location')
     const { values: bindings, labels } = await this.checkBindings(principal, source, body.bindings)
     const calls = await this.checkCalls(space, source, body.calls, principal)
     const list = await this.checkList(principal, space, slot.entry, source, body.list, record.list)
@@ -1208,6 +1315,42 @@ export class SpaceToolService {
       outcome: 'applied',
     })
     return { status: 200, tool }
+  }
+
+  /**
+   * `PATCH …/tools/{source}` with `folder` (TOOL-FEAT-030, PROF-TOOL-043): `title` renames the managed folder at once,
+   * with no phone (a name grants nothing), `200`; `check: true` checks the folder and the members whose access failed
+   * again, `202`. Files in the existing mode answers `409 not-managed`.
+   */
+  private async patchFolder(
+    principal: Principal,
+    space: Space,
+    slot: FeatureSlot,
+    source: CatalogSource,
+    record: SpaceToolRecord,
+    body: unknown
+  ): Promise<{ status: 200 | 202; tool: SpaceToolView }> {
+    const folder = record.location === 'managed' ? await this.folders?.folderOf(space.id, slot.feature.id) : undefined
+    if (!folder || !this.folders)
+      throw new SpaceError(`${this.agentName} manages no folder of this space`, 'not-managed')
+    if (!isObject(body)) throw new SpaceError('folder is { title } or { check: true }', 'bad-request', 'folder')
+    if (body.title !== undefined) {
+      await this.folders.rename(space, folder, body.title, principal.id)
+      const tool = await this.ownerView(space, source.name, principal)
+      await this.announce(space, {
+        spaceId: space.id,
+        feature: slot.feature.id,
+        source: source.name,
+        state: tool.state,
+        outcome: 'applied',
+      })
+      return { status: 200, tool }
+    }
+    if (body.check === true) {
+      await this.folders.check(space, folder)
+      return { status: 202, tool: await this.ownerView(space, source.name, principal) }
+    }
+    throw new SpaceError('folder is { title } or { check: true }', 'bad-request', 'folder')
   }
 
   /**
@@ -1337,6 +1480,8 @@ export class SpaceToolService {
     const { space, slot, source } = await this.owned(principal, spaceId, sourceId)
     if (slot.inUse && slot.inUse.source.name !== source.name) this.inUse(slot, source)
     const wasAdded = !!slot.inUse
+    // the agent stops managing the folder, left as it is with its members and its files (TOOL-FEAT-032)
+    if (slot.inUse?.record.location === 'managed') await this.folders?.release(space, slot.feature.id, principal.id)
     for (const record of slot.records) if (record.pendingChange) await this.drop(space, record, 'cancelled', true)
     // the provider removed leaves a record only to say that an `add: auto` feature is `off` (TOOL-SPACE-001)
     for (const record of slot.records)
@@ -1532,6 +1677,7 @@ export class SpaceToolService {
       next.calls = { ...(change.calls ?? {}) }
       next.bindingLabels = change.bindingLabels ? { ...change.bindingLabels } : undefined
       next.list = change.list
+      next.location = change.location
       // the feature's other providers, an `off` one among them, leave it: one provider at a time (TOOL-FEAT-003)
       const entry = this.entryOfSource(space, record.sourceId)
       for (const other of await this.store.spaceTools.listBySpace(space.id))
@@ -1566,6 +1712,8 @@ export class SpaceToolService {
       })
     }
     await this.store.spaceTools.save(await this.withoutStalePolicies(space, source, next))
+    // the space's folder, made by the agent once the owner confirmed Files in the managed mode (TOOL-FEAT-024)
+    if (change.kind === 'add' && change.location === 'managed') await this.folders?.start(space, featureId, source)
     if (change.kind !== 'add') await this.hooks.endAllowances?.(space.id, record.sourceId)
     await this.governance?.review(space)
     await this.spaces.record(
@@ -1602,6 +1750,8 @@ export class SpaceToolService {
     const next = change.source ? this.catalog.source(change.source) : undefined
     const entry = this.entryOfSource(space, record.sourceId)
     if (!former || !next || !entry?.providers.includes(next.name)) return this.drop(space, record, 'failed', false)
+    // the folder the agent managed at the former provider stays there as it is (TOOL-FEAT-032)
+    if (record.location === 'managed') await this.folders?.release(space, entry.feature, change.requestedBy)
     for (const other of await this.store.spaceTools.listBySpace(space.id))
       if (entry.providers.includes(other.sourceId)) {
         await this.store.spaceTools.delete(space.id, other.sourceId)
@@ -1616,10 +1766,13 @@ export class SpaceToolService {
       calls: { ...(change.calls ?? {}) },
       ...(change.bindingLabels ? { bindingLabels: { ...change.bindingLabels } } : {}),
       ...(change.list ? { list: change.list } : {}),
+      ...(change.location ? { location: change.location } : {}),
       updatedAt: nowIso(),
       updatedBy: change.requestedBy,
     }
     await this.store.spaceTools.save(added)
+    // a folder made at the new provider, in the managed mode (TOOL-FEAT-024)
+    if (change.location === 'managed') await this.folders?.start(space, entry.feature, next)
     if (this.catalog.profileOf(next)) await this.features?.renewMark(space.id, entry.feature, next.name)
     await this.governance?.review(space)
     await this.spaces.record(space.id, change.requestedBy, 'provider-changed', {
@@ -1674,6 +1827,30 @@ export class SpaceToolService {
   private async destroyAccount(spaceId: string, sourceId: string): Promise<void> {
     await this.store.spaceAccounts.delete(spaceId, sourceId)
     await this.hooks.accountEnded?.(spaceId, sourceId)
+  }
+
+  /**
+   * The managed folder of a feature, or members' access to it, changed (PROF-TOOL-041): `ayni.space.tools.changed`,
+   * applied, with no change id, to the owner's sessions and to those of each member whose access it is.
+   */
+  public async folderChanged(space: Space, featureId: string, sourceId: string, principalIds: string[]): Promise<void> {
+    const source = this.catalog.source(sourceId)
+    const record = await this.store.spaceTools.get(space.id, sourceId)
+    if (!source || !record) return
+    const state = this.stateOf(source, record, await this.store.spaceAccounts.get(space.id, sourceId))
+    const value: SpaceToolsChanged = {
+      spaceId: space.id,
+      feature: featureId,
+      source: sourceId,
+      state,
+      outcome: 'applied',
+    }
+    await this.announce(space, value)
+    for (const id of new Set(principalIds))
+      if (id !== space.ownerPrincipalId)
+        await this.hooks
+          .announceTo?.(id, value)
+          .catch((err) => this.logger.warn({ err, spaceId: space.id }, 'a change of a folder was not announced'))
   }
 
   private async announce(space: Space, value: SpaceToolsChanged): Promise<void> {
