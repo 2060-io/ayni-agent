@@ -2,6 +2,15 @@
  * Ayni AG-UI Profile 3.5 (2060-io/ayni-spec, v4/ayni-agui-profile/profile.md).
  * Every name below cites the section or the PROF-* requirement it implements.
  *
+ * 3.5, package 3.5.9 (a team space's folder managed by the agent, agent D145 to D151): the owner's item of Files carries
+ * `locations` and `location`, and in the managed mode `folder` (`SpaceToolFolder`; to a member `title`, `webUrl` and
+ * `myAccess`, PROF-TOOL-040, PROF-TOOL-041); `POST {sessions}/spaces/{id}/tools` takes `location`; `PATCH` takes
+ * `folder: { title }` (a rename, at once) or `folder: { check: true }` (PROF-TOOL-043); `GET {sessions}/spaces/{id}`
+ * gives the owner each member's `folderAccess` and the people `addedOutside`; the Notifications carry `folder-access`
+ * items (`FolderAccessNotice`, PROF-TOOL-042); the activity has `folder-created`, `folder-renamed`, `folder-released`,
+ * `access-failed` and `manager-needed`. New errors: `location-not-allowed`, `cannot-manage`,
+ * `managed-location`, `not-managed`, `bad-name`. Additive.
+ *
  * 3.5, package 3.5.8 (features and providers, agent D120 to D124): the tools of a space are one item per feature of its
  * template, never one per source (PROF-TOOL-033): `SpaceTool` carries `feature` (`id`, `title`, `profile`), to the owner
  * the `providers` the template allows, `source`, `title` and `description` of the provider in use (`null` while none is
@@ -1192,6 +1201,16 @@ export const ERROR_STATUS = {
   'not-connected': 409,
   /** 3.5.8: the choices of a location read with the space's account, which is not set (PROF-TOOL-023) */
   'space-account-not-set': 409,
+  /** 3.5.9: a mode of Files the template does not allow, with `field: "location"` (PROF-TOOL-040) */
+  'location-not-allowed': 422,
+  /** 3.5.9: the managed mode with a provider the agent cannot manage a folder at (PROF-TOOL-040) */
+  'cannot-manage': 409,
+  /** 3.5.9: a `list` of Files while the agent manages its folder (PROF-TOOL-043) */
+  'managed-location': 409,
+  /** 3.5.9: `folder` on Files in the existing mode (PROF-TOOL-043) */
+  'not-managed': 409,
+  /** 3.5.9: a name of the managed folder the profile does not take, with `field: "folder.title"` (PROF-TOOL-043) */
+  'bad-name': 422,
   /** 3.5.5: a call of Audit or Operations while the device holds no open admin grant (§3.14, PROF-ADMIN-007) */
   'admin-closed': 403,
   /** 3.5.5: a call of Audit by a person who does not hold `auditor` (§3.14) */
@@ -1421,11 +1440,35 @@ export interface SpaceMemberInfo {
   organization: string | null
   state: 'active' | 'invited' | 'left'
   role: SpaceRole
+  /** to the owner of a space whose Files has a managed folder: the member's access to it (3.5.9, PROF-TOOL-041) */
+  folderAccess?: FolderAccess
+}
+
+/** Why a member has no access to a managed folder (3.5.9, agent TOOL-FEAT-028). */
+export type FolderAccessReason =
+  | 'no-address'
+  | 'no-account'
+  | 'not-allowed'
+  | 'too-many'
+  | 'permission-denied'
+  | 'unavailable'
+  | 'not-connected'
+
+/**
+ * A member's access to the space's managed folder (3.5.9, PROF-SPACE-003): `none` for a member given no access (no tool of
+ * Files, or a guest with `guests: false`); `role` once one is given; `reason` while it is not in place.
+ */
+export interface FolderAccess {
+  state: 'in-place' | 'pending' | 'failed' | 'none'
+  role?: 'reader' | 'editor' | 'manager'
+  reason?: FolderAccessReason
 }
 
 /** `GET {sessions}/spaces/{id}`: the space, and, for an active member of a list space, its members. */
 export interface SpaceDetail extends SpaceInfo {
   members?: SpaceMemberInfo[]
+  /** to the owner of a space whose Files has a managed folder: the people it holds that the agent did not add (3.5.9) */
+  addedOutside?: { name: string }[]
   createdAt: string
   updatedAt: string
 }
@@ -1480,6 +1523,12 @@ export type SpaceActivityKind =
   | 'tool-removed'
   /** 3.5.8: the provider of a feature changed, `tool` the new one, its `formerSource` the one it replaced (PROF-TOOL-006) */
   | 'provider-changed'
+  /** 3.5.9: the managed folder of a team space (PROF-TOOL-043) */
+  | 'folder-created'
+  | 'folder-renamed'
+  | 'folder-released'
+  | 'access-failed'
+  | 'manager-needed'
   | 'account-set'
   | 'account-cleared'
   | 'created'
@@ -1707,6 +1756,12 @@ export interface SpaceTool {
   capabilities?: string[]
   /** a feature with a contract: its location (3.5.8, PROF-TOOL-033) */
   list?: SpaceToolList
+  /** Files, to the owner: the modes the template allows for the provider, `existing` alone where it cannot manage (3.5.9) */
+  locations?: SpaceToolLocation[]
+  /** Files, to the owner: the mode in use, once chosen (3.5.9, PROF-TOOL-040) */
+  location?: SpaceToolLocation
+  /** Files in the managed mode: the folder the agent made and keeps (3.5.9, PROF-TOOL-041) */
+  folder?: SpaceToolFolder
   account?: {
     kind: AccountKind
     /**
@@ -1775,8 +1830,31 @@ export interface AddSpaceToolRequest {
   source: string
   replaces?: string
   bindings?: Record<string, string>
+  /** Files (3.5.9, PROF-TOOL-040): a folder the agent makes (`managed`, with no `list`) or one that exists */
+  location?: SpaceToolLocation
   list?: SpaceToolListInput
   calls?: Record<string, SpaceCallRule>
+}
+
+/** The modes of Files in a team space (3.5.9, agent D145): a folder the agent makes and keeps, or one that exists. */
+export type SpaceToolLocation = 'managed' | 'existing'
+
+/**
+ * The managed folder of a space's Files (3.5.9, PROF-TOOL-041). To the owner: `title`, `state` (`creating`, `ready`,
+ * `needs-manager`, `failed`), `reason` (`not-connected`, `scope-missing`, `manager-gone`, `permission-denied`,
+ * `unavailable`), `managedWith` (`owner`: the owner's own account, `manager`: the managing account), `webUrl`, `access`
+ * (how many members' access is in place, waits, failed) and `addedOutside` (how many people the store lists that the
+ * agent did not add). To another member: `title`, `webUrl` and `myAccess`.
+ */
+export interface SpaceToolFolder {
+  title: string
+  state?: 'creating' | 'ready' | 'needs-manager' | 'failed'
+  reason?: 'not-connected' | 'scope-missing' | 'manager-gone' | 'permission-denied' | 'unavailable' | null
+  managedWith?: 'owner' | 'manager'
+  webUrl?: string
+  access?: { inPlace: number; pending: number; failed: number }
+  addedOutside?: number
+  myAccess?: 'in-place' | 'pending' | 'failed'
 }
 
 /** `GET {sessions}/spaces/{id}/tools/{source}/list/choices?text=` (3.5.8, PROF-TOOL-023): at most fifty. */
@@ -1786,6 +1864,11 @@ export interface SpaceToolChoicesResponse {
 
 /** `PATCH {sessions}/spaces/{id}/tools/{source}` (PROF-TOOL-003): `200` applied, or `202` with `pending`. */
 export interface SpaceToolPatch {
+  /**
+   * a managed folder (3.5.9, PROF-TOOL-043): `title` renames it at once (`200`), `check: true` checks again the folder and
+   * the members whose access failed (`202`)
+   */
+  folder?: { title?: string; check?: true }
   bindings?: Record<string, string>
   /** the whole location list of a feature with a contract (3.5.8, PROF-TOOL-022) */
   list?: SpaceToolListInput
@@ -1997,7 +2080,13 @@ export const NOTIFICATIONS_PAGE = { default: 50, max: 200 } as const
 export type NotificationKind = 'approval' | GovernanceNoticeKind
 
 /** The notices of a space's governance (PROF-TOOL-038, agent INTX-APPR-027). */
-export type GovernanceNoticeKind = 'owner-changed' | 'policy-attention' | 'no-approver' | 'space-without-owner'
+export type GovernanceNoticeKind =
+  | 'owner-changed'
+  | 'policy-attention'
+  | 'no-approver'
+  | 'space-without-owner'
+  /** 3.5.9: a member's access to the space's managed folder failed, to its owner (PROF-TOOL-042) */
+  | 'folder-access'
 
 /** One decision of an approver, as an item of the Notifications names it. */
 export interface NotificationDecision {
@@ -2058,8 +2147,22 @@ export interface NotificationItem {
   waiting: boolean
   /** the approval of an item of kind `approval` */
   approval?: NotificationApproval
-  /** the notice of any other kind */
+  /** the notice of any other kind but `folder-access` */
   notice?: GovernanceNoticeBody
+  /** an item of kind `folder-access` (3.5.9, PROF-TOOL-042) */
+  folderAccess?: FolderAccessNotice
+}
+
+/**
+ * A member whose access to the space's managed folder failed (3.5.9, PROF-TOOL-042), to the space's owner alone, `waiting`
+ * while it is not in place: "<member> has no access to the folder <folder> yet: <reason>", with Try again.
+ */
+export interface FolderAccessNotice {
+  member: { name: string }
+  feature: FeatureRef
+  source: { id: string; title: string }
+  folder: { title: string }
+  reason: FolderAccessReason
 }
 
 /** `GET {sessions}/spaces/{id}/notifications` and `GET {sessions}/notifications`: newest first (PROF-TOOL-024). */
