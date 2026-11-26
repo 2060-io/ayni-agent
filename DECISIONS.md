@@ -2423,3 +2423,88 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       removal, and the events to the owner and the member), `tests/featurePack.test.ts` (the managed mode in force),
       `tests/postgres.test.ts` (schema 3.16.0). The directory's email of a person is stood in for in the test (the agent
       reads it from the directory entry, `app.ts`), as is the owner's sign-in of the shared drive.
+
+87. **Google Workspace, each person with their own sign-in: an account several sources use, the scopes of each tool,
+    the check by the ID token** (2026-11-25; ayni-spec D118, architecture §10.10, TOOL-CAT-020 and 021, TOOL-OAUTH-012 to
+    018, TOOL-CONN-015 and 016, PROF-TOOL-028 and 029; stacked on decisions 85 and 86). Nothing in the code is Google's:
+    the agent-pack of §10.10 drives it.
+    - **The scope, against the spec.** Added beside the ids asked: TOOL-CAT-015 (`from` naming an account), TOOL-FEAT-004
+      and 005 (a provider gives `scopes` alone of a tool of its profile; a feature none), TOOL-FEAT-025 (a missing scope of
+      management, below), TOOL-CONN-001, 006, 007, 009, 010 and 011, TOOL-ACCESS-009 and 011, RBAC-FILTER-004,
+      TOOL-OAUTH-005, 006 and 010, PROF-TOOL-014 and 020. Not in the spec, so not built: TOOL-OAUTH-011 and TOOL-CONN-017
+      (the ids go from TOOL-OAUTH-010 to 012, and TOOL-CONN stops at 016). Left out: `revokedAtSource` of a Disconnect
+      (PROF-TOOL-032, the key service, not built in this agent), the connector itself (`2060-io/ayni-connector-google`,
+      TOOL-OAUTH-018's other half) and the network policy that keeps it to the agent (ayni-deploy).
+    - **The account of `tools.accounts`** is a declaring entry of the catalog (`ToolCatalog.account`, `accountOnly`), not
+      a source: no tool, no URL. Its records are keyed by its id (`sourceId: google`). Your accounts lists it where its
+      first source is in `tools.sources`. Its client is `pre-registered`; a sign-in discovers the server of each source it
+      is for, each of which must name the client's issuer (else `502 source-unavailable`). Its token goes only to the URL
+      of the source of the call (the handle's URL), and a call checks that source's metadata: another issuer turns the
+      account to `reconnect`, `changed`, for every source. Its pack digest adds `resource: false` only where it is said, so
+      that the digests of the accounts held before stay as they were.
+    - **A connector over plain HTTP.** §10.10 names `http://connector-google.internal:8000/mcp`, and the profiles' common
+      §11 runs a connector "inside the same deployment or behind TLS"; the OAuth client took HTTPS or the loopback only.
+      Read as: the server of a source of an account with `resource: false` (one whose tokens are for its authorization
+      server's own interfaces, so a connector's) may be reached over HTTP, its discovery and its Protected Resource
+      Metadata included; the authorization server's endpoints and `jwks_uri` stay HTTPS. Any other source as before.
+    - **One resource per sign-in.** An account of `tools.accounts` without `resource: false` asks, at one sign-in, for the
+      sources at the first one's resource; the others stay to allow (none such account exists yet).
+    - **The scopes asked** are those of the tools the model may be given of the sources the sign-in is for, as the
+      agent-pack names them, since the server's declaration with the account is not known before it: a provider's core,
+      the tools of the capabilities its `capabilities` leaves in (all when absent) but `team-roots`, and its `offer`; an MCP
+      server's `offer`, else its tools that declare scopes. Of those, the ones the Principal's roles give (`ALLOW` or
+      `APPROVAL`, not an elevation they may request), less those granted already. `openid` and `email` are asked at every
+      sign-in of an account checked by the ID token, an incremental one included: TOOL-OAUTH-016 checks the ID token of
+      each sign-in, so that a second consent with another Google account is refused; TOOL-OAUTH-012's "Calendar's four
+      scopes only" is read as the tools' scopes. `allowed` and `missing` are computed over the same set.
+    - **`{source}` of `authorize`** may be an account's id (every source not `all`, or all of them when none is open), a
+      source whose own tools declare scopes, or one source of an item's `access` (that one alone); a source of a `from`
+      whose account carries no `access` stays `404`. The attempt keeps `allow` (the sources asked) and the `nonce`,
+      sealed under the verifier's key. The URL carries the agent-pack's `parameters` first, then the agent's own.
+      `login_hint` is sent only when the directory entry has an email.
+    - **A sign-in that allows more of a connected account** (an attempt with `allow`, the account `connected`) extends it
+      in place: the same id and `connectedAt`, the tokens and the scopes granted sealed under a new key of the account (the
+      former destroyed with the row's update), its connection closed so the server is read again, its allowances kept, an
+      audit record `allowed` and `ayni.connections.changed`. A first sign-in, or one of an account to reconnect, makes the
+      account as before. The scopes granted are the answer's `scope`, else the scopes asked (as TOOL-OAUTH-013 says, so a
+      server without incremental consent that answers no `scope` loses the former ones).
+    - **The scopes granted** are sealed beside the label (`labelCipher` holds `{ label, granted }`), so that a turn's tools
+      and Your accounts never open the tokens; no change of schema. A refresh whose `scope` differs updates them and
+      announces the change. A tool that declares no scopes in a source whose others do is given to no model, and warned of
+      once; a source of an account that declares none has all its tools once connected.
+    - **What the model reads.** For an account of `tools.accounts`, one line per source, not connected included (TOOL-CONN-
+      010 says "one line for each personal source"); a source's own account keeps one line per account. A connected
+      account's source not all allowed reads "(not allowed)" or "(allowed in part: <titles>)". The Connect card names the
+      account (`source: google`, its title and description), the feature of the source, and, for `why: allow`, the source
+      in `allow`. `offer_connection` finds a source's own line before its account's.
+    - **The ID token** (`src/tools/idToken.ts`, `node:crypto`, no library): RS256 or ES256, within the issuer's
+      `id_token_signing_alg_values_supported` when it lists them; the key of `jwks_uri` by `kid` (one key without `kid`),
+      the set kept ten minutes and read again once for an unknown `kid`; `iss` exactly the issuer; `aud` the client alone
+      (an array with another audience is refused) and `azp`, when present, the client; `exp` with no leeway; the `nonce`
+      compared in constant time. Then `email_verified` the boolean `true`, the email in lower case equal to the directory
+      entry's (no entry: `wrong-person`), `hd` equal to `check.idToken.hostedDomain` (the `hd` asked is
+      `oauth.hostedDomain`, which proves nothing). The label is `check.label` with `{email}` replaced. The ID token is
+      sealed nowhere and sent nowhere. A refused one revokes the tokens, as the requirement says: at Google a revocation
+      ends the person's whole grant to the project, so a refused incremental sign-in of the same person also ends the
+      account in force at its next refresh (noted for Fabrice).
+    - **Refused at start, beyond the letter:** `check.tool` on an account of `tools.accounts` (it offers no tool,
+      TOOL-CAT-017); a pointer (`check.email`, `check.binding`) beside `check.idToken`; `check.idToken` on an account of
+      fields; `scopes` on a tool whose source has no OAuth sign-in, and on a tool of `tools.features`; `tokenPatterns` on a
+      source of an account of `tools.accounts`, and on the account (the schema: TOOL-CAT-020 lists its keys). An account's
+      `title` defaults to its id, as a source's does.
+    - **A managed folder's scopes** (decision 86's "grants the scopes" read as "connected"): with the scopes of each tool
+      built, `as: owner` checks the owner's connected account against the scopes the tools of management declare at the
+      provider (`MANAGING_TOOLS`: `files_create_team_root`, `files_rename_root`, `files_shares`, `files_share`,
+      `files_unshare`); one missing is `scope-missing`, and nothing is asked of the store. The owner's sign-in of the
+      provider in that space (`spaceId`) asks them too (the hook `managingTools`), and may start while Files is `setup`.
+      The managing key adds the scopes granted, so that a sign-in that grants more of the same account lifts a refusal of
+      the store. A provider whose tools of management declare no scopes keeps the reading of decision 86.
+    - **The wire** (`@ayni.org/ayni-agui-profile` 3.5.10): `Connection.access` (`ConnectionAccess`: `source`, `title`,
+      `allowed` of `CONNECTION_ALLOWED`, `missing`), `ConnectActivity.why: 'allow'` and `allow`. Additive.
+    - **Tests:** `tests/googleAccountPack.test.ts` (the pack of §10.10 and every refusal, the digests, no Google client id
+      in the repository's packs, chart or docs), `tests/googleAccount.test.ts` (a fake of Google's authorization server
+      with RS256 ID tokens, a consent that unticks, `include_granted_scopes` and revocation, and a fake connector in front
+      of the fake provider of the features' tests, `tests/googleFixtures.ts`: the item and its `access`, the URL of each
+      sign-in, a partial grant, Calendar allowed next on the same account, the model's tools and lines, the cards, the
+      bad ID tokens one by one, the token at the connector alone, another issuer, a team space's shared drive waiting as
+      `scope-missing` then made, Disconnect revoked at the fake Google, a log with no secret).
