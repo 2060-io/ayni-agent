@@ -38,7 +38,7 @@ import type { McpServerSource } from '../tools/mcp.js'
 import type { CallAccountSecret } from '../tools/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
-import { FILES_1_0 } from './profiles.js'
+import { CODE_ONLY_CAPABILITIES, FILES_1_0, toolsInUse } from './profiles.js'
 import { FeatureService } from './service.js'
 
 const MINUTE = 60_000
@@ -529,13 +529,12 @@ export class ManagedFolders {
   private async wanted(space: Space, folder: ManagedFolderRecord, source: CatalogSource): Promise<Map<string, Wanted>> {
     const entry = this.entryOf(space, folder)
     const record = await this.deps.store.spaceTools.get(space.id, source.name)
+    const inUse = await this.toolsOfProvider(space, folder, source)
     const out = new Map<string, Wanted>()
     for (const person of await this.activePeople(space)) {
       if (person.role === 'guest' && entry?.guests !== true) continue
-      const tools = FILES_1_0.tools.filter(
-        (t) =>
-          t.capability !== 'team-roots' &&
-          resolveTier(source.access, person.principal.roles, t.name, false).tier !== 'DENY'
+      const tools = inUse.filter(
+        (t) => resolveTier(source.access, person.principal.roles, t.name, false).tier !== 'DENY'
       )
       if (!tools.length) continue
       const writes = tools.some(
@@ -556,6 +555,22 @@ export class ManagedFolders {
       })
     }
     return out
+  }
+
+  /**
+   * The tools of the profile the provider gives in the space (TOOL-FEAT-010): the core, and the capabilities in use as
+   * the server declares them for the managing account, the source's `capabilities` and the tools of the code's own left
+   * out; the core alone while that account is not there to read it with.
+   */
+  private async toolsOfProvider(space: Space, folder: ManagedFolderRecord, source: CatalogSource) {
+    const account = await this.accountOf(space, source, folder.managerPrincipalId)
+    const state = account
+      ? await this.deps.features.declared(source, account, FeatureService.keyOf(account))
+      : { capabilities: [] as string[] }
+    return toolsInUse(
+      FILES_1_0,
+      state.capabilities.filter((c) => !CODE_ONLY_CAPABILITIES.includes(c))
+    )
   }
 
   private entryOf(space: Space, folder: ManagedFolderRecord): TemplateFeature | undefined {

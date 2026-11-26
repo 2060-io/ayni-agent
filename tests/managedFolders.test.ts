@@ -13,7 +13,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { buildAgent, type RunningAgent } from '../src/app.js'
 import type { Principal } from '../src/core/types.js'
 import type { ManagedFolders } from '../src/features/managedFolders.js'
-import { requestIdOf } from '../src/features/managedFolders.js'
+import { REREAD_EVERY, requestIdOf } from '../src/features/managedFolders.js'
+import { FILES_1_0 } from '../src/features/profiles.js'
 import { type FakeProvider, fakeProvider, featuresPack, PERSONAL_ACCOUNT } from './featureFixtures.js'
 import { parseSse, testEnv } from './helpers.js'
 import { type Doc, type Phone, phone, type ScriptedModel, scripted, until } from './toolFixtures.js'
@@ -74,7 +75,7 @@ async function device(name: string, roles: string[], email?: string): Promise<De
   return { ...created, principal: updated, connectionId }
 }
 
-async function _open(d: Device, spaceId: string): Promise<Device> {
+async function open(d: Device, spaceId: string): Promise<Device> {
   const response = await running.app.inject({
     method: 'POST',
     url: '/agui/v3/sessions',
@@ -95,7 +96,7 @@ async function call(d: Pick<Device, 'sessionToken'>, method: string, url: string
   return { status: response.statusCode, body: response.body ? response.json() : undefined }
 }
 
-function _run(d: Pick<Device, 'sessionId' | 'sessionToken'>, text: string) {
+function run(d: Pick<Device, 'sessionId' | 'sessionToken'>, text: string, ayni?: Doc) {
   return running.app
     .inject({
       method: 'POST',
@@ -104,9 +105,10 @@ function _run(d: Pick<Device, 'sessionId' | 'sessionToken'>, text: string) {
       payload: {
         threadId: d.sessionId,
         runId: `run-${Date.now()}-${Math.random()}`,
-        messages: [{ id: `u-${Math.random()}`, role: 'user', content: text }],
+        messages: text ? [{ id: `u-${Math.random()}`, role: 'user', content: text }] : [],
         tools: [],
         context: [],
+        ...(ayni ? { forwardedProps: { ayni } } : {}),
       },
     })
     .then((response) => ({
@@ -154,20 +156,20 @@ const teamOf = async (provider: FakeProvider, spaceId: string) => {
 }
 const membersAtStore = async (provider: FakeProvider, spaceId: string) =>
   Object.fromEntries(((await teamOf(provider, spaceId))?.shares ?? []).map((s) => [s.recipient.address, s.role]))
-const _lastUserText = () => {
+const lastUserText = () => {
   const user = (model.requests.at(-1)?.messages ?? []).filter((m) => m.role === 'user').at(-1)
   return typeof user?.content === 'string' ? user.content : JSON.stringify(user?.content)
 }
-const _toolAnswers = () =>
+const toolAnswers = () =>
   (model.requests.at(-1)?.messages ?? []).filter((m) => m.role === 'tool').map((m) => String(m.content))
-const _definitionNames = () => (model.requests.at(-1)?.tools ?? []).map((t) => t.name)
+const definitionNames = () => (model.requests.at(-1)?.tools ?? []).map((t) => t.name)
 
 let jonas: Device
 let ana: Device
 let lena: Device
 let piet: Device
 let tom: Device
-let _mia: Device
+let mia: Device
 let alpha: { id: string }
 
 beforeAll(async () => {
@@ -313,7 +315,7 @@ beforeAll(async () => {
   lena = await device('lena', ['reader'], 'lena@example.org')
   piet = await device('piet', ['employee'])
   tom = await device('tom', ['employee'])
-  _mia = await device('mia', ['employee'], 'mia@example.org')
+  mia = await device('mia', ['employee'], 'mia@example.org')
 }, 30_000)
 
 afterAll(async () => {
@@ -484,5 +486,350 @@ describe('adding Files in the managed mode (TOOL-FEAT-024 to 026, TOOL-FEAT-034,
     expect((await membersAtStore(cloud, alpha.id))['tom@example.org']).toBe('editor')
     const after = (await call(jonas, 'GET', `/spaces/${alpha.id}/notifications`)).body.notifications as Doc[]
     expect(after.filter((n) => n.kind === 'folder-access' && n.waiting)).toEqual([])
+  })
+})
+
+/** A Principal's membership of a space's folder, as the agent records it. */
+const membershipOf = async (spaceId: string, d: Device) =>
+  (await membershipsOf(spaceId)).find((m) => m.principalId === d.principal.id)
+/** A membership's next try made due now, as if its wait had passed. */
+const dueNow = async (spaceId: string, d: Device, extra: Doc = {}) => {
+  const m = await membershipOf(spaceId, d)
+  if (!m) throw new Error('no membership')
+  await running.agent.store.folderMemberships.save({
+    ...m,
+    nextAttemptAt: new Date(Date.now() - 1000).toISOString(),
+    ...extra,
+  })
+}
+const tokenOf = (d: Device) => `tok_${d.connectionId.replace(/[^A-Za-z0-9]/g, '')}Token`
+const sharesFor = (provider: FakeProvider, address: string) =>
+  provider.calls.filter(
+    (c) =>
+      c.name === 'files_share' && (c.args.recipients as { address: string }[] | undefined)?.[0]?.address === address
+  )
+
+describe("keeping the folder's members in step with the space (TOOL-FEAT-027)", () => {
+  it('ends a membership first, then makes the new ones, at the change of the space', async () => {
+    await addMember(alpha.id, mia.principal.id)
+    const from = cloud.calls.length
+    const anaShare = (await membershipOf(alpha.id, ana))?.shareId
+    expect(anaShare).toBeDefined()
+    expect(
+      (await call(jonas, 'DELETE', `/spaces/${alpha.id}/members/mem_${alpha.id}_${ana.principal.id}`)).status
+    ).toBe(204)
+    const made = cloud.calls.slice(from).map((c) => c.name)
+    expect(made.indexOf('files_unshare')).toBeGreaterThanOrEqual(0)
+    expect(made.indexOf('files_unshare')).toBeLessThan(made.indexOf('files_share'))
+    expect(cloud.calls.slice(from).find((c) => c.name === 'files_unshare')?.args.share).toBe(anaShare)
+    expect(await membershipOf(alpha.id, ana)).toBeUndefined()
+    expect(await membersAtStore(cloud, alpha.id)).toMatchObject({ 'mia@example.org': 'editor' })
+    expect((await membersAtStore(cloud, alpha.id))['ana@example.org']).toBeUndefined()
+  })
+
+  it('reads the members and the name back every six hours, makes again what the store lost, leaves who it did not add', async () => {
+    const team = await teamOf(cloud, alpha.id)
+    if (!team) throw new Error('no team root')
+    team.shares = team.shares.filter((s) => s.recipient.address !== 'mia@example.org')
+    team.shares.push({
+      id: 'sh-boss',
+      role: 'editor',
+      recipient: { address: 'boss@example.org', name: 'Boss' },
+      inherited: false,
+    })
+    team.title = 'Alpha (renamed at the store)'
+    // not yet six hours: nothing is read back
+    const from = cloud.calls.length
+    await folders.tick()
+    expect(cloud.calls.slice(from).filter((c) => c.name === 'files_shares')).toHaveLength(0)
+    await folders.tick(Date.now() + REREAD_EVERY + 1000)
+    expect(cloud.calls.slice(from).map((c) => c.name)).toEqual(expect.arrayContaining(['files_shares', 'files_get']))
+    expect(await membersAtStore(cloud, alpha.id)).toMatchObject({
+      'mia@example.org': 'editor',
+      'boss@example.org': 'editor',
+    })
+    expect(cloud.calls.slice(from).filter((c) => c.name === 'files_unshare')).toHaveLength(0)
+    const folder = (await filesOf(jonas, alpha.id)).folder
+    expect(folder).toMatchObject({ title: 'Alpha (renamed at the store)', addedOutside: 1 })
+    expect((await call(jonas, 'GET', `/spaces/${alpha.id}`)).body.addedOutside).toEqual([{ name: 'Boss' }])
+    // the name read back is the location's label; it is not changed back (TOOL-FEAT-030)
+    expect((await running.agent.store.spaceTools.get(alpha.id, 'cloud-team'))?.list?.entries?.[0]?.label).toBe(
+      'Alpha (renamed at the store)'
+    )
+    expect(cloud.calls.slice(from).filter((c) => c.name === 'files_rename_root')).toHaveLength(0)
+  })
+})
+
+describe('a change of the members that fails (TOOL-FEAT-028, PROF-TOOL-041, PROF-TOOL-042)', () => {
+  let zoe: Device
+  let zoeAlpha: Device
+
+  it('tries one that passes again after 1 and 5 minutes, or the wait the store asks, and the member has no tools meanwhile', async () => {
+    zoe = await device('zoe', ['employee'], 'zoe@example.org')
+    cloud.failures.push(
+      { tool: 'files_share', code: 'unavailable', address: 'zoe@example.org' },
+      { tool: 'files_share', code: 'unavailable', address: 'zoe@example.org' },
+      { tool: 'files_share', code: 'rate-limited', retryAfterSeconds: 120, address: 'zoe@example.org' }
+    )
+    await addMember(alpha.id, zoe.principal.id)
+    const put = await call(zoe, 'PUT', '/connections/cloud-team/account', {
+      values: { token: tokenOf(zoe) },
+      spaceId: alpha.id,
+    })
+    expect(put.status).toBe(200)
+    let at = Date.now()
+    await running.agent.spaces.membersChanged(alpha.id)
+    let m = await membershipOf(alpha.id, zoe)
+    expect(m).toMatchObject({ state: 'pending', reason: 'unavailable', attempts: 1 })
+    expect(Date.parse(m?.nextAttemptAt as string) - at).toBeGreaterThanOrEqual(59_000)
+    expect(Date.parse(m?.nextAttemptAt as string) - at).toBeLessThan(65_000)
+    // the owner is told: the count on the item, the member list, the activity and one notice
+    expect((await filesOf(jonas, alpha.id)).folder.access).toEqual({ inPlace: 5, pending: 1, failed: 0 })
+    const detail = (await call(jonas, 'GET', `/spaces/${alpha.id}`)).body
+    expect((detail.members as Doc[]).find((x) => x.name === 'zoe')?.folderAccess).toEqual({
+      state: 'pending',
+      role: 'editor',
+      reason: 'unavailable',
+    })
+    const notices = (await call(jonas, 'GET', `/spaces/${alpha.id}/notifications`)).body.notifications as Doc[]
+    expect(notices.filter((n) => n.kind === 'folder-access' && n.waiting).map((n) => n.folderAccess.member)).toEqual([
+      { name: 'zoe' },
+    ])
+    // Zoe is given none of the feature's tools, and the model reads why
+    zoeAlpha = await open(zoe, alpha.id)
+    expect((await filesOf(zoe, alpha.id)).folder).toMatchObject({ myAccess: 'pending' })
+    model.script = [{ text: 'Not yet.' }]
+    await run(zoeAlpha, 'what is in the folder?')
+    expect(definitionNames()).not.toContain('files_list')
+    expect(lastUserText()).toContain("the person's access to this space's folder is not ready yet")
+    // not due: not tried
+    const tries = () => sharesFor(cloud, 'zoe@example.org').length
+    await folders.tick()
+    expect(tries()).toBe(1)
+    await dueNow(alpha.id, zoe)
+    at = Date.now()
+    await folders.tick()
+    m = await membershipOf(alpha.id, zoe)
+    expect(tries()).toBe(2)
+    expect(m?.attempts).toBe(2)
+    expect(Date.parse(m?.nextAttemptAt as string) - at).toBeGreaterThanOrEqual(5 * 60_000 - 1000)
+    expect(Date.parse(m?.nextAttemptAt as string) - at).toBeLessThan(5 * 60_000 + 5000)
+    await dueNow(alpha.id, zoe)
+    at = Date.now()
+    await folders.tick()
+    m = await membershipOf(alpha.id, zoe)
+    expect(Date.parse(m?.nextAttemptAt as string) - at).toBeGreaterThanOrEqual(119_000)
+    expect(Date.parse(m?.nextAttemptAt as string) - at).toBeLessThan(125_000)
+    await dueNow(alpha.id, zoe)
+    await folders.tick()
+    expect(await membershipOf(alpha.id, zoe)).toMatchObject({ state: 'in-place', attempts: 0 })
+    const after = (await call(jonas, 'GET', `/spaces/${alpha.id}/notifications`)).body.notifications as Doc[]
+    expect(after.filter((n) => n.kind === 'folder-access' && n.waiting)).toEqual([])
+    model.script = [{ text: 'Here.' }]
+    await run(zoeAlpha, 'and now?')
+    expect(definitionNames()).toContain('files_list')
+    expect(lastUserText()).not.toContain('not ready yet')
+  })
+
+  it('leaves one that passes failed after a day of tries, and the owner tries again', async () => {
+    cloud.failures.push({ tool: 'files_share', code: 'unavailable', address: 'zoe@example.org' })
+    const team = await teamOf(cloud, alpha.id)
+    if (!team) throw new Error('no team root')
+    team.shares = team.shares.filter((s) => s.recipient.address !== 'zoe@example.org')
+    await dueNow(alpha.id, zoe, {
+      state: 'pending',
+      attempts: 20,
+      firstFailedAt: new Date(Date.now() - 24 * 3_600_000).toISOString(),
+    })
+    await folders.tick()
+    expect(await membershipOf(alpha.id, zoe)).toMatchObject({ state: 'failed', reason: 'unavailable' })
+    const tries = sharesFor(cloud, 'zoe@example.org').length
+    await folders.tick()
+    expect(sharesFor(cloud, 'zoe@example.org')).toHaveLength(tries)
+    const checked = await call(jonas, 'PATCH', `/spaces/${alpha.id}/tools/cloud-team`, { folder: { check: true } })
+    expect(checked.status).toBe(202)
+    expect(await membershipOf(alpha.id, zoe)).toMatchObject({ state: 'in-place' })
+  })
+
+  it('leaves one refused for a reason that stays failed at once, until the owner tries again', async () => {
+    const kim = await device('kim', ['employee'])
+    cloud.refuse.set('kim@partner.example', 'not-allowed')
+    await addMember(alpha.id, kim.principal.id, 'guest', 'kim@partner.example')
+    await running.agent.spaces.membersChanged(alpha.id)
+    expect(await membershipOf(alpha.id, kim)).toMatchObject({ state: 'failed', reason: 'not-allowed' })
+    const tries = sharesFor(cloud, 'kim@partner.example').length
+    await dueNow(alpha.id, kim)
+    await folders.tick(Date.now() + 2 * 3_600_000)
+    expect(sharesFor(cloud, 'kim@partner.example')).toHaveLength(tries)
+    expect((await filesOf(jonas, alpha.id)).folder.access.failed).toBe(1)
+    const detail = (await call(jonas, 'GET', `/spaces/${alpha.id}`)).body
+    expect((detail.members as Doc[]).find((x) => x.name === 'kim')?.folderAccess).toEqual({
+      state: 'failed',
+      role: 'editor',
+      reason: 'not-allowed',
+    })
+    cloud.refuse.delete('kim@partner.example')
+    expect(
+      (await call(jonas, 'PATCH', `/spaces/${alpha.id}/tools/cloud-team`, { folder: { check: true } })).status
+    ).toBe(202)
+    expect(await membershipOf(alpha.id, kim)).toMatchObject({ state: 'in-place' })
+  })
+
+  it('tries a removal every hour until it is done', async () => {
+    cloud.failures.push({ tool: 'files_unshare', code: 'unavailable' })
+    const at = Date.now()
+    await call(jonas, 'DELETE', `/spaces/${alpha.id}/members/mem_${alpha.id}_${zoe.principal.id}`)
+    const m = await membershipOf(alpha.id, zoe)
+    expect(m?.state).toBe('removing')
+    expect(Date.parse(m?.nextAttemptAt as string) - at).toBeGreaterThanOrEqual(3_600_000 - 1000)
+    await folders.tick()
+    expect((await membershipOf(alpha.id, zoe))?.state).toBe('removing')
+    await dueNow(alpha.id, zoe)
+    await folders.tick()
+    expect(await membershipOf(alpha.id, zoe)).toBeUndefined()
+    expect((await membersAtStore(cloud, alpha.id))['zoe@example.org']).toBeUndefined()
+  })
+})
+
+describe('what the model is given of a managed folder (TOOL-FEAT-025, TOOL-FEAT-031)', () => {
+  it('never gives the tools of team-roots, and refuses in code a share of the folder itself', async () => {
+    expect(
+      (
+        await call(mia, 'PUT', '/connections/cloud-team/account', {
+          values: { token: tokenOf(mia) },
+          spaceId: alpha.id,
+        })
+      ).status
+    ).toBe(200)
+    const miaAlpha = await open(mia, alpha.id)
+    // the mark of the space's provider, made at the first turn that gives its tools (TOOL-FEAT-016)
+    model.script = [{ text: 'Ready.' }]
+    await run(miaAlpha, 'hello')
+    const mark = (await running.agent.store.featureMarks.get(alpha.id, 'files'))?.mark
+    const ref = (await folderOf(alpha.id))?.ref
+    const from = cloud.calls.length
+    model.script = [
+      {
+        calls: [
+          {
+            name: 'files_share',
+            arguments: { ref: `${mark}~${ref}`, role: 'editor', recipients: [{ address: 'someone@example.org' }] },
+          },
+        ],
+      },
+      { text: 'Only the owner changes that.' },
+    ]
+    await run(miaAlpha, 'give someone access to our folder')
+    expect(definitionNames()).toEqual(expect.arrayContaining(['files_list', 'files_share', 'files_unshare']))
+    expect(definitionNames()).not.toContain('files_create_team_root')
+    expect(definitionNames()).not.toContain('files_rename_root')
+    expect(toolAnswers().at(-1)).toMatch(
+      /^managed-root: who belongs to this space's folder follows the space's members/
+    )
+    expect(cloud.calls.slice(from)).toEqual([])
+    const records = await running.agent.store.toolCalls.list({
+      spaceId: alpha.id,
+      principalId: mia.principal.id,
+      limit: 5,
+    })
+    expect(records[0]).toMatchObject({ toolName: 'files_share', outcome: 'managed-root' })
+    expect(ph.callsOf('sendConfirmRequest').filter((c) => JSON.stringify(c).includes('someone@example.org'))).toEqual(
+      []
+    )
+    // an item inside it follows the rules of the profile and of the space
+    model.script = [
+      {
+        calls: [
+          {
+            name: 'files_share',
+            arguments: { ref: `${mark}~f-q3`, role: 'reader', recipients: [{ address: 'lena@example.org' }] },
+          },
+        ],
+      },
+      { text: 'Shared.' },
+    ]
+    const turn = run(miaAlpha, 'share Q3 with Lena')
+    const conversationId = (await running.agent.sessions.get(miaAlpha.sessionId))?.conversationId
+    let card: { id: string } | undefined
+    await until(async () => {
+      card = (await running.agent.store.approvals.list({ status: 'PENDING' })).find(
+        (r) => r.conversationId === conversationId
+      )
+      return !!card
+    })
+    await run(miaAlpha, '', { kind: 'approval.decide', approvalId: card?.id, decision: 'reject' })
+    await turn
+    const inside = await running.agent.store.toolCalls.list({
+      spaceId: alpha.id,
+      principalId: mia.principal.id,
+      limit: 5,
+    })
+    expect(inside[0]?.outcome).not.toBe('managed-root')
+  }, 15_000)
+})
+
+describe("the folder's name (TOOL-FEAT-030, PROF-TOOL-043)", () => {
+  it('is renamed by the owner alone, at once and with no phone, and not by a rename of the space', async () => {
+    const patch = (d: Device, body: Doc) => call(d, 'PATCH', `/spaces/${alpha.id}/tools/cloud-team`, body)
+    expect(await patch(mia, { folder: { title: 'Mine' } })).toMatchObject({ status: 403, body: { error: 'not-owner' } })
+    for (const title of ['a/b', '', ' ', 'x'.repeat(101), '..'])
+      expect(await patch(jonas, { folder: { title } })).toMatchObject({
+        status: 422,
+        body: { error: 'bad-name', field: 'folder.title' },
+      })
+    const asked = ph.callsOf('sendConfirmRequest').length
+    const renamed = await patch(jonas, { folder: { title: 'Alpha Files' } })
+    expect(renamed.status).toBe(200)
+    expect(renamed.body.tool.folder.title).toBe('Alpha Files')
+    expect(ph.callsOf('sendConfirmRequest')).toHaveLength(asked)
+    const call0 = cloud.calls.filter((c) => c.name === 'files_rename_root').at(-1)
+    expect(call0?.args).toEqual({ root: (await folderOf(alpha.id))?.ref, name: 'Alpha Files' })
+    expect(call0?.headers['ayni-dav-username']).toBe('ayni-manager')
+    expect((await teamOf(cloud, alpha.id))?.title).toBe('Alpha Files')
+    expect((await activityOf(alpha.id))[0]).toBe('folder-renamed')
+    expect((await call(jonas, 'PATCH', `/spaces/${alpha.id}`, { title: 'Project Alpha 2' })).status).toBe(200)
+    expect((await folderOf(alpha.id))?.name).toBe('Alpha Files')
+    expect(await patch(jonas, { folder: {} })).toMatchObject({ status: 400, body: { error: 'bad-request' } })
+  })
+
+  it('answers not-managed for Files in the existing mode', async () => {
+    const beta = await space('Project Beta', 'existing-only')
+    await confirmed(jonas, () => call(jonas, 'POST', `/spaces/${beta.id}/tools`, { source: 'cloud-team' }))
+    expect((await filesOf(jonas, beta.id)).location).toBe('existing')
+    expect(
+      await call(jonas, 'PATCH', `/spaces/${beta.id}/tools/cloud-team`, { folder: { title: 'Beta' } })
+    ).toMatchObject({ status: 409, body: { error: 'not-managed' } })
+    expect(await folderOf(beta.id)).toBeUndefined()
+  })
+})
+
+describe("the space's rules of Files change a member's role at the folder (TOOL-FEAT-026, TOOL-FEAT-027)", () => {
+  it('makes a writer a reader once every tool that writes or deletes is off in the space', async () => {
+    // of the core and of the capabilities in use, which the owner reads with his own account
+    expect(
+      (
+        await call(jonas, 'PUT', '/connections/cloud-team/account', {
+          values: { token: tokenOf(jonas) },
+          spaceId: alpha.id,
+        })
+      ).status
+    ).toBe(200)
+    const writes = FILES_1_0.tools
+      .filter(
+        (t) =>
+          (t.effect === 'write' || t.effect === 'delete') &&
+          ['folders', 'search', 'share', undefined].includes(t.capability)
+      )
+      .map((t) => t.name)
+    const res = await call(jonas, 'PATCH', `/spaces/${alpha.id}/tools/cloud-team`, {
+      calls: Object.fromEntries(writes.map((name) => [name, 'off'])),
+    })
+    expect(res.status).toBe(200)
+    expect(await membersAtStore(cloud, alpha.id)).toMatchObject({
+      'mia@example.org': 'reader',
+      'jonas@example.org': 'reader',
+      'lena@example.org': 'reader',
+    })
+    expect((await membershipOf(alpha.id, mia))?.role).toBe('reader')
   })
 })
