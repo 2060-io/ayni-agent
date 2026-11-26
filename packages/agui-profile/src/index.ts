@@ -389,8 +389,8 @@ export interface SpaceToolsChangedValue {
   spaceId: string
   /** the feature the change concerns (3.5.8, PROF-TOOL-006) */
   feature: string
-  /** the provider it concerns: for a change of provider, the new one */
-  source: string
+  /** the feature's provider after the change, for a change of provider the new one; null when it has none (3.5.9) */
+  source: string | null
   /** a change of provider: the provider it replaced (3.5.8, PROF-TOOL-034) */
   formerSource?: string
   state: SpaceToolState
@@ -1702,6 +1702,8 @@ export interface SpaceToolProvider {
   account: { kind: AccountKind }
   /** the template's default, which a client marks "Suggested" */
   default: boolean
+  /** 3.5.9: where Files may be with this provider, `existing` alone for one that cannot manage (PROF-TOOL-040) */
+  locations?: SpaceToolLocation[]
 }
 
 /**

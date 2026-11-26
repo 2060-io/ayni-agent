@@ -81,7 +81,8 @@ export interface SpaceToolsChanged {
   spaceId: string
   /** the feature the change concerns (PROF-TOOL-006) */
   feature: string
-  source: string
+  /** the feature's provider after the change, null when it has none (profile §5) */
+  source: string | null
   state: SpaceToolState
   changeId?: string
   outcome: ChangeOutcome
@@ -1520,10 +1521,11 @@ export class SpaceToolService {
     // its policies left with it: a notice of one that needed attention ends (TOOL-SPACE-018)
     await this.governance?.review(space)
     const tool = await this.ownerView(space, source.name, principal)
+    // the feature has no provider any more: the event names none (profile §5)
     await this.announce(space, {
       spaceId: space.id,
       feature: slot.feature.id,
-      source: source.name,
+      source: tool.source ?? null,
       state: tool.state,
       outcome: 'applied',
     })

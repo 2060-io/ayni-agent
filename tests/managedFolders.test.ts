@@ -1083,8 +1083,17 @@ describe('releasing the folder (TOOL-FEAT-032)', () => {
     await confirmed(jonas, () => call(jonas, 'POST', `/spaces/${managed.id}/tools`, { source: 'cloud-team' }))
     await until(async () => (await folderOf(managed.id))?.state === 'ready')
     const from = cloud.calls.length
+    const jonasManaged = await open(jonas, managed.id)
     expect((await call(jonas, 'DELETE', `/spaces/${managed.id}/tools/cloud-team`)).status).toBe(200)
     expect(await folderOf(managed.id)).toBeUndefined()
+    // Files has no provider any more: the event names none (profile §5)
+    const chunks: string[] = []
+    running.streams.attach(jonasManaged.sessionId, { write: (c) => chunks.push(c), end: () => undefined }, 0)()
+    const told = parseSse(chunks.join(''))
+      .map((e) => e.event as Doc)
+      .filter((e) => e.type === 'CUSTOM' && e.name === CUSTOM_EVENT.spaceToolsChanged)
+      .map((e) => e.value)
+    expect(told.at(-1)).toMatchObject({ spaceId: managed.id, feature: 'files', source: null, outcome: 'applied' })
     expect(cloud.calls.slice(from)).toEqual([])
     expect((await activityOf(managed.id)).slice(0, 2)).toEqual(['tool-removed', 'folder-released'])
   })
