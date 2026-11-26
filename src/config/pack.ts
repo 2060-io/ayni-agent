@@ -836,6 +836,10 @@ function personalSourceErrors(where: string, source: ToolSourceDef, account: Sou
           `${where}.account.check.tool: ${tool} is of effect ${effect}: the check reads, with a tool of effect read (TOOL-CAT-017)`
         )
     }
+    if (check.idToken && !account.oauth)
+      errors.push(
+        `${where}.account.check.idToken: the ID token is that of an OAuth sign-in, which the account does not declare (TOOL-CAT-021)`
+      )
   }
   return errors
 }

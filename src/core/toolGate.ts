@@ -35,6 +35,7 @@ import type { Store } from '../store/types.js'
 import { scrubAccount } from '../tools/accountValues.js'
 import { type CatalogSource, defaultRuleOf, type PackRule, strictest, type ToolCatalog } from '../tools/catalog.js'
 import type { ToolRegistry } from '../tools/registry.js'
+import { toolGranted } from '../tools/scopes.js'
 import type { CallAccountSecret, ToolContext, ToolResult, ToolSpec } from '../tools/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
@@ -310,6 +311,8 @@ export class ToolGate {
   private readonly validators = new Map<string, ReturnType<typeof ajv.compile> | null>()
   /** the tools whose rule is approval with nobody to approve them, warned of once (TOOL-CAT-009) */
   private readonly warnedNoApprover = new Set<string>()
+  /** the tools of a source whose others declare their scopes, that declare none, warned of once (TOOL-CAT-021) */
+  private readonly warnedNoScopes = new Set<string>()
 
   public constructor(private readonly deps: ToolGateDeps) {}
 
@@ -431,7 +434,11 @@ export class ToolGate {
       const mark = await features.markOf(spaceId, feature.id, source.name)
       const where: LocationScope = scope ?? { kind: 'any' }
       const accountSetAt = source.account.kind === 'personal' ? personalReady.get(source.name) : r?.accountSetAt
+      // of a source whose tools declare their scopes, only the tools whose scopes were all granted (TOOL-OAUTH-013)
+      const granted =
+        source.account.kind === 'personal' ? await connections?.grantedIn(principal, source, spaceId) : undefined
       for (const spec of features.specsFor(source, state, where)) {
+        if (granted && !this.scopesGranted(source, spec.rawName, granted)) continue
         const resolution = await registry.resolve(spec, principal.roles, grants)
         if (resolution.tier === 'DENY') continue
         const ownerRule = r?.record.calls[spec.rawName]
@@ -516,6 +523,13 @@ export class ToolGate {
     const providers = await this.providerTools(principal, spaceId, grants, ready, personalReady, guest, waiting)
     const theirs = new Set(providers.map((t) => t.name))
     const out: TurnTool[] = []
+    // the scopes granted to each personal account a source of this conversation uses, where its tools declare them
+    const grantedBy = new Map<string, string[] | undefined>()
+    const grantedOf = async (source: CatalogSource) => {
+      if (!grantedBy.has(source.name))
+        grantedBy.set(source.name, await connections?.grantedIn(principal, source, spaceId))
+      return grantedBy.get(source.name)
+    }
     // every tool the roles reach, by role or through a grant they may hold (RBAC-TOOL-004, D112)
     for (const visible of await registry.reachable(principal.roles, grants, principal)) {
       const spec = visible.spec
@@ -538,7 +552,12 @@ export class ToolGate {
         bindings = r.bindings
         accountSetAt = r.accountSetAt
       } else bindings = spaceTools.bindingValues(source, undefined)
-      if (source.account.kind === 'personal') accountSetAt = personalReady.get(source.name)
+      if (source.account.kind === 'personal') {
+        accountSetAt = personalReady.get(source.name)
+        // only the tools whose scopes were all granted (TOOL-OAUTH-013)
+        const granted = await grantedOf(source)
+        if (granted && !this.scopesGranted(source, spec.rawName, granted)) continue
+      }
       const packRule = catalog.packRuleOf(source, spec.rawName, spec.annotations)
       const rule = (ownerRule ? strictest<SpaceCallRule>(packRule.rule, ownerRule) : packRule.rule) as CallRule
       const feature = catalog.featureOf(source)
@@ -577,6 +596,25 @@ export class ToolGate {
       })
     }
     return [...out.sort((a, b) => a.name.localeCompare(b.name)), ...providers]
+  }
+
+  /**
+   * Whether every scope a tool declares is granted (TOOL-OAUTH-013); a tool its server lists that declares none, in a source
+   * whose other tools declare theirs, is given to no model, and warned of once (TOOL-CAT-021).
+   */
+  private scopesGranted(source: CatalogSource, tool: string, granted: readonly string[]): boolean {
+    if (source.tools[tool]?.scopes === undefined) {
+      const key = `${source.name}:${tool}`
+      if (!this.warnedNoScopes.has(key)) {
+        this.warnedNoScopes.add(key)
+        this.deps.logger.warn(
+          { source: source.name, tool },
+          'this tool declares no scopes where the other tools of its source declare theirs: no model is given it (TOOL-CAT-021)'
+        )
+      }
+      return false
+    }
+    return toolGranted(source, tool, granted)
   }
 
   // ---- one call (TOOL-CALL-001) --------------------------------------------------------------------------------------

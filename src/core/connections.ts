@@ -1,6 +1,6 @@
 /**
- * Each person's own accounts (ayni-spec D104 to D110; TOOL-ACCESS-008..014, TOOL-OAUTH-001..010, TOOL-CONN-001..014,
- * TOOL-SPACE-012/013, TOOL-CALL-011, PRIV-ERASE-013; AG-UI profile 3.5 §3.11).
+ * Each person's own accounts (ayni-spec D104 to D110, D118; TOOL-ACCESS-008..014, TOOL-OAUTH-001..016, TOOL-CONN-001..016,
+ * TOOL-SPACE-012/013, TOOL-CALL-011, PRIV-ERASE-013; AG-UI profile 3.5 §3.11 and §3.13).
  *
  * A source of kind `personal` runs each call with the account of the person who asks. The person, and nobody else,
  * connects it: through OAuth as MCP defines it (an attempt started from a bound session, the sign-in in the browser, the
@@ -10,6 +10,11 @@
  *
  * An account is `connected` or `reconnect` (with its reason); a person holds at most one per source, or one per value of
  * the binding the source's account is for (D110), which the check reads right after the sign-in, outside the model.
+ *
+ * An account of `tools.accounts` (D118) is declared once for several sources: one sign-in, one item of Your accounts, its
+ * token sent only to the URLs of its sources. Where the tools of a source declare their scopes, a sign-in asks those of the
+ * tools the model may be given, the scopes granted are read after every token answer, and the model is given only the
+ * tools whose scopes were all granted; the item says, per source, whether all, some or none of its tools are allowed.
  */
 import { createHash } from 'node:crypto'
 import type { AccountCheck, AgentPack, SourceAccount } from '../config/packTypes.js'
@@ -18,6 +23,7 @@ import { resolveTier } from '../policy/rbac.js'
 import type { Store } from '../store/types.js'
 import { accountSecrets, buildAccountHeaders, fitsFields } from '../tools/accountValues.js'
 import { type CatalogSource, effectFromAnnotations, type ToolCatalog } from '../tools/catalog.js'
+import { checkPerson, type Jwk, validateIdToken } from '../tools/idToken.js'
 import {
   type AuthorizationServerMetadata,
   type ClientCredentials,
@@ -31,7 +37,8 @@ import {
   type TokenSet,
 } from '../tools/oauth.js'
 import type { ToolRegistry } from '../tools/registry.js'
-import type { CallAccountSecret, PersonalOAuthHandle } from '../tools/types.js'
+import { declaresScopes, modelToolsOf, scopesOfTool, toolGranted } from '../tools/scopes.js'
+import type { CallAccountSecret, ConnectCard, PersonalOAuthHandle } from '../tools/types.js'
 import { nowIso, prefixedId } from '../util/ids.js'
 import type { Logger } from '../util/logger.js'
 import { isPersonalSpace, SpaceError, type SpaceService } from './spaces.js'
@@ -64,12 +71,23 @@ const DISCOVERY_TTL_MS = 10 * 60_000
 const LABEL_MAX = 80
 /** The longest description of a source in what the model reads (TOOL-CONN-010). */
 const DESCRIPTION_MAX = 120
+/** The scopes a sign-in whose check reads the ID token asks beside the tools' own (TOOL-OAUTH-012). */
+const ID_TOKEN_SCOPES = ['openid', 'email']
 
 /** A refusal of Your accounts (profile 3.5 §3.11), with what its body carries beyond the code. */
 export class ConnectionError extends SpaceError {}
 
 /** Where an account serves (PROF-TOOL-014). */
 export type ConnectionUse = { kind: 'agent' } | { kind: 'personal' } | { kind: 'space'; id: string; title: string }
+
+/** Whether all, some or none of a source's tools the person may use are allowed by the scopes granted (PROF-TOOL-028). */
+export interface ConnectionAccess {
+  source: string
+  title: string
+  allowed: 'all' | 'some' | 'none'
+  /** `some`: the titles of the tools not allowed */
+  missing?: string[]
+}
 
 /** One item of `GET {sessions}/connections` (PROF-TOOL-014). */
 export interface ConnectionView {
@@ -88,6 +106,11 @@ export interface ConnectionView {
   revokesAtSource: boolean
   /** the features the sources that use the account serve, each once (PROF-TOOL-035) */
   features: { id: string; title: string }[]
+  /**
+   * an account of `tools.accounts`, or whose sources' tools declare their scopes: per source the person may use, whether
+   * its tools are allowed (PROF-TOOL-028, TOOL-CONN-015)
+   */
+  access?: ConnectionAccess[]
 }
 
 /** `ayni.connections.changed` (PROF-TOOL-019). */
@@ -105,17 +128,15 @@ export interface ConnectionsChanged {
   chosen?: string
 }
 
-/** A personal source the person has not connected, or must reconnect, in a conversation (TOOL-CONN-010, D108). */
-export interface ToConnect {
-  source: string
-  title: string
-  description?: string
-  method: 'oauth' | 'fields'
-  why: 'connect' | 'reconnect'
-  binding?: { label: string; value: string; valueLabel: string | null }
-  spaceId?: string
-  /** the feature of the source the card is for (PROF-TOOL-035) */
-  feature?: { id: string; title: string }
+/**
+ * A personal source the person has not connected, or must reconnect, or whose tools are not all allowed, in a
+ * conversation (TOOL-CONN-010, TOOL-CONN-016, D108): its Connect card, and the line the model reads of it.
+ */
+export interface ToConnect extends ConnectCard {
+  /** the source the line names, when it is not the account the card names: a source of an account of tools.accounts */
+  line?: { source: string; title: string; description?: string }
+  /** `why: allow`: the titles of the tools not allowed, none when no tool of the source is (TOOL-CONN-016) */
+  missing?: string[]
 }
 
 /** What the callback answers the browser (TOOL-OAUTH-006): a redirection, or a page. */
@@ -139,6 +160,11 @@ export interface ConnectionHooks {
   endAllowances?: (principalId: string, sourceIds: string[]) => Promise<void>
   /** the sessions of a conversation of profile 3.5 or later, which can show a Connect card (TOOL-CONN-011) */
   connectSessions?: (conversationId: string) => Promise<Session[]>
+  /**
+   * the tools of a source whose scopes the Principal's sign-in also asks in that space, though no model is given them:
+   * those a team space's managed folder is managed with, for the Principal who manages it (D145, TOOL-FEAT-025)
+   */
+  managingTools?: (principal: Principal, source: CatalogSource, spaceId: string) => Promise<string[]>
 }
 
 export interface ConnectionDeps {
@@ -211,6 +237,8 @@ export function packDigestOf(source: Pick<CatalogSource, 'kind' | 'account' | 'u
     binding: account.binding ?? null,
     bindingResource: account.oauth?.bindingRequest?.resource ?? null,
     fields: (account.fields ?? []).map((f) => f.name),
+    // an account whose sign-in names no resource (D118): said only where it is, so that other digests stay as they were
+    ...(account.oauth?.resource === false ? { resource: false } : {}),
   })
 }
 
@@ -237,6 +265,17 @@ function page(title: string, text: string): string {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(title)}</title></head><body><main><h1>${esc(title)}</h1><p>${esc(text)}</p></main></body></html>`
 }
 
+/** What the check of a new account found (TOOL-CONN-013, TOOL-OAUTH-016). */
+type CheckOutcome =
+  | { ok: true; value?: string; valueLabel?: string; label?: string }
+  | { ok: false; outcome: 'wrong-binding' | 'wrong-person' | 'failed'; expected?: string; chosen?: string }
+
+/** What is sealed apart from an account's tokens, under its key: its label, and the scopes granted (TOOL-OAUTH-013). */
+interface Described {
+  label?: string
+  granted?: string[]
+}
+
 interface Expected {
   value?: string
   label?: string
@@ -252,6 +291,7 @@ export class ConnectionService {
   private readonly locks = new Map<string, Promise<unknown>>()
   private readonly discoveries = new Map<string, { at: number; discovery: Discovery }>()
   private readonly metadatas = new Map<string, { at: number; metadata: AuthorizationServerMetadata }>()
+  private readonly keySets = new Map<string, { at: number; keys: Jwk[] }>()
 
   public constructor(private readonly deps: ConnectionDeps) {}
 
@@ -287,10 +327,15 @@ export class ConnectionService {
     return this.deps.catalog.sources().filter((s) => s.kind !== 'bundled' && s.account.kind === 'personal')
   }
 
-  /** The source that declares the account a source uses: itself, or the one its `account.from` names (TOOL-CAT-015). */
+  /**
+   * What declares the account a source uses: itself, the source its `account.from` names (TOOL-CAT-015), or the account of
+   * `tools.accounts` it names (TOOL-CAT-020).
+   */
   public declaringOf(source: CatalogSource): CatalogSource | undefined {
     if (source.account.kind !== 'personal') return undefined
     if (!source.account.from) return source
+    const account = this.deps.catalog.account(source.account.from)
+    if (account) return account
     const named = this.deps.catalog.source(source.account.from)
     return named?.account.kind === 'personal' && !named.account.from ? named : undefined
   }
@@ -300,8 +345,13 @@ export class ConnectionService {
     return this.personalSources().filter((s) => s.name === declaring.name || s.account.from === declaring.name)
   }
 
-  /** A source the person may connect or use: of kind personal, declaring its own account (TOOL-CONN-001). */
+  /**
+   * What a person may connect or use: an account of `tools.accounts` (TOOL-CONN-015), or a source of kind personal that
+   * declares its own account (TOOL-CONN-001).
+   */
   private declared(sourceId: string): CatalogSource | undefined {
+    const account = this.deps.catalog.account(sourceId)
+    if (account) return account
     const source = this.deps.catalog.source(sourceId)
     if (!source || source.kind === 'bundled' || source.account.kind !== 'personal' || source.account.from)
       return undefined
@@ -335,6 +385,63 @@ export class ConnectionService {
   private bindingOf(declaring: CatalogSource) {
     const name = declaring.account.binding
     return name ? declaring.bindings.find((b) => b.name === name) : undefined
+  }
+
+  // ---- the scopes of each tool (D118, TOOL-CAT-021, TOOL-OAUTH-012, TOOL-OAUTH-013) ---------------------------------
+
+  /**
+   * Whether an account's item says, per source, which tools are allowed: an account of `tools.accounts`, or one whose
+   * sources' tools declare their scopes (PROF-TOOL-028).
+   */
+  public scoped(declaring: CatalogSource): boolean {
+    return declaring.accountOnly === true || this.consumersOf(declaring).some((s) => declaresScopes(s))
+  }
+
+  /**
+   * The tools of a source the Principal's roles give that the model may be given of it (TOOL-OAUTH-012): the profile's
+   * tools and the extras of a provider of a feature with a contract, the offered tools of an MCP server, else the tools
+   * whose scopes the agent-pack declares.
+   */
+  private toolsFor(principal: Principal, source: CatalogSource): string[] {
+    const named =
+      modelToolsOf(source.name, source, this.deps.catalog.profileOf(source)) ??
+      Object.keys(source.tools).filter((t) => scopesOfTool(source, t) !== undefined)
+    return named.filter((tool) => {
+      const tier = resolveTier(source.access, principal.roles, tool, false).tier
+      return tier === 'ALLOW' || tier === 'APPROVAL'
+    })
+  }
+
+  /** The scopes granted to an account, sealed beside its label: none while it holds no tokens (TOOL-OAUTH-013). */
+  private async grantedOf(record: PersonalAccountRecord | undefined): Promise<string[]> {
+    if (record?.state !== 'connected') return []
+    return (await this.describedOf(record))?.granted ?? []
+  }
+
+  /**
+   * Whether all, some or none of a source's tools the Principal may use are allowed by the scopes the account was granted
+   * (TOOL-OAUTH-013, PROF-TOOL-028); a source whose tools declare no scopes has all of them, once connected.
+   */
+  private allowedOf(
+    principal: Principal,
+    source: CatalogSource,
+    record: PersonalAccountRecord | undefined,
+    granted: string[]
+  ): ConnectionAccess {
+    const base = { source: source.name, title: source.title }
+    if (record?.state !== 'connected') return { ...base, allowed: 'none' }
+    if (!declaresScopes(source)) return { ...base, allowed: 'all' }
+    const tools = this.toolsFor(principal, source)
+    const missing = tools.filter((t) => !toolGranted(source, t, granted))
+    if (!missing.length) return { ...base, allowed: 'all' }
+    if (missing.length === tools.length) return { ...base, allowed: 'none' }
+    return { ...base, allowed: 'some', missing: missing.map((t) => this.deps.catalog.toolTitle(source, t)) }
+  }
+
+  /** The scopes granted to the Principal's account a source uses in a conversation, when its tools declare them. */
+  public async grantedIn(principal: Principal, source: CatalogSource, spaceId: string): Promise<string[] | undefined> {
+    if (!declaresScopes(source)) return undefined
+    return this.grantedOf((await this.accountIn(principal, source, spaceId))?.record)
   }
 
   /**
@@ -389,21 +496,29 @@ export class ConnectionService {
 
   // ---- Your accounts (TOOL-CONN-001, PROF-TOOL-014) ------------------------------------------------------------------
 
-  /** The label of an account, opened from its own sealed part: never the tokens (TOOL-ACCESS-011). */
-  private async labelOf(record: PersonalAccountRecord): Promise<string | undefined> {
+  /**
+   * The label of an account and the scopes it was granted, opened from their own sealed part: never the tokens
+   * (TOOL-ACCESS-011, TOOL-OAUTH-013).
+   */
+  private async describedOf(record: PersonalAccountRecord): Promise<Described | undefined> {
     if (!record.labelCipher || !record.encKeyRef) return undefined
     const person = await this.store.personKeys.get(record.principalId)
     if (!person) return undefined
     try {
-      return openUnder<{ label?: string }>(
+      return openUnder<Described>(
         this.deps.crypto,
         person.wrappedKey,
         record.encKeyRef,
         Buffer.from(record.labelCipher, 'base64')
-      ).label
+      )
     } catch {
       return undefined
     }
+  }
+
+  /** The label of an account, opened from its own sealed part: never the tokens (TOOL-ACCESS-011). */
+  private async labelOf(record: PersonalAccountRecord): Promise<string | undefined> {
+    return (await this.describedOf(record))?.label
   }
 
   /** Whether a Disconnect reaches the service: its authorization server names a revocation endpoint (TOOL-CONN-006). */
@@ -412,6 +527,46 @@ export class ConnectionService {
     const issuer = await this.store.kv.get(`oauth-source-issuer:${declaring.name}`)
     if (!issuer) return false
     return (await this.store.kv.get(`oauth-revocation:${issuer}`)) === 'yes'
+  }
+
+  /**
+   * The sources that use an account and are available to the Principal (TOOL-CONN-015): of the whole agent or of
+   * Personal, or `ready` in a space of which they are an active member (a guest only where the template opens it), and
+   * whose tools the Principal's roles give; in the order of `tools.sources`.
+   */
+  private async availableConsumers(principal: Principal, declaring: CatalogSource): Promise<CatalogSource[]> {
+    const out: CatalogSource[] = []
+    const spaces = this.spaceTools ? await this.deps.spaces.listFor(principal) : []
+    for (const consumer of this.consumersOf(declaring)) {
+      if (!(await this.givesATool(principal, consumer))) continue
+      if (consumer.availability === 'agent' || consumer.availability === 'personal') {
+        out.push(consumer)
+        continue
+      }
+      for (const access of spaces) {
+        if (access.left || !access.role || isPersonalSpace(access.space.id)) continue
+        const ready = (await this.spaceTools?.readyIn(access.space))?.find((r) => r.source.name === consumer.name)
+        if (!ready || (access.role === 'guest' && ready.entry.guests !== true)) continue
+        out.push(consumer)
+        break
+      }
+    }
+    return out
+  }
+
+  /** The `access` of an account's item, for an account whose item carries it (PROF-TOOL-028). */
+  private async accessOf(
+    principal: Principal,
+    declaring: CatalogSource,
+    record: PersonalAccountRecord | undefined
+  ): Promise<ConnectionAccess[] | undefined> {
+    if (!this.scoped(declaring)) return undefined
+    const granted = await this.grantedOf(record)
+    // an account of tools.accounts lists every source of it; a source's own account its sources that declare scopes
+    const sources = (await this.availableConsumers(principal, declaring)).filter(
+      (c) => declaring.accountOnly || declaresScopes(c)
+    )
+    return sources.map((c) => this.allowedOf(principal, c, record, granted))
   }
 
   private async view(
@@ -430,6 +585,7 @@ export class ConnectionService {
         (a.expectedBinding?.value ?? '') === (binding ? (expected.value ?? '') : '')
     )
     const label = record ? await this.labelOf(record) : undefined
+    const access = await this.accessOf(principal, declaring, record)
     return {
       source: declaring.name,
       title: declaring.title,
@@ -467,6 +623,7 @@ export class ConnectionService {
       attempt: attempt ? { id: attempt.id, expiresAt: attempt.expiresAt } : null,
       revokesAtSource: await this.revokesAtSource(declaring),
       features: this.featuresOf(declaring),
+      ...(access ? { access } : {}),
     }
   }
 
@@ -488,9 +645,11 @@ export class ConnectionService {
     const held = await this.store.personalAccounts.listByPrincipal(principal.id)
     const waiting = (await this.store.oauthAttempts.listWaiting()).filter((a) => a.principalId === principal.id)
     const out: ConnectionView[] = []
-    for (const source of this.personalSources()) {
-      const declaring = this.declared(source.name)
-      if (!declaring) continue
+    // in the order of tools.sources: an account of tools.accounts where its first source is (TOOL-CONN-015)
+    const declarings = this.personalSources()
+      .flatMap((s) => (s.account.from && this.deps.catalog.account(s.account.from)) || this.declared(s.name) || [])
+      .filter((d, i, all) => all.findIndex((x) => x.name === d.name) === i)
+    for (const declaring of declarings) {
       const binding = this.bindingOf(declaring)
       const expected = await this.expectedOf(principal, declaring)
       const mine = held.filter((r) => r.sourceId === declaring.name)
@@ -539,10 +698,12 @@ export class ConnectionService {
   private async placeOf(
     principal: Principal,
     declaring: CatalogSource,
-    spaceId: unknown
+    spaceId: unknown,
+    among?: CatalogSource[]
   ): Promise<{ expected?: { value: string; label?: string }; spaceId?: string }> {
     const binding = this.bindingOf(declaring)
-    const consumers = this.consumersOf(declaring)
+    // a sign-in for some of the account's sources is placed by those (PROF-TOOL-029)
+    const consumers = among ?? this.consumersOf(declaring)
     // a source none of whose tools the Principal's roles give is not theirs to connect, anywhere (TOOL-CONN-001)
     let gives = false
     for (const consumer of consumers) if (await this.givesATool(principal, consumer)) gives = true
@@ -592,14 +753,27 @@ export class ConnectionService {
 
   // ---- the client and the metadata (TOOL-OAUTH-001..004) ------------------------------------------------------------
 
-  /** What a server's metadata says, kept a while: read again on a start, and when the cached one is old. */
-  private async discoveryOf(declaring: CatalogSource, fresh = false): Promise<Discovery> {
-    const url = declaring.url as string
-    const cached = this.discoveries.get(declaring.name)
+  /**
+   * What a server's metadata says, kept a while: read again on a start, and when the cached one is old. The server of a
+   * source of an account whose tokens are for its authorization server's own interfaces (`resource: false`) is a
+   * connector of the deployment, which may be reached over HTTP (D118, TOOL-OAUTH-018).
+   */
+  private async discoveryOf(source: CatalogSource, fresh = false, connector = false): Promise<Discovery> {
+    const url = source.url as string
+    const cached = this.discoveries.get(source.name)
     if (!fresh && cached && Date.now() - cached.at < DISCOVERY_TTL_MS) return cached.discovery
-    const discovery = await this.deps.oauth.discover(url)
-    this.discoveries.set(declaring.name, { at: Date.now(), discovery })
+    const discovery = await this.deps.oauth.discover(url, connector)
+    this.discoveries.set(source.name, { at: Date.now(), discovery })
     return discovery
+  }
+
+  /** The keys of an issuer's `jwks_uri`, kept a while and read again for a key the set does not hold (TOOL-OAUTH-016). */
+  private async keysOf(uri: string, fresh: boolean): Promise<Jwk[]> {
+    const cached = this.keySets.get(uri)
+    if (!fresh && cached && Date.now() - cached.at < DISCOVERY_TTL_MS) return cached.keys
+    const keys = await this.deps.oauth.jwks(uri)
+    this.keySets.set(uri, { at: Date.now(), keys })
+    return keys
   }
 
   private async metadataOf(issuer: string, fresh = false): Promise<AuthorizationServerMetadata> {
@@ -705,8 +879,83 @@ export class ConnectionService {
   // ---- connecting through OAuth (TOOL-OAUTH-005, TOOL-CONN-004) ----------------------------------------------------
 
   /**
-   * `POST {sessions}/connections/{source}/authorize` (TOOL-CONN-004): an attempt for the Principal and the session, for
-   * one use and ten minutes, and the URL of the sign-in. No confirmation on the phone (D104).
+   * What a sign-in started for `{source}` is of (TOOL-CONN-004, PROF-TOOL-029): the account a source declares, or an
+   * account of `tools.accounts`, for all its sources; or one source of an item's `access`, for that source alone.
+   */
+  private authorizeTarget(sourceId: string): { declaring: CatalogSource; only?: CatalogSource } | undefined {
+    const declaring = this.declared(sourceId)
+    if (declaring) return { declaring }
+    const source = this.deps.catalog.source(sourceId)
+    const of = source ? this.declaringOf(source) : undefined
+    return source && of && this.scoped(of) ? { declaring: of, only: source } : undefined
+  }
+
+  /**
+   * The sources a sign-in asks the scopes of (TOOL-OAUTH-012, PROF-TOOL-029): the one named; else, for an account whose
+   * item carries `access`, every source of it not all of whose tools are allowed, or all of them when every one is.
+   */
+  private async allowFor(
+    principal: Principal,
+    declaring: CatalogSource,
+    only: CatalogSource | undefined,
+    held: PersonalAccountRecord | undefined
+  ): Promise<CatalogSource[]> {
+    if (only) return [only]
+    const access = (await this.accessOf(principal, declaring, held)) ?? []
+    const open = access.filter((a) => a.allowed !== 'all').map((a) => a.source)
+    const names = open.length ? open : access.map((a) => a.source)
+    return names.flatMap((n) => this.deps.catalog.source(n) ?? [])
+  }
+
+  /**
+   * The scopes a sign-in asks (TOOL-OAUTH-005, TOOL-OAUTH-012): where the sources' tools declare theirs, those of the tools
+   * the model may be given of the sources it is for that the Principal's roles give, with those of the tools of a managed
+   * folder the Principal manages in the space, and only those not granted yet; else the agent-pack's `scopes`, the
+   * challenge's or the metadata's, with `offline_access` where the authorization server lists it. `openid` and `email`
+   * when the check reads the ID token.
+   */
+  private async scopesFor(
+    principal: Principal,
+    declaring: CatalogSource,
+    sources: CatalogSource[],
+    spaceId: string | undefined,
+    discovery: Discovery,
+    metadata: AuthorizationServerMetadata,
+    held: PersonalAccountRecord | undefined
+  ): Promise<string[]> {
+    let scopes: string[]
+    if (this.scoped(declaring)) {
+      const wanted = new Set<string>()
+      for (const source of sources) {
+        const tools = [
+          ...this.toolsFor(principal, source),
+          ...(spaceId ? ((await this.hooks.managingTools?.(principal, source, spaceId)) ?? []) : []),
+        ]
+        for (const tool of tools) for (const scope of scopesOfTool(source, tool) ?? []) wanted.add(scope)
+      }
+      const granted = await this.grantedOf(held)
+      scopes = [...wanted].filter((s) => !granted.includes(s))
+    } else {
+      const declared = declaring.account.oauth?.scopes
+      scopes = declared ?? discovery.challengeScopes ?? discovery.scopesSupported ?? []
+      if (!declared && metadata.scopes_supported?.includes('offline_access') && !scopes.includes('offline_access'))
+        scopes = [...scopes, 'offline_access']
+    }
+    // for an account that asked for more, those too (TOOL-OAUTH-009)
+    if (held?.moreAccess) {
+      const secret = await this.openSecret(held)
+      for (const scope of secret?.tokens?.wantedScopes ?? []) if (!scopes.includes(scope)) scopes = [...scopes, scope]
+    }
+    if (declaring.account.check?.idToken)
+      scopes = [...ID_TOKEN_SCOPES, ...scopes.filter((s) => !ID_TOKEN_SCOPES.includes(s))]
+    return scopes
+  }
+
+  /**
+   * `POST {sessions}/connections/{source}/authorize` (TOOL-CONN-004, TOOL-CONN-015, PROF-TOOL-029): an attempt for the
+   * Principal and the session, for one use and ten minutes, and the URL of the sign-in. No confirmation on the phone (D104).
+   * For an account of `tools.accounts`, the server of each source it is for must name the client's issuer; with
+   * `resource: false` no `resource` is asked, and the sources may be connectors of the deployment (D118).
    */
   public async startAuthorize(
     principal: Principal,
@@ -714,18 +963,43 @@ export class ConnectionService {
     sourceId: string,
     spaceId: unknown
   ): Promise<{ attemptId: string; authorizationUrl: string; expiresAt: string }> {
-    const declaring = this.declared(sourceId)
-    if (!declaring) throw new ConnectionError('this source cannot be connected', 'not-found')
-    const place = await this.placeOf(principal, declaring, spaceId)
+    const target = this.authorizeTarget(sourceId)
+    if (!target) throw new ConnectionError('this source cannot be connected', 'not-found')
+    const { declaring } = target
+    const binding = this.bindingOf(declaring)
+    const scoped = this.scoped(declaring)
+    // the sources the sign-in is for, and where: Personal, the whole agent, or the space asked (TOOL-CONN-004)
+    const firstPlace = await this.placeOf(principal, declaring, spaceId, target.only ? [target.only] : undefined)
+    const held = await this.store.personalAccounts.find(
+      principal.id,
+      declaring.name,
+      binding ? firstPlace.expected?.value : undefined
+    )
+    let sources = scoped ? await this.allowFor(principal, declaring, target.only, held) : [declaring]
     if (!declaring.account.oauth)
       throw new ConnectionError('this source connects with fields, not a sign-in', 'not-oauth')
     const oauth = declaring.account.oauth
+    if (!sources.length) throw new ConnectionError('this source cannot be connected', 'not-found')
+    const place = target.only
+      ? firstPlace
+      : await this.placeOf(principal, declaring, spaceId, scoped ? sources : undefined)
     let discovery: Discovery
     let issuer: string
     let metadata: AuthorizationServerMetadata
     let client: { ref: string; credentials: ClientCredentials }
     try {
-      discovery = await this.discoveryOf(declaring, true)
+      // each source's server names the authorization server of the account (TOOL-OAUTH-001, TOOL-CAT-020)
+      const found: { source: CatalogSource; discovery: Discovery }[] = []
+      for (const source of declaring.accountOnly ? sources : [declaring]) {
+        const d = await this.discoveryOf(source, true, oauth.resource === false)
+        found.push({ source, discovery: d })
+        issuer = this.issuerFor(declaring, d)
+      }
+      // one resource per sign-in: the sources at the first one's (decision 87)
+      const first = found[0] as { source: CatalogSource; discovery: Discovery }
+      discovery = first.discovery
+      if (declaring.accountOnly && oauth.resource !== false)
+        sources = found.filter((f) => f.discovery.resource === discovery.resource).map((f) => f.source)
       issuer = this.issuerFor(declaring, discovery)
       metadata = await this.metadataOf(issuer, true)
       client = await this.clientFor(declaring, issuer, metadata)
@@ -735,30 +1009,27 @@ export class ConnectionService {
       throw new ConnectionError(why, 'source-unavailable')
     }
     await this.store.kv.set(`oauth-source-issuer:${declaring.name}`, issuer)
-    // the scopes: the agent-pack's when it declares them (`[]`: none), else the challenge's, else the server's metadata's,
-    // with offline_access when the authorization server lists it; and, for an account that asked for more, those too
-    const declared = oauth.scopes
-    let scopes = declared ?? discovery.challengeScopes ?? discovery.scopesSupported ?? []
-    if (!declared && metadata.scopes_supported?.includes('offline_access') && !scopes.includes('offline_access'))
-      scopes = [...scopes, 'offline_access']
-    const binding = this.bindingOf(declaring)
-    const held = await this.store.personalAccounts.find(
-      principal.id,
-      declaring.name,
-      binding ? place.expected?.value : undefined
+    const scopes = await this.scopesFor(
+      principal,
+      declaring,
+      sources,
+      place.spaceId,
+      discovery,
+      metadata,
+      held?.state === 'connected' ? held : undefined
     )
-    if (held?.moreAccess) {
-      const secret = await this.openSecret(held)
-      for (const scope of secret?.tokens?.wantedScopes ?? []) if (!scopes.includes(scope)) scopes = [...scopes, scope]
-    }
     // the value asked at the sign-in, where the service allows it (D110, layer a)
-    let resource = discovery.resource
+    let resource: string | undefined = oauth.resource === false ? undefined : discovery.resource
     const extra: Record<string, string> = {}
     const request = oauth.bindingRequest
     if (request && place.expected) {
       if (request.parameter) extra[request.parameter] = place.expected.value
       if (request.resource) resource = request.resource.replace(/\{value\}/g, encodeURIComponent(place.expected.value))
     }
+    // the person's own email as the hint of the sign-in, and the organization's domain (TOOL-OAUTH-014)
+    const email = this.deps.directoryEmail?.(principal)
+    if (oauth.loginHint === 'email' && email) extra.login_hint = email
+    if (oauth.hostedDomain) extra.hd = oauth.hostedDomain
     // a new start of the same source for the same value ends the attempt that waits (TOOL-OAUTH-005)
     for (const waiting of await this.store.oauthAttempts.listWaiting())
       if (
@@ -770,6 +1041,9 @@ export class ConnectionService {
     const { verifier, challenge } = pkcePair()
     const { state, hash } = newState()
     const keyRef = this.deps.crypto.newWrappedKey()
+    // a nonce of 256 random bits, sealed in the attempt, when the check reads the ID token (TOOL-OAUTH-014)
+    const nonce = declaring.account.check?.idToken ? newState().state : undefined
+    if (nonce) extra.nonce = nonce
     const now = Date.now()
     const attempt: OAuthAttemptRecord = {
       id: prefixedId('att'),
@@ -777,14 +1051,16 @@ export class ConnectionService {
       originSessionId: session.id,
       sourceId: declaring.name,
       ...(place.spaceId ? { spaceId: place.spaceId } : {}),
+      ...(scoped ? { allow: sources.map((s) => s.name) } : {}),
       stateHash: hash,
       ...(place.expected ? { expectedBinding: place.expected } : {}),
       issuer,
       issParameterSupported: metadata.authorization_response_iss_parameter_supported === true,
-      resource,
+      ...(resource !== undefined ? { resource } : {}),
       scopes,
       clientRef: client.ref,
       verifierCipher: sealJson(this.deps.crypto, keyRef, { verifier }).cipher.toString('base64'),
+      ...(nonce ? { nonceCipher: sealJson(this.deps.crypto, keyRef, { nonce }).cipher.toString('base64') } : {}),
       encKeyRef: keyRef,
       createdAt: new Date(now).toISOString(),
       expiresAt: new Date(now + (this.deps.attemptSeconds ?? DEFAULT_ATTEMPT_SECONDS) * 1000).toISOString(),
@@ -795,12 +1071,13 @@ export class ConnectionService {
       redirectUri: this.callbackUrl,
       state,
       challenge,
-      resource,
+      ...(resource !== undefined ? { resource } : {}),
       scopes,
       extra,
+      ...(oauth.parameters ? { parameters: oauth.parameters } : {}),
     })
     this.deps.logger.info(
-      { principalId: principal.id, source: declaring.name, attemptId: attempt.id },
+      { principalId: principal.id, source: declaring.name, attemptId: attempt.id, allow: attempt.allow },
       'a sign-in of a person own account started'
     )
     return { attemptId: attempt.id, authorizationUrl, expiresAt: attempt.expiresAt }
@@ -924,19 +1201,23 @@ export class ConnectionService {
       )
       return end('failed')
     }
+    const granted = tokens.scopes ?? attempt.scopes
     const secret: PersonalAccountSecret = {
       tokens: {
         accessToken: tokens.accessToken,
         ...(tokens.refreshToken ? { refreshToken: tokens.refreshToken } : {}),
         ...(tokens.expiresAt ? { expiresAt: tokens.expiresAt } : {}),
-        scopes: tokens.scopes ?? attempt.scopes,
+        scopes: granted,
         wantedScopes: attempt.scopes,
         issuer: attempt.issuer,
         clientRef: attempt.clientRef,
-        resource: attempt.resource,
+        ...(attempt.resource !== undefined ? { resource: attempt.resource } : {}),
       },
     }
-    const checked = await this.check(principal, declaring, secret, attempt.expectedBinding)
+    // the ID token is checked here and forgotten: it is sealed nowhere and sent nowhere (TOOL-OAUTH-016, 018)
+    const checked = declaring.account.check?.idToken
+      ? await this.checkIdToken(principal, declaring, attempt, metadata, credentials, tokens.idToken)
+      : await this.check(principal, declaring, secret, attempt.expectedBinding)
     if (!checked.ok) {
       // nothing of a refused account is kept: its tokens are revoked where the service allows it, and forgotten
       await this.revokeTokens(metadata, credentials, secret, REVOKE_WAIT_MS)
@@ -945,8 +1226,81 @@ export class ConnectionService {
         ...(checked.chosen ? { chosen: checked.chosen } : {}),
       })
     }
-    const record = await this.seal(principal, declaring, 'oauth', secret, checked)
+    // a sign-in that allows more of a connected account adds to it: the same account, its scopes those granted now
+    // (TOOL-CONN-015, TOOL-OAUTH-013)
+    const binding = this.bindingOf(declaring)
+    const held = await this.store.personalAccounts.find(
+      principal.id,
+      declaring.name,
+      binding ? checked.value : undefined
+    )
+    if (attempt.allow && held?.state === 'connected') {
+      const extended = await this.extend(held, declaring, secret, granted, checked.label)
+      if (extended) return end('connected', held.bindingValue !== undefined ? { value: held.bindingValue } : {})
+    }
+    const record = await this.seal(principal, declaring, 'oauth', secret, { ...checked, granted })
     return end('connected', record.bindingValue !== undefined ? { value: record.bindingValue } : {})
+  }
+
+  /**
+   * The check by the ID token of the sign-in (TOOL-OAUTH-016): an `id_token` in the answer, validated as OpenID Connect
+   * Core §3.1.3.7 says against the issuer's keys, the client and the attempt's nonce (`failed` otherwise); then the person
+   * it names, against their directory entry (`wrong-person` otherwise). The label from `check.label`, `{email}` standing
+   * for that email.
+   */
+  private async checkIdToken(
+    principal: Principal,
+    declaring: CatalogSource,
+    attempt: OAuthAttemptRecord,
+    metadata: AuthorizationServerMetadata,
+    credentials: ClientCredentials,
+    idToken: string | undefined
+  ): Promise<CheckOutcome> {
+    const check = declaring.account.check
+    const failed = (why: string) => {
+      this.deps.logger.warn(
+        { attemptId: attempt.id, source: attempt.sourceId, why },
+        'the ID token of a sign-in was refused'
+      )
+      return { ok: false as const, outcome: 'failed' as const }
+    }
+    if (!check?.idToken) return failed('no check')
+    if (!idToken) return failed('no ID token')
+    if (!metadata.jwks_uri) return failed('no keys')
+    const jwksUri = metadata.jwks_uri
+    let nonce: string
+    try {
+      nonce = openJson<{ nonce: string }>(
+        this.deps.crypto,
+        attempt.encKeyRef,
+        Buffer.from(attempt.nonceCipher ?? '', 'base64')
+      ).nonce
+    } catch {
+      return failed('no nonce')
+    }
+    const valid = await validateIdToken(idToken, {
+      issuer: attempt.issuer,
+      clientId: credentials.clientId,
+      nonce,
+      ...(metadata.id_token_signing_alg_values_supported
+        ? { algorithms: metadata.id_token_signing_alg_values_supported }
+        : {}),
+      keys: (fresh) => this.keysOf(jwksUri, fresh),
+    })
+    if (!valid.ok) return failed(valid.why)
+    const person = checkPerson(valid.claims, {
+      email: this.deps.directoryEmail?.(principal),
+      ...(check.idToken.hostedDomain !== undefined ? { hostedDomain: check.idToken.hostedDomain } : {}),
+    })
+    if (!person.ok) {
+      this.deps.logger.warn(
+        { attemptId: attempt.id, source: attempt.sourceId, why: person.why },
+        'the ID token of a sign-in names someone else'
+      )
+      return { ok: false, outcome: 'wrong-person' }
+    }
+    const label = check.label?.includes('{email}') ? check.label.replace(/\{email\}/g, person.email) : undefined
+    return { ok: true, ...(label && !/\{\/[^{}]*\}/.test(label) ? { label: label.slice(0, LABEL_MAX) } : {}) }
   }
 
   // ---- connecting with fields (TOOL-CONN-005) -----------------------------------------------------------------------
@@ -996,10 +1350,7 @@ export class ConnectionService {
     declaring: CatalogSource,
     secret: PersonalAccountSecret,
     expected: { value: string; label?: string } | undefined
-  ): Promise<
-    | { ok: true; value?: string; valueLabel?: string; label?: string }
-    | { ok: false; outcome: 'wrong-binding' | 'wrong-person' | 'failed'; expected?: string; chosen?: string }
-  > {
+  ): Promise<CheckOutcome> {
     const check: AccountCheck | undefined = declaring.account.check
     if (!check)
       return {
@@ -1112,7 +1463,7 @@ export class ConnectionService {
     declaring: CatalogSource,
     method: 'oauth' | 'fields',
     secret: PersonalAccountSecret,
-    checked: { value?: string; valueLabel?: string; label?: string }
+    checked: { value?: string; valueLabel?: string; label?: string; granted?: string[] }
   ): Promise<PersonalAccountRecord> {
     const binding = this.bindingOf(declaring)
     const value = binding ? checked.value : undefined
@@ -1128,8 +1479,13 @@ export class ConnectionService {
       method,
       state: 'connected',
       cipher: sealUnder(this.deps.crypto, person, keyRef, secret).toString('base64'),
-      ...(checked.label
-        ? { labelCipher: sealUnder(this.deps.crypto, person, keyRef, { label: checked.label }).toString('base64') }
+      ...(checked.label || checked.granted
+        ? {
+            labelCipher: sealUnder(this.deps.crypto, person, keyRef, {
+              ...(checked.label ? { label: checked.label } : {}),
+              ...(checked.granted ? { granted: checked.granted } : {}),
+            } satisfies Described).toString('base64'),
+          }
         : {}),
       encKeyRef: keyRef,
       packDigest: packDigestOf(declaring),
@@ -1151,6 +1507,45 @@ export class ConnectionService {
     await this.audit(principal.id, declaring.name, value, former ? 'replaced' : 'connected')
     await this.announce(principal.id, declaring, value, {})
     return record
+  }
+
+  /**
+   * A sign-in that allowed more of a connected account (TOOL-CONN-015, TOOL-OAUTH-013): the same account, its tokens and the
+   * scopes granted now sealed under a new key of its own, the former one destroyed with them; its connection closes so
+   * that the server is read again with the new token. Its allowances stay: it is the same account. False when the account
+   * changed meanwhile.
+   */
+  private async extend(
+    held: PersonalAccountRecord,
+    declaring: CatalogSource,
+    secret: PersonalAccountSecret,
+    granted: string[],
+    label: string | undefined
+  ): Promise<boolean> {
+    const person = await this.store.personKeys.get(held.principalId)
+    if (!person) return false
+    const keyRef = newKeyUnder(this.deps.crypto, person.wrappedKey)
+    const kept = label ?? (await this.labelOf(held))
+    const updated = await this.store.personalAccounts.update({
+      ...held,
+      moreAccess: false,
+      cipher: sealUnder(this.deps.crypto, person.wrappedKey, keyRef, secret).toString('base64'),
+      labelCipher: sealUnder(this.deps.crypto, person.wrappedKey, keyRef, {
+        ...(kept ? { label: kept } : {}),
+        granted,
+      } satisfies Described).toString('base64'),
+      encKeyRef: keyRef,
+      refreshedAt: nowIso(),
+    })
+    if (!updated) return false
+    await this.hooks.accountEnded?.(held.id)
+    this.deps.logger.info(
+      { principalId: held.principalId, source: declaring.name, accountId: held.id },
+      'a person own account allowed more'
+    )
+    await this.audit(held.principalId, declaring.name, held.bindingValue, 'allowed')
+    await this.announce(held.principalId, declaring, held.bindingValue, {})
+    return true
   }
 
   /** An account to reconnect: its tokens destroyed, its key with them, its state and reason kept (TOOL-OAUTH-008/010). */
@@ -1236,7 +1631,7 @@ export class ConnectionService {
    */
   public async disconnect(principal: Principal, accountId: string): Promise<ConnectionView> {
     const record = await this.store.personalAccounts.get(accountId)
-    const declaring = record ? this.deps.catalog.source(record.sourceId) : undefined
+    const declaring = record ? (this.declared(record.sourceId) ?? this.deps.catalog.source(record.sourceId)) : undefined
     if (!record || record.principalId !== principal.id || !declaring)
       throw new ConnectionError('no such account', 'not-found')
     await this.revokeAccount(record, REVOKE_WAIT_MS)
@@ -1377,13 +1772,17 @@ export class ConnectionService {
       }
     }
     if (!secret.tokens) return { status: 'not-connected' }
+    // the one URL the token goes to: the server it is for, or, for an account of tools.accounts, the URL of the source of
+    // this call, one of the account's sources (TOOL-OAUTH-015)
+    const url = found.declaring.accountOnly ? source.url : (secret.tokens.resource ?? source.url)
+    if (!url) return { status: 'not-connected' }
     return {
       status: 'connected',
       record,
       account: {
         kind: 'personal',
         accountId: record.id,
-        oauth: new OAuthHandle(this, record.id, secret.tokens.resource, secret.tokens.accessToken),
+        oauth: new OAuthHandle(this, record.id, url, secret.tokens.accessToken, source.name),
       },
     }
   }
@@ -1410,7 +1809,7 @@ export class ConnectionService {
    * token kept before the new access token is used. A server that names another authorization server than the account's
    * gets no token, and the account goes to reconnect.
    */
-  public async accessToken(accountId: string, after401?: string): Promise<string> {
+  public async accessToken(accountId: string, after401?: string, sourceId?: string): Promise<string> {
     return this.serial(accountId, async () => {
       const record = await this.store.personalAccounts.get(accountId)
       if (record?.state !== 'connected') throw new AccountNotConnected(record ? 'reconnect' : 'not-connected')
@@ -1418,10 +1817,18 @@ export class ConnectionService {
       const tokens = secret?.tokens
       const declaring = this.declared(record.sourceId)
       if (!secret || !tokens || !declaring) throw new AccountNotConnected()
-      // the server names another authorization server: the account's token never goes there, nor anywhere (TOOL-OAUTH-010)
+      // the server names another authorization server: the account's token never goes there, nor anywhere (TOOL-OAUTH-010);
+      // for an account of tools.accounts, the server of the source called, whose change ends the account for every source
+      // that uses it (TOOL-OAUTH-015)
+      const called = declaring.accountOnly ? (sourceId ? this.deps.catalog.source(sourceId) : undefined) : declaring
+      if (!called) throw new AccountNotConnected()
       let discovery: Discovery | undefined
       try {
-        discovery = await this.discoveryOf(declaring, after401 !== undefined)
+        discovery = await this.discoveryOf(
+          called,
+          after401 !== undefined,
+          declaring.accountOnly === true && declaring.account.oauth?.resource === false
+        )
       } catch {
         // the metadata cannot be read now: the token stays with its own server
       }
@@ -1448,7 +1855,7 @@ export class ConnectionService {
         const credentials = await this.credentialsFor(declaring, tokens.clientRef)
         fresh = await this.deps.oauth.refresh(metadata, credentials, {
           refreshToken: tokens.refreshToken,
-          resource: tokens.resource,
+          ...(tokens.resource !== undefined ? { resource: tokens.resource } : {}),
         })
       } catch (error) {
         if (error instanceof OAuthRefused) {
@@ -1471,17 +1878,32 @@ export class ConnectionService {
         },
       }
       const person = await this.store.personKeys.get(record.principalId)
+      // the scopes granted, read in every token answer: fewer than before give the model fewer tools (TOOL-OAUTH-013)
+      const described = await this.describedOf(record)
+      const regranted =
+        fresh.scopes && described?.granted && fresh.scopes.join(' ') !== described.granted.join(' ')
+          ? fresh.scopes
+          : undefined
       // the account was replaced, disconnected or ended during the refresh: nothing of it is written back
       if (
         !person ||
         !(await this.store.personalAccounts.update({
           ...((await this.store.personalAccounts.get(accountId)) ?? record),
           cipher: sealUnder(this.deps.crypto, person.wrappedKey, record.encKeyRef, next).toString('base64'),
+          ...(regranted
+            ? {
+                labelCipher: sealUnder(this.deps.crypto, person.wrappedKey, record.encKeyRef, {
+                  ...described,
+                  granted: regranted,
+                } satisfies Described).toString('base64'),
+              }
+            : {}),
           refreshedAt: nowIso(),
         }))
       )
         throw new AccountNotConnected()
       this.deps.logger.info({ accountId, source: record.sourceId }, 'a person own account refreshed')
+      if (regranted && declaring) await this.announce(record.principalId, declaring, record.bindingValue, {})
       return fresh.accessToken
     })
   }
@@ -1535,7 +1957,9 @@ export class ConnectionService {
 
   /**
    * The personal sources available in a conversation whose tools the Principal's roles give and whose account there is
-   * `not-connected` or `reconnect`, in the order of `tools.sources`, one per account (TOOL-CONN-010).
+   * `not-connected` or `reconnect`, one per account, or, for an account of `tools.accounts`, one per source; and the
+   * sources of a connected account none or only some of whose tools are allowed (TOOL-CONN-010, TOOL-CONN-016). In the
+   * order of `tools.sources`.
    */
   public async toConnect(principal: Principal, spaceId: string, grants: ElevationGrant[] = []): Promise<ToConnect[]> {
     const personal = isPersonalSpace(spaceId)
@@ -1552,56 +1976,96 @@ export class ConnectionService {
       }
       if (!(await this.givesATool(principal, source, grants))) continue
       const found = await this.accountIn(principal, source, spaceId)
-      if (!found || found.record?.state === 'connected') continue
+      if (!found) continue
       const declaring = found.declaring
-      const key = `${declaring.name}|${found.value ?? ''}`
+      const connected = found.record?.state === 'connected'
+      // a connected account: a line only for a source whose tools are not all allowed (TOOL-CONN-016)
+      const allowed =
+        connected && this.scoped(declaring) && declaresScopes(source)
+          ? this.allowedOf(principal, source, found.record, await this.grantedOf(found.record))
+          : undefined
+      if (connected && allowed?.allowed !== 'some' && allowed?.allowed !== 'none') continue
+      // one line per account, but per source for an account several sources use, and for one to allow
+      const perSource = declaring.accountOnly === true || connected
+      const key = perSource ? `source:${source.name}` : `${declaring.name}|${found.value ?? ''}`
       if (seen.has(key)) continue
       seen.add(key)
       const binding = this.bindingOf(declaring)
+      const feature = this.deps.catalog.featureOf(source)
       out.push({
         source: declaring.name,
         title: declaring.title,
         ...(declaring.description ? { description: declaring.description.slice(0, DESCRIPTION_MAX) } : {}),
         method: declaring.account.oauth ? 'oauth' : 'fields',
-        why: found.record?.state === 'reconnect' ? 'reconnect' : 'connect',
+        why: connected ? 'allow' : found.record?.state === 'reconnect' ? 'reconnect' : 'connect',
+        ...(connected ? { allow: { source: source.name, title: source.title } } : {}),
         ...(binding && found.value !== undefined
           ? { binding: { label: binding.label, value: found.value, valueLabel: found.label ?? null } }
           : {}),
         ...(source.availability === 'spaces' ? { spaceId } : {}),
-        ...((feature) => (feature ? { feature: { id: feature.id, title: feature.title } } : {}))(
-          this.deps.catalog.featureOf(source)
-        ),
+        ...(feature ? { feature: { id: feature.id, title: feature.title } } : {}),
+        ...(perSource && source.name !== declaring.name
+          ? {
+              line: {
+                source: source.name,
+                title: source.title,
+                ...(source.description ? { description: source.description.slice(0, DESCRIPTION_MAX) } : {}),
+              },
+            }
+          : {}),
+        ...(allowed?.allowed === 'some' ? { missing: allowed.missing ?? [] } : {}),
       })
     }
     return out
   }
 
-  /** The record of the system the model reads of them, in the Principal's block (TOOL-CONN-010); none with nothing to connect. */
+  /**
+   * The record of the system the model reads of them, in the Principal's block (TOOL-CONN-010, TOOL-CONN-016); none with
+   * nothing to connect or allow.
+   */
   public static record(lines: ToConnect[]): string | undefined {
     if (!lines.length) return undefined
+    const state = (l: ToConnect) =>
+      l.why === 'reconnect'
+        ? 'to reconnect'
+        : l.why === 'allow'
+          ? l.missing?.length
+            ? `allowed in part: ${l.missing.join(', ')}`
+            : 'not allowed'
+          : 'not connected'
     return [
       'Accounts this person can connect, with the tool offer_connection:',
-      ...lines.map(
-        (l) =>
-          `- ${l.source}: ${l.title}${l.description ? `, ${l.description}` : ''}${l.binding ? ` (${l.binding.label}: ${l.binding.valueLabel ?? l.binding.value})` : ''} (${l.why === 'reconnect' ? 'to reconnect' : 'not connected'})`
-      ),
+      ...lines.map((l) => {
+        const named = l.line ?? l
+        return `- ${named.source}: ${named.title}${named.description ? `, ${named.description}` : ''}${l.binding ? ` (${l.binding.label}: ${l.binding.valueLabel ?? l.binding.value})` : ''} (${state(l)})`
+      }),
     ].join('\n')
   }
 
+  /** The Connect card of a line: what the clients draw, never the words the model reads (PROF-TOOL-020). */
+  private static cardOf(line: ToConnect): ConnectCard {
+    const { line: _line, missing: _missing, ...card } = line
+    return card
+  }
+
   /**
-   * The model's `offer_connection` (TOOL-CONN-011): the Connect card of a source the record lists, `connected` when the
-   * account is now, `not-available` for another, `unavailable` when no session of the conversation can show the card.
+   * The model's `offer_connection` (TOOL-CONN-011, TOOL-CONN-016): the Connect card of a source the record lists, with
+   * `why: allow` for a source of a connected account whose tools are not all allowed; `connected` when the account is
+   * connected now and every tool of the source allowed, `not-available` for another, `unavailable` when no session of the
+   * conversation can show the card.
    */
   public async offer(
     principal: Principal,
     session: Session,
     spaceId: string,
     sourceId: string,
-    show: (card: ToConnect) => Promise<void>
+    show: (card: ConnectCard) => Promise<void>
   ): Promise<'shown' | 'connected' | 'not-available' | 'unavailable'> {
     const source = this.deps.catalog.source(sourceId)
     const lines = await this.toConnect(principal, spaceId)
-    const line = lines.find((l) => l.source === sourceId || (source && this.declaringOf(source)?.name === l.source))
+    const line =
+      lines.find((l) => (l.line?.source ?? l.allow?.source ?? l.source) === sourceId) ??
+      lines.find((l) => l.source === sourceId || (source && this.declaringOf(source)?.name === l.source))
     if (!line) {
       if (source && (await this.connectedIn(principal, source, spaceId))) return 'connected'
       const declaring = this.declared(sourceId)
@@ -1613,7 +2077,7 @@ export class ConnectionService {
     const conversationId = session.conversationId ?? session.id
     const capable = (await this.hooks.connectSessions?.(conversationId)) ?? []
     if (!capable.length) return 'unavailable'
-    await show(line)
+    await show(ConnectionService.cardOf(line))
     return 'shown'
   }
 
@@ -1714,7 +2178,9 @@ export class OAuthHandle implements PersonalOAuthHandle {
     public readonly accountId: string,
     /** the server the token is for: the only URL it is sent to (no token passthrough) */
     public readonly url: string,
-    private current: string
+    private current: string,
+    /** the source of the call: for an account of tools.accounts, the server whose metadata is checked (TOOL-OAUTH-015) */
+    private readonly sourceId?: string
   ) {
     this.seen.add(current)
   }
@@ -1729,7 +2195,7 @@ export class OAuthHandle implements PersonalOAuthHandle {
 
   private async fetchToken(): Promise<string> {
     try {
-      this.current = await this.service.accessToken(this.accountId)
+      this.current = await this.service.accessToken(this.accountId, undefined, this.sourceId)
       this.seen.add(this.current)
       return this.current
     } catch (error) {
@@ -1740,7 +2206,7 @@ export class OAuthHandle implements PersonalOAuthHandle {
 
   private async refreshAfter401(used: string): Promise<string | undefined> {
     try {
-      this.current = await this.service.accessToken(this.accountId, used)
+      this.current = await this.service.accessToken(this.accountId, used, this.sourceId)
       this.seen.add(this.current)
       return this.current
     } catch (error) {

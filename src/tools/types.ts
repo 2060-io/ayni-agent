@@ -34,10 +34,13 @@ export interface ConnectCard {
   title: string
   description?: string
   method: 'oauth' | 'fields'
-  why: 'connect' | 'reconnect'
+  /** `allow`: the account is connected and one of its sources has tools whose scopes it lacks (PROF-TOOL-029) */
+  why: 'connect' | 'reconnect' | 'allow'
+  /** `why: allow`: the source to allow; `source` is then the account's (PROF-TOOL-029) */
+  allow?: { source: string; title: string }
   binding?: { label: string; value: string; valueLabel: string | null }
   spaceId?: string
-  /** the feature of the source the card is for (PROF-TOOL-035) */
+  /** the feature of the source the card is for, with `why: allow` the feature of `allow` (PROF-TOOL-035) */
   feature?: { id: string; title: string }
 }
 
