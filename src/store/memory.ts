@@ -6,8 +6,10 @@ import type {
   DigestAnchor,
   ElevationGrant,
   FeatureMarkRecord,
+  FolderMembershipRecord,
   GovernanceNotice,
   LifecycleState,
+  ManagedFolderRecord,
   MemoryAccessLog,
   OAuthAttemptRecord,
   OAuthClientRecord,
@@ -625,6 +627,34 @@ export class MemoryStore implements Store {
     },
     delete: async (spaceId: string, featureId: string) => {
       this.featureMarkRows.delete(`${spaceId}\n${featureId}`)
+    },
+  }
+
+  private readonly folderRows = new Map<string, ManagedFolderRecord>()
+  public managedFolders = {
+    get: async (spaceId: string, featureId: string) => clone(this.folderRows.get(`${spaceId}\n${featureId}`)),
+    save: async (r: ManagedFolderRecord) => {
+      this.folderRows.set(`${r.spaceId}\n${r.featureId}`, clone(r))
+    },
+    delete: async (spaceId: string, featureId: string) => {
+      this.folderRows.delete(`${spaceId}\n${featureId}`)
+    },
+    listAll: async () => clone([...this.folderRows.values()]),
+  }
+
+  private readonly membershipRows = new Map<string, FolderMembershipRecord>()
+  public folderMemberships = {
+    listByFolder: async (spaceId: string, featureId: string) =>
+      clone([...this.membershipRows.values()].filter((r) => r.spaceId === spaceId && r.featureId === featureId)),
+    save: async (r: FolderMembershipRecord) => {
+      this.membershipRows.set(`${r.spaceId}\n${r.featureId}\n${r.principalId}`, clone(r))
+    },
+    delete: async (spaceId: string, featureId: string, principalId: string) => {
+      this.membershipRows.delete(`${spaceId}\n${featureId}\n${principalId}`)
+    },
+    deleteByFolder: async (spaceId: string, featureId: string) => {
+      for (const [key, r] of [...this.membershipRows.entries()])
+        if (r.spaceId === spaceId && r.featureId === featureId) this.membershipRows.delete(key)
     },
   }
 

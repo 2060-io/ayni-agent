@@ -279,7 +279,7 @@ export function featureErrors(pack: AgentPack): string[] {
 
 /**
  * What the agent leaves to the operator's judgment about features (TOOL-AVAIL-002): a source of spaces that no template
- * names as a provider, and a provider that declares `manage`, whose managed mode this version does not build.
+ * names as a provider.
  */
 export function featureWarnings(pack: AgentPack): string[] {
   const warnings: string[] = []
@@ -289,10 +289,6 @@ export function featureWarnings(pack: AgentPack): string[] {
     if (source.availability === 'spaces' && !named.has(id))
       warnings.push(
         `tools.sources.${id}: a source of availability spaces that no template names as a provider of its feature: no space can use it (TOOL-AVAIL-002)`
-      )
-    if (source.type === 'mcp' && source.manage)
-      warnings.push(
-        `tools.sources.${id}.manage: the managed mode of a team space's folder is not built in this version: ${id} is used in the existing mode, the owner picking a folder that exists (TOOL-FEAT-023)`
       )
   }
   return warnings

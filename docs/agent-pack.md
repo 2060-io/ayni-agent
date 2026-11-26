@@ -693,9 +693,11 @@ spaces:
 - **A template's entry** (`spaces.templates[].features`, TOOL-AVAIL-002): `feature`, `providers` (sources of
   availability `spaces` that serve it), `default` (required with `add: auto` and several providers), `add` (`auto` or
   `owner`), `guests`, `any` (each member's own account reaches any location in place of a list: for an entry with a
-  provider of a personal account of a feature with a contract) and, for Files, `location` (`managed`, `existing`,
-  `either`; validated, the managed mode not being built in this version). The withdrawn `tools` of a template is refused
-  in words.
+  provider of a personal account of a feature with a contract) and, for Files, `location`: `managed` (the agent makes
+  and keeps the space's folder), `existing` (the owner picks a folder that exists) or `either` (the default: the owner
+  chooses when adding Files, the managed folder offered first), TOOL-FEAT-023; a provider with no `manage` is in the
+  existing mode whatever `location` says, and a space of kind `organization` is always in it. The withdrawn `tools` of a
+  template is refused in words.
 - **A provider of a feature with a contract** (TOOL-FEAT-004) is an MCP server of availability `spaces` or `personal`;
   its `capabilities` are capabilities of the profile; its `offer` and `tools.<name>` name only its extras (no name with
   the profile's prefix); it declares no binding named as the profile's location (`root`, `calendar`). At the first
@@ -706,9 +708,74 @@ spaces:
   change of provider renews (TOOL-FEAT-016); the folder or calendar of a space is set in code from a list of one, and
   checked against a longer list (TOOL-FEAT-014); a call that names an address outside `identity.organization.emailDomains`
   is `external` (TOOL-FEAT-013).
-- **`manage`** (`as: owner`, or `as: manager` with `apply`, each value one `${VAR}`, D150) on a provider of Files of
-  availability `spaces` and a personal account says that the agent may make and keep a team space's folder: validated
-  (TOOL-FEAT-023), warned at start, and not built in this version (Files is always in the existing mode).
+- **`manage`** on a provider of Files of availability `spaces` and a personal account says that the agent may make and
+  keep a team space's folder there (D145, TOOL-FEAT-023 to 034), and with which account: `as: owner`, the space owner's
+  own account of the provider, of an OAuth sign-in (a Google shared drive, the owner its manager, D147); `as: manager`,
+  the **managing account**, whose headers `apply` builds, each value one `${VAR}` of the deployment's secrets (a
+  Nextcloud team folder, D150). Below.
+
+#### A team space's managed folder (`manage`, `location: managed`)
+
+When the owner adds Files in the managed mode (`POST …/tools` with `"location": "managed"`, which waits for the owner's
+phone), the agent calls the profile's `files_create_team_root` with the managing account, the space's title as the
+name and a `requestId` the space and the feature fix (`ayni-<space id>-<feature>`), so that a retry makes no second
+folder; the folder is the feature's location, one entry, which the owner does not change (`409 managed-location`). It
+then keeps the folder's members in step with the space's people through the tools of `share` (`files_shares`,
+`files_share`, `files_unshare` on the folder's own reference): each `active` member whose roles give a tool of the
+provider, a guest only where the template's entry says `guests: true`, each named by the email of their directory entry
+or of their invitation; `editor` when their roles give a tool that writes or deletes that the space does not set `off`,
+`reader` otherwise, the owner (and, with `as: owner`, the space's successor) `manager` where the server declares
+`"team-roots": { "manager": true }`. It records only the memberships it made, never an address; a person someone added
+at the store is left as they are and shown to the owner. A change that fails is kept and tried again (after 1, 5 and
+30 minutes then hourly for a day for `unavailable` and `rate-limited`; at once `failed` for a refusal that stays; a
+removal every hour until done); every six hours the agent reads the members and the name back. The tools of
+`team-roots` and those `share` calls are the agent's code's, outside any conversation and with no card, whatever the
+source's `capabilities` leaves the model; the model is never given `files_create_team_root` or `files_rename_root`, and
+its `files_share` or `files_unshare` of the folder itself is refused in code (`managed-root`). Removing Files, or
+changing its provider, ends the management and leaves the folder, its members and its files as they are.
+
+A provider is offered in the managed mode only when its server declares the capabilities `team-roots` and `share` for
+the managing account (`409 cannot-manage` otherwise). With `as: owner`, the owner's account must be connected and
+grant what the store asks for these tools: until then the folder is `creating` with `not-connected` or
+`scope-missing`, and Files reads `setup`; declare in the account's `oauth.scopes` the scope the store needs to manage a
+shared drive (`https://www.googleapis.com/auth/drive` at Google). With `as: manager`, the administrator of the store
+gives the managing account the right to set up team folders and their groups.
+
+```yaml
+tools:
+  sources:
+    cloud-team:                          # a Nextcloud team folder per space, managed with the managing account (D150)
+      type: mcp
+      feature: files
+      title: Nextcloud
+      transport: streamable-http
+      url: http://connector-nextcloud.internal:8000/mcp
+      headers: { Ayni-Nextcloud: "https://cloud.example.org" }   # sent with every account, the managing one included
+      account:                           # each member's own Nextcloud account, in Your accounts
+        kind: personal
+        fields:
+          - { name: username, label: User name }
+          - { name: password, label: App password }
+        apply:
+          - { header: Ayni-Dav-Username, value: "{username}" }
+          - { header: Ayni-Dav-Password, value: "{password}" }
+      availability: spaces
+      manage:
+        as: manager
+        apply:
+          - { header: Ayni-Dav-Username, value: "${NEXTCLOUD_MANAGER_USERNAME}" }
+          - { header: Ayni-Dav-Password, value: "${NEXTCLOUD_MANAGER_PASSWORD}" }
+      access: { roles: { employee: ["*"] } }
+spaces:
+  templates:
+    - id: project
+      title: Project
+      kind: team
+      creators: [manager]
+      membership: { mode: list }
+      features:
+        - { feature: files, providers: [cloud-team], add: owner, location: either, guests: true }
+```
 
 ### The sources: `tools.sources`
 
@@ -722,7 +789,7 @@ starts with a letter or a digit, then letters, digits, `_` and `-`, 64 at most.
 | `type` | all | `mcp`, `http` or `bundled` | required |
 | `feature` | `mcp`, `http` | the feature it serves, a key of `tools.features` (TOOL-FEAT-002); a bundled tool names none | required |
 | `capabilities` | `mcp` | a provider of a feature with a contract: the optional capabilities of its profile it uses, at most | every one the server declares |
-| `manage` | `mcp` | a provider of Files: how a team space's folder would be managed (TOOL-FEAT-023, not built) | none |
+| `manage` | `mcp` | a provider of Files: the agent makes and keeps a team space's folder there, with the owner's own account (`as: owner`) or the managing account `apply` builds (`as: manager`), TOOL-FEAT-023 to 034 | none |
 | `transport`, `url`, `command`, `args`, `env`, `headers` | `mcp` | the connection: `stdio` needs `command`, `sse` and `streamable-http` need `url`; `headers` and `env` hold the agent's account as placeholders; the agent connects on first need and again after a drop (TOOL-MCP-003) | none |
 | `description`, `method`, `url`, `headers`, `parameters`, `bodyTemplate`, `timeoutSeconds` | `http` | the request: `description` is what the model reads of the tool (required), `parameters` the JSON Schema of its arguments, `{param}` placeholders in `url` and `bodyTemplate` | `timeoutSeconds: 30` |
 | `bundled`, `enabled` | `bundled` | the bundled tool it names (below), and `enabled: false` to turn off one that is on by default; `endpoint` and `defaultStatClass` for `statistics`, `provider` for `generateImage` | `enabled: true` |
@@ -1232,8 +1299,7 @@ How it works:
   method `identity.authentication.methods` does not enable, a method twice, or no method, or in a pack that lists no
   accepted combination (TOOL-CAT-010, IDENT-AUTH-015).
 
-Warned at start: a source of `spaces` that no template names as a provider of its feature, a provider that declares
-`manage` (not built), and a tool whose rule the pack sets to `approval` with no role to approve it (its calls are refused
+Warned at start: a source of `spaces` that no template names as a provider of its feature, and a tool whose rule the pack sets to `approval` with no role to approve it (its calls are refused
 as `no-approver`; the same is warned at discovery when the annotations set it).
 
 MCP servers connect lazily by default.

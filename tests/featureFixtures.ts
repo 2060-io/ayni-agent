@@ -27,6 +27,34 @@ export interface FakeDeclaration {
   capabilities: string[]
   /** core tools it does not list, to be refused (TOOL-FEAT-011) */
   missing?: string[]
+  /** `team-roots`: whether the store has the role `manager` (files §4.7) */
+  'team-roots'?: { manager: boolean }
+}
+
+/** A share of a team root at the fake store: a membership (files §4.4, §4.7). */
+export interface FakeShare {
+  id: string
+  role: string
+  recipient: { address: string; name?: string }
+  inherited: false
+}
+
+/** A team root the fake store keeps: its name, the request that made it, its members (files §4.7). */
+export interface FakeTeamRoot {
+  ref: string
+  title: string
+  requestId: string
+  shares: FakeShare[]
+}
+
+/** An answer the fake gives a tool in place of its own, once each, in order (common §9). */
+export interface FakeFailure {
+  tool: string
+  code: string
+  reason?: string
+  retryAfterSeconds?: number
+  /** only for a call whose recipient is this address */
+  address?: string
 }
 
 export interface FakeProviderOptions {
@@ -43,6 +71,11 @@ export interface FakeProviderOptions {
   roots?: FakeRoot[]
   /** the reference of a file it names `/Reports/Q3.md` */
   q3Ref?: string
+  /**
+   * who a call's account is at the store, by its address: from `Ayni-Dav-Username` (`<name>@example.org`) or a bearer
+   * token `tok_<name>Token` (`<name>@example.org`)
+   */
+  whoIs?: (headers: Record<string, string | string[] | undefined>) => string | undefined
 }
 
 export interface FakeProvider {
@@ -55,6 +88,12 @@ export interface FakeProvider {
   bytes?: { base64: string; mediaType: string; name: string }
   /** an answer that is not the profile's shape */
   malformed: boolean
+  /** the team roots it made (files §4.7), by reference */
+  teamRoots: Map<string, FakeTeamRoot>
+  /** answers given in place of the tool's own, consumed in order */
+  failures: FakeFailure[]
+  /** the addresses a team root does not take, with the reason of `recipient-refused` */
+  refuse: Map<string, string>
   declare(profile: 'files' | 'calendar', declaration: FakeDeclaration | undefined): void
   close(): Promise<void>
 }
@@ -75,6 +114,15 @@ function serverSchema(profile: FeatureProfile, name: string): Record<string, unk
   return { type: 'object', properties, required }
 }
 
+/** Who an account is at a fake store: its user name, or the name in its token, at example.org. */
+export function defaultWhoIs(headers: Record<string, string | string[] | undefined>): string | undefined {
+  const user = headers['ayni-dav-username']
+  if (typeof user === 'string' && user) return `${user}@example.org`
+  const auth = headers.authorization
+  const token = typeof auth === 'string' ? /^Bearer tok_(.+)Token$/.exec(auth)?.[1] : undefined
+  return token ? `${token.replace(/^conn/, '')}@example.org` : undefined
+}
+
 const DEFAULT_ROOTS: FakeRoot[] = [
   { ref: '48213', title: '/Projects/Alpha', path: '/Projects/Alpha', writable: true, portable: true },
   { ref: '48214', title: '/Projects/Beta', path: '/Projects/Beta', writable: true, portable: true },
@@ -89,7 +137,20 @@ export async function fakeProvider(options: FakeProviderOptions): Promise<FakePr
   }
   const roots = options.roots ?? DEFAULT_ROOTS
   const q3 = options.q3Ref ?? 'f-q3'
-  const fake: Omit<FakeProvider, 'url' | 'close' | 'declare'> = { calls: [], foreignItem: false, malformed: false }
+  const fake: Omit<FakeProvider, 'url' | 'close' | 'declare'> = {
+    calls: [],
+    foreignItem: false,
+    malformed: false,
+    teamRoots: new Map(),
+    failures: [],
+    refuse: new Map(),
+  }
+  const whoIs = options.whoIs ?? defaultWhoIs
+  let made = 0
+  const error = (code: string, extra: Record<string, unknown> = {}) => ({
+    structured: { error: { code, message: `The store answered ${code}.`, ...extra } },
+    isError: true,
+  })
   const item = (root: string, ref: string, name: string, path: string, extra: Record<string, unknown> = {}) => ({
     ref,
     root,
@@ -101,9 +162,107 @@ export async function fakeProvider(options: FakeProviderOptions): Promise<FakePr
     version: 'v1',
     ...extra,
   })
-  const answer = (name: string, args: Record<string, unknown>): { structured: unknown; isError?: boolean } => {
+  /** The team roots of files §4.7: made once per request, their members through the tools of `share`. */
+  const teamAnswer = (
+    name: string,
+    args: Record<string, unknown>,
+    caller: string | undefined
+  ): { structured: unknown; isError?: boolean } | undefined => {
+    const manager = declarations.files?.['team-roots']?.manager === true
+    if (name === 'files_create_team_root') {
+      const existing = [...fake.teamRoots.values()].find((t) => t.requestId === args.requestId)
+      const team = existing ?? {
+        ref: `team-${++made}`,
+        title: String(args.name),
+        requestId: String(args.requestId),
+        shares: caller
+          ? [
+              {
+                id: `sh-${made}-0`,
+                role: manager ? 'manager' : 'editor',
+                recipient: { address: caller },
+                inherited: false,
+              },
+            ]
+          : [],
+      }
+      fake.teamRoots.set(team.ref, team as FakeTeamRoot)
+      return {
+        structured: {
+          root: { ref: team.ref, title: team.title, path: '/', writable: true, portable: true, team: true },
+        },
+      }
+    }
+    const team = fake.teamRoots.get(typeof args.root === 'string' ? args.root : '')
+    if (!team) return undefined
+    if (name === 'files_rename_root') {
+      team.title = String(args.name)
+      return {
+        structured: {
+          root: { ref: team.ref, title: team.title, path: '/', writable: true, portable: true, team: true },
+        },
+      }
+    }
+    if (args.ref !== team.ref) return undefined
+    if (name === 'files_get')
+      return {
+        structured: {
+          item: {
+            ref: team.ref,
+            root: team.ref,
+            kind: 'folder',
+            name: team.title,
+            path: '/',
+            webUrl: `https://store.example/folders/${team.ref}`,
+          },
+        },
+      }
+    if (name === 'files_shares') return { structured: { shares: team.shares } }
+    if (name === 'files_share') {
+      const address = String((args.recipients as { address: string }[] | undefined)?.[0]?.address ?? '')
+      if (args.role === 'manager' && !manager) return error('not-supported', { field: 'role' })
+      const refused = fake.refuse.get(address)
+      if (refused) return error('recipient-refused', { reason: refused })
+      const held = team.shares.find((s) => s.recipient.address === address)
+      const share = held ?? {
+        id: `sh-${team.ref}-${team.shares.length + 1}-${made++}`,
+        role: '',
+        recipient: { address },
+        inherited: false as const,
+      }
+      share.role = String(args.role)
+      if (!held) team.shares.push(share)
+      return { structured: { shares: [share] } }
+    }
+    if (name === 'files_unshare') {
+      const at = team.shares.findIndex((s) => s.id === args.share)
+      if (at < 0) return error('not-found')
+      team.shares.splice(at, 1)
+      return { structured: { shares: team.shares } }
+    }
+    return undefined
+  }
+  const answer = (
+    name: string,
+    args: Record<string, unknown>,
+    caller?: string
+  ): { structured: unknown; isError?: boolean } => {
+    const failing = fake.failures.findIndex(
+      (f) =>
+        f.tool === name &&
+        (!f.address || (args.recipients as { address: string }[] | undefined)?.[0]?.address === f.address)
+    )
+    if (failing >= 0) {
+      const [f] = fake.failures.splice(failing, 1)
+      return error(f.code, {
+        ...(f.reason ? { reason: f.reason } : {}),
+        ...(f.retryAfterSeconds ? { retryAfterSeconds: f.retryAfterSeconds } : {}),
+      })
+    }
+    const team = teamAnswer(name, args, caller)
+    if (team) return team
     const root = typeof args.root === 'string' ? args.root : ''
-    const known = roots.some((r) => r.ref === root)
+    const known = roots.some((r) => r.ref === root) || fake.teamRoots.has(root)
     const notFound = { structured: { error: { code: 'not-found', message: 'No such item here.' } }, isError: true }
     if (fake.malformed && name !== 'files_roots' && name !== 'calendar_calendars') return { structured: { odd: true } }
     switch (name) {
@@ -215,7 +374,7 @@ export async function fakeProvider(options: FakeProviderOptions): Promise<FakePr
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const args = (request.params.arguments ?? {}) as Record<string, unknown>
       fake.calls.push({ name: request.params.name, args, headers })
-      const { structured, isError } = answer(request.params.name, args)
+      const { structured, isError } = answer(request.params.name, args, whoIs(headers))
       return {
         content: [{ type: 'text', text: JSON.stringify(structured) }],
         structuredContent: structured as Record<string, unknown>,

@@ -1711,6 +1711,119 @@ describe.skipIf(!serverUrl)('the reference relational store', () => {
     })
   })
 
+  describe("a team space's managed folder in the store (ayni-spec D145 to D150, TOOL-FEAT-034, PROF-TOOL-042, schema 3.16.0)", () => {
+    it('keeps each folder and each membership the agent made, with no address, and the notices of the owner', async () => {
+      const url = await freshDatabase()
+      const client = new pg.Client({ connectionString: url })
+      await client.connect()
+      await client.query(
+        'CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())'
+      )
+      for (const m of MIGRATIONS.filter((m) => olderThan(m.version, '3.16.0'))) {
+        await client.query(m.sql)
+        await client.query('INSERT INTO schema_migrations (version) VALUES ($1)', [m.version])
+      }
+      // before 3.16.0 a notice of a member's access is refused by the kinds the table takes
+      await expect(
+        client.query(
+          "INSERT INTO governance_notices (id, principal_id, space_id, kind, at, data) VALUES ('ntc_0', 'p-jonas', 'spc_alpha', 'folder-access', now(), '{}')"
+        )
+      ).rejects.toThrow()
+      await client.end()
+      const store = new PostgresStore(url)
+      await store.init()
+      const at = '2026-11-25T10:00:00.000Z'
+      expect(await store.managedFolders.get('spc_alpha', 'files')).toBeUndefined()
+      const folder = {
+        spaceId: 'spc_alpha',
+        featureId: 'files',
+        sourceId: 'cloud-team',
+        ref: 'team-1',
+        name: 'Project Alpha',
+        requestId: 'ayni-spc_alpha-files',
+        state: 'ready' as const,
+        managedWith: 'manager' as const,
+        managers: false,
+        webUrl: 'https://cloud.example.org/f/team-1',
+        addedOutside: [{ name: 'Boss' }],
+        baseline: ['sh-1-0'],
+        attempts: 0,
+        lastReadAt: at,
+        createdAt: at,
+        updatedAt: at,
+      }
+      await store.managedFolders.save(folder)
+      await store.managedFolders.save({ ...folder, spaceId: 'spc_beta', state: 'creating', reason: 'not-connected' })
+      expect(await store.managedFolders.get('spc_alpha', 'files')).toEqual(folder)
+      await store.managedFolders.save({ ...folder, name: 'Alpha Files' })
+      expect((await store.managedFolders.get('spc_alpha', 'files'))?.name).toBe('Alpha Files')
+      expect((await store.managedFolders.listAll()).map((f) => f.spaceId)).toEqual(['spc_alpha', 'spc_beta'])
+      const ana = {
+        spaceId: 'spc_alpha',
+        featureId: 'files',
+        principalId: 'p-ana',
+        role: 'editor' as const,
+        shareId: 'sh-2',
+        state: 'in-place' as const,
+        attempts: 0,
+        updatedAt: at,
+      }
+      const piet = {
+        ...ana,
+        principalId: 'p-piet',
+        state: 'failed' as const,
+        reason: 'not-allowed' as const,
+        attempts: 1,
+        firstFailedAt: at,
+      }
+      await store.folderMemberships.save(ana)
+      await store.folderMemberships.save(piet)
+      await store.folderMemberships.save({ ...ana, spaceId: 'spc_beta' })
+      expect(await store.folderMemberships.listByFolder('spc_alpha', 'files')).toEqual([ana, piet])
+      await store.folderMemberships.save({ ...ana, role: 'reader' })
+      expect((await store.folderMemberships.listByFolder('spc_alpha', 'files'))[0]?.role).toBe('reader')
+      await store.folderMemberships.delete('spc_alpha', 'files', 'p-piet')
+      expect(await store.folderMemberships.listByFolder('spc_alpha', 'files')).toHaveLength(1)
+      // the notice of a member whose access failed, to the owner, waiting until resolved (PROF-TOOL-042)
+      const notice = {
+        id: 'ntc_folder',
+        principalId: 'p-jonas',
+        spaceId: 'spc_alpha',
+        kind: 'folder-access' as const,
+        at,
+        subject: {
+          space: { id: 'spc_alpha', title: 'Project Alpha' },
+          member: { name: 'Piet' },
+          feature: { id: 'files', title: 'Files' },
+          source: { id: 'cloud-team', title: 'Nextcloud' },
+          folder: { title: 'Alpha Files' },
+          folderReason: 'not-allowed' as const,
+          memberPrincipalId: 'p-piet',
+        },
+      }
+      await store.governanceNotices.save(notice)
+      expect(await store.governanceNotices.list({ spaceId: 'spc_alpha', kind: 'folder-access', open: true })).toEqual([
+        notice,
+      ])
+      // released: the folder and its memberships leave the store; the other space's stay
+      await store.managedFolders.delete('spc_alpha', 'files')
+      await store.folderMemberships.deleteByFolder('spc_alpha', 'files')
+      expect(await store.managedFolders.get('spc_alpha', 'files')).toBeUndefined()
+      expect(await store.folderMemberships.listByFolder('spc_alpha', 'files')).toEqual([])
+      expect(await store.folderMemberships.listByFolder('spc_beta', 'files')).toHaveLength(1)
+      const check = new pg.Client({ connectionString: url })
+      await check.connect()
+      const { rows } = await check.query(
+        'SELECT data FROM folder_memberships UNION ALL SELECT data FROM managed_folders'
+      )
+      const versions = await check.query('SELECT version FROM schema_migrations')
+      await check.end()
+      expect(JSON.stringify(rows)).not.toContain('@')
+      expect(versions.rows.map((r) => r.version)).toContain('3.16.0')
+      await store.close()
+    })
+  })
+
   it('keeps what a person enrolled sealed, a passkey found by a keyed index of its id (IDENT-AUTH-014)', async () => {
     const url = await freshDatabase()
     const store = new PostgresStore(url)

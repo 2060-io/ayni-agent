@@ -43,9 +43,15 @@ export interface NotificationDeps {
 type Listed = { kind: 'approval'; at: string; id: string; record: ApprovalRecord } | GovernanceListed
 type GovernanceListed = { kind: 'notice'; at: string; id: string; notice: GovernanceNotice }
 
-/** Whether a notice waits for its person: a policy that needs attention, a space without an owner, until resolved. */
+/**
+ * Whether a notice waits for its person: a policy that needs attention, a space without an owner, a member whose access to
+ * the managed folder failed (PROF-TOOL-042), until resolved.
+ */
 export function noticeWaits(notice: GovernanceNotice): boolean {
-  return !notice.resolvedAt && (notice.kind === 'policy-attention' || notice.kind === 'space-without-owner')
+  return (
+    !notice.resolvedAt &&
+    (notice.kind === 'policy-attention' || notice.kind === 'space-without-owner' || notice.kind === 'folder-access')
+  )
 }
 
 /** The place that lists a notice: the agent's for a space without an owner (its stewards), else the space's. */
@@ -136,9 +142,24 @@ export class Notifications {
     return { id: record.id, kind: 'approval', at: record.createdAt, waiting: canDecide, approval }
   }
 
-  /** A notice as its person reads it (§3.12, PROF-TOOL-038). */
+  /** A notice as its person reads it (§3.12, PROF-TOOL-038, PROF-TOOL-042). */
   public noticeItem(notice: GovernanceNotice): NotificationItem {
     const s = notice.subject
+    // a member whose access to the managed folder failed, to the owner (PROF-TOOL-042)
+    if (notice.kind === 'folder-access')
+      return {
+        id: notice.id,
+        kind: notice.kind,
+        at: notice.at,
+        waiting: noticeWaits(notice),
+        folderAccess: {
+          member: s.member ?? { name: '' },
+          feature: s.feature ?? { id: '', title: '' },
+          source: s.source ?? { id: '', title: '' },
+          folder: s.folder ?? { title: '' },
+          reason: s.folderReason ?? 'unavailable',
+        },
+      }
     const base = { space: s.space }
     const body =
       notice.kind === 'owner-changed'

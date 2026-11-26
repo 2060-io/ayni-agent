@@ -756,7 +756,7 @@ export interface McpSource extends SourceFields {
   capabilities?: string[]
   /**
    * a provider of Files: the agent may make and keep a team space's folder at it, with the owner's own account or the
-   * managing account `apply` builds (D145, D150, TOOL-FEAT-023). Validated here; the managed mode itself is not built yet.
+   * managing account `apply` builds (D145, D150, TOOL-FEAT-023 to 034).
    */
   manage?: SourceManage
 }

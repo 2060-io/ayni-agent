@@ -7,8 +7,10 @@ import type {
   DigestAnchor,
   ElevationGrant,
   FeatureMarkRecord,
+  FolderMembershipRecord,
   GovernanceNotice,
   LifecycleState,
+  ManagedFolderRecord,
   MemoryAccessLog,
   OAuthAttemptRecord,
   OAuthClientRecord,
@@ -897,6 +899,52 @@ export class PostgresStore implements Store {
       await this.pool.query('DELETE FROM space_accounts WHERE space_id = $1 AND source_id = $2', [spaceId, sourceId])
     },
     listAll: async () => (await this.rows('SELECT * FROM space_accounts', [])).map((r) => this.accountFromRow(r)),
+  }
+
+  public managedFolders = {
+    get: (spaceId: string, featureId: string) =>
+      this.one<ManagedFolderRecord>('SELECT data FROM managed_folders WHERE space_id = $1 AND feature_id = $2', [
+        spaceId,
+        featureId,
+      ]),
+    save: async (r: ManagedFolderRecord) => {
+      await this.pool.query(
+        `INSERT INTO managed_folders (space_id, feature_id, data) VALUES ($1,$2,$3)
+         ON CONFLICT (space_id, feature_id) DO UPDATE SET data = $3`,
+        [r.spaceId, r.featureId, r]
+      )
+    },
+    delete: async (spaceId: string, featureId: string) => {
+      await this.pool.query('DELETE FROM managed_folders WHERE space_id = $1 AND feature_id = $2', [spaceId, featureId])
+    },
+    listAll: () => this.many<ManagedFolderRecord>('SELECT data FROM managed_folders ORDER BY space_id, feature_id', []),
+  }
+
+  public folderMemberships = {
+    listByFolder: (spaceId: string, featureId: string) =>
+      this.many<FolderMembershipRecord>(
+        'SELECT data FROM folder_memberships WHERE space_id = $1 AND feature_id = $2 ORDER BY principal_id',
+        [spaceId, featureId]
+      ),
+    save: async (r: FolderMembershipRecord) => {
+      await this.pool.query(
+        `INSERT INTO folder_memberships (space_id, feature_id, principal_id, data) VALUES ($1,$2,$3,$4)
+         ON CONFLICT (space_id, feature_id, principal_id) DO UPDATE SET data = $4`,
+        [r.spaceId, r.featureId, r.principalId, r]
+      )
+    },
+    delete: async (spaceId: string, featureId: string, principalId: string) => {
+      await this.pool.query(
+        'DELETE FROM folder_memberships WHERE space_id = $1 AND feature_id = $2 AND principal_id = $3',
+        [spaceId, featureId, principalId]
+      )
+    },
+    deleteByFolder: async (spaceId: string, featureId: string) => {
+      await this.pool.query('DELETE FROM folder_memberships WHERE space_id = $1 AND feature_id = $2', [
+        spaceId,
+        featureId,
+      ])
+    },
   }
 
   public featureMarks = {

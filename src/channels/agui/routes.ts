@@ -29,6 +29,7 @@ import { normalizeClient, SessionError } from '../../core/sessions.js'
 import { type SpaceAccess, SpaceError, spaceIdOf } from '../../core/spaces.js'
 import type { SpaceToolsChanged } from '../../core/spaceTools.js'
 import {
+  AGENT_ACTOR,
   type ClientDescription,
   type Conversation,
   DIRECTORY_ACTOR,
@@ -821,15 +822,28 @@ export class AgUiRoutes {
     }
   }
 
-  /** A space and, for an active member of a list space, its members (PROF-SPACE-003). */
+  /**
+   * A space and, for an active member of a list space, its members (PROF-SPACE-003); to the owner of a space whose Files
+   * has a managed folder, each member's access to it and the people it holds that the agent did not add (PROF-TOOL-041).
+   */
   private async spaceDetail(access: SpaceAccess, ctx: SpaceViewContext) {
     const { space } = access
     const rows = space.kind === 'personal' ? [] : await this.agent.spaces.memberRows(space.id)
+    const folder =
+      access.role === 'owner' && space.kind !== 'personal'
+        ? await this.agent.spaceTools?.folders?.members(space)
+        : undefined
+    const member = (m: SpaceMember) => {
+      const info = this.memberInfo(m, ctx.principals)
+      const folderAccess = m.principalId ? folder?.access.get(m.principalId) : undefined
+      return folder ? { ...info, folderAccess: folderAccess ?? { state: 'none' as const } } : info
+    }
     return {
       ...(await this.spaceInfo(access, ctx, rows)),
       ...(space.membership.mode === 'list' && space.kind !== 'personal' && !access.left
-        ? { members: rows.map((m) => this.memberInfo(m, ctx.principals)) }
+        ? { members: rows.map(member) }
         : {}),
+      ...(folder ? { addedOutside: folder.addedOutside } : {}),
       createdAt: space.createdAt,
       updatedAt: space.updatedAt,
     }
@@ -869,7 +883,10 @@ export class AgUiRoutes {
       id: a.id,
       at: a.at,
       kind: a.action,
-      ...(a.actorId === DIRECTORY_ACTOR ? {} : { by: { name: this.nameOf(principals, a.actorId) } }),
+      // what a reload of the directory or the agent's own code did names no one
+      ...(a.actorId === DIRECTORY_ACTOR || a.actorId === AGENT_ACTOR
+        ? {}
+        : { by: { name: this.nameOf(principals, a.actorId) } }),
       ...(name ? { member: { name } } : {}),
       ...(a.fields ? { fields: a.fields } : {}),
       ...(a.conversationId ? { conversationId: a.conversationId } : {}),
@@ -1554,6 +1571,13 @@ export class AgUiRoutes {
     for (const session of await this.agent.store.sessions.listByPrincipal(principalId, ['bound']))
       if (session.channelType === 'ag-ui')
         await this.streams.publish(session.id, ev.custom(CUSTOM_EVENT.connectionsChanged, { ...value }))
+  }
+
+  /** `ayni.space.tools.changed` to one person's sessions: their access to a managed folder changed (PROF-TOOL-041). */
+  public async announceSpaceToolsTo(principalId: string, value: SpaceToolsChanged): Promise<void> {
+    for (const session of await this.agent.store.sessions.listByPrincipal(principalId, ['bound']))
+      if (session.channelType === 'ag-ui')
+        await this.streams.publish(session.id, ev.custom(CUSTOM_EVENT.spaceToolsChanged, { ...value }))
   }
 
   /** A change of a space's tools applied or was dropped: every bound session of its owner hears it (PROF-TOOL-006). */

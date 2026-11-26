@@ -265,11 +265,13 @@ describe("a team space's folder managed by the agent, in the agent-pack (TOOL-FE
     p.spaces.templates.find((t: Doc) => t.id === 'alpha').features[0].location = 'either'
   }
 
-  it('starts on a managing account from the deployment secrets, warning that the managed mode is not built', () => {
+  it('starts on a managing account from the deployment secrets, the managed mode in force', () => {
     const pack = validatePackDocument(doc(managed), { ...env, MANAGER_NAME: 'ayni-manager' })
-    expect(catalogWarnings(pack).join('\n')).toContain(
-      "tools.sources.drive.manage: the managed mode of a team space's folder is not built in this version"
-    )
+    expect(catalogWarnings(pack).join('\n')).not.toContain('manage')
+    expect(new ToolCatalog(pack).source('drive')?.manage).toEqual({
+      as: 'manager',
+      apply: [{ header: 'Ayni-Dav-Username', value: 'ayni-manager' }],
+    })
   })
 
   it('refuses a managing value that is not a placeholder, manage on another feature, and a managed location with no provider that manages', () => {

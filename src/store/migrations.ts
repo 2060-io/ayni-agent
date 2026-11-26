@@ -1,5 +1,5 @@
 /** Memory schema versions (CORE-VER-001/002). Each migration is applied once, in order. */
-export const MEMORY_SCHEMA_VERSION = '3.15.0'
+export const MEMORY_SCHEMA_VERSION = '3.16.0'
 
 export const MIGRATIONS: { version: string; sql: string }[] = [
   {
@@ -522,6 +522,30 @@ CREATE TABLE IF NOT EXISTS feature_marks (
   created_at TIMESTAMPTZ NOT NULL,
   PRIMARY KEY (space_id, feature_id)
 );
+`,
+  },
+  {
+    // a team space's folder made and kept by the agent (ayni-spec D145 to D150, TOOL-FEAT-034): the folder of each space
+    // and feature, and each membership the agent made of it, with no address; the notice of a member whose access failed
+    // is a notice of the space's Notifications (PROF-TOOL-042)
+    version: '3.16.0',
+    sql: `
+CREATE TABLE IF NOT EXISTS managed_folders (
+  space_id TEXT NOT NULL,
+  feature_id TEXT NOT NULL,
+  data JSONB NOT NULL,
+  PRIMARY KEY (space_id, feature_id)
+);
+CREATE TABLE IF NOT EXISTS folder_memberships (
+  space_id TEXT NOT NULL,
+  feature_id TEXT NOT NULL,
+  principal_id TEXT NOT NULL,
+  data JSONB NOT NULL,
+  PRIMARY KEY (space_id, feature_id, principal_id)
+);
+ALTER TABLE governance_notices DROP CONSTRAINT IF EXISTS governance_notices_kind_check;
+ALTER TABLE governance_notices ADD CONSTRAINT governance_notices_kind_check
+  CHECK (kind IN ('owner-changed','policy-attention','no-approver','space-without-owner','folder-access'));
 `,
   },
 ]

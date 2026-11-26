@@ -44,6 +44,13 @@ export interface ProviderState {
   capabilities: string[]
   /** the server's own tools that the source offers (TOOL-CAT-003): given to the model as a category's */
   extras: ListedTool[]
+  /**
+   * every optional capability the server declares and lists the tools of, whatever the source's `capabilities` leaves
+   * out for the model: what the agent's own code may use, as `team-roots` and `share` to manage a folder (TOOL-FEAT-025)
+   */
+  declared?: string[]
+  /** `team-roots`: whether the store has the role `manager` on a team root (files §4.7) */
+  teamRootsManager?: boolean
 }
 
 /** Where a feature's calls may go in a conversation (TOOL-FEAT-014, TOOL-FEAT-022). */
@@ -132,11 +139,17 @@ export function readDeclaration(
       profile.tools.filter((t) => t.capability === c).every((t) => listed.has(t.name))
   )
   const extras = declaration.tools.filter((t) => !hasProfilePrefix(profile, t.name) && source.offer?.includes(t.name))
+  const listedAll = profile.capabilities.filter(
+    (c) => declared.includes(c) && profile.tools.filter((t) => t.capability === c).every((t) => listed.has(t.name))
+  )
+  const teamRoots = isObject(extension['team-roots']) ? extension['team-roots'] : undefined
   return {
     conformant: true,
     version: String(extension.version),
     capabilities,
     extras,
+    declared: listedAll,
+    ...(teamRoots ? { teamRootsManager: teamRoots.manager === true } : {}),
   }
 }
 

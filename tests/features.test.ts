@@ -241,6 +241,8 @@ describe("a space's tools by feature (TOOL-SPACE-002, TOOL-FEAT-006, PROF-TOOL-0
           description: "A folder of the organization's Nextcloud, with an account of the space",
           account: { kind: 'space' },
           default: true,
+          // no provider of this pack manages a folder: Files in the existing mode only (PROF-TOOL-040)
+          locations: ['existing'],
         },
         {
           source: 'drive',
@@ -248,8 +250,10 @@ describe("a space's tools by feature (TOOL-SPACE-002, TOOL-FEAT-006, PROF-TOOL-0
           description: 'The files each person can open in their drive',
           account: { kind: 'personal' },
           default: false,
+          locations: ['existing'],
         },
       ],
+      locations: ['existing'],
       source: null,
       title: null,
       state: 'available',
