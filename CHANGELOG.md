@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.0](https://github.com/2060-io/ayni-agent/compare/v0.36.0...v0.37.0) (2026-11-26)
+
+
+### Features
+
+* **tools:** the managed folder of a team space, made and kept by the agent (TOOL-FEAT-024 to 034) ([#137](https://github.com/2060-io/ayni-agent/issues/137)) ([db32cea](https://github.com/2060-io/ayni-agent/commit/db32cea5c89b9edd96205da8210197d5d718551e))
+
 ## [0.36.0](https://github.com/2060-io/ayni-agent/compare/v0.35.1...v0.36.0) (2026-11-26)
 
 
