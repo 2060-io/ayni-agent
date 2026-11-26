@@ -2066,9 +2066,12 @@ export class ConnectionService {
   ): Promise<'shown' | 'connected' | 'not-available' | 'unavailable'> {
     const source = this.deps.catalog.source(sourceId)
     const lines = await this.toConnect(principal, spaceId)
+    // the line of that source; else the one of the account it uses, when the record lists the account once; else the
+    // first line of the account the model named by its own id
     const line =
       lines.find((l) => (l.line?.source ?? l.allow?.source ?? l.source) === sourceId) ??
-      lines.find((l) => l.source === sourceId || (source && this.declaringOf(source)?.name === l.source))
+      lines.find((l) => !l.line && !l.allow && !!source && this.declaringOf(source)?.name === l.source) ??
+      lines.find((l) => l.source === sourceId)
     if (!line) {
       if (source && (await this.connectedIn(principal, source, spaceId))) return 'connected'
       const declaring = this.declared(sourceId)
