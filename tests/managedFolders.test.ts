@@ -146,8 +146,8 @@ const space = (title: string, templateId = 'team-project') =>
   call(jonas, 'POST', '/spaces', { templateId, title, purpose: 'Build' }).then((r) => r.body as { id: string })
 const filesOf = async (d: Device, spaceId: string) =>
   ((await call(d, 'GET', `/spaces/${spaceId}/tools`)).body.tools as Doc[]).find((t) => t.feature.id === 'files') as Doc
-const activityOf = async (spaceId: string) =>
-  ((await call(jonas, 'GET', `/spaces/${spaceId}/activity`)).body.activity as Doc[]).map((a) => a.kind)
+const activityOf = async (spaceId: string, d: Device = jonas) =>
+  ((await call(d, 'GET', `/spaces/${spaceId}/activity`)).body.activity as Doc[]).map((a) => a.kind)
 const folderOf = (spaceId: string) => running.agent.store.managedFolders.get(spaceId, 'files')
 const membershipsOf = (spaceId: string) => running.agent.store.folderMemberships.listByFolder(spaceId, 'files')
 const teamOf = async (provider: FakeProvider, spaceId: string) => {
@@ -831,5 +831,216 @@ describe("the space's rules of Files change a member's role at the folder (TOOL-
       'lena@example.org': 'reader',
     })
     expect((await membershipOf(alpha.id, mia))?.role).toBe('reader')
+  })
+})
+
+describe("a shared drive managed with the owner's own account (TOOL-FEAT-025, TOOL-FEAT-029, D147)", () => {
+  let gamma: { id: string }
+  const driveToken = (d: Device, n = 1) => `tok_conn${d.connectionId.replace(/^conn-/, '')}${n > 1 ? n : ''}Token`
+  const drivers = () => gdrive.calls.map((c) => c.headers.authorization)
+
+  it("waits for the owner's account, then makes the drive with it, the owner and the successor its managers", async () => {
+    gamma = await space('Project Gamma')
+    await addMember(gamma.id, ana.principal.id)
+    await addMember(gamma.id, mia.principal.id)
+    expect(
+      (await call(jonas, 'PUT', `/spaces/${gamma.id}/successor`, { memberId: `mem_${gamma.id}_${ana.principal.id}` }))
+        .status
+    ).toBe(200)
+    const asked = await confirmed(jonas, () =>
+      call(jonas, 'POST', `/spaces/${gamma.id}/tools`, { source: 'team-drive', location: 'managed' })
+    )
+    expect(asked.body.tool.pending.summary).toBe(
+      'Use Google Drive for Files in Project Gamma. Fleet support makes a shared drive named Project Gamma, owned by ' +
+        'your organization, with you as its manager, and gives each member of the space access to it. People outside ' +
+        'your organization included.'
+    )
+    // the owner's account is not connected: Files is setup, the folder waits for it, nothing reaches the store
+    await until(async () => (await folderOf(gamma.id))?.state === 'creating')
+    const waiting = await filesOf(jonas, gamma.id)
+    expect(waiting).toMatchObject({
+      state: 'setup',
+      location: 'managed',
+      folder: { title: 'Project Gamma', state: 'creating', reason: 'not-connected', managedWith: 'owner' },
+    })
+    expect(gdrive.calls.filter((c) => c.name === 'files_create_team_root')).toEqual([])
+    driveAccounts.set(jonas.principal.id, driveToken(jonas))
+    await folders.tick()
+    expect((await folderOf(gamma.id))?.state).toBe('ready')
+    const made = gdrive.calls.find((c) => c.name === 'files_create_team_root')
+    expect(made?.headers.authorization).toBe(`Bearer ${driveToken(jonas)}`)
+    expect(made?.args.requestId).toBe(requestIdOf(gamma.id, 'files'))
+    expect(await membersAtStore(gdrive, gamma.id)).toEqual({
+      'jonas@example.org': 'manager',
+      'ana@example.org': 'manager',
+      'mia@example.org': 'editor',
+    })
+    // the owner's own membership is the one the store made with the drive: recorded with its share
+    expect(await membershipOf(gamma.id, jonas)).toMatchObject({ role: 'manager', shareId: 'sh-1-0', state: 'in-place' })
+    expect((await filesOf(jonas, gamma.id)).state).toBe('ready')
+    // nobody but the owner's account changed the drive's members
+    expect(new Set(drivers())).toEqual(new Set([`Bearer ${driveToken(jonas)}`]))
+  })
+
+  it("hands the drive to the new owner with the former owner's account, then manages it with the new one", async () => {
+    const from = gdrive.calls.length
+    const res = await call(jonas, 'POST', `/spaces/${gamma.id}/owner`, {
+      memberId: `mem_${gamma.id}_${mia.principal.id}`,
+    })
+    expect(res.status).toBe(200)
+    const handed = gdrive.calls.slice(from)
+    // Mia made a manager first, with Jonas's account, then Jonas's own role set from his membership
+    expect(handed[0]).toMatchObject({
+      name: 'files_share',
+      args: { role: 'manager', recipients: [{ address: 'mia@example.org' }] },
+    })
+    expect(handed.every((c) => c.headers.authorization === `Bearer ${driveToken(jonas)}`)).toBe(true)
+    expect(await membersAtStore(gdrive, gamma.id)).toMatchObject({
+      'mia@example.org': 'manager',
+      'jonas@example.org': 'editor',
+    })
+    expect((await folderOf(gamma.id))?.managerPrincipalId).toBe(mia.principal.id)
+    // from then on, the new owner's account
+    driveAccounts.set(mia.principal.id, driveToken(mia))
+    await addMember(gamma.id, lena.principal.id)
+    const next = gdrive.calls.length
+    await running.agent.spaces.membersChanged(gamma.id)
+    expect(gdrive.calls.slice(next).map((c) => c.headers.authorization)).toEqual([`Bearer ${driveToken(mia)}`])
+    expect((await membersAtStore(gdrive, gamma.id))['lena@example.org']).toBe('reader')
+  })
+
+  it('makes no change with an account the store refused, until that account changes', async () => {
+    gdrive.failures.push({ tool: 'files_share', code: 'account-refused' })
+    const kai = await device('kai', ['employee'], 'kai@example.org')
+    await addMember(gamma.id, kai.principal.id)
+    await running.agent.spaces.membersChanged(gamma.id)
+    expect(await membershipOf(gamma.id, kai)).toMatchObject({ state: 'failed', reason: 'not-connected' })
+    const tries = sharesFor(gdrive, 'kai@example.org').length
+    await folders.tick()
+    await running.agent.spaces.membersChanged(gamma.id)
+    expect(sharesFor(gdrive, 'kai@example.org')).toHaveLength(tries)
+    // a new sign-in of the owner: tried again
+    driveAccounts.set(mia.principal.id, driveToken(mia, 2))
+    await folders.tick()
+    expect(await membershipOf(gamma.id, kai)).toMatchObject({ state: 'in-place' })
+    expect(sharesFor(gdrive, 'kai@example.org').at(-1)?.headers.authorization).toBe(`Bearer ${driveToken(mia, 2)}`)
+  })
+
+  it('reads needs-manager when no account it holds manages the drive, changes no member, and Check again restores it', async () => {
+    const delta = await space('Project Delta')
+    await addMember(delta.id, ana.principal.id)
+    await confirmed(jonas, () =>
+      call(jonas, 'POST', `/spaces/${delta.id}/tools`, { source: 'team-drive', location: 'managed' })
+    )
+    await until(async () => (await folderOf(delta.id))?.state === 'ready')
+    // Jonas's account is gone before the hand-over, and Ana has none that manages the drive
+    driveAccounts.delete(jonas.principal.id)
+    const from = gdrive.calls.length
+    await call(jonas, 'POST', `/spaces/${delta.id}/owner`, { memberId: `mem_${delta.id}_${ana.principal.id}` })
+    expect(await folderOf(delta.id)).toMatchObject({ state: 'needs-manager', reason: 'manager-gone' })
+    expect(await activityOf(delta.id, ana)).toContain('manager-needed')
+    const owner = await filesOf(ana, delta.id)
+    expect(owner.folder).toMatchObject({ state: 'needs-manager', reason: 'manager-gone', managedWith: 'owner' })
+    // the members keep their access, and none is changed
+    expect(owner.state).toBe('ready')
+    await addMember(delta.id, lena.principal.id)
+    await running.agent.spaces.membersChanged(delta.id)
+    await folders.tick(Date.now() + REREAD_EVERY + 1000)
+    const deltaRef = (await folderOf(delta.id))?.ref
+    expect(gdrive.calls.slice(from).filter((c) => c.args.root === deltaRef && c.name !== 'files_shares')).toEqual([])
+    expect(await membersAtStore(gdrive, delta.id)).toEqual({
+      'jonas@example.org': 'manager',
+      'ana@example.org': 'editor',
+    })
+    // an administrator makes Ana a manager at the store; she signs in; Check again
+    const team = await teamOf(gdrive, delta.id)
+    const ana0 = team?.shares.find((s) => s.recipient.address === 'ana@example.org')
+    if (ana0) ana0.role = 'manager'
+    driveAccounts.set(ana.principal.id, driveToken(ana))
+    expect((await call(ana, 'PATCH', `/spaces/${delta.id}/tools/team-drive`, { folder: { check: true } })).status).toBe(
+      202
+    )
+    expect(await folderOf(delta.id)).toMatchObject({ state: 'ready', managerPrincipalId: ana.principal.id })
+    expect((await membersAtStore(gdrive, delta.id))['lena@example.org']).toBe('reader')
+    expect(sharesFor(gdrive, 'lena@example.org').at(-1)?.headers.authorization).toBe(`Bearer ${driveToken(ana)}`)
+  })
+
+  it("leaves the folder creating with scope-missing while the owner's account lacks a scope", async () => {
+    driveAccounts.set(jonas.principal.id, driveToken(jonas, 3))
+    const deps = (folders as unknown as { deps: Doc }).deps
+    const server = deps.server
+    let asked = 0
+    // the server asks the owner's account for more access (TOOL-OAUTH-009), as a 403 insufficient_scope does
+    deps.server = (id: string) =>
+      id === 'team-drive'
+        ? {
+            callTool: async (name: string) => {
+              if (name !== 'files_create_team_root') return { content: '', data: {}, isError: false }
+              asked++
+              return { content: 'more access', isError: true, accountOutcome: 'more-access-needed' }
+            },
+          }
+        : server(id)
+    try {
+      const epsilon = await space('Project Epsilon')
+      await confirmed(jonas, () =>
+        call(jonas, 'POST', `/spaces/${epsilon.id}/tools`, { source: 'team-drive', location: 'managed' })
+      )
+      await until(async () => (await folderOf(epsilon.id))?.reason === 'scope-missing')
+      expect((await filesOf(jonas, epsilon.id)).folder).toMatchObject({ state: 'creating', reason: 'scope-missing' })
+      await folders.tick()
+      expect(asked).toBe(1)
+      // a new sign-in that grants it
+      deps.server = server
+      driveAccounts.set(jonas.principal.id, driveToken(jonas, 4))
+      await folders.tick()
+      expect((await folderOf(epsilon.id))?.state).toBe('ready')
+    } finally {
+      deps.server = server
+    }
+  })
+})
+
+describe('releasing the folder (TOOL-FEAT-032)', () => {
+  it('stops managing it when the provider changes, says so on the phone, and leaves it as it is at the store', async () => {
+    const before = await membersAtStore(cloud, alpha.id)
+    const ref = (await folderOf(alpha.id))?.ref as string
+    const asked = ph.callsOf('sendConfirmRequest').length
+    const res = await call(jonas, 'POST', `/spaces/${alpha.id}/tools`, {
+      source: 'plain-team',
+      replaces: 'cloud-team',
+      location: 'existing',
+    })
+    expect(res.status).toBe(202)
+    expect(res.body.tool.pending.summary).toContain(
+      'Fleet support stops managing the team folder Alpha Files. It stays at Nextcloud with its members and its files.'
+    )
+    await until(() => ph.callsOf('sendConfirmRequest').length > asked)
+    const from = cloud.calls.length
+    await ph.confirm(jonas.connectionId, true)
+    await until(async () => !(await folderOf(alpha.id)))
+    await folders.tick(Date.now() + REREAD_EVERY + 1000)
+    await call(jonas, 'DELETE', `/spaces/${alpha.id}/members/mem_${alpha.id}_${mia.principal.id}`)
+    expect(cloud.calls.slice(from)).toEqual([])
+    expect(await membershipsOf(alpha.id)).toEqual([])
+    expect(cloud.teamRoots.get(ref)?.title).toBe('Alpha Files')
+    expect(
+      Object.fromEntries((cloud.teamRoots.get(ref)?.shares ?? []).map((s) => [s.recipient.address, s.role]))
+    ).toEqual(before)
+    expect(await activityOf(alpha.id)).toContain('folder-released')
+    const notices = (await call(jonas, 'GET', `/spaces/${alpha.id}/notifications`)).body.notifications as Doc[]
+    expect(notices.filter((n) => n.kind === 'folder-access' && n.waiting)).toEqual([])
+    expect((await filesOf(jonas, alpha.id)).folder).toBeUndefined()
+  })
+
+  it('stops managing it when Files is removed, and makes no call to the store for it', async () => {
+    const managed = await space('Project Removed', 'managed-only')
+    await confirmed(jonas, () => call(jonas, 'POST', `/spaces/${managed.id}/tools`, { source: 'cloud-team' }))
+    await until(async () => (await folderOf(managed.id))?.state === 'ready')
+    const from = cloud.calls.length
+    expect((await call(jonas, 'DELETE', `/spaces/${managed.id}/tools/cloud-team`)).status).toBe(200)
+    expect(await folderOf(managed.id)).toBeUndefined()
+    expect(cloud.calls.slice(from)).toEqual([])
+    expect((await activityOf(managed.id)).slice(0, 2)).toEqual(['tool-removed', 'folder-released'])
   })
 })
