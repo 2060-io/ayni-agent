@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.0](https://github.com/2060-io/ayni-agent/compare/v0.35.1...v0.36.0) (2026-11-26)
+
+
+### Features
+
+* **tools:** features and providers, Files 1.0 and Calendar 1.0, one provider per feature in a space (TOOL-FEAT-001 to 023) ([#135](https://github.com/2060-io/ayni-agent/issues/135)) ([07c23b3](https://github.com/2060-io/ayni-agent/commit/07c23b3e17d3dd5b6a84298cd20820126fb3db24))
+
 ## [0.35.1](https://github.com/2060-io/ayni-agent/compare/v0.35.0...v0.35.1) (2026-11-25)
 
 
