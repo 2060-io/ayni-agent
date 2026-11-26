@@ -14,7 +14,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { buildAgent, type RunningAgent } from '../src/app.js'
 import type { Principal } from '../src/core/types.js'
 import type { ManagedFolders } from '../src/features/managedFolders.js'
-import { REREAD_EVERY, requestIdOf } from '../src/features/managedFolders.js'
+import { httpsUrlOf, REREAD_EVERY, requestIdOf } from '../src/features/managedFolders.js'
 import { FILES_1_0 } from '../src/features/profiles.js'
 import { type FakeProvider, fakeProvider, featuresPack, PERSONAL_ACCOUNT } from './featureFixtures.js'
 import { parseSse, testEnv } from './helpers.js'
@@ -1096,5 +1096,21 @@ describe('releasing the folder (TOOL-FEAT-032)', () => {
     expect(told.at(-1)).toMatchObject({ spaceId: managed.id, feature: 'files', source: null, outcome: 'applied' })
     expect(cloud.calls.slice(from)).toEqual([])
     expect((await activityOf(managed.id)).slice(0, 2)).toEqual(['tool-removed', 'folder-released'])
+  })
+})
+
+describe('the address a store gives of a folder (PROF-TOOL-041, TOOL-FEAT-017)', () => {
+  it('is kept only when it is an https address, since the clients open it as a link', () => {
+    expect(httpsUrlOf('https://store.example/folders/team-1')).toBe('https://store.example/folders/team-1')
+    for (const other of [
+      'javascript:alert(1)',
+      'http://store.example/f',
+      'data:text/html,x',
+      '/folders/1',
+      '',
+      7,
+      null,
+    ])
+      expect(httpsUrlOf(other)).toBeUndefined()
   })
 })

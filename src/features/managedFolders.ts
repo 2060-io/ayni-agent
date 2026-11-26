@@ -137,6 +137,19 @@ export interface MemberFolderAccess {
   reason?: FolderAccessReason
 }
 
+/**
+ * The address a store gives of a folder, kept only when it is an `https` one: the clients open it as a link, and what a
+ * store answers is not trusted (TOOL-FEAT-017).
+ */
+export function httpsUrlOf(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value) return undefined
+  try {
+    return new URL(value).protocol === 'https:' ? value : undefined
+  } catch {
+    return undefined
+  }
+}
+
 const isObject = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value)
 
@@ -432,7 +445,8 @@ export class ManagedFolders {
     // where a person opens it, when the store has such an address (PROF-TOOL-041)
     const got = await this.call(source, account, 'files_get', { root: root.ref, ref: root.ref })
     const item = got.ok && isObject(got.data.item) ? got.data.item : undefined
-    if (typeof item?.webUrl === 'string' && item.webUrl) made.webUrl = item.webUrl
+    const webUrl = httpsUrlOf(item?.webUrl)
+    if (webUrl) made.webUrl = webUrl
     // what the store lists right after it is made is the account that made it (files §4.7): with the owner's own
     // account, the owner's membership; any other, no one's the agent added (D146)
     const shares = await this.call(source, account, 'files_shares', { root: root.ref, ref: root.ref })
@@ -1119,7 +1133,8 @@ export class ManagedFolders {
     const got = await this.call(source, account, 'files_get', { root: folder.ref, ref: folder.ref })
     const item = got.ok && isObject(got.data.item) ? got.data.item : undefined
     if (item && typeof item.name === 'string' && item.name) next.name = item.name
-    if (item && typeof item.webUrl === 'string' && item.webUrl) next.webUrl = item.webUrl
+    const webUrl = httpsUrlOf(item?.webUrl)
+    if (webUrl) next.webUrl = webUrl
     await this.saveFolder(space, next)
     if (next.name !== folder.name) await this.setLocation(space, next)
     if (next.addedOutside.length !== folder.addedOutside.length)
