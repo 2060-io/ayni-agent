@@ -16,6 +16,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { buildAgent, type RunningAgent } from '../src/app.js'
 import type { Principal } from '../src/core/types.js'
+import { callbackQuery, type FakeAs, type FakeOAuthMcp, fakeAuthServer, fakeOAuthMcp } from './connectionFixtures.js'
 import { mintLocally } from './directoryFixtures.js'
 import {
   CALENDAR_TOOLS,
@@ -57,6 +58,9 @@ let google: FakeGoogle
 let otherIssuer: FakeGoogle
 let connector: FakeConnector
 let search: FakeMcp
+/** a source of its own sign-in whose tools declare their scopes: its item's access names it alone */
+let notesAs: FakeAs
+let notes: FakeOAuthMcp
 const logLines: string[] = []
 
 interface Device {
@@ -192,9 +196,25 @@ function googlePack(): string {
     Object.entries(pack.tools.sources as Doc).filter(([, source]) => (source as Doc).type === 'bundled')
   )
   pack.tools = {
-    features: { search: { title: 'Web search' } },
+    features: { search: { title: 'Web search' }, notes: { title: 'Notes' } },
     sources: {
       ...bundled,
+      notes: {
+        type: 'mcp',
+        feature: 'notes',
+        title: 'Notes',
+        description: 'Your notes',
+        transport: 'streamable-http',
+        url: notes.url,
+        account: { kind: 'personal', oauth: { client: { registration: 'dynamic' } } },
+        availability: 'personal',
+        offer: ['list-notes', 'add-note'],
+        access: { roles: { employee: ['*'] } },
+        tools: {
+          'list-notes': { effect: 'read', untrusted: false, scopes: ['notes:read'] },
+          'add-note': { title: 'Add a note', effect: 'write', untrusted: false, scopes: ['notes:write'] },
+        },
+      },
       // a server of the agent's own account beside the Google sources: a person's Google token never reaches it
       websearch: {
         type: 'mcp',
@@ -242,6 +262,11 @@ beforeAll(async () => {
   otherIssuer = await fakeGoogle()
   connector = await fakeConnector(google, { ...DRIVE_TOOLS, ...MANAGING_DRIVE_TOOLS, ...CALENDAR_TOOLS })
   search = await fakeMcpServer([{ name: 'search', annotations: { readOnlyHint: true } }])
+  notesAs = await fakeAuthServer({ registration: true })
+  notes = await fakeOAuthMcp(notesAs, [
+    { name: 'list-notes', annotations: { readOnlyHint: true }, scope: 'notes:read' },
+    { name: 'add-note', scope: 'notes:write' },
+  ])
   process.env.TOOLS_GOOGLE_CLIENT_ID = google.clientId
   process.env.TOOLS_GOOGLE_CLIENT_SECRET = google.clientSecret
   const logger = pino({ level: 'debug' }, { write: (line: string) => void logLines.push(line) })
@@ -259,7 +284,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await running?.stop()
-  for (const fake of [google, otherIssuer, connector, search]) await fake?.close()
+  for (const fake of [google, otherIssuer, connector, search, notesAs, notes]) await fake?.close()
   delete process.env.TOOLS_GOOGLE_CLIENT_ID
   delete process.env.TOOLS_GOOGLE_CLIENT_SECRET
 })
@@ -267,8 +292,8 @@ afterAll(async () => {
 describe('one Google account for Google Drive and Google Calendar (TOOL-CONN-015, PROF-TOOL-028)', () => {
   it('lists the account once, under its id and title, with each of its sources not allowed', async () => {
     const list = (await call(ana, 'GET', '/connections')).body.connections as Doc[]
-    expect(list.map((c) => c.source)).toEqual(['google'])
-    expect(list[0]).toMatchObject({
+    expect(list.map((c) => c.source)).toEqual(['notes', 'google'])
+    expect(list[1]).toMatchObject({
       source: 'google',
       title: 'Google',
       description: 'Your files and your calendar at Google, with your own rights there',
@@ -292,8 +317,9 @@ describe('one Google account for Google Drive and Google Calendar (TOOL-CONN-015
     model.script = [{ calls: [{ name: 'offer_connection', arguments: { source: 'calendar' } }] }, { text: 'Connect.' }]
     const response = await run(ana, 'what do I have tomorrow?')
     expect(response.statusCode).toBe(200)
+    expect(personOf(0)).toContain('Accounts this person can connect, with the tool offer_connection:\n- notes: Notes')
     expect(personOf(0)).toContain(
-      'Accounts this person can connect, with the tool offer_connection:\n- drive: Google Drive, The files you can open in Google Drive (not connected)\n- calendar: Google Calendar, Your calendars and events at Google (not connected)'
+      '- drive: Google Drive, The files you can open in Google Drive (not connected)\n- calendar: Google Calendar, Your calendars and events at Google (not connected)'
     )
     const card = parseSse(response.body)
       .map((e) => e.event)
@@ -306,6 +332,28 @@ describe('one Google account for Google Drive and Google Calendar (TOOL-CONN-015
       why: 'connect',
       feature: { id: 'calendar', title: 'Calendar' },
     })
+  })
+})
+
+describe('a source of its own sign-in whose tools declare their scopes (PROF-TOOL-028, TOOL-OAUTH-012)', () => {
+  it("lists its access alone, asks its tools' scopes with its resource, and allows them all once granted", async () => {
+    const before = ((await call(ana, 'GET', '/connections')).body.connections as Doc[]).find(
+      (c) => c.source === 'notes'
+    )
+    expect(before?.access).toEqual([{ source: 'notes', title: 'Notes', allowed: 'none' }])
+    const start = await call(ana, 'POST', '/connections/notes/authorize', {})
+    expect(start.status).toBe(202)
+    const url = new URL(start.body.authorizationUrl as string)
+    expect(url.searchParams.get('scope')).toBe('notes:read notes:write')
+    expect(url.searchParams.get('resource')).toBe(notes.url)
+    const answer = notesAs.authorize(url.toString(), { email: 'ana@example.org' })
+    const callback = await running.app.inject({ method: 'GET', url: `/tools/oauth/callback?${callbackQuery(answer)}` })
+    expect(callback.statusCode).toBe(303)
+    const after = ((await call(ana, 'GET', '/connections')).body.connections as Doc[]).find((c) => c.source === 'notes')
+    expect(after).toMatchObject({ state: 'connected', access: [{ source: 'notes', title: 'Notes', allowed: 'all' }] })
+    model.script = [{ text: 'Your notes.' }]
+    await run(ana, 'my notes')
+    expect(toolNames()).toEqual(expect.arrayContaining(['list-notes', 'add-note']))
   })
 })
 
@@ -365,8 +413,10 @@ describe('allowing Google Drive, in part (TOOL-OAUTH-012 to 014, TOOL-OAUTH-016,
       ],
     })
     // the scopes granted are sealed with the account, never in the clear (TOOL-ACCESS-009)
-    const [record] = await running.agent.store.personalAccounts.listByPrincipal(ana.principal.id)
-    expect(record?.sourceId).toBe('google')
+    const record = (await running.agent.store.personalAccounts.listByPrincipal(ana.principal.id)).find(
+      (r) => r.sourceId === 'google'
+    )
+    expect(record?.state).toBe('connected')
     expect(JSON.stringify(record)).not.toContain('drive.readonly')
     model.script = [{ text: 'Here are your files.' }]
     await run(ana, 'which files do I have?')
@@ -440,10 +490,12 @@ describe('allowing Google Calendar next (TOOL-OAUTH-012, TOOL-CONN-015, PROF-TOO
       { source: 'calendar', title: 'Google Calendar', allowed: 'all' },
     ])
     expect(connectionsEvents(ana.sessionId).length).toBeGreaterThan(events)
-    model.script = [{ text: 'Your calendar.' }]
+    model.script = [{ calls: [{ name: 'offer_connection', arguments: { source: 'calendar' } }] }, { text: 'Done.' }]
     await run(ana, 'what do I have tomorrow?')
     expect(toolNames()).toEqual(expect.arrayContaining(Object.keys(CALENDAR_TOOLS)))
     expect(personOf()).not.toContain('- calendar: Google Calendar, Your calendars')
+    // every tool of Calendar allowed: no card, and the model reads that it is connected (TOOL-CONN-011)
+    expect(toolAnswers().at(-1)).toMatch(/^connected: /)
   })
 
   it("asks, from the account's own id, for the scopes of every source not yet allowed", async () => {
@@ -516,6 +568,11 @@ describe('the life of the account (TOOL-OAUTH-015, TOOL-CONN-006)', () => {
         { source: 'calendar', title: 'Google Calendar', allowed: 'none' },
       ])
       expect(otherIssuer.tokenRequests.length).toBe(before)
+      // a source whose server names another authorization server than the account's cannot be connected (TOOL-CAT-020)
+      expect(await call(jonas, 'POST', '/connections/drive/authorize', {})).toMatchObject({
+        status: 502,
+        body: { error: 'source-unavailable' },
+      })
     } finally {
       connector.authorizationServers = [google.issuer]
       discoveries().clear()
@@ -600,7 +657,9 @@ describe('the end of the account (TOOL-CONN-006)', () => {
       ],
     })
     expect(google.revocations.slice(revoked).map((r) => r.token_type_hint)).toEqual(['refresh_token', 'access_token'])
-    expect(await running.agent.store.personalAccounts.listByPrincipal(ana.principal.id)).toEqual([])
+    expect(
+      (await running.agent.store.personalAccounts.listByPrincipal(ana.principal.id)).map((r) => r.sourceId)
+    ).toEqual(['notes'])
     await until(() => connectionsEvents(ana.sessionId).some((e) => e.outcome === 'disconnected'))
     model.script = [{ text: 'Gone.' }]
     await run(ana, 'my files')

@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { parse as parseYaml } from 'yaml'
 import { PackError, validatePackDocument } from '../src/config/pack.js'
+import { packDigestOf, scopesDigestOf } from '../src/core/connections.js'
 import { FILES_1_0 } from '../src/features/profiles.js'
 import { ToolCatalog } from '../src/tools/catalog.js'
 import { modelToolsOf } from '../src/tools/scopes.js'
@@ -228,6 +229,25 @@ describe('the scopes of each tool, the parameters of the sign-in, the check by t
       'hostedDomain'
     )
     expect(refusal(doc((p) => (p.tools.accounts.google.check.idToken.email = false)))).toContain('idToken/email')
+  })
+})
+
+describe('how the agent-pack connects the account, at a start (TOOL-CONN-009, TOOL-OAUTH-013)', () => {
+  it("keeps the account when a tool's scopes change, and ends it when its client does", () => {
+    const of = (edit?: (p: Doc) => void) => {
+      const account = new ToolCatalog(validatePackDocument(doc(edit), env)).account('google')
+      if (!account) throw new Error('no account')
+      return { pack: packDigestOf(account), scopes: scopesDigestOf(account.account) }
+    }
+    const before = of()
+    // a tool's scopes changed: the tools whose scopes are not all granted are left out, and the account stays
+    expect(
+      of((p) => (p.tools.sources.calendar.tools.calendar_respond.scopes = ['https://www.googleapis.com/auth/calendar']))
+    ).toEqual(before)
+    // another client: the account ends at the next start
+    expect(of((p) => (p.tools.accounts.google.oauth.client.issuer = 'https://accounts.example.net')).pack).not.toBe(
+      before.pack
+    )
   })
 })
 
