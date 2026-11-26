@@ -2285,7 +2285,8 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     - **The location of a feature with a contract** is the list of TOOL-SPACE-014 for that feature only (the lists of
       categories, D111, are still not built): at most ten entries, each one the provider listed to the owner. The
       choices are the profile's tool that lists locations, called with `query` (the owner's text) and `limit: 50`, with
-      the account the owner's own calls would use, outside any conversation and with no record; their `title` is an
+      the account the owner's own calls would use, outside any conversation and with no record, for any provider the
+      template allows (the list of a change of provider is picked before the change is sent); their `title` is an
       entry's label. A `PATCH` takes an entry the list holds, or one of the choices read in the last 30 minutes, which the
       code reads again then with the same text; anything else is `422 bad-binding` at `list.entries.<i>.<argument>`. An
       entry that is not `portable` is `422 not-portable` for a provider of each person's own account. A list of one sets

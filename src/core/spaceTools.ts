@@ -1442,7 +1442,9 @@ export class SpaceToolService {
   /**
    * `GET {sessions}/spaces/{id}/tools/{source}/list/choices?text=` (TOOL-SPACE-015, PROF-TOOL-023): for the owner alone,
    * the locations of a provider of a feature with a contract that its tool listing locations answers to the text, read with
-   * the account the owner's own calls would use in the space; nothing of it reaches a model or a record.
+   * the account the owner's own calls would use in the space; nothing of it reaches a model or a record. Any provider the
+   * template allows answers, the one in use or another: the list of a change of provider is picked before it is sent
+   * (PROF-TOOL-034).
    */
   public async choices(
     principal: Principal,
@@ -1453,7 +1455,6 @@ export class SpaceToolService {
     const { space, slot, source } = await this.owned(principal, spaceId, sourceId)
     const profile = this.catalog.profileOf(source)
     if (!profile) throw new SpaceError(`${source.title} declares no list to search`, 'not-found')
-    if (slot.inUse && slot.inUse.source.name !== source.name) this.inUse(slot, source)
     if (!slot.inUse && slot.off) throw new SpaceError(`${slot.feature.title} is off in this space`, 'not-found')
     if (typeof text !== 'string' || text.length < 1 || text.length > 100)
       throw new SpaceError('text is 1 to 100 characters', 'bad-request', 'text')

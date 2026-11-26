@@ -324,10 +324,11 @@ describe("a space's tools by feature (TOOL-SPACE-002, TOOL-FEAT-006, PROF-TOOL-0
       error: 'bad-request',
       field: 'text',
     })
-    // the provider the template allows that is not the one in use (TOOL-FEAT-006)
+    // another provider the template allows answers its choices, with the owner's own account, for a change of provider;
+    // a change of it is refused (TOOL-FEAT-006)
     expect(await call(jonas, 'GET', `/spaces/${alpha.id}/tools/drive/list/choices?text=/Proj`)).toMatchObject({
       status: 409,
-      body: { error: 'provider-not-used' },
+      body: { error: 'not-connected' },
     })
     expect(await call(jonas, 'PATCH', `/spaces/${alpha.id}/tools/drive`, { calls: {} })).toMatchObject({
       status: 409,
