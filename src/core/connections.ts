@@ -1057,14 +1057,12 @@ export class ConnectionService {
       ? { Authorization: `Bearer ${secret.tokens.accessToken}` }
       : buildAccountHeaders(declaring.account, secret.values ?? {})
     const url = secret.tokens?.resource ?? declaring.url
-    const result = await this.deps.registry.checkRead(declaring.name, {
-      url: url as string,
-      headers,
-      tool: check.tool,
-    })
+    const tool = check.tool
+    if (!tool) return undefined
+    const result = await this.deps.registry.checkRead(declaring.name, { url: url as string, headers, tool })
     if (!result) return undefined
     // a check reads: a tool the agent-pack declares nothing of is taken by its annotations (TOOL-CAT-017)
-    const declared = declaring.tools[check.tool]?.effect
+    const declared = declaring.tools[tool]?.effect
     if (declaring.kind === 'mcp' && !declared && effectFromAnnotations(result.annotations) !== 'read') return undefined
     if (result.structured !== undefined && result.structured !== null) return result.structured
     try {

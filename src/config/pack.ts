@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { Ajv2020 } from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
 import { parse as parseYaml } from 'yaml'
+import { knownProfile } from '../features/profiles.js'
 import {
   type ApprovalTimeoutKind,
   boundsError,
@@ -16,8 +17,11 @@ import {
   timeoutBoundsOf,
 } from '../policy/spacePolicy.js'
 import { fieldsNamedBy } from '../tools/accountValues.js'
+import { declaresScopes, modelToolsOf, scopesOfTool } from '../tools/scopes.js'
 import { featureDocumentErrors, featureErrors, featureWarnings } from './featureRules.js'
 import type {
+  AccountCheck,
+  AccountOAuth,
   AgentPack,
   BundledName,
   EvidencePolicy,
@@ -33,6 +37,7 @@ import type {
 import {
   ACCOUNT_KINDS,
   ADMIN_ROLES,
+  AGENT_SET_PARAMETERS,
   AUTHENTICATION_METHOD_TYPES,
   AVAILABILITIES,
   BUNDLED_NAMES,
@@ -782,27 +787,10 @@ function personalSourceErrors(where: string, source: ToolSourceDef, account: Sou
       errors.push(
         `${where}.headers.${auth}: a source of OAuth sends each person's own token and no Authorization of its own (TOOL-CAT-013)`
       )
-    const client = account.oauth.client
-    if (client.registration === 'pre-registered') {
-      for (const key of ['issuer', 'id'] as const)
-        if (!client[key]?.trim())
-          errors.push(
-            `${where}.account.oauth.client.${key}: a pre-registered client declares its ${key === 'id' ? 'id' : 'issuer'}, from the deployment's secrets, and it is empty (TOOL-CAT-014)`
-          )
-    } else
-      for (const key of ['issuer', 'id', 'secret'] as const)
-        if (client[key] !== undefined)
-          errors.push(
-            `${where}.account.oauth.client.${key}: only a pre-registered client declares it, not one of ${client.registration} (TOOL-CAT-014)`
-          )
-    const request = account.oauth.bindingRequest
-    if (request && !account.binding)
+    errors.push(...oauthErrors(`${where}.account.oauth`, account.oauth, !!account.binding))
+    if (account.oauth.resource !== undefined)
       errors.push(
-        `${where}.account.oauth.bindingRequest: the account declares no binding whose value the sign-in could ask for (TOOL-CAT-014)`
-      )
-    if (request?.resource !== undefined && !request.resource.includes('{value}'))
-      errors.push(
-        `${where}.account.oauth.bindingRequest.resource: the resource names the value as {value} (TOOL-CAT-014)`
+        `${where}.account.oauth.resource: false is for an account of tools.accounts alone, whose authorization server issues tokens for its own interfaces; a source's sign-in names its server as the resource (TOOL-CAT-021)`
       )
   }
   if (account.fields !== undefined || account.apply !== undefined) {
@@ -832,35 +820,92 @@ function personalSourceErrors(where: string, source: ToolSourceDef, account: Sou
   }
   const check = account.check
   if (check) {
-    const pointers: [string, string | undefined][] = [
-      ['check.binding.value', check.binding?.value],
-      ['check.binding.label', check.binding?.label],
-      ['check.email', check.email],
-    ]
-    for (const [field, pointer] of pointers)
-      if (pointer !== undefined && !isJsonPointer(pointer))
-        errors.push(`${where}.account.${field}: ${JSON.stringify(pointer)} is not a JSON pointer (TOOL-CAT-017)`)
-    for (const pointer of check.label ? pointersOfLabel(check.label) : [])
-      if (!isJsonPointer(pointer))
-        errors.push(`${where}.account.check.label: {${pointer}} is not a JSON pointer (TOOL-CAT-017)`)
-    if (check.binding && !account.binding)
+    errors.push(...checkErrors(`${where}.account.check`, check, !!account.binding))
+    const tool = check.tool
+    if (tool !== undefined) {
+      // an HTTP tool is one tool, named by its source's id; an MCP server offers its `offer`, or every tool it lists
+      const offered =
+        source.type === 'http'
+          ? tool === sourceIdOf(where)
+          : source.type === 'mcp' && (!source.offer || source.offer.includes(tool))
+      if (!offered) errors.push(`${where}.account.check.tool: ${tool} is not a tool the source offers (TOOL-CAT-017)`)
+      const declared = source.tools?.[tool]?.effect
+      const effect = declared ?? (source.type === 'http' ? (source.method === 'GET' ? 'read' : 'write') : undefined)
+      if (effect !== undefined && effect !== 'read')
+        errors.push(
+          `${where}.account.check.tool: ${tool} is of effect ${effect}: the check reads, with a tool of effect read (TOOL-CAT-017)`
+        )
+    }
+  }
+  return errors
+}
+
+/**
+ * The sign-in of a person's own account, of a source or of `tools.accounts` (TOOL-CAT-014, TOOL-CAT-021), `at` being
+ * where its `oauth` is written: a `pre-registered` client with its issuer and id, the other registrations with neither;
+ * a `bindingRequest` only with a binding; no parameter of the agent's own among the agent-pack's.
+ */
+function oauthErrors(at: string, oauth: AccountOAuth, hasBinding: boolean): string[] {
+  const errors: string[] = []
+  const client = oauth.client
+  if (client.registration === 'pre-registered') {
+    for (const key of ['issuer', 'id'] as const)
+      if (!client[key]?.trim())
+        errors.push(
+          `${at}.client.${key}: a pre-registered client declares its ${key === 'id' ? 'id' : 'issuer'}, from the deployment's secrets, and it is empty (TOOL-CAT-014)`
+        )
+  } else
+    for (const key of ['issuer', 'id', 'secret'] as const)
+      if (client[key] !== undefined)
+        errors.push(
+          `${at}.client.${key}: only a pre-registered client declares it, not one of ${client.registration} (TOOL-CAT-014)`
+        )
+  const request = oauth.bindingRequest
+  if (request && !hasBinding)
+    errors.push(
+      `${at}.bindingRequest: the account declares no binding whose value the sign-in could ask for (TOOL-CAT-014)`
+    )
+  if (request?.resource !== undefined && !request.resource.includes('{value}'))
+    errors.push(`${at}.bindingRequest.resource: the resource names the value as {value} (TOOL-CAT-014)`)
+  for (const name of Object.keys(oauth.parameters ?? {}))
+    if (AGENT_SET_PARAMETERS.includes(name.toLowerCase()))
       errors.push(
-        `${where}.account.check.binding: the account declares no binding whose value the check would read (TOOL-CAT-017)`
+        `${at}.parameters.${name}: the agent sets ${name} itself; the agent-pack adds parameters of its own only (TOOL-CAT-021)`
       )
-    // an HTTP tool is one tool, named by its source's id; an MCP server offers its `offer`, or every tool it lists
-    const offered =
-      source.type === 'http'
-        ? check.tool === sourceIdOf(where)
-        : source.type === 'mcp' && (!source.offer || source.offer.includes(check.tool))
-    if (!offered)
-      errors.push(`${where}.account.check.tool: ${check.tool} is not a tool the source offers (TOOL-CAT-017)`)
-    const declared = source.tools?.[check.tool]?.effect
-    const effect = declared ?? (source.type === 'http' ? (source.method === 'GET' ? 'read' : 'write') : undefined)
-    if (effect !== undefined && effect !== 'read')
+  return errors
+}
+
+/**
+ * The check of a person's own account (TOOL-CAT-017, TOOL-CAT-021), `at` being where it is written: a tool's read or the
+ * ID token, one of the two; JSON pointers that are pointers, into the tool's result only; a binding read only for an
+ * account that has one.
+ */
+function checkErrors(at: string, check: AccountCheck, hasBinding: boolean): string[] {
+  const errors: string[] = []
+  if (check.tool !== undefined && check.idToken !== undefined)
+    errors.push(`${at}.idToken: the ID token stands in place of check.tool, not beside it (TOOL-CAT-021)`)
+  if (check.tool === undefined && check.idToken === undefined)
+    errors.push(
+      `${at}: a check reads a tool (tool) or the ID token of the sign-in (idToken) (TOOL-CAT-017, TOOL-CAT-021)`
+    )
+  const pointers: [string, string | undefined][] = [
+    ['binding.value', check.binding?.value],
+    ['binding.label', check.binding?.label],
+    ['email', check.email],
+  ]
+  for (const [field, pointer] of pointers) {
+    if (pointer === undefined) continue
+    if (!isJsonPointer(pointer))
+      errors.push(`${at}.${field}: ${JSON.stringify(pointer)} is not a JSON pointer (TOOL-CAT-017)`)
+    else if (check.idToken)
       errors.push(
-        `${where}.account.check.tool: ${check.tool} is of effect ${effect}: the check reads, with a tool of effect read (TOOL-CAT-017)`
+        `${at}.${field}: a pointer into the result of check.tool, which the ID token replaces: idToken checks the email itself (TOOL-CAT-021)`
       )
   }
+  for (const pointer of check.label ? pointersOfLabel(check.label) : [])
+    if (!isJsonPointer(pointer)) errors.push(`${at}.label: {${pointer}} is not a JSON pointer (TOOL-CAT-017)`)
+  if (check.binding && !hasBinding)
+    errors.push(`${at}.binding: the account declares no binding whose value the check would read (TOOL-CAT-017)`)
   return errors
 }
 
@@ -877,18 +922,29 @@ function sourceIdOf(where: string): string {
 function personalAccountErrors(pack: AgentPack): string[] {
   const errors: string[] = []
   const sources = pack.tools?.sources ?? {}
+  const accounts = pack.tools?.accounts ?? {}
   for (const [id, source] of Object.entries(sources)) {
     if (source.type === 'bundled' || source.account?.kind !== 'personal') continue
     const where = `tools.sources.${id}`
     const account = source.account
-    if (account.check?.email !== undefined && !pack.identity.directory?.file)
-      errors.push(
-        `${where}.account.check.email: the email of an account is compared with the person's entry of the user directory, and this agent has none (TOOL-CAT-017, IDENT-DIR-001)`
-      )
+    errors.push(...directoryCheckErrors(`${where}.account.check`, account.check, pack))
     if (account.from === undefined) continue
+    // an account of tools.accounts: the source says kind and from, and nothing else (TOOL-CAT-020)
+    if (accounts[account.from]) {
+      if (source.type !== 'mcp')
+        errors.push(
+          `${where}.type: ${id} uses the account ${account.from} of tools.accounts, whose sources are MCP servers (TOOL-CAT-020)`
+        )
+      for (const key of Object.keys(account))
+        if (key !== 'kind' && key !== 'from')
+          errors.push(
+            `${where}.account.${key}: a source of the account ${account.from} of tools.accounts declares kind and from only (TOOL-CAT-020)`
+          )
+      continue
+    }
     const named = sources[account.from]
     const refuse = (why: string) => errors.push(`${where}.account.from: ${account.from} ${why} (TOOL-CAT-015)`)
-    if (!named) refuse('is not a key of tools.sources')
+    if (!named) refuse('is not a key of tools.sources or of tools.accounts')
     else if (named.type === 'bundled' || named.account?.kind !== 'personal')
       refuse("is not a source of a person's own account")
     else if (named.account.from !== undefined || named.account.binding !== undefined)
@@ -902,6 +958,109 @@ function personalAccountErrors(pack: AgentPack): string[] {
       refuse(
         `is ${named.type !== source.type ? `of type ${named.type}` : `at another URL, ${named.url}`}: an account is used at the same server only`
       )
+  }
+  return errors
+}
+
+/** An email checked against the person's directory entry needs a directory (TOOL-CAT-017, TOOL-CAT-021, IDENT-DIR-001). */
+function directoryCheckErrors(at: string, check: AccountCheck | undefined, pack: AgentPack): string[] {
+  if (pack.identity.directory?.file) return []
+  const errors: string[] = []
+  if (check?.email !== undefined)
+    errors.push(
+      `${at}.email: the email of an account is compared with the person's entry of the user directory, and this agent has none (TOOL-CAT-017, IDENT-DIR-001)`
+    )
+  if (check?.idToken?.email)
+    errors.push(
+      `${at}.idToken.email: the email of the ID token is compared with the person's entry of the user directory, and this agent has none (TOOL-CAT-021, IDENT-DIR-001)`
+    )
+  return errors
+}
+
+/**
+ * The accounts of `tools.accounts` (D118, TOOL-CAT-020): an id no source has, used by at least one source, with a client
+ * the operator registered; its check by the ID token, never by a tool, since an account offers none.
+ */
+function toolAccountErrors(pack: AgentPack): string[] {
+  const errors: string[] = []
+  const sources = pack.tools?.sources ?? {}
+  for (const [id, account] of Object.entries(pack.tools?.accounts ?? {})) {
+    const where = `tools.accounts.${id}`
+    if (sources[id])
+      errors.push(
+        `${where}: ${id} is also the id of a source: an account of tools.accounts has an id of its own (TOOL-CAT-020)`
+      )
+    const users = Object.entries(sources).filter(
+      ([, s]) => s.type !== 'bundled' && s.account?.kind === 'personal' && s.account.from === id
+    )
+    if (!users.length)
+      errors.push(
+        `${where}: no source uses it: a source names it with account: { kind: personal, from: ${id} } (TOOL-CAT-020)`
+      )
+    if (account.oauth.client.registration !== 'pre-registered')
+      errors.push(
+        `${where}.oauth.client.registration: the client of an account of tools.accounts is pre-registered, the operator's own, not ${account.oauth.client.registration} (TOOL-CAT-020)`
+      )
+    errors.push(...oauthErrors(`${where}.oauth`, account.oauth, false))
+    if (account.check) {
+      errors.push(...checkErrors(`${where}.check`, account.check, false))
+      if (account.check.tool !== undefined)
+        errors.push(
+          `${where}.check.tool: an account of tools.accounts offers no tool to read: its check is the ID token of the sign-in (idToken) (TOOL-CAT-017, TOOL-CAT-020)`
+        )
+    }
+    errors.push(...directoryCheckErrors(`${where}.check`, account.check, pack))
+  }
+  return errors
+}
+
+/**
+ * The scopes of each tool (D118, TOOL-CAT-021): only on a source whose account signs in with OAuth, directly or through
+ * `from`; then on every tool the model may be given of it, as far as the agent-pack names them, and never beside the
+ * account's own `oauth.scopes`.
+ */
+function scopeErrors(pack: AgentPack): string[] {
+  const errors: string[] = []
+  const sources = pack.tools?.sources ?? {}
+  const accounts = pack.tools?.accounts ?? {}
+  /** where the OAuth of a source's account is written, and the scopes it asks itself */
+  const oauthOf = (source: ToolSourceDef): { at: string; oauth: AccountOAuth } | undefined => {
+    if (source.type === 'bundled' || source.account?.kind !== 'personal') return undefined
+    const from = source.account.from
+    if (from === undefined) return source.account.oauth ? { at: '', oauth: source.account.oauth } : undefined
+    if (accounts[from]) return { at: `tools.accounts.${from}.oauth`, oauth: accounts[from].oauth }
+    const named = sources[from]
+    return named && named.type !== 'bundled' && named.account?.oauth
+      ? { at: `tools.sources.${from}.account.oauth`, oauth: named.account.oauth }
+      : undefined
+  }
+  const asked = new Set<string>()
+  for (const [id, source] of Object.entries(sources)) {
+    if (source.type === 'bundled' || !declaresScopes(source)) continue
+    const where = `tools.sources.${id}`
+    const signIn = oauthOf(source)
+    if (!signIn) {
+      for (const [tool, decl] of Object.entries(source.tools ?? {}))
+        if (decl.scopes !== undefined)
+          errors.push(
+            `${where}.tools.${tool}.scopes: a tool says the scopes of an OAuth sign-in, and the source's account has none (TOOL-CAT-021)`
+          )
+      continue
+    }
+    const at = signIn.at || `${where}.account.oauth`
+    if (signIn.oauth.scopes !== undefined && !asked.has(at)) {
+      asked.add(at)
+      errors.push(
+        `${at}.scopes: the tools of ${id} declare the scopes they need, and the sign-in asks theirs: the account declares none of its own (TOOL-CAT-021)`
+      )
+    }
+    const feature = source.feature ? pack.tools?.features?.[source.feature]?.profile : undefined
+    const profile = feature ? knownProfile(feature.id, feature.version) : undefined
+    for (const tool of modelToolsOf(id, source, profile) ?? [])
+      if (scopesOfTool(source, tool) === undefined)
+        errors.push(
+          `${where}.tools.${tool}.scopes: ${tool} is given to the model, and the source's other tools declare their scopes: it declares its own too (TOOL-CAT-021)`
+        )
   }
   return errors
 }
@@ -933,6 +1092,9 @@ export function catalogErrors(pack: AgentPack): string[] {
   }
   // the accounts of other sources, and the check of the email (TOOL-CAT-015, TOOL-CAT-017)
   errors.push(...personalAccountErrors(pack))
+  // the accounts several sources use, and the scopes of each tool (TOOL-CAT-020, TOOL-CAT-021)
+  errors.push(...toolAccountErrors(pack))
+  errors.push(...scopeErrors(pack))
   // the features, the feature each source serves, one provider of a feature in a space, the templates' features
   // (TOOL-FEAT-001 to 005, TOOL-FEAT-023, TOOL-AVAIL-002)
   errors.push(...featureErrors(pack))

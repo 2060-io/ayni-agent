@@ -66,6 +66,11 @@ export interface CatalogSource {
   capabilities?: string[]
   /** a provider of Files: how a team space's folder is managed at it (TOOL-FEAT-023 to 034, `ManagedFolders`) */
   manage?: SourceManage
+  /**
+   * an account of `tools.accounts` (D118, TOOL-CAT-020), not a source: no tool and no URL of its own; the sources whose
+   * `account.from` names it use it, each at its own URL
+   */
+  accountOnly?: true
 }
 
 /** A feature of `tools.features` (D120), with the agent's copy of its profile for a feature with a contract. */
@@ -144,12 +149,27 @@ export interface PackRule {
 export class ToolCatalog {
   private readonly byName = new Map<string, CatalogSource>()
   private readonly featuresById = new Map<string, CatalogFeature>()
+  private readonly accountsById = new Map<string, CatalogSource>()
 
   public constructor(private readonly pack: AgentPack) {
     for (const [id, def] of Object.entries(pack.tools?.features ?? {})) {
       const profile = def.profile ? knownProfile(def.profile.id, def.profile.version) : undefined
       this.featuresById.set(id, { id, title: def.title, ...(profile ? { profile } : {}), tools: def.tools ?? {} })
     }
+    // the accounts several sources use: each declares the account its sources name in `from` (D118, TOOL-CAT-020)
+    for (const [id, def] of Object.entries(pack.tools?.accounts ?? {}))
+      this.accountsById.set(id, {
+        name: id,
+        kind: 'mcp',
+        title: def.title ?? id,
+        titleDeclared: !!def.title,
+        ...(def.description ? { description: def.description } : {}),
+        account: { kind: 'personal', oauth: def.oauth, ...(def.check ? { check: def.check } : {}) },
+        availability: 'personal',
+        bindings: [],
+        tools: {},
+        accountOnly: true,
+      })
     for (const [id, def] of Object.entries(pack.tools?.sources ?? {})) {
       if (def.type === 'bundled') continue
       this.byName.set(id, {
@@ -204,6 +224,16 @@ export class ToolCatalog {
   /** A source by its id; a bundled tool that no source names is a source of its bundled name. */
   public source(name: string): CatalogSource | undefined {
     return this.byName.get(name)
+  }
+
+  /** The accounts of `tools.accounts`, in the agent-pack's order (D118, TOOL-CAT-020). */
+  public accounts(): CatalogSource[] {
+    return [...this.accountsById.values()]
+  }
+
+  /** An account of `tools.accounts` by its id: what its sources' `account.from` names. */
+  public account(id: string): CatalogSource | undefined {
+    return this.accountsById.get(id)
   }
 
   /** The source of a tool spec: the source it names, or a bundled source of its own name. */

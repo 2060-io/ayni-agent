@@ -582,18 +582,67 @@ export interface AccountOAuth {
    * authorization request, or a `resource` in which `{value}` stands for it
    */
   bindingRequest?: { parameter?: string; resource?: string }
+  /**
+   * `false`, for an account of `tools.accounts` alone (D118, TOOL-CAT-021): its authorization server issues tokens for
+   * its own interfaces, and neither the authorization nor the token requests carry a `resource` (RFC 8707)
+   */
+  resource?: false
+  /** parameters added to the authorization request, each a name and a fixed text (TOOL-CAT-021, TOOL-OAUTH-014) */
+  parameters?: Record<string, string>
+  /** `email`: the email of the person's directory entry is sent as `login_hint` (TOOL-OAUTH-014) */
+  loginHint?: 'email'
+  /** sent as `hd`, the organization's domain the sign-in asks for (TOOL-OAUTH-014); it proves nothing (TOOL-OAUTH-016) */
+  hostedDomain?: string
 }
+
+/** The parameters of an authorization request the agent sets itself: never one of the agent-pack's (TOOL-CAT-021). */
+export const AGENT_SET_PARAMETERS: readonly string[] = [
+  'response_type',
+  'client_id',
+  'redirect_uri',
+  'state',
+  'code_challenge',
+  'code_challenge_method',
+  'resource',
+  'scope',
+  'nonce',
+  'login_hint',
+  'hd',
+]
 
 /** The read the agent makes once after each connection of a person's own account (D110, TOOL-CAT-017). */
 export interface AccountCheck {
-  /** a tool the source offers, of effect `read`, called with no argument */
-  tool: string
+  /** a tool the source offers, of effect `read`, called with no argument; `idToken` stands in its place */
+  tool?: string
+  /**
+   * the ID token of the sign-in, in place of a tool (D118, TOOL-CAT-021, TOOL-OAUTH-016): its email, verified and equal
+   * to the person's directory entry's, and, with `hostedDomain`, its `hd`
+   */
+  idToken?: { email: true; hostedDomain?: string }
   /** JSON pointers into its result: the value of the account's binding and its name */
   binding?: { value: string; label?: string }
   /** a JSON pointer to the account's email, compared with the person's entry of the directory */
   email?: string
-  /** a text naming the account, in which `{/pointer}` stands for the value at that pointer */
+  /**
+   * a text naming the account, in which `{/pointer}` stands for the value at that pointer of the tool's result, and, with
+   * `idToken`, `{email}` for the email of the ID token
+   */
   label?: string
+}
+
+/**
+ * A person's own account declared once for several sources (D118, TOOL-CAT-020): an entry of `tools.accounts`, keyed by
+ * an id no source uses, that each of its sources names with `account: { kind: personal, from: <id> }`.
+ */
+export interface ToolAccountDef {
+  kind: 'personal'
+  /** what people read of the account in Your accounts; its id by default */
+  title?: string
+  description?: string
+  /** the sign-in, with a `pre-registered` client */
+  oauth: AccountOAuth
+  /** the check after each sign-in: by the ID token (`idToken`), an account of its own offering no tool */
+  check?: AccountCheck
 }
 
 /**
@@ -610,7 +659,10 @@ export interface SourceAccount {
   apply?: AccountHeader[]
   /** a `personal` account of an MCP server: OAuth as MCP defines it (D105) */
   oauth?: AccountOAuth
-  /** a `personal` account: the id of another source whose account it uses, at the same URL (TOOL-CAT-015) */
+  /**
+   * a `personal` account: the id of another source whose account it uses, at the same URL (TOOL-CAT-015), or of an
+   * account of `tools.accounts` (TOOL-CAT-020)
+   */
   from?: string
   /** a `personal` account: the binding whose value each account is for (D110, TOOL-CAT-017) */
   binding?: string
@@ -672,6 +724,11 @@ export interface ToolDeclaration {
   stepUp?: StepUp
   /** the bounds and the default of its approval policy in a space, tighter than `approvals.spaces` (TOOL-CAT-023) */
   approval?: ToolApprovalBounds
+  /**
+   * a tool of a source whose account signs in with OAuth (directly or through `from`): the scopes it needs, all granted
+   * before the model is given it (D118, TOOL-CAT-021, TOOL-OAUTH-013); written in full, as the service names them
+   */
+  scopes?: string[]
 }
 
 /** An entry of an approval policy as the agent-pack may write it: never a `person` (TOOL-CAT-023). */
@@ -988,7 +1045,12 @@ export interface AgentPack {
    * tool or a bundled tool with everything the four questions ask of it. `mcp.servers`, `tools.http`, `tools.bundled`,
    * `tools.access` and `actions` are withdrawn, and refused at start in words (TOOL-CAT-011).
    */
-  tools?: { features?: Record<string, FeatureDef>; sources?: Record<string, ToolSourceDef> }
+  tools?: {
+    features?: Record<string, FeatureDef>
+    /** each person's own accounts declared once for several sources (D118, TOOL-CAT-020) */
+    accounts?: Record<string, ToolAccountDef>
+    sources?: Record<string, ToolSourceDef>
+  }
   purposes?: { id: string; label: string; description?: string; permittedRoles?: string[] }[]
   approvals?: {
     timeoutMinutes?: number

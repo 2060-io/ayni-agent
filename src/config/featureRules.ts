@@ -98,6 +98,10 @@ export function featureErrors(pack: AgentPack): string[] {
           errors.push(
             `${at}.${member}: the ${member} of a tool of a profile is the profile's, the same for every provider (TOOL-FEAT-005)`
           )
+      if ((decl as Record<string, unknown>).scopes !== undefined)
+        errors.push(
+          `${at}.scopes: the scopes a tool needs are its provider's, declared on the source's tools (TOOL-CAT-021, TOOL-FEAT-004)`
+        )
     }
   }
 
@@ -152,11 +156,14 @@ export function featureErrors(pack: AgentPack): string[] {
         )
     for (const [tool, decl] of Object.entries(source.tools ?? {})) {
       if (!hasProfilePrefix(profile, tool)) continue
-      const members = Object.keys(decl ?? {})
+      // the scopes a tool needs at this provider are the provider's to say (TOOL-CAT-021); the rest is the feature's
+      const members = Object.keys(decl ?? {}).filter((m) => m !== 'scopes')
       if (members.length)
         errors.push(
-          `${where}.tools.${tool}.${members[0]}: what is said of a tool of ${profile.id} is said once, on the feature ${source.feature} (TOOL-FEAT-004, TOOL-FEAT-005)`
+          `${where}.tools.${tool}.${members[0]}: what is said of a tool of ${profile.id} is said once, on the feature ${source.feature}; a provider gives its scopes alone (TOOL-FEAT-004, TOOL-FEAT-005)`
         )
+      else if (!profileTool(profile, tool))
+        errors.push(`${where}.tools.${tool}: ${tool} is no tool of ${profile.id} ${profile.version} (TOOL-FEAT-004)`)
     }
     const location = profile.location.argument
     for (const binding of source.bindings ?? [])
@@ -182,10 +189,13 @@ export function featureErrors(pack: AgentPack): string[] {
       if (source.manage.as === 'owner') {
         if (source.manage.apply)
           errors.push(`${at}.apply: as: owner manages with the space owner's own account, which builds nothing here`)
-        const declaring = source.account?.from
-          ? Object.entries(pack.tools?.sources ?? {}).find(([sid]) => sid === source.account?.from)?.[1]
-          : source
-        if (!declaring?.account?.oauth)
+        const from = source.account?.from
+        // the owner's own account of an OAuth sign-in: the source's, another source's, or one of tools.accounts (D118)
+        const oauth = from
+          ? (pack.tools?.accounts?.[from]?.oauth ??
+            Object.entries(pack.tools?.sources ?? {}).find(([sid]) => sid === from)?.[1]?.account?.oauth)
+          : source.account?.oauth
+        if (!oauth)
           errors.push(
             `${at}.as: owner manages with the owner's own account of an OAuth sign-in, which the source's account does not declare (TOOL-FEAT-023)`
           )
