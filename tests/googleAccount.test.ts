@@ -27,10 +27,20 @@ import {
   type GoogleUser,
   googleSources,
   type IdTokenFault,
+  MANAGING_DRIVE_TOOLS,
   SCOPES,
 } from './googleFixtures.js'
 import { parseSse, testEnv } from './helpers.js'
-import { type Doc, type FakeMcp, fakeMcpServer, phone, type ScriptedModel, scripted, until } from './toolFixtures.js'
+import {
+  type Doc,
+  type FakeMcp,
+  fakeMcpServer,
+  type Phone,
+  phone,
+  type ScriptedModel,
+  scripted,
+  until,
+} from './toolFixtures.js'
 
 const APP_LINK_BASE = 'https://app.dev.ayni.org/app/'
 const DOMAIN = 'example.org'
@@ -42,6 +52,7 @@ const PEOPLE = [
 
 let running: RunningAgent
 let model: ScriptedModel
+let ph: Phone
 let google: FakeGoogle
 let otherIssuer: FakeGoogle
 let connector: FakeConnector
@@ -52,6 +63,7 @@ interface Device {
   sessionId: string
   sessionToken: string
   principal: Principal
+  connectionId: string
 }
 let ana: Device
 let jonas: Device
@@ -79,6 +91,7 @@ async function device(name: string, directoryId: string): Promise<Device> {
     connectionId,
     { name: 'Ayni', version: '1.0.0', platform: 'ios' }
   )
+  await ph.flowCapable(connectionId)
   const thread = `thread-${Math.random().toString(36).slice(2, 10)}`
   await running.agent.sessions.markConfirmationSent(session, connectionId, thread)
   const confirm = await running.agent.sessions.findByConfirmation(connectionId, thread)
@@ -86,7 +99,7 @@ async function device(name: string, directoryId: string): Promise<Device> {
   await running.agent.sessions.bind(confirm, principal, confirm.binding.nonce)
   const updated = { ...principal, roles: ['employee'], directoryEntryId: directoryId }
   await running.agent.principals.save(updated)
-  return { ...created, principal: updated }
+  return { ...created, principal: updated, connectionId }
 }
 
 async function call(d: Pick<Device, 'sessionToken'>, method: string, url: string, payload?: unknown) {
@@ -143,9 +156,14 @@ async function signIn(
   d: Device,
   source: string,
   user: GoogleUser,
-  options: { untick?: string[]; fault?: IdTokenFault; deny?: boolean } = {}
+  options: { untick?: string[]; fault?: IdTokenFault; deny?: boolean; spaceId?: string } = {}
 ) {
-  const start = await call(d, 'POST', `/connections/${source}/authorize`, {})
+  const start = await call(
+    d,
+    'POST',
+    `/connections/${source}/authorize`,
+    options.spaceId ? { spaceId: options.spaceId } : {}
+  )
   if (start.status !== 202) return { start, url: undefined, callback: undefined }
   const url = new URL(start.body.authorizationUrl as string)
   google.fault = options.fault
@@ -192,7 +210,29 @@ function googlePack(): string {
     },
   }
   googleSources(pack, { url: connector.url, issuer: google.issuer, domain: DOMAIN })
-  pack.spaces.templates = (pack.spaces.templates as Doc[]).map((t) => ({ ...t, features: [] }))
+  // a team space's shared drive, made and kept with its owner's own Google account (architecture §10.13)
+  pack.tools.sources['team-drive'] = {
+    ...pack.tools.sources.drive,
+    description: "The space's shared drive",
+    availability: 'spaces',
+    capabilities: ['search', 'share'],
+    manage: { as: 'owner' },
+    tools: Object.fromEntries(
+      Object.entries({ ...DRIVE_TOOLS, ...MANAGING_DRIVE_TOOLS }).map(([name, scopes]) => [name, { scopes }])
+    ),
+  }
+  pack.identity.organization = { emailDomains: [DOMAIN] }
+  pack.spaces.templates = [
+    {
+      id: 'project',
+      title: 'Project',
+      kind: 'team',
+      creators: ['employee'],
+      membership: { mode: 'list' },
+      rules: { allowedProviders: { default: ['stub'] } },
+      features: [{ feature: 'files', providers: ['team-drive'], add: 'owner', location: 'managed' }],
+    },
+  ]
   writeFileSync(join(dir, 'agent-pack.yaml'), stringifyYaml(pack))
   return dir
 }
@@ -200,7 +240,7 @@ function googlePack(): string {
 beforeAll(async () => {
   google = await fakeGoogle()
   otherIssuer = await fakeGoogle()
-  connector = await fakeConnector(google, { ...DRIVE_TOOLS, ...CALENDAR_TOOLS })
+  connector = await fakeConnector(google, { ...DRIVE_TOOLS, ...MANAGING_DRIVE_TOOLS, ...CALENDAR_TOOLS })
   search = await fakeMcpServer([{ name: 'search', annotations: { readOnlyHint: true } }])
   process.env.TOOLS_GOOGLE_CLIENT_ID = google.clientId
   process.env.TOOLS_GOOGLE_CLIENT_SECRET = google.clientSecret
@@ -211,7 +251,7 @@ beforeAll(async () => {
     { drainMs: 200 }
   )
   mintLocally(running)
-  phone(running)
+  ph = phone(running)
   model = scripted(running)
   ana = await device('ana', 'p-ana')
   jonas = await device('jonas', 'p-jonas')
@@ -482,6 +522,69 @@ describe('the life of the account (TOOL-OAUTH-015, TOOL-CONN-006)', () => {
     }
   })
 
+  it('wrote nothing of a token, a code, a nonce or an ID token to its log, so far', () => {
+    const log = logLines.join('\n')
+    for (const secret of google.secrets) expect(log.includes(secret), 'a secret in the log').toBe(false)
+  })
+})
+
+describe("a team space's shared drive, managed with its owner's own Google account (TOOL-FEAT-025, D147)", () => {
+  let beta: { id: string }
+  const folderOf = () => running.agent.store.managedFolders.get(beta.id, 'files')
+  const filesOf = async () =>
+    ((await call(jonas, 'GET', `/spaces/${beta.id}/tools`)).body.tools as Doc[]).find(
+      (t) => t.feature.id === 'files'
+    ) as Doc
+
+  it("waits as scope-missing while Jonas's account lacks drive, asking nothing of the store", async () => {
+    // Jonas signs in again, and unticks drive
+    const { callback } = await signIn(
+      jonas,
+      'google',
+      { email: 'jonas@example.org', hd: DOMAIN },
+      { untick: [SCOPES.drive] }
+    )
+    expect(callback?.statusCode).toBe(303)
+    expect((await googleItem(jonas)).state).toBe('connected')
+    beta = (await call(jonas, 'POST', '/spaces', { templateId: 'project', title: 'Project Beta', purpose: 'Build' }))
+      .body as { id: string }
+    const asked = ph.callsOf('sendConfirmRequest').length
+    const add = await call(jonas, 'POST', `/spaces/${beta.id}/tools`, { source: 'team-drive', location: 'managed' })
+    expect(add.status).toBe(202)
+    await until(() => ph.callsOf('sendConfirmRequest').length > asked)
+    await ph.confirm(jonas.connectionId, true)
+    await until(async () => (await folderOf())?.reason === 'scope-missing')
+    expect((await filesOf()).folder).toMatchObject({ state: 'creating', reason: 'scope-missing', managedWith: 'owner' })
+    expect(connector.provider.calls.filter((c) => c.name === 'files_create_team_root')).toEqual([])
+  })
+
+  it('asks drive at the sign-in for the space, then makes the shared drive with it', async () => {
+    const start = await call(jonas, 'POST', '/connections/team-drive/authorize', { spaceId: beta.id })
+    expect(start.status).toBe(202)
+    const scope = new URL(start.body.authorizationUrl as string).searchParams.get('scope')?.split(' ')
+    expect(scope).toEqual(['openid', 'email', SCOPES.drive])
+    await call(jonas, 'DELETE', `/connections/attempts/${start.body.attemptId}`)
+    const { callback } = await signIn(
+      jonas,
+      'team-drive',
+      { email: 'jonas@example.org', hd: DOMAIN },
+      { spaceId: beta.id }
+    )
+    expect(callback?.statusCode).toBe(303)
+    const folders = running.agent.spaceTools?.folders
+    await folders?.tick()
+    await until(async () => (await folderOf())?.state === 'ready')
+    const made = connector.provider.calls.find((c) => c.name === 'files_create_team_root')
+    expect(made?.args).toMatchObject({ name: 'Project Beta' })
+    expect((await filesOf()).folder).toMatchObject({ state: 'ready', managedWith: 'owner' })
+    // the scopes of management are asked of the one who manages the folder alone
+    expect(
+      await folders?.managingToolsFor(ana.principal, running.agent.catalog?.source('team-drive') as never, beta.id)
+    ).toEqual([])
+  })
+})
+
+describe('the end of the account (TOOL-CONN-006)', () => {
   it('disconnects the account for both sources at once, revoked at Google', async () => {
     const item = await googleItem(ana)
     const revoked = google.revocations.length

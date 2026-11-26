@@ -544,6 +544,8 @@ export async function buildAgent(
       const conversation = await sessions.conversationById(conversationId)
       return conversation ? sessions.sessionsOfConversation(conversation) : []
     },
+    // the owner's sign-in asks the scopes of the tools a team space's folder is managed with (TOOL-FEAT-025, D118)
+    managingTools: (principal, source, spaceId) => folders.managingToolsFor(principal, source, spaceId),
   }
   gate.hooks = {
     // the arguments of an approval erased with its turn: its card and its items say so (INTX-APPR-015)

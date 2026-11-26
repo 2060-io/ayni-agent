@@ -741,6 +741,9 @@ export class ConnectionService {
             spaceId,
           }
       }
+      // the one who manages the space's folder at the provider signs in for its scopes while Files is in setup (TOOL-FEAT-025)
+      if (!binding && (await this.hooks.managingTools?.(principal, consumer, access.space.id))?.length)
+        return { spaceId }
       // the owner of a space whose binding has no value connects to choose it: the attempt expects nothing
       if (binding && access.role === 'owner') {
         const record = await this.store.spaceTools.get(access.space.id, consumer.name)

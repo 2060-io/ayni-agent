@@ -34,6 +34,14 @@ export const DRIVE_TOOLS: Record<string, string[]> = {
   files_create: [SCOPES.drive],
   files_replace: [SCOPES.drive],
 }
+/** The tools a team space's shared drive is managed with, and those of `share` a model may be given (§10.13). */
+export const MANAGING_DRIVE_TOOLS: Record<string, string[]> = {
+  files_create_team_root: [SCOPES.drive],
+  files_rename_root: [SCOPES.drive],
+  files_shares: [SCOPES.drive],
+  files_share: [SCOPES.drive],
+  files_unshare: [SCOPES.drive],
+}
 export const CALENDAR_TOOLS: Record<string, string[]> = {
   calendar_calendars: [SCOPES.calendarList],
   calendar_list_events: [SCOPES.eventsRead],
@@ -372,8 +380,13 @@ export interface FakeConnector {
  * token lacks the tool's scope, and the fake provider of Files 1.0 and Calendar 1.0 for the rest.
  */
 export async function fakeConnector(google: FakeGoogle, scopes: Record<string, string[]>): Promise<FakeConnector> {
+  // Google Drive declares team roots, shared drives with managers, to an account of a Workspace (providers.md §6)
   const provider = await fakeProvider({
-    files: { version: '1.0', capabilities: ['search', 'folders', 'trash', 'share'] },
+    files: {
+      version: '1.0',
+      capabilities: ['search', 'folders', 'trash', 'share', 'team-roots'],
+      'team-roots': { manager: true },
+    },
     calendar: { version: '1.0', capabilities: ['free-busy', 'respond', 'attendees'] },
   })
   const fake = { authorizations: [], headers: [], provider } as unknown as FakeConnector
