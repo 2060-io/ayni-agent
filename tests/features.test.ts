@@ -761,8 +761,7 @@ describe('changing the provider of Files (TOOL-FEAT-007, 008, 009, 016)', () => 
     const activity = (await call(jonas, 'GET', `/spaces/${alpha.id}/activity`)).body.activity
     expect(activity[0]).toMatchObject({
       kind: 'provider-changed',
-      tool: { source: 'drive', title: 'Google Drive' },
-      formerTool: { source: 'nextcloud', title: 'Nextcloud' },
+      tool: { source: 'drive', title: 'Google Drive', formerSource: 'nextcloud' },
       feature: { id: 'files', title: 'Files' },
     })
   })

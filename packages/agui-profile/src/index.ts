@@ -10,7 +10,7 @@
  * provider is `POST {sessions}/spaces/{id}/tools` with `replaces` (PROF-TOOL-034); the choices of a location are
  * `GET {sessions}/spaces/{id}/tools/{source}/list/choices?text=` (`SpaceToolChoicesResponse`, PROF-TOOL-023).
  * `ayni.space.tools.changed` carries `feature` and, for a change of provider, `formerSource`; the activity has
- * `provider-changed`, `feature` and `formerTool`. Every source a client is given carries its `feature` (PROF-TOOL-035): a
+ * `provider-changed`, `feature` and `tool.formerSource`. Every source a client is given carries its `feature` (PROF-TOOL-035): a
  * card's `action.source`, `metadata.sources`, the sources of a conversation, the Connect card; a connection of Your
  * accounts carries `features`. A card's `action.outsideOrganization` lists the addresses that made a call external
  * (PROF-TOOL-007). New errors: `feature-has-provider`, `provider-not-used`, `not-portable`, `too-many-entries`,
@@ -1478,7 +1478,7 @@ export type SpaceActivityKind =
   | 'tool-added'
   | 'tool-changed'
   | 'tool-removed'
-  /** 3.5.8: the provider of a feature changed, `tool` the new one and `formerTool` the one it replaced (PROF-TOOL-006) */
+  /** 3.5.8: the provider of a feature changed, `tool` the new one, its `formerSource` the one it replaced (PROF-TOOL-006) */
   | 'provider-changed'
   | 'account-set'
   | 'account-cleared'
@@ -1504,12 +1504,13 @@ export interface SpaceActivityItem {
   /** the names of the fields a `rules-changed` changed */
   fields?: string[]
   conversationId?: string
-  /** the source a change of the space's tools concerns (3.4); never a value of its account */
-  tool?: { source: string; title: string }
+  /**
+   * the source a change of the space's tools concerns (3.4); never a value of its account. A `provider-changed` names the
+   * provider it replaced as `formerSource` (3.5.8), its title given by the feature's `providers`
+   */
+  tool?: { source: string; title: string; formerSource?: string }
   /** the feature it concerns (3.5.8, PROF-TOOL-006) */
   feature?: FeatureRef
-  /** a `provider-changed`: the provider it replaced (3.5.8) */
-  formerTool?: { source: string; title: string }
   /** an `owner-changed`: how, the new owner being `member`, and a steward's reason (PROF-SPACE-009) */
   how?: OwnerChange
   reason?: string

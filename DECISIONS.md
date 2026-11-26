@@ -2315,7 +2315,7 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
     - **The wire** (`@ayni.org/ayni-agui-profile` 3.5.8): one item per feature (`feature`, `providers` to the owner,
       `source`/`title` `null` while none is chosen, `conformant`, `capabilities`, `list`), `replaces`, `list` in `POST`
       and `PATCH`, `…/list/choices`, `feature` and `formerSource` on `ayni.space.tools.changed`, `provider-changed`,
-      `feature` and `formerTool` in the activity, `feature` on every source (cards, `metadata.sources`, the sources of a
+      `feature` and `tool.formerSource` in the activity, `feature` on every source (cards, `metadata.sources`, the sources of a
       conversation, the Connect card), `features` on a connection, `outsideOrganization` on a card, and the errors
       `feature-has-provider`, `provider-not-used`, `not-portable`, `too-many-entries`, `any-not-allowed`,
       `not-connected`, `space-account-not-set`. Not additive.

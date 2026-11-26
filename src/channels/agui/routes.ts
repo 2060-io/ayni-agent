@@ -874,11 +874,19 @@ export class AgUiRoutes {
       ...(a.fields ? { fields: a.fields } : {}),
       ...(a.conversationId ? { conversationId: a.conversationId } : {}),
       // the source of a change of the space's tools, with its feature, never a value of its account (PROF-TOOL-006)
-      ...(a.sourceId ? { tool: { source: a.sourceId, title: this.titleOf(a.sourceId) } } : {}),
+      // a provider-changed names the provider it replaced next to the new one (profile §3.7)
+      ...(a.sourceId
+        ? {
+            tool: {
+              source: a.sourceId,
+              title: this.titleOf(a.sourceId),
+              ...(a.formerSourceId ? { formerSource: a.formerSourceId } : {}),
+            },
+          }
+        : {}),
       ...((feature) => (feature ? { feature: { id: feature.id, title: feature.title } } : {}))(
         this.agent.catalog?.feature(a.featureId ?? this.agent.catalog?.source(a.sourceId ?? '')?.feature)
       ),
-      ...(a.formerSourceId ? { formerTool: { source: a.formerSourceId, title: this.titleOf(a.formerSourceId) } } : {}),
       // how the owner changed, and a steward's reason (SPACE-MEMB-008, PROF-SPACE-009)
       ...(a.how ? { how: a.how } : {}),
       ...(a.reason ? { reason: a.reason } : {}),
