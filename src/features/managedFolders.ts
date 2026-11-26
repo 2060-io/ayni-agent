@@ -79,8 +79,19 @@ interface Wanted {
   address?: string
 }
 
-/** What a call of a tool of the profile with the managing account answered. */
-type Answer = { ok: true; data: Record<string, unknown> } | { ok: false; code: string; reason?: string }
+/**
+ * What a call of a tool of the profile with the managing account answered: `not-connected` and `scope-missing` when the
+ * managing account itself cannot act (not connected, refused by the store, or without a scope it needs).
+ */
+type Answer =
+  | { ok: true; data: Record<string, unknown> }
+  | { ok: false; code: string; reason?: string; retryAfterSeconds?: number }
+
+/** The codes that say the managing account cannot act, whatever the call: not connected or refused, or a scope missing. */
+function accountReason(code: string): 'not-connected' | 'scope-missing' | undefined {
+  if (code === 'not-connected' || code === 'account-refused') return 'not-connected'
+  return code === 'scope-missing' ? 'scope-missing' : undefined
+}
 
 export interface ManagedFoldersDeps {
   store: Store
@@ -135,6 +146,8 @@ export class ManagedFolders {
   public connections?: ConnectionService
   /** one change of a folder at a time: a tick, a request and a reload never act on one folder together */
   private readonly running = new Map<string, Promise<void>>()
+  /** the managing account of `as: manager` changes only with the deployment's secrets, at a start */
+  private readonly startedAt = nowIso()
 
   public constructor(private readonly deps: ManagedFoldersDeps) {}
 
@@ -210,6 +223,34 @@ export class ManagedFolders {
     return opened?.status === 'connected' ? opened.account : undefined
   }
 
+  /**
+   * What names the managing account as it is now (TOOL-FEAT-028): a change that failed because it cannot act waits until
+   * this changes, a new sign-in of the owner or a start of the agent with the deployment's secrets.
+   */
+  private async managingKey(space: Space, source: CatalogSource, managerId?: string): Promise<string | undefined> {
+    if (source.manage?.as === 'manager') return `manage:${source.name}@${this.startedAt}`
+    const id = managerId ?? space.ownerPrincipalId
+    const principal = id ? await this.deps.store.principals.get(id) : undefined
+    return principal ? this.connections?.fingerprintIn(principal, source, space.id) : undefined
+  }
+
+  /**
+   * The managing account a change of the folder runs with now: none while it is not connected, or while the store refused
+   * it as it still is (TOOL-FEAT-025, TOOL-FEAT-028).
+   */
+  private async usableAccount(
+    space: Space,
+    folder: ManagedFolderRecord,
+    source: CatalogSource
+  ): Promise<CallAccountSecret | undefined> {
+    if (
+      folder.refusedAccount &&
+      folder.refusedAccount === (await this.managingKey(space, source, folder.managerPrincipalId))
+    )
+      return undefined
+    return this.accountOf(space, source, folder.managerPrincipalId)
+  }
+
   /** A call of a tool of the profile with the managing account, outside any conversation and with no record (TOOL-FEAT-025). */
   private async call(
     source: CatalogSource,
@@ -226,12 +267,17 @@ export class ManagedFolders {
         language: this.deps.pack.language.agent,
       } as never)
       const data = isObject(result.data) ? result.data : {}
+      if (result.accountOutcome)
+        return { ok: false, code: result.accountOutcome === 'more-access-needed' ? 'scope-missing' : 'not-connected' }
       if (!result.isError) return { ok: true, data }
       const error = isObject(data.error) ? data.error : {}
       return {
         ok: false,
         code: typeof error.code === 'string' ? error.code : 'unavailable',
         ...(typeof error.reason === 'string' ? { reason: error.reason } : {}),
+        ...(typeof error.retryAfterSeconds === 'number' && error.retryAfterSeconds > 0
+          ? { retryAfterSeconds: error.retryAfterSeconds }
+          : {}),
       }
     } catch {
       // the error may echo the request: the source is named, nothing of the account (TOOL-ACCESS-005)
@@ -288,19 +334,37 @@ export class ManagedFolders {
     await this.serial(`${space.id}|${featureId}`, () => this.create(space, folder, source))
   }
 
-  /** When a change that failed for a reason that passes is tried next; none once it has been tried for a day. */
-  private static nextTry(attempts: number, firstFailedAt: string | undefined, now: number): string | undefined {
+  /**
+   * When a change that failed for a reason that passes is tried next, after 1, 5 and 30 minutes then every hour, or after
+   * the store's `retryAfterSeconds`; none once it has been tried for a day (TOOL-FEAT-028).
+   */
+  private static nextTry(
+    attempts: number,
+    firstFailedAt: string | undefined,
+    now: number,
+    retryAfterSeconds?: number
+  ): string | undefined {
     const first = firstFailedAt ? Date.parse(firstFailedAt) : now
-    const wait = (RETRY_MINUTES[attempts - 1] ?? 60) * MINUTE
+    const wait = retryAfterSeconds ? retryAfterSeconds * 1000 : (RETRY_MINUTES[attempts - 1] ?? 60) * MINUTE
     if (now + wait - first > RETRY_SPAN) return undefined
     return new Date(now + wait).toISOString()
   }
 
-  /** Makes the folder with the managing account and the same `requestId` each time (TOOL-FEAT-024, TOOL-FEAT-025). */
+  /**
+   * Makes the folder with the managing account and the same `requestId` each time (TOOL-FEAT-024, TOOL-FEAT-025): while
+   * that account is not connected, refused or without a scope, the folder stays `creating` with the reason, tried again
+   * once the account changes; a failure that passes is tried again on the schedule of TOOL-FEAT-028; one the store
+   * refuses leaves it `failed`.
+   */
   private async create(space: Space, folder: ManagedFolderRecord, source: CatalogSource): Promise<void> {
-    const account = await this.accountOf(space, source, folder.managerPrincipalId)
+    const account = await this.usableAccount(space, folder, source)
     if (!account) {
-      await this.saveFolder(space, { ...folder, state: 'creating', reason: 'not-connected' })
+      await this.saveFolder(space, {
+        ...folder,
+        state: 'creating',
+        reason: folder.reason === 'scope-missing' ? 'scope-missing' : 'not-connected',
+        nextAttemptAt: undefined,
+      })
       return
     }
     const answer = await this.call(source, account, 'files_create_team_root', {
@@ -309,10 +373,21 @@ export class ManagedFolders {
     })
     const now = Date.now()
     if (!answer.ok) {
+      const cannot = accountReason(answer.code)
+      if (cannot) {
+        await this.saveFolder(space, {
+          ...folder,
+          state: 'creating',
+          reason: cannot,
+          nextAttemptAt: undefined,
+          refusedAccount: await this.managingKey(space, source, folder.managerPrincipalId),
+        })
+        return
+      }
       if (PASSING.includes(answer.code)) {
         const attempts = folder.attempts + 1
         const firstFailedAt = folder.firstFailedAt ?? new Date(now).toISOString()
-        const nextAttemptAt = ManagedFolders.nextTry(attempts, firstFailedAt, now)
+        const nextAttemptAt = ManagedFolders.nextTry(attempts, firstFailedAt, now, answer.retryAfterSeconds)
         await this.saveFolder(space, {
           ...folder,
           attempts,
@@ -345,29 +420,38 @@ export class ManagedFolders {
       ...folder,
       ref: root.ref,
       name: typeof root.title === 'string' && root.title ? root.title : folder.name,
-      ...(typeof root.webUrl === 'string' ? { webUrl: root.webUrl } : {}),
       state: 'ready',
       reason: undefined,
       managers: declared.teamRootsManager === true,
       attempts: 0,
       firstFailedAt: undefined,
       nextAttemptAt: undefined,
+      refusedAccount: undefined,
+      lastReadAt: nowIso(),
     }
-    // the account that made it is its first member (files §4.7): the owner, for a folder of the owner's own account
-    if (made.managedWith === 'owner' && made.managerPrincipalId)
+    // where a person opens it, when the store has such an address (PROF-TOOL-041)
+    const got = await this.call(source, account, 'files_get', { root: root.ref, ref: root.ref })
+    const item = got.ok && isObject(got.data.item) ? got.data.item : undefined
+    if (typeof item?.webUrl === 'string' && item.webUrl) made.webUrl = item.webUrl
+    // what the store lists right after it is made is the account that made it (files §4.7): with the owner's own
+    // account, the owner's membership; any other, no one's the agent added (D146)
+    const shares = await this.call(source, account, 'files_shares', { root: root.ref, ref: root.ref })
+    const listed = shares.ok && Array.isArray(shares.data.shares) ? shares.data.shares.filter(isObject) : []
+    const owner = made.managedWith === 'owner' && made.managerPrincipalId ? made.managerPrincipalId : undefined
+    const ownerPrincipal = owner ? await this.deps.store.principals.get(owner) : undefined
+    const ownerShare = ownerPrincipal ? ManagedFolders.shareOf(listed, this.deps.emailOf(ownerPrincipal)) : undefined
+    made.baseline = listed.flatMap((s) => (typeof s.id === 'string' && s !== ownerShare ? [s.id] : []))
+    if (owner)
       await this.deps.store.folderMemberships.save({
         spaceId: space.id,
         featureId: folder.featureId,
-        principalId: made.managerPrincipalId,
+        principalId: owner,
         role: made.managers ? 'manager' : 'editor',
+        ...(typeof ownerShare?.id === 'string' ? { shareId: ownerShare.id } : {}),
         state: 'in-place',
         attempts: 0,
         updatedAt: nowIso(),
       })
-    // what the store lists right after it is made is no one's the agent added later (D146)
-    const shares = await this.call(source, account, 'files_shares', { root: root.ref, ref: root.ref })
-    if (shares.ok && Array.isArray(shares.data.shares))
-      made.baseline = shares.data.shares.flatMap((s) => (isObject(s) && typeof s.id === 'string' ? [s.id] : []))
     await this.saveFolder(space, made)
     await this.setLocation(space, made)
     await this.deps.spaces.record(space.id, space.ownerPrincipalId ?? AGENT_ACTOR, 'folder-created', {
@@ -376,6 +460,19 @@ export class ManagedFolders {
     })
     this.deps.logger.info({ spaceId: space.id, source: source.name }, 'the folder of a space was made')
     await this.reconcileFolder(space, made, source)
+  }
+
+  /** The share of an address among those a store lists: the recipient's address, compared without case. */
+  private static shareOf(
+    shares: Record<string, unknown>[],
+    address: string | undefined
+  ): Record<string, unknown> | undefined {
+    if (!address) return undefined
+    const wanted = address.toLowerCase()
+    return shares.find(
+      (s) =>
+        isObject(s.recipient) && typeof s.recipient.address === 'string' && s.recipient.address.toLowerCase() === wanted
+    )
   }
 
   /** The folder is the feature's location, one entry, which the owner does not change while it is managed (TOOL-FEAT-024). */
@@ -465,12 +562,27 @@ export class ManagedFolders {
     return this.deps.catalog.templateFeatures(space.templateId).find((e) => e.feature === folder.featureId)
   }
 
-  /** Brings the members of every folder of a space in step with its people, at once (TOOL-FEAT-027). */
+  /**
+   * Brings the members of every folder of a space in step with its people, at once (TOOL-FEAT-027); a folder that needs a
+   * manager is checked again at each change of the space (TOOL-FEAT-029).
+   */
   public async reconcile(space: Space): Promise<void> {
     for (const folder of await this.foldersOf(space.id)) {
       const source = this.deps.catalog.source(folder.sourceId)
-      if (source)
-        await this.serial(`${space.id}|${folder.featureId}`, () => this.reconcileFolder(space, folder, source))
+      if (!source) continue
+      await this.serial(`${space.id}|${folder.featureId}`, async () => {
+        if (folder.state === 'needs-manager') await this.rescue(space, folder, source)
+        else await this.reconcileFolder(space, folder, source)
+      })
+    }
+  }
+
+  /** Every space's folders in step: after a reload of the directory, which changes roles and who a rule takes in. */
+  public async reconcileAll(): Promise<void> {
+    const spaceIds = new Set((await this.deps.store.managedFolders.listAll()).map((f) => f.spaceId))
+    for (const id of spaceIds) {
+      const space = await this.deps.spaces.find(id)
+      if (space) await this.reconcile(space)
     }
   }
 
@@ -478,10 +590,19 @@ export class ManagedFolders {
     return (await this.deps.store.managedFolders.listAll()).filter((f) => f.spaceId === spaceId)
   }
 
+  /** The address a member is named by at the store, read now: their directory entry's, or a guest's invitation's (D146). */
+  private async addressOf(space: Space, principalId: string): Promise<string | undefined> {
+    const principal = await this.deps.store.principals.get(principalId)
+    if (!principal) return undefined
+    const access = await this.deps.spaces.access(principal, space.id)
+    if (access?.role !== 'guest') return this.deps.emailOf(principal)
+    return (await this.deps.spaces.memberRows(space.id)).find((r) => r.principalId === principalId)?.email
+  }
+
   /**
    * One folder's members in step (TOOL-FEAT-026, 027, 028): the memberships to end first, then those to make or to change,
-   * each with the managing account, those that wait for their next try left as they are; with no managing account, no
-   * change is made with any other.
+   * each with the managing account, those that wait for their next try left as they are; with no managing account that
+   * can act, no change is made with any other.
    */
   private async reconcileFolder(
     space: Space,
@@ -489,19 +610,27 @@ export class ManagedFolders {
     source: CatalogSource,
     options: { force?: boolean } = {}
   ): Promise<void> {
-    const folder = (await this.deps.store.managedFolders.get(given.spaceId, given.featureId)) ?? given
+    let folder = (await this.deps.store.managedFolders.get(given.spaceId, given.featureId)) ?? given
     if (folder.state !== 'ready' || !folder.ref) return
+    const ref = folder.ref
     const wanted = await this.wanted(space, folder, source)
     const memberships = await this.deps.store.folderMemberships.listByFolder(space.id, folder.featureId)
-    const account = await this.accountOf(space, source, folder.managerPrincipalId)
+    let account = await this.usableAccount(space, folder, source)
     const now = Date.now()
     const due = (m: FolderMembershipRecord) => options.force || !m.nextAttemptAt || Date.parse(m.nextAttemptAt) <= now
     const touched = new Set<string>()
+    // the store refused the managing account, or found a scope missing: nothing more is tried with it until it changes
+    const refused = async () => {
+      account = undefined
+      folder = { ...folder, refusedAccount: await this.managingKey(space, source, folder.managerPrincipalId) }
+      await this.saveFolder(space, folder)
+    }
     // a membership ended goes first (TOOL-FEAT-027)
     for (const m of memberships) {
       if (wanted.has(m.principalId)) continue
       touched.add(m.principalId)
-      if (!m.shareId) {
+      // one never made at the store ends here
+      if (m.state !== 'in-place' && m.state !== 'removing' && !m.shareId) {
         await this.deps.store.folderMemberships.delete(space.id, folder.featureId, m.principalId)
         await this.resolveNotice(space, m.principalId)
         continue
@@ -510,23 +639,28 @@ export class ManagedFolders {
         if (m.state !== 'removing') await this.saveMembership({ ...m, state: 'removing' })
         continue
       }
-      const answer = await this.call(source, account, 'files_unshare', {
-        root: folder.ref,
-        ref: folder.ref,
-        share: m.shareId,
-      })
+      const shareId = m.shareId ?? (await this.lookupShare(space, source, account, ref, m.principalId))
+      const answer = shareId
+        ? await this.call(source, account, 'files_unshare', { root: ref, ref, share: shareId })
+        : ({ ok: false, code: 'not-found' } as const)
       if (answer.ok || answer.code === 'not-found') {
+        if (!shareId)
+          this.deps.logger.warn(
+            { spaceId: space.id, source: source.name },
+            'a membership of a managed folder had no share the store still lists: its record ends'
+          )
         await this.deps.store.folderMemberships.delete(space.id, folder.featureId, m.principalId)
         await this.resolveNotice(space, m.principalId)
+        continue
       }
+      if (accountReason(answer.code)) await refused()
       // a removal is never given up: every hour until it is done (TOOL-FEAT-028)
-      else
-        await this.saveMembership({
-          ...m,
-          state: 'removing',
-          attempts: m.attempts + 1,
-          nextAttemptAt: new Date(now + HOUR).toISOString(),
-        })
+      await this.saveMembership({
+        ...m,
+        state: 'removing',
+        attempts: m.attempts + 1,
+        nextAttemptAt: new Date(now + HOUR).toISOString(),
+      })
     }
     // then those to make, or to give another role
     for (const [principalId, want] of wanted) {
@@ -548,10 +682,12 @@ export class ManagedFolders {
         continue
       }
       const changedRole = !!m && m.role !== want.role
-      // one that failed for a reason that stays waits for a change it depends on, or the owner's Try again
-      if (m?.state === 'failed' && !changedRole && !options.force && m.reason !== 'not-connected') continue
-      if (m?.state === 'failed' && m.reason === 'not-connected' && !account) continue
-      if (m && !changedRole && !due(m)) continue
+      // one that failed for a reason that stays waits for a change of what it depends on (the member's address came, the
+      // managing account can act again) or for the owner's Try again (TOOL-FEAT-028)
+      if (m?.state === 'failed' && !changedRole && !options.force) {
+        const changed = m.reason === 'no-address' || (m.reason === 'not-connected' && !!account)
+        if (!changed) continue
+      } else if (m && !changedRole && !due(m)) continue
       touched.add(principalId)
       const membership: FolderMembershipRecord = { ...(m ?? this.newMembership(folder, principalId)), role: want.role }
       if (!account) {
@@ -559,21 +695,14 @@ export class ManagedFolders {
         continue
       }
       const answer = await this.call(source, account, 'files_share', {
-        root: folder.ref,
-        ref: folder.ref,
+        root: ref,
+        ref,
         role: want.role,
         recipients: [{ address: want.address }],
       })
       if (answer.ok) {
-        const address = want.address.toLowerCase()
         const shares = Array.isArray(answer.data.shares) ? answer.data.shares.filter(isObject) : []
-        const mine =
-          shares.find(
-            (s) =>
-              isObject(s.recipient) &&
-              typeof s.recipient.address === 'string' &&
-              s.recipient.address.toLowerCase() === address
-          ) ?? shares[0]
+        const mine = ManagedFolders.shareOf(shares, want.address) ?? shares[0]
         await this.saveMembership({
           ...membership,
           ...(typeof mine?.id === 'string' ? { shareId: mine.id } : {}),
@@ -586,7 +715,10 @@ export class ManagedFolders {
         await this.resolveNotice(space, principalId)
         continue
       }
-      if (answer.code === 'recipient-refused')
+      if (accountReason(answer.code)) {
+        await refused()
+        await this.failed(space, folder, source, membership, 'not-connected', true)
+      } else if (answer.code === 'recipient-refused')
         await this.failed(
           space,
           folder,
@@ -595,10 +727,29 @@ export class ManagedFolders {
           REFUSED.includes(answer.reason as FolderAccessReason) ? (answer.reason as FolderAccessReason) : 'no-account',
           true
         )
-      else if (PASSING.includes(answer.code)) await this.failed(space, folder, source, membership, 'unavailable', false)
+      else if (PASSING.includes(answer.code))
+        await this.failed(space, folder, source, membership, 'unavailable', false, answer.retryAfterSeconds)
       else await this.failed(space, folder, source, membership, 'permission-denied', true)
     }
+    // the managing account acted: a former refusal of it is over
+    if (account && folder.refusedAccount) await this.saveFolder(space, { ...folder, refusedAccount: undefined })
     if (touched.size) await this.hooks.changed?.(space, folder.featureId, folder.sourceId, [...touched])
+  }
+
+  /** The share of a member the store lists, found by their address, for a membership recorded with no share id. */
+  private async lookupShare(
+    space: Space,
+    source: CatalogSource,
+    account: CallAccountSecret,
+    ref: string,
+    principalId: string
+  ): Promise<string | undefined> {
+    const address = await this.addressOf(space, principalId)
+    if (!address) return undefined
+    const listed = await this.call(source, account, 'files_shares', { root: ref, ref })
+    const shares = listed.ok && Array.isArray(listed.data.shares) ? listed.data.shares.filter(isObject) : []
+    const found = ManagedFolders.shareOf(shares, address)
+    return typeof found?.id === 'string' ? found.id : undefined
   }
 
   private newMembership(folder: ManagedFolderRecord, principalId: string): FolderMembershipRecord {
@@ -627,12 +778,13 @@ export class ManagedFolders {
     source: CatalogSource,
     m: FolderMembershipRecord,
     reason: FolderAccessReason,
-    stays: boolean
+    stays: boolean,
+    retryAfterSeconds?: number
   ): Promise<void> {
     const now = Date.now()
     const attempts = m.attempts + 1
     const firstFailedAt = m.firstFailedAt ?? new Date(now).toISOString()
-    const nextAttemptAt = stays ? undefined : ManagedFolders.nextTry(attempts, firstFailedAt, now)
+    const nextAttemptAt = stays ? undefined : ManagedFolders.nextTry(attempts, firstFailedAt, now, retryAfterSeconds)
     const state: FolderMembershipRecord['state'] = stays || !nextAttemptAt ? 'failed' : 'pending'
     const first = m.reason !== reason || m.state === 'in-place' || m.attempts === 0
     await this.saveMembership({ ...m, state, reason, attempts, firstFailedAt, nextAttemptAt })
@@ -713,7 +865,7 @@ export class ManagedFolders {
       const source = this.deps.catalog.source(folder.sourceId)
       if (!source) continue
       await this.serial(`${space.id}|${folder.featureId}`, async () => {
-        // the notices of the former owner end; the new owner is told of what still fails
+        // the notices of the former owner end; the new owner is told of what still fails, at its next change
         for (const n of await this.deps.store.governanceNotices.list({
           spaceId: space.id,
           kind: 'folder-access',
@@ -724,13 +876,17 @@ export class ManagedFolders {
             await this.deps.store.governanceNotices.save(resolved)
             await this.hooks.noticeChanged?.(resolved)
           }
-        if (folder.managedWith === 'manager' || folder.state === 'creating' || folder.state === 'failed') {
-          if (folder.managedWith === 'owner' && change.newId)
-            await this.saveFolder(space, { ...folder, managerPrincipalId: change.newId })
-          await this.reconcileFolder(space, folder, source)
+        const current = (await this.folderOf(space.id, folder.featureId)) ?? folder
+        if (current.managedWith === 'manager') {
+          await this.reconcileFolder(space, current, source)
           return
         }
-        await this.handOver(space, folder, source, change)
+        // a folder not made yet is made with the new owner's account
+        if (current.state !== 'ready' && current.state !== 'needs-manager') {
+          await this.saveFolder(space, { ...current, refusedAccount: undefined, managerPrincipalId: change.newId })
+          return
+        }
+        await this.handOver(space, current, source, change)
       })
     }
   }
@@ -741,92 +897,113 @@ export class ManagedFolders {
     source: CatalogSource,
     change: { formerId?: string; newId?: string }
   ): Promise<void> {
-    const formerAccount = await this.accountOf(space, source, folder.managerPrincipalId ?? change.formerId)
+    const managerId = folder.managerPrincipalId ?? change.formerId
+    const formerAccount = folder.state === 'ready' ? await this.accountOf(space, source, managerId) : undefined
     const next = change.newId ? await this.deps.store.principals.get(change.newId) : undefined
     const address = next ? this.deps.emailOf(next) : undefined
+    const role: FolderMembershipRecord['role'] = folder.managers ? 'manager' : 'editor'
     if (next && address && formerAccount && folder.ref) {
       const answer = await this.call(source, formerAccount, 'files_share', {
         root: folder.ref,
         ref: folder.ref,
-        role: folder.managers ? 'manager' : 'editor',
+        role,
         recipients: [{ address }],
       })
       if (answer.ok) {
         const shares = Array.isArray(answer.data.shares) ? answer.data.shares.filter(isObject) : []
-        const mine =
-          shares.find(
-            (s) =>
-              isObject(s.recipient) &&
-              typeof s.recipient.address === 'string' &&
-              s.recipient.address.toLowerCase() === address.toLowerCase()
-          ) ?? shares[0]
+        const mine = ManagedFolders.shareOf(shares, address) ?? shares[0]
         await this.saveMembership({
           spaceId: space.id,
           featureId: folder.featureId,
           principalId: next.id,
-          role: folder.managers ? 'manager' : 'editor',
+          role,
           ...(typeof mine?.id === 'string' ? { shareId: mine.id } : {}),
           state: 'in-place',
           attempts: 0,
           updatedAt: nowIso(),
         })
+        await this.resolveNotice(space, next.id)
         // the former owner's role, or the end of their membership, while their account still manages it
-        const handed = { ...folder, managerPrincipalId: folder.managerPrincipalId ?? change.formerId }
-        await this.reconcileFolder(space, handed, source)
+        await this.reconcileFolder(space, { ...folder, managerPrincipalId: managerId }, source)
         await this.saveFolder(space, {
           ...((await this.folderOf(space.id, folder.featureId)) ?? folder),
           managerPrincipalId: next.id,
+          refusedAccount: undefined,
         })
         this.deps.logger.info({ spaceId: space.id, source: source.name }, 'the new owner of a space manages its folder')
         return
       }
     }
     // the new owner may manage it already, made a manager at the store by an administrator (D147)
-    if (next && (await this.manages(space, folder, source, next))) {
-      await this.saveFolder(space, {
-        ...folder,
-        managerPrincipalId: next.id,
-        ...(folder.state === 'needs-manager' ? { state: 'ready', reason: undefined } : {}),
+    if (await this.rescue(space, folder, source, next)) return
+    if (folder.state !== 'needs-manager') {
+      await this.saveFolder(space, { ...folder, state: 'needs-manager', reason: 'manager-gone', lastReadAt: nowIso() })
+      await this.deps.spaces.record(space.id, AGENT_ACTOR, 'manager-needed', {
+        sourceId: source.name,
+        featureId: folder.featureId,
       })
-      await this.reconcileFolder(space, { ...folder, state: 'ready', managerPrincipalId: next.id }, source)
-      return
+      this.deps.logger.warn(
+        { spaceId: space.id, source: source.name },
+        'no account the agent holds manages the folder of a space'
+      )
     }
-    await this.saveFolder(space, {
-      ...folder,
-      state: 'needs-manager',
-      reason: 'manager-gone',
-      ...(next ? { managerPrincipalId: next.id } : {}),
-    })
-    await this.deps.spaces.record(space.id, AGENT_ACTOR, 'manager-needed', {
-      sourceId: source.name,
-      featureId: folder.featureId,
-    })
-    this.deps.logger.warn(
-      { spaceId: space.id, source: source.name },
-      'no account the agent holds manages the folder of a space'
-    )
   }
 
-  /** Whether a person's own account manages the folder now: their share of it is a manager's (D147). */
-  private async manages(
+  /**
+   * A folder whose manager is gone, checked again (TOOL-FEAT-029): when the owner's own account manages it now, made a
+   * manager at the store by an administrator, it is `ready` again and managed with that account; true when it is.
+   */
+  private async rescue(
+    space: Space,
+    folder: ManagedFolderRecord,
+    source: CatalogSource,
+    given?: Principal
+  ): Promise<boolean> {
+    const owner =
+      given ?? (space.ownerPrincipalId ? await this.deps.store.principals.get(space.ownerPrincipalId) : undefined)
+    const share = owner ? await this.managerShare(space, folder, source, owner) : undefined
+    const current = (await this.folderOf(space.id, folder.featureId)) ?? folder
+    if (!owner || !share) {
+      if (current.state === 'needs-manager') await this.saveFolder(space, { ...current, lastReadAt: nowIso() })
+      return false
+    }
+    await this.saveMembership({
+      spaceId: space.id,
+      featureId: folder.featureId,
+      principalId: owner.id,
+      role: 'manager',
+      ...(typeof share.id === 'string' ? { shareId: share.id } : {}),
+      state: 'in-place',
+      attempts: 0,
+      updatedAt: nowIso(),
+    })
+    const ready: ManagedFolderRecord = {
+      ...current,
+      state: 'ready',
+      reason: undefined,
+      managerPrincipalId: owner.id,
+      refusedAccount: undefined,
+    }
+    await this.saveFolder(space, ready)
+    this.deps.logger.info({ spaceId: space.id, source: source.name }, 'the owner of a space manages its folder again')
+    await this.reconcileFolder(space, ready, source)
+    return true
+  }
+
+  /** A person's own share of the folder when it is a manager's: their account manages it now (D147). */
+  private async managerShare(
     space: Space,
     folder: ManagedFolderRecord,
     source: CatalogSource,
     person: Principal
-  ): Promise<boolean> {
+  ): Promise<Record<string, unknown> | undefined> {
     const account = await this.accountOf(space, source, person.id)
     const address = this.deps.emailOf(person)
-    if (!account || !address || !folder.ref) return false
+    if (!account || !address || !folder.ref) return undefined
     const answer = await this.call(source, account, 'files_shares', { root: folder.ref, ref: folder.ref })
-    if (!answer.ok || !Array.isArray(answer.data.shares)) return false
-    return answer.data.shares.some(
-      (s) =>
-        isObject(s) &&
-        s.role === 'manager' &&
-        isObject(s.recipient) &&
-        typeof s.recipient.address === 'string' &&
-        s.recipient.address.toLowerCase() === address.toLowerCase()
-    )
+    if (!answer.ok || !Array.isArray(answer.data.shares)) return undefined
+    const share = ManagedFolders.shareOf(answer.data.shares.filter(isObject), address)
+    return share?.role === 'manager' ? share : undefined
   }
 
   // ---- what the owner does of it (TOOL-FEAT-030, PROF-TOOL-043) --------------------------------------------------------
@@ -836,21 +1013,22 @@ export class ManagedFolders {
     const error = folderNameError(title)
     if (error) throw new SpaceError(error, 'bad-name', 'folder.title')
     const source = this.deps.catalog.source(folder.sourceId)
-    if (!source || !folder.ref || folder.state === 'creating')
-      throw new SpaceError('the folder is not made yet', 'source-unavailable')
+    if (!source || !folder.ref || folder.state === 'creating' || folder.state === 'failed')
+      throw new SpaceError('the folder is not made yet', 'not-managed')
     const name = (title as string).trim()
     await this.serial(`${space.id}|${folder.featureId}`, async () => {
-      const account = await this.accountOf(space, source, folder.managerPrincipalId)
+      const current = (await this.folderOf(space.id, folder.featureId)) ?? folder
+      const account = current.state === 'ready' ? await this.usableAccount(space, current, source) : undefined
       if (!account)
         throw new SpaceError(`${source.title} cannot be reached with the account that manages it`, 'source-unavailable')
-      const answer = await this.call(source, account, 'files_rename_root', { root: folder.ref, name })
+      const answer = await this.call(source, account, 'files_rename_root', { root: current.ref, name })
       if (!answer.ok) {
         if (answer.code === 'invalid-argument')
           throw new SpaceError(`${source.title} does not take this name`, 'bad-name', 'folder.title')
         throw new SpaceError(`${source.title} did not rename the folder`, 'source-unavailable')
       }
       const root = isObject(answer.data.root) ? answer.data.root : {}
-      const renamed = { ...folder, name: typeof root.title === 'string' && root.title ? root.title : name }
+      const renamed = { ...current, name: typeof root.title === 'string' && root.title ? root.title : name }
       await this.saveFolder(space, renamed)
       await this.setLocation(space, renamed)
       await this.deps.spaces.record(space.id, actorId, 'folder-renamed', {
@@ -862,23 +1040,23 @@ export class ManagedFolders {
 
   /**
    * Check again (PROF-TOOL-043): a folder that waits for its managing account, failed or needs a manager, and every member
-   * whose access failed, at once.
+   * whose access failed, at once, the managing account tried again whatever it answered before.
    */
   public async check(space: Space, folder: ManagedFolderRecord): Promise<void> {
     const source = this.deps.catalog.source(folder.sourceId)
     if (!source) return
     await this.serial(`${space.id}|${folder.featureId}`, async () => {
-      const current = (await this.folderOf(space.id, folder.featureId)) ?? folder
+      const current = { ...((await this.folderOf(space.id, folder.featureId)) ?? folder), refusedAccount: undefined }
       if (current.state === 'creating' || current.state === 'failed') {
         await this.create(space, { ...current, state: 'creating', attempts: 0, firstFailedAt: undefined }, source)
         return
       }
       if (current.state === 'needs-manager') {
-        const owner = space.ownerPrincipalId ? await this.deps.store.principals.get(space.ownerPrincipalId) : undefined
-        if (!owner || !(await this.manages(space, current, source, owner))) return
-        await this.saveFolder(space, { ...current, state: 'ready', reason: undefined, managerPrincipalId: owner.id })
+        await this.rescue(space, current, source)
+        return
       }
-      await this.reread(space, source)
+      await this.saveFolder(space, current)
+      await this.reread(space, current, source)
       await this.reconcileFolder(space, current, source, { force: true })
     })
   }
@@ -888,31 +1066,28 @@ export class ManagedFolders {
    * store no longer holds as recorded made again, the people the agent did not add counted by their names, and the name
    * the store gives the folder kept.
    */
-  private async reread(space: Space, source: CatalogSource): Promise<void> {
-    const folder = (await this.foldersOf(space.id)).find((f) => f.sourceId === source.name)
-    if (!folder?.ref || folder.state !== 'ready') return
-    const account = await this.accountOf(space, source, folder.managerPrincipalId)
+  private async reread(space: Space, given: ManagedFolderRecord, source: CatalogSource): Promise<void> {
+    const folder = (await this.folderOf(space.id, given.featureId)) ?? given
+    if (!folder.ref || folder.state !== 'ready') return
+    const account = await this.usableAccount(space, folder, source)
     if (!account) return
     const listed = await this.call(source, account, 'files_shares', { root: folder.ref, ref: folder.ref })
     const next: ManagedFolderRecord = { ...folder, lastReadAt: nowIso() }
     if (listed.ok && Array.isArray(listed.data.shares)) {
       const shares = listed.data.shares.filter(isObject)
       const memberships = await this.deps.store.folderMemberships.listByFolder(space.id, folder.featureId)
-      const wanted = await this.wanted(space, folder, source)
       const ours = new Set<string>()
       for (const m of memberships) {
-        const address = wanted.get(m.principalId)?.address?.toLowerCase()
-        const held = shares.find(
-          (s) =>
-            (m.shareId && s.id === m.shareId) ||
-            (!!address && isObject(s.recipient) && String(s.recipient.address ?? '').toLowerCase() === address)
-        )
-        if (held && typeof held.id === 'string') ours.add(held.id)
+        const held =
+          shares.find((s) => !!m.shareId && s.id === m.shareId) ??
+          ManagedFolders.shareOf(shares, await this.addressOf(space, m.principalId))
+        if (typeof held?.id === 'string') ours.add(held.id)
         if (m.state !== 'in-place') continue
         if (!held || held.role !== m.role)
-          // made again at the next change: the store no longer holds it as the agent made it
+          // made again now: the store no longer holds it as the agent made it
           await this.saveMembership({ ...m, state: 'pending', nextAttemptAt: undefined, attempts: 0 })
-        else if (!m.shareId && typeof held.id === 'string') await this.saveMembership({ ...m, shareId: held.id })
+        else if (m.shareId !== held.id && typeof held.id === 'string')
+          await this.saveMembership({ ...m, shareId: held.id })
       }
       const baseline = new Set(folder.baseline ?? [])
       next.addedOutside = shares
@@ -921,45 +1096,44 @@ export class ManagedFolders {
           name:
             isObject(s.recipient) && typeof s.recipient.name === 'string' && s.recipient.name
               ? s.recipient.name
-              : 'someone of the store',
+              : typeof s.audience === 'string'
+                ? s.audience
+                : 'a person',
         }))
     }
     const got = await this.call(source, account, 'files_get', { root: folder.ref, ref: folder.ref })
     const item = got.ok && isObject(got.data.item) ? got.data.item : undefined
     if (item && typeof item.name === 'string' && item.name) next.name = item.name
-    if (item && typeof item.webUrl === 'string') next.webUrl = item.webUrl
+    if (item && typeof item.webUrl === 'string' && item.webUrl) next.webUrl = item.webUrl
     await this.saveFolder(space, next)
     if (next.name !== folder.name) await this.setLocation(space, next)
+    if (next.addedOutside.length !== folder.addedOutside.length)
+      await this.hooks.changed?.(space, folder.featureId, folder.sourceId, [])
   }
 
   /**
    * The schedule of the agent, every minute (TOOL-FEAT-027, 028, 029): a folder still to make tried when it is due or its
-   * managing account came; every folder's members in step, each change when it is due; every six hours the members and
+   * managing account changed; every folder's members in step, each change when it is due; every six hours the members and
    * the name read back, and a folder that needs a manager checked again.
    */
   public async tick(now = Date.now()): Promise<void> {
-    for (const folder of await this.deps.store.managedFolders.listAll()) {
-      const space = await this.deps.spaces.find(folder.spaceId)
-      const source = this.deps.catalog.source(folder.sourceId)
+    for (const listed of await this.deps.store.managedFolders.listAll()) {
+      const space = await this.deps.spaces.find(listed.spaceId)
+      const source = this.deps.catalog.source(listed.sourceId)
       if (!space || !source) continue
-      const stale = !folder.lastReadAt || now - Date.parse(folder.lastReadAt) >= REREAD_EVERY
-      await this.serial(`${space.id}|${folder.featureId}`, async () => {
-        if (folder.state === 'creating' && (!folder.nextAttemptAt || Date.parse(folder.nextAttemptAt) <= now)) {
-          await this.create(space, folder, source)
+      await this.serial(`${space.id}|${listed.featureId}`, async () => {
+        const folder = (await this.folderOf(listed.spaceId, listed.featureId)) ?? listed
+        const stale = !folder.lastReadAt || now - Date.parse(folder.lastReadAt) >= REREAD_EVERY
+        if (folder.state === 'creating') {
+          if (!folder.nextAttemptAt || Date.parse(folder.nextAttemptAt) <= now) await this.create(space, folder, source)
           return
         }
         if (folder.state === 'needs-manager') {
-          if (!stale) return
-          const owner = space.ownerPrincipalId
-            ? await this.deps.store.principals.get(space.ownerPrincipalId)
-            : undefined
-          if (owner && (await this.manages(space, folder, source, owner)))
-            await this.saveFolder(space, { ...folder, state: 'ready', reason: undefined, managerPrincipalId: owner.id })
-          else await this.saveFolder(space, { ...folder, lastReadAt: nowIso() })
+          if (stale) await this.rescue(space, folder, source)
           return
         }
         if (folder.state !== 'ready') return
-        if (stale) await this.reread(space, source)
+        if (stale) await this.reread(space, folder, source)
         await this.reconcileFolder(space, folder, source)
       })
     }

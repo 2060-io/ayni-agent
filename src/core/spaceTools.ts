@@ -1160,24 +1160,34 @@ export class SpaceToolService {
     source: CatalogSource,
     body: { location?: unknown; list?: unknown }
   ): Promise<'managed' | 'existing' | undefined> {
-    const given = body.location
     if (this.catalog.profileOf(source)?.id !== FILES_1_0.id || !this.folders) {
-      if (given !== undefined) throw new SpaceError('a location mode is for Files only', 'bad-request', 'location')
+      if (body.location !== undefined)
+        throw new SpaceError('a location mode is for Files only', 'bad-request', 'location')
       return undefined
     }
-    if (given !== undefined && given !== 'managed' && given !== 'existing')
+    if (body.location !== undefined && body.location !== 'managed' && body.location !== 'existing')
       throw new SpaceError('location is managed or existing', 'bad-request', 'location')
+    let given: 'managed' | 'existing' | undefined = body.location
     const allowed = ManagedFolders.allowed(entry, space)
+    // a provider with no `manage` is in the existing mode whatever the template says (TOOL-FEAT-023)
     const manages = this.folders.managesAt(source)
+    if (!manages) {
+      if (given === 'managed' && !allowed.includes('managed'))
+        throw new SpaceError(`the template allows ${allowed.join(' or ')}`, 'location-not-allowed', 'location')
+      if (given === 'managed')
+        throw new SpaceError(`${this.agentName} cannot make a folder at ${source.title}`, 'cannot-manage')
+      return 'existing'
+    }
     if (given === undefined) {
-      if (allowed.length > 1 && manages)
+      if (allowed.length > 1)
         throw new SpaceError('choose a folder the agent makes, or one that exists', 'bad-request', 'location')
-      return manages ? allowed[0] : 'existing'
+      given = allowed[0]
     }
     if (!allowed.includes(given))
       throw new SpaceError(`the template allows ${allowed.join(' or ')}`, 'location-not-allowed', 'location')
     if (given === 'existing') return given
-    if (!manages || (await this.folders.mayManage(space, source)) === false)
+    // the server must declare team-roots and share with the managing account (TOOL-FEAT-033)
+    if ((await this.folders.mayManage(space, source)) === false)
       throw new SpaceError(`${this.agentName} cannot make a folder at ${source.title}`, 'cannot-manage')
     if (body.list !== undefined)
       throw new SpaceError('a folder the agent makes is the one location: send no list', 'bad-request', 'list')
@@ -1314,6 +1324,8 @@ export class SpaceToolService {
       state: tool.state,
       outcome: 'applied',
     })
+    // the space's rules of Files changed what its members may do: their roles at the managed folder follow (TOOL-FEAT-027)
+    if (current.location === 'managed') await this.folders?.reconcile(space)
     return { status: 200, tool }
   }
 
@@ -1712,8 +1724,6 @@ export class SpaceToolService {
       })
     }
     await this.store.spaceTools.save(await this.withoutStalePolicies(space, source, next))
-    // the space's folder, made by the agent once the owner confirmed Files in the managed mode (TOOL-FEAT-024)
-    if (change.kind === 'add' && change.location === 'managed') await this.folders?.start(space, featureId, source)
     if (change.kind !== 'add') await this.hooks.endAllowances?.(space.id, record.sourceId)
     await this.governance?.review(space)
     await this.spaces.record(
@@ -1735,6 +1745,11 @@ export class SpaceToolService {
       changeId: change.id,
       outcome: 'applied',
     })
+    // the space's folder, made by the agent once the owner confirmed Files in the managed mode, the feature `setup` with
+    // the folder `creating` until it is (TOOL-FEAT-024)
+    if (change.kind === 'add' && change.location === 'managed') await this.folders?.start(space, featureId, source)
+    // the space's rules of Files changed what its members may do: their roles at the managed folder follow (TOOL-FEAT-027)
+    else if (change.kind === 'patch' && next.location === 'managed') await this.folders?.reconcile(space)
   }
 
   /**
@@ -1771,8 +1786,6 @@ export class SpaceToolService {
       updatedBy: change.requestedBy,
     }
     await this.store.spaceTools.save(added)
-    // a folder made at the new provider, in the managed mode (TOOL-FEAT-024)
-    if (change.location === 'managed') await this.folders?.start(space, entry.feature, next)
     if (this.catalog.profileOf(next)) await this.features?.renewMark(space.id, entry.feature, next.name)
     await this.governance?.review(space)
     await this.spaces.record(space.id, change.requestedBy, 'provider-changed', {
@@ -1794,6 +1807,8 @@ export class SpaceToolService {
       changeId: change.id,
       outcome: 'applied',
     })
+    // a folder made at the new provider, in the managed mode (TOOL-FEAT-024)
+    if (change.location === 'managed') await this.folders?.start(space, entry.feature, next)
   }
 
   /** A change dropped (declined, expired, failed, withdrawn): the account's values it carried are destroyed with it. */

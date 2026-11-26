@@ -1066,6 +1066,8 @@ export async function buildAgent(
     // on now; then every change of the file while it runs (IDENT-ROLE-013)
     await people.apply(await directory.settle())
     directory.onReload(async (reload) => void (await people.apply(reload)))
+    // the managed folders follow what the load changed: roles, and who a rule takes in or out (TOOL-FEAT-027)
+    directory.onReload(async () => void (await folders.reconcileAll()))
     // a grant whose Principal lost a role it opened for ends (RBAC-ADMIN-004)
     directory.onReload(async () => void (await agent.adminGrants?.review()))
     directory.watch((env.directoryPollSeconds ?? 10) * 1000)

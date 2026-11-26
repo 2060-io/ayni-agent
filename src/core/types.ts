@@ -1080,6 +1080,11 @@ export interface ManagedFolderRecord {
   attempts: number
   firstFailedAt?: string
   nextAttemptAt?: string
+  /**
+   * what named the managing account when the store refused it, or found a scope missing: no change is tried with it
+   * again until it changes (TOOL-FEAT-028); never a credential
+   */
+  refusedAccount?: string
   lastReadAt?: string
   createdAt: string
   updatedAt: string
