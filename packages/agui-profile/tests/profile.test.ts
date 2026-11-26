@@ -11,6 +11,7 @@ import {
   BINDING_GOAL_CODE,
   buildAppLink,
   CLIENT_PLATFORMS,
+  CONNECTION_ALLOWED,
   CONNECTION_STATES,
   type ConnectActivity,
   type Connection,
@@ -312,6 +313,47 @@ describe("each person's own accounts (§3.11, PROF-TOOL-014..021, agent D104 to 
       texts: { msg_1: 'my token is ghp_… please' },
     }
     expect(withheld.texts?.msg_1).toContain('ghp_…')
+  })
+
+  it('lists an account that several sources use with access per source, and a card that allows one (3.5.10)', () => {
+    const google: Connection = {
+      source: 'google',
+      title: 'Google',
+      description: 'Your files and your calendar at Google, with your own rights there',
+      features: [
+        { id: 'files', title: 'Files' },
+        { id: 'calendar', title: 'Calendar' },
+      ],
+      method: 'oauth',
+      binding: null,
+      usedIn: [{ kind: 'personal' }],
+      state: 'connected',
+      reason: null,
+      moreAccess: false,
+      account: { id: 'acc_1', label: 'ana@example.org', connectedAt: '2026-11-22T09:02:00Z', lastUsedAt: null },
+      attempt: null,
+      revokesAtSource: true,
+      access: [
+        {
+          source: 'drive',
+          title: 'Google Drive',
+          allowed: 'some',
+          missing: ['Create a file', "Replace a file's content"],
+        },
+        { source: 'calendar', title: 'Google Calendar', allowed: 'none' },
+      ],
+    }
+    expect(CONNECTION_ALLOWED).toEqual(['all', 'some', 'none'])
+    expect(google.access?.map((a) => a.allowed)).toEqual(['some', 'none'])
+    const allow: ConnectActivity = {
+      source: 'google',
+      title: 'Google',
+      method: 'oauth',
+      why: 'allow',
+      allow: { source: 'calendar', title: 'Google Calendar' },
+      feature: { id: 'calendar', title: 'Calendar' },
+    }
+    expect(allow.allow?.source).toBe('calendar')
   })
 
   it('links to Your accounts of an agent (PROF-LINK-004)', () => {

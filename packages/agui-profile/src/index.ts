@@ -2,6 +2,15 @@
  * Ayni AG-UI Profile 3.5 (2060-io/ayni-spec, v4/ayni-agui-profile/profile.md).
  * Every name below cites the section or the PROF-* requirement it implements.
  *
+ * 3.5, package 3.5.10 (an account that several sources use, and the scopes of each tool, agent D118): an item of Your
+ * accounts for an account of `tools.accounts` (Google's, for Google Drive and Google Calendar), or whose source's tools
+ * declare their scopes, carries `access`, one `ConnectionAccess` per source the person may use, `allowed` being `all`,
+ * `some` (with `missing`, the titles of the tools not allowed) or `none` (§3.13, PROF-TOOL-028);
+ * `POST {sessions}/connections/{source}/authorize` takes one of the sources of an item's `access`, and asks the sign-in
+ * for that source's scopes, or the account's id, for those of every source not `all` (PROF-TOOL-029); the Connect card
+ * may carry `why: 'allow'` with `allow`, the source to allow, its `source` being the account's (PROF-TOOL-020,
+ * PROF-TOOL-029). `ayni.connections.changed` is also sent when an item's `access` changes. Additive.
+ *
  * 3.5, package 3.5.9 (a team space's folder managed by the agent, agent D145 to D151): the owner's item of Files carries
  * `locations` and `location`, and in the managed mode `folder` (`SpaceToolFolder`; to a member `title`, `webUrl` and
  * `myAccess`, PROF-TOOL-040, PROF-TOOL-041); `POST {sessions}/spaces/{id}/tools` takes `location`; `PATCH` takes
@@ -1982,6 +1991,23 @@ export type ConnectionOutcome =
 /** Where an account serves: every conversation, Personal, or a space (§3.11). */
 export type ConnectionUse = { kind: 'agent' } | { kind: 'personal' } | { kind: 'space'; id: string; title: string }
 
+/** How much of a source's tools the scopes the person granted allow (3.5.10, §3.13, PROF-TOOL-028). */
+export type ConnectionAllowed = 'all' | 'some' | 'none'
+export const CONNECTION_ALLOWED: readonly ConnectionAllowed[] = ['all', 'some', 'none']
+
+/**
+ * One source of an account's `access` (3.5.10, §3.13, PROF-TOOL-028): whether every tool of it the person may use is
+ * allowed (`all`), some (`some`, with `missing`, the titles of the tools not allowed), or none. Its Allow, or Allow more,
+ * is `POST {sessions}/connections/{source}/authorize` with this `source` (PROF-TOOL-029).
+ */
+export interface ConnectionAccess {
+  source: string
+  title: string
+  allowed: ConnectionAllowed
+  /** `some`: the titles of the tools not allowed, as the person reads them ("Create a file") */
+  missing?: string[]
+}
+
 /**
  * One item of `GET {sessions}/connections` (PROF-TOOL-014): an account the person can connect or holds. No item carries a
  * token or a value of a field; `account.label` is shown to this person only.
@@ -2005,13 +2031,23 @@ export interface Connection {
   revokesAtSource: boolean
   /** the features the sources that use the account serve, each once (3.5.8, PROF-TOOL-035): "For Files, Calendar" */
   features: FeatureRef[]
+  /**
+   * an account that several sources use (`source` is then the account's id, `google`), or a source whose tools declare
+   * their scopes: one entry per source the person may use, in the agent's order (3.5.10, §3.13, PROF-TOOL-028); absent
+   * on any other item
+   */
+  access?: ConnectionAccess[]
 }
 
 export interface ConnectionsResponse {
   connections: Connection[]
 }
 
-/** `POST {sessions}/connections/{source}/authorize` (PROF-TOOL-015): `spaceId` for a source of a space's template. */
+/**
+ * `POST {sessions}/connections/{source}/authorize` (PROF-TOOL-015): `spaceId` for a source of a space's template. `{source}`
+ * is an item's `source`, or one of the sources of its `access`, the sign-in then asking that source's scopes alone
+ * (3.5.10, PROF-TOOL-029).
+ */
 export interface AuthorizeConnectionRequest {
   spaceId?: string
 }
@@ -2064,10 +2100,16 @@ export interface ConnectActivity {
   title: string
   description?: string
   method: ConnectionMethod
-  why: 'connect' | 'reconnect'
+  /** `allow` (3.5.10): the account is connected, and the source of `allow` has tools its scopes do not allow yet */
+  why: 'connect' | 'reconnect' | 'allow'
+  /**
+   * `why: 'allow'` (3.5.10, PROF-TOOL-029): the source to allow; `source` and `title` are then the account's. The card's
+   * button sends `POST {sessions}/connections/{allow.source}/authorize`.
+   */
+  allow?: { source: string; title: string }
   binding?: { label: string; value: string; valueLabel: string | null }
   spaceId?: string
-  /** the feature of the source the card is for (3.5.8, PROF-TOOL-035) */
+  /** the feature of the source the card is for, with `why: 'allow'` the feature of `allow` (3.5.8, PROF-TOOL-035) */
   feature?: FeatureRef
 }
 
