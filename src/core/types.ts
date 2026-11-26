@@ -1182,7 +1182,10 @@ export interface PersonalAccountRecord {
   moreAccess?: boolean
   /** the sealed tokens or values (base64); empty once its tokens are destroyed (`reconnect`) */
   cipher: string
-  /** the label, sealed apart under the same key (base64): Your accounts reads it without opening the tokens */
+  /**
+   * the label and the scopes granted, sealed apart under the same key (base64): Your accounts and the tools of a turn
+   * read them without opening the tokens (TOOL-ACCESS-009, TOOL-OAUTH-013)
+   */
   labelCipher?: string
   /** the account's key, wrapped by the person's key; destroyed with the record */
   encKeyRef: string
@@ -1212,8 +1215,12 @@ export interface PersonalAccountSecret {
     issuer: string
     /** the key of the agent's client at the issuer */
     clientRef: string
-    /** the server's URL the token is for, and the only one it is sent to */
-    resource: string
+    /**
+     * the server's URL the token is for, and the only one it is sent to; none for an account of `tools.accounts` whose
+     * authorization server issues tokens for its own interfaces (`resource: false`), whose token goes only to its sources'
+     * URLs (TOOL-OAUTH-015)
+     */
+    resource?: string
   }
   /** an account of fields: one value per field (D102) */
   values?: Record<string, string>
@@ -1236,10 +1243,15 @@ export interface OAuthAttemptRecord {
   id: string
   principalId: string
   originSessionId: string
-  /** the source that declares the account */
+  /** the source that declares the account, or the account of `tools.accounts` (D118) */
   sourceId: string
   /** the space the attempt was started for, for a source of availability spaces */
   spaceId?: string
+  /**
+   * the sources whose tools' scopes the sign-in asks, for an account whose tools declare them (TOOL-OAUTH-012,
+   * PROF-TOOL-029)
+   */
+  allow?: string[]
   /** a digest of its `state`: the callback finds it by it; the state itself is kept nowhere */
   stateHash: string
   /** the value the check must read, and its name (D110); none when the owner connects to choose it */
@@ -1247,12 +1259,15 @@ export interface OAuthAttemptRecord {
   issuer: string
   /** whether the authorization server says it sends `iss` (RFC 9207) */
   issParameterSupported: boolean
-  resource: string
+  /** none for an account whose sign-in names no resource (`resource: false`, TOOL-CAT-021) */
+  resource?: string
   scopes: string[]
   /** the key of the agent's client at the issuer */
   clientRef: string
   /** the PKCE verifier, sealed under a key of the attempt's own (base64), and that key wrapped by the master key */
   verifierCipher: string
+  /** the `nonce` of a sign-in whose check reads the ID token, sealed under the same key (TOOL-OAUTH-014, TOOL-OAUTH-016) */
+  nonceCipher?: string
   encKeyRef: string
   createdAt: string
   expiresAt: string

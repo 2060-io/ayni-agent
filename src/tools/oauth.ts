@@ -15,6 +15,7 @@
  * by its `error` code only.
  */
 import { createHash, randomBytes } from 'node:crypto'
+import type { Jwk } from './idToken.js'
 
 /** The MCP protocol version the discovery request speaks (MCP authorization, revision 2026-07-28). */
 export const MCP_PROTOCOL_VERSION = '2025-06-18'
@@ -62,6 +63,9 @@ export interface AuthorizationServerMetadata {
   token_endpoint_auth_methods_supported?: string[]
   client_id_metadata_document_supported?: boolean
   authorization_response_iss_parameter_supported?: boolean
+  /** OpenID Connect Discovery: the keys an ID token is signed with (TOOL-OAUTH-016) */
+  jwks_uri?: string
+  id_token_signing_alg_values_supported?: string[]
 }
 
 /** What the discovery found of a server. */
@@ -83,6 +87,8 @@ export interface TokenSet {
   expiresAt?: string
   /** the scopes granted, when the server said */
   scopes?: string[]
+  /** the ID token of an OpenID Connect sign-in: checked once at the callback, then forgotten (TOOL-OAUTH-016, 018) */
+  idToken?: string
 }
 
 /** How the agent authenticates to a token endpoint: a public client sends its id, a confidential one its secret too. */
@@ -111,6 +117,20 @@ export function secureUrl(url: string): boolean {
     const u = new URL(url)
     if (u.protocol === 'https:') return true
     return u.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Whether the URL of a connector of the deployment may be reached (D118, TOOL-OAUTH-018, feature profiles common §11): a
+ * connector runs inside the deployment or behind TLS, so HTTP as well as HTTPS; its authorization server's endpoints
+ * stay HTTPS (`secureUrl`).
+ */
+export function connectorUrl(url: string): boolean {
+  try {
+    const u = new URL(url)
+    return u.protocol === 'https:' || u.protocol === 'http:'
   } catch {
     return false
   }
@@ -179,14 +199,15 @@ export class OAuthClient {
     private readonly timeoutMs = OAUTH_REQUEST_MS
   ) {}
 
-  private async request(url: string, init: RequestInit = {}): Promise<Response> {
-    if (!secureUrl(url)) throw new SourceUnavailable(`${new URL(url).origin} is not served over HTTPS`)
+  private async request(url: string, init: RequestInit = {}, connector = false): Promise<Response> {
+    if (!(connector ? connectorUrl(url) : secureUrl(url)))
+      throw new SourceUnavailable(`${new URL(url).origin} is not served over HTTPS`)
     return this.fetchFn(url, { ...init, signal: init.signal ?? AbortSignal.timeout(this.timeoutMs) })
   }
 
-  private async getJson<T>(url: string): Promise<T | undefined> {
+  private async getJson<T>(url: string, connector = false): Promise<T | undefined> {
     try {
-      const response = await this.request(url, { headers: { accept: 'application/json' } })
+      const response = await this.request(url, { headers: { accept: 'application/json' } }, connector)
       if (!response.ok) {
         await response.body?.cancel().catch(() => undefined)
         return undefined
@@ -201,32 +222,38 @@ export class OAuthClient {
   /**
    * Finds a server's authorization servers (TOOL-OAUTH-001): its `401` to a request without a token names its Protected
    * Resource Metadata, else the well-known URIs do. The metadata must identify the server and name an authorization server.
+   * A connector of the deployment (`connector`, D118) may be reached over HTTP; any other server only over HTTPS.
    */
-  public async discover(url: string): Promise<Discovery> {
-    if (!secureUrl(url)) throw new SourceUnavailable('the server is not reached over HTTPS')
+  public async discover(url: string, connector = false): Promise<Discovery> {
+    const reachable = connector ? connectorUrl : secureUrl
+    if (!reachable(url)) throw new SourceUnavailable('the server is not reached over HTTPS')
     let metadataUrl: string | undefined
     let challengeScopes: string[] | undefined
     try {
       // an MCP request without a token: the server's 401 names where its metadata is (RFC 9728 §5.1)
-      const response = await this.request(url, {
-        method: 'POST',
-        headers: {
-          accept: 'application/json, text/event-stream',
-          'content-type': 'application/json',
-          'mcp-protocol-version': MCP_PROTOCOL_VERSION,
-        },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: 0,
-          method: 'initialize',
-          params: {
-            protocolVersion: MCP_PROTOCOL_VERSION,
-            capabilities: {},
-            clientInfo: { name: 'ayni-agent', version: '3.0.0' },
+      const response = await this.request(
+        url,
+        {
+          method: 'POST',
+          headers: {
+            accept: 'application/json, text/event-stream',
+            'content-type': 'application/json',
+            'mcp-protocol-version': MCP_PROTOCOL_VERSION,
           },
-        }),
-        redirect: 'error',
-      })
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 0,
+            method: 'initialize',
+            params: {
+              protocolVersion: MCP_PROTOCOL_VERSION,
+              capabilities: {},
+              clientInfo: { name: 'ayni-agent', version: '3.0.0' },
+            },
+          }),
+          redirect: 'error',
+        },
+        connector
+      )
       await response.body?.cancel().catch(() => undefined)
       if (response.status === 401) {
         const challenge = parseBearerChallenge(response.headers.get('www-authenticate'))
@@ -239,8 +266,8 @@ export class OAuthClient {
     const candidates = metadataUrl ? [metadataUrl] : protectedResourceUris(url)
     let prm: ProtectedResourceMetadata | undefined
     for (const candidate of candidates) {
-      if (!secureUrl(candidate)) continue
-      prm = await this.getJson<ProtectedResourceMetadata>(candidate)
+      if (!reachable(candidate)) continue
+      prm = await this.getJson<ProtectedResourceMetadata>(candidate, connector)
       if (prm) break
     }
     if (!prm || typeof prm.resource !== 'string')
@@ -327,19 +354,24 @@ export class OAuthClient {
       redirectUri: string
       state: string
       challenge: string
-      resource: string
+      /** none for an account whose authorization server issues tokens for its own interfaces (TOOL-CAT-021) */
+      resource?: string
       scopes: string[]
+      /** the agent's own: the binding asked, `login_hint`, `hd`, `nonce` (TOOL-OAUTH-005, TOOL-OAUTH-014) */
       extra?: Record<string, string>
+      /** the agent-pack's, which never name a parameter the agent sets (TOOL-CAT-021) */
+      parameters?: Record<string, string>
     }
   ): string {
     const url = new URL(metadata.authorization_endpoint)
+    for (const [name, value] of Object.entries(params.parameters ?? {})) url.searchParams.set(name, value)
     url.searchParams.set('response_type', 'code')
     url.searchParams.set('client_id', params.clientId)
     url.searchParams.set('redirect_uri', params.redirectUri)
     url.searchParams.set('state', params.state)
     url.searchParams.set('code_challenge', params.challenge)
     url.searchParams.set('code_challenge_method', 'S256')
-    url.searchParams.set('resource', params.resource)
+    if (params.resource !== undefined) url.searchParams.set('resource', params.resource)
     if (params.scopes.length) url.searchParams.set('scope', params.scopes.join(' '))
     for (const [name, value] of Object.entries(params.extra ?? {})) url.searchParams.set(name, value)
     return url.toString()
@@ -405,6 +437,7 @@ export class OAuthClient {
         ? { expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString() }
         : {}),
       ...(typeof json.scope === 'string' ? { scopes: json.scope.split(/[\s,]+/).filter(Boolean) } : {}),
+      ...(typeof json.id_token === 'string' && json.id_token ? { idToken: json.id_token } : {}),
     }
   }
 
@@ -412,14 +445,14 @@ export class OAuthClient {
   public exchange(
     metadata: AuthorizationServerMetadata,
     client: ClientCredentials,
-    params: { code: string; verifier: string; redirectUri: string; resource: string }
+    params: { code: string; verifier: string; redirectUri: string; resource?: string }
   ): Promise<TokenSet> {
     return this.tokenRequest(metadata, client, {
       grant_type: 'authorization_code',
       code: params.code,
       code_verifier: params.verifier,
       redirect_uri: params.redirectUri,
-      resource: params.resource,
+      ...(params.resource !== undefined ? { resource: params.resource } : {}),
     })
   }
 
@@ -427,13 +460,21 @@ export class OAuthClient {
   public refresh(
     metadata: AuthorizationServerMetadata,
     client: ClientCredentials,
-    params: { refreshToken: string; resource: string }
+    params: { refreshToken: string; resource?: string }
   ): Promise<TokenSet> {
     return this.tokenRequest(metadata, client, {
       grant_type: 'refresh_token',
       refresh_token: params.refreshToken,
-      resource: params.resource,
+      ...(params.resource !== undefined ? { resource: params.resource } : {}),
     })
+  }
+
+  /** The keys of an issuer's `jwks_uri` (RFC 7517), over HTTPS: what an ID token is verified with (TOOL-OAUTH-016). */
+  public async jwks(uri: string): Promise<Jwk[]> {
+    if (!secureUrl(uri)) throw new SourceUnavailable('the keys of the authorization server are not served over HTTPS')
+    const doc = await this.getJson<{ keys?: unknown }>(uri)
+    if (!doc || !Array.isArray(doc.keys)) throw new SourceUnavailable('the authorization server publishes no keys')
+    return doc.keys.filter((k): k is Jwk => !!k && typeof k === 'object')
   }
 
   /**

@@ -87,6 +87,18 @@ type Answer =
   | { ok: true; data: Record<string, unknown> }
   | { ok: false; code: string; reason?: string; retryAfterSeconds?: number }
 
+/**
+ * The tools a team space's folder is managed with (TOOL-FEAT-025): the agent's code calls them, never a model; the owner's
+ * own account grants their scopes, which the owner's sign-in asks for in that space.
+ */
+export const MANAGING_TOOLS: readonly string[] = [
+  'files_create_team_root',
+  'files_rename_root',
+  'files_shares',
+  'files_share',
+  'files_unshare',
+]
+
 /** The codes that say the managing account cannot act, whatever the call: not connected or refused, or a scope missing. */
 function accountReason(code: string): 'not-connected' | 'scope-missing' | undefined {
   if (code === 'not-connected' || code === 'account-refused') return 'not-connected'
@@ -233,7 +245,44 @@ export class ManagedFolders {
     const principal = id ? await this.deps.store.principals.get(id) : undefined
     if (!principal) return undefined
     const opened = await this.connections?.open(principal, source, space.id, false)
-    return opened?.status === 'connected' ? opened.account : undefined
+    if (opened?.status !== 'connected') return undefined
+    // an account that lacks a scope the tools of management declare cannot act (TOOL-FEAT-025, TOOL-OAUTH-013)
+    if (await this.lacksScope(principal, source, space.id)) return undefined
+    return opened.account
+  }
+
+  /**
+   * Whether the owner's own account, connected, lacks a scope that the tools of management declare at the provider
+   * (TOOL-FEAT-025): the folder then waits as `scope-missing`, and nothing is asked of the store.
+   */
+  private async lacksScope(principal: Principal, source: CatalogSource, spaceId: string): Promise<boolean> {
+    const needs = MANAGING_TOOLS.flatMap((t) => source.tools[t]?.scopes ?? [])
+    if (!needs.length) return false
+    const granted = await this.connections?.grantedIn(principal, source, spaceId)
+    return granted !== undefined && needs.some((s) => !granted.includes(s))
+  }
+
+  /** Whether the owner's own account is connected and lacks a scope of management, for the folder's line. */
+  private async scopeMissing(space: Space, source: CatalogSource, managerId?: string): Promise<boolean> {
+    if (source.manage?.as !== 'owner') return false
+    const id = managerId ?? space.ownerPrincipalId
+    const principal = id ? await this.deps.store.principals.get(id) : undefined
+    if (!principal) return false
+    if ((await this.connections?.open(principal, source, space.id, false))?.status !== 'connected') return false
+    return this.lacksScope(principal, source, space.id)
+  }
+
+  /**
+   * The tools whose scopes the Principal's sign-in of a provider asks in a space beside those of the model's tools: the
+   * tools of management, for the Principal who manages the space's folder at that provider with their own account
+   * (TOOL-FEAT-025, TOOL-OAUTH-012).
+   */
+  public async managingToolsFor(principal: Principal, source: CatalogSource, spaceId: string): Promise<string[]> {
+    if (!this.managesAt(source) || source.manage?.as !== 'owner' || !source.feature) return []
+    const folder = await this.folderOf(spaceId, source.feature)
+    if (!folder || folder.sourceId !== source.name) return []
+    const space = await this.deps.spaces.find(spaceId)
+    return (folder.managerPrincipalId ?? space?.ownerPrincipalId) === principal.id ? [...MANAGING_TOOLS] : []
   }
 
   /**
@@ -244,7 +293,11 @@ export class ManagedFolders {
     if (source.manage?.as === 'manager') return `manage:${source.name}@${this.startedAt}`
     const id = managerId ?? space.ownerPrincipalId
     const principal = id ? await this.deps.store.principals.get(id) : undefined
-    return principal ? this.connections?.fingerprintIn(principal, source, space.id) : undefined
+    if (!principal) return undefined
+    const fingerprint = await this.connections?.fingerprintIn(principal, source, space.id)
+    // a sign-in that grants more of the same account changes it too (TOOL-OAUTH-013)
+    const granted = await this.connections?.grantedIn(principal, source, space.id)
+    return fingerprint && granted ? `${fingerprint}|${granted.join(' ')}` : fingerprint
   }
 
   /**
@@ -372,10 +425,11 @@ export class ManagedFolders {
   private async create(space: Space, folder: ManagedFolderRecord, source: CatalogSource): Promise<void> {
     const account = await this.usableAccount(space, folder, source)
     if (!account) {
+      const missing = await this.scopeMissing(space, source, folder.managerPrincipalId)
       await this.saveFolder(space, {
         ...folder,
         state: 'creating',
-        reason: folder.reason === 'scope-missing' ? 'scope-missing' : 'not-connected',
+        reason: missing || folder.reason === 'scope-missing' ? 'scope-missing' : 'not-connected',
         nextAttemptAt: undefined,
       })
       return

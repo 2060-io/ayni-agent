@@ -800,7 +800,7 @@ starts with a letter or a digit, then letters, digits, `_` and `-`, 64 at most.
 | `bindings` | `mcp`, `http` | the parameters the agent pins (below) | none |
 | `untrusted` | `mcp`, `http` | what it returns was written outside the organization | from `openWorldHint` for an MCP tool; `false` for an HTTP tool |
 | `access` | all | who may use its tools: `roles`, `approval`, `elevation`, `default` (the tiers, below) | none |
-| `tools.<name>` | all | what the pack says of one tool of the source: `title`, `effect`, `call`, `untrusted`, `stepUp` | from the annotations or the method |
+| `tools.<name>` | all | what the pack says of one tool of the source: `title`, `effect`, `call`, `untrusted`, `stepUp`, and, for a source whose account signs in with OAuth, the `scopes` it needs (below) | from the annotations or the method |
 
 A source answers four questions (D96), each by declaration or by default, and the layers below the pack (the owner of a
 space, then the person) can only narrow the answers:
@@ -1121,6 +1121,12 @@ Connecting asks nothing of the phone; disconnecting applies at once.
 | `account.binding` | the binding of the source whose value each account is for, such as Relaticle's workspace: a person holds one account per value, and a conversation uses the one for the value in force there |
 | `account.check` | the read the agent makes once right after each connection, in code and outside the model: `tool` (a tool the source offers, of effect `read`, called with no argument), JSON pointers into its result (`binding.value`, `binding.label`, `email`) and a `label` in which `{/pointer}` stands for a value. A value of the binding other than the one expected, or an email other than the person's in the user directory, discards the tokens (revoked where the service allows it) |
 | `account.tokenPatterns` | regular expressions that find a credential of the source in a message (a `space` or `personal` account): a message with a match of 16 characters or more is held back from the model whole (D109) |
+| `account.oauth.parameters` | parameters added to the authorization request, each a name and a fixed text (`access_type: offline`); never one the agent sets itself: `response_type`, `client_id`, `redirect_uri`, `state`, `code_challenge`, `code_challenge_method`, `resource`, `scope`, `nonce`, `login_hint`, `hd` |
+| `account.oauth.loginHint` | `email`: the email of the person's entry in the user directory is sent as `login_hint`, so that the service's sign-in proposes the right account |
+| `account.oauth.hostedDomain` | the organization's domain, sent as `hd`; it proves nothing by itself: `check.idToken.hostedDomain` checks it |
+| `account.oauth.resource` | `false`, for an account of `tools.accounts` alone: its authorization server issues tokens for its own interfaces, and neither the sign-in nor the token requests name a `resource` (RFC 8707) |
+| `account.check.idToken` | `{ email: true, hostedDomain?: <domain> }`, in place of `check.tool`: the ID token of the sign-in is validated (its signature by a key of the issuer's `jwks_uri`, `iss`, `aud`, `exp`, the attempt's `nonce`), then its `email_verified`, its `email` against the person's directory entry and its `hd` against the domain; the `label` names `{email}` |
+| `tools.<name>.scopes` | the scopes a tool needs, written in full as the service names them. Once one tool of a source declares them, every tool the model may be given of it does, and the account declares no `oauth.scopes`: a sign-in asks those of the tools the person's roles give (only those not granted yet, for an account already connected), the scopes granted are read in every token answer, and the model is given only the tools whose scopes were all granted |
 
 The two demonstrations of phase 2, Relaticle CRM in the spaces of a Sales template and GitHub in Personal and in a
 Project space:
@@ -1243,6 +1249,125 @@ How it works:
   `409 no-space-account`); the value of the binding the account is for comes from an account of the owner's own, never
   typed by hand (`422 not-your-account` otherwise), and is confirmed on the owner's phone as any binding is.
 
+#### An account several sources use: `tools.accounts` (D118)
+
+`tools.accounts` declares a person's own account once, keyed by an id that no source has, for several sources: each of
+them says `account: { kind: personal, from: <id> }` and nothing else of its account. Your accounts lists the account as
+one item, under its id and title, with `access`: for each of its sources the person may use, whether all, some or none
+of its tools are allowed by the scopes the person granted (`allowed`, and `missing`, the titles of the tools not
+allowed). Allow on a source (`POST {sessions}/connections/<source>/authorize`) asks the scopes of that source's tools;
+the account's own id asks those of every source not yet allowed; a sign-in that allows more of a connected account adds
+to it, the same account. Disconnect ends it for every source at once, revoked at the service where its metadata names a
+revocation endpoint. Its client is `pre-registered`, the operator's own; the server of each source must name the
+client's issuer in its Protected Resource Metadata, or that source cannot be connected; its token is sent only to the
+URLs of its sources. With `oauth.resource: false`, a source's URL may be a connector of the deployment reached over
+plain HTTP inside the cluster; the authorization server's endpoints stay HTTPS.
+
+The model reads, in the record of the person, one line per source of such an account that is not connected, and one
+per source of a connected account whose tools are not all allowed: `(not allowed)`, or `(allowed in part: <the titles
+of the tools not allowed>)`; `offer_connection` then shows a Connect card with `why: allow` and the source to allow.
+
+**Google Workspace, each person with their own sign-in** (architecture §10.10): one Google account for Google Drive and
+Google Calendar, served by the deployment's own Google connector, with the organization's own Google client
+(`TOOLS_GOOGLE_CLIENT_ID` and `TOOLS_GOOGLE_CLIENT_SECRET` from the deployment's secrets: the agent ships with none and
+refuses to start without them). The client is a web client of a Google Cloud project of the organization's own Google
+Workspace organization, of user type Internal, with the one redirect URI `{PUBLIC_BASE_URL}/tools/oauth/callback`.
+
+```yaml
+identity:
+  directory: { file: /secrets/directory/directory.yaml }   # check.idToken compares the email with the person's entry
+
+tools:
+  features:
+    files:    { title: Files, profile: { id: org.ayni/files, version: "1.0" } }
+    calendar:
+      title: Calendar
+      profile: { id: org.ayni/calendar, version: "1.0" }
+      tools:
+        calendar_cancel_event: { call: confirm }
+  accounts:
+    google:                              # one Google account per person, for every Google source
+      kind: personal
+      title: Google
+      description: Your files and your calendar at Google, with your own rights there
+      oauth:
+        client:
+          registration: pre-registered   # the organization's own client, registered at Google
+          issuer: https://accounts.google.com
+          id: ${TOOLS_GOOGLE_CLIENT_ID}  # a web client of the organization's own Google Cloud project
+          secret: ${TOOLS_GOOGLE_CLIENT_SECRET}
+        resource: false                  # Google issues its tokens for its own interfaces: the sign-in names no resource
+        parameters: { access_type: offline, prompt: consent, include_granted_scopes: "true" }
+        loginHint: email                 # the email of the person's directory entry
+        hostedDomain: example.org        # the organization's domain: asked as hd, and checked in the ID token
+      check:
+        idToken: { email: true, hostedDomain: example.org }
+        label: "{email}"
+  sources:
+    drive:
+      type: mcp
+      feature: files
+      title: Google Drive
+      description: The files you can open in Google Drive
+      transport: streamable-http
+      url: http://connector-google.internal:8000/mcp     # the deployment's own connector, which calls the Drive API
+      account: { kind: personal, from: google }
+      availability: personal
+      capabilities: [search]             # the optional capabilities used, at most: no folders, trash or share
+      untrusted: true                    # a shared file is written by anyone who can edit it
+      access: { roles: { employee: ["*"] } }
+      tools:
+        files_roots:   { scopes: ["https://www.googleapis.com/auth/drive.readonly"] }
+        files_list:    { scopes: ["https://www.googleapis.com/auth/drive.readonly"] }
+        files_get:     { scopes: ["https://www.googleapis.com/auth/drive.readonly"] }
+        files_read:    { scopes: ["https://www.googleapis.com/auth/drive.readonly"] }
+        files_search:  { scopes: ["https://www.googleapis.com/auth/drive.readonly"] }
+        files_create:  { scopes: ["https://www.googleapis.com/auth/drive"] }
+        files_replace: { scopes: ["https://www.googleapis.com/auth/drive"] }
+    calendar:
+      type: mcp
+      feature: calendar
+      title: Google Calendar
+      description: Your calendars and events at Google
+      transport: streamable-http
+      url: http://connector-google.internal:8000/mcp     # the same connector, which calls the Calendar API
+      account: { kind: personal, from: google }
+      availability: personal
+      capabilities: [free-busy, respond, attendees]      # no repeating events, no meeting links
+      untrusted: true                    # an invitation is written by its organizer
+      access: { roles: { employee: ["*"] } }
+      tools:
+        calendar_calendars:    { scopes: ["https://www.googleapis.com/auth/calendar.calendarlist.readonly"] }
+        calendar_list_events:  { scopes: ["https://www.googleapis.com/auth/calendar.events.readonly"] }
+        calendar_get_event:    { scopes: ["https://www.googleapis.com/auth/calendar.events.readonly"] }
+        calendar_free_busy:    { scopes: ["https://www.googleapis.com/auth/calendar.events.freebusy"] }
+        calendar_create_event: { scopes: ["https://www.googleapis.com/auth/calendar.events"] }
+        calendar_update_event: { scopes: ["https://www.googleapis.com/auth/calendar.events"] }
+        calendar_cancel_event: { scopes: ["https://www.googleapis.com/auth/calendar.events"] }
+        calendar_respond:      { scopes: ["https://www.googleapis.com/auth/calendar.events"] }
+```
+
+How it goes:
+
+- **Allow Google Drive.** The sign-in asks Google for `openid`, `email`, `drive.readonly` and `drive` (the scopes of
+  Drive's tools that the person's roles give, with `openid` and `email` for the ID token), no `resource`, with the
+  `parameters`, the person's email as `login_hint`, `hd` and a `nonce` sealed in the attempt. A person who unticks
+  `drive` at Google's consent connects with the reads only: `files_create` and `files_replace` are not given to the
+  model, which reads "drive: Google Drive, … (allowed in part: Create a file, Replace a file's content)".
+- **The ID token** is checked at the callback and forgotten: a failure of its signature, issuer, audience, expiry or
+  nonce, or no ID token at all, ends the attempt as `failed`; an email not verified, another email or another `hd` as
+  `wrong-person`; in both cases the tokens are revoked at Google and nothing is kept.
+- **Allow Google Calendar** later asks only for Calendar's scopes (and `openid`, `email`), with
+  `include_granted_scopes=true`: Google answers a token for both, and the same account now allows Calendar too.
+- **The connector** receives each call with the person's access token in `Authorization`, and nothing else of the
+  account: no refresh token, no client secret, no ID token. Its Protected Resource Metadata names
+  `https://accounts.google.com`; a source whose server names another authorization server cannot be connected, and an
+  account whose source's server moves to another turns to reconnect, `changed`, for every source.
+- **A team space's shared drive** (`manage: { as: owner }` on a provider of Files of availability `spaces`, which uses
+  `from: google`): the tools of management (`files_create_team_root`, `files_rename_root`, `files_shares`,
+  `files_share`, `files_unshare`) declare their `scopes` (`…/auth/drive`) so that the owner's sign-in in that space asks
+  them; while the owner's account lacks one, the folder waits as `scope-missing` and nothing is asked of the store.
+
 ### Refused by the loader, for each person's own accounts
 
 - a `personal` account that declares none, or more than one, of `oauth`, `fields` and `apply`, and `from`, naming the
@@ -1258,7 +1383,16 @@ How it works:
   `binding` that names no binding of the source, or comes without `check.binding`; `check.email` in an agent with no
   user directory (TOOL-CAT-017);
 - `oauth`, `from`, `binding` or `check` on an account that is not `personal`; `tokenPatterns` on one that is neither a
-  space's nor a person's.
+  space's nor a person's;
+- an account of `tools.accounts` that no source uses, whose id a source also has, or whose client is not
+  `pre-registered`; a source that uses one and is not an MCP server, or declares anything beside `kind` and `from` in its
+  `account` (TOOL-CAT-020); `check.tool` on such an account, which offers no tool;
+- a parameter the agent sets itself in `oauth.parameters`; `oauth.resource: false` in a source's own account; a tool
+  the model may be given without `scopes` where another tool of its source declares them (the profile's core, the tools
+  of the capabilities `capabilities` leaves in but `team-roots`, the extras of `offer`); `oauth.scopes` beside tools that
+  declare theirs; `scopes` on a tool whose source has no OAuth sign-in, and on a tool of `tools.features`;
+  `check.idToken` beside `check.tool`, on an account of fields, with a pointer (`check.email`, `check.binding`), or
+  in an agent with no user directory (TOOL-CAT-021).
 
 ### Refused by the loader
 

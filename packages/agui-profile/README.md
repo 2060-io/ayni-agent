@@ -23,7 +23,9 @@ Admin, `ayni.admin.changed`, Audit and Operations and their errors; from 3.5.6, 
 space by feature, each with one provider chosen among those its template allows, the change of provider, the location of
 a feature with a contract and its choices, and the feature of every source a client is given; from 3.5.9, a team
 space's folder made and kept by the agent: the modes of Files, the folder, each member's access to it and its
-notifications) and the few AG-UI message shapes it reuses.
+notifications; from 3.5.10, an account that several sources use and the scopes of each tool: an item's `access`, the
+sign-in for one source of it, and the Connect card that allows one more source) and the few AG-UI message shapes it
+reuses.
 
 ```ts
 import { APP_LINK_DOMAIN, buildAppLink, parseAppLink, PROFILE_VERSION } from '@ayni.org/ayni-agui-profile'

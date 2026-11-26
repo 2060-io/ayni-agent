@@ -310,6 +310,8 @@ beforeAll(async () => {
         : { status: 'not-connected' },
     fingerprintIn: async (p: Principal) =>
       driveAccounts.has(p.id) ? `acc-${p.id}@${driveAccounts.get(p.id)}` : undefined,
+    // the tools of these providers declare no scopes (TOOL-CAT-021): the store's refusal says what is missing
+    grantedIn: async () => undefined,
   } as never
   jonas = await device('jonas', ['employee', 'lead'], 'jonas@example.org')
   ana = await device('ana', ['employee'], 'ana@example.org')

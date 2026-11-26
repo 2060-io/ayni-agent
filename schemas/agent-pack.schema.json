@@ -1016,6 +1016,16 @@
             "$ref": "#/$defs/feature"
           }
         },
+        "accounts": {
+          "description": "Each person's own accounts declared once for several sources (D118, TOOL-CAT-020), keyed by an id that no source uses: a source uses one with account: { kind: personal, from: <id> }. Google's account serves Google Drive and Google Calendar with one sign-in.",
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/sourceId"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/toolAccount"
+          }
+        },
         "sources": {
           "type": "object",
           "propertyNames": {
@@ -1841,44 +1851,9 @@
           "minItems": 1,
           "items": { "$ref": "#/$defs/accountHeader" }
         },
-        "oauth": {
-          "description": "A personal account of an MCP server: OAuth as MCP defines it, revision 2026-07-28 (D105, TOOL-CAT-014).",
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["client"],
-          "properties": {
-            "client": {
-              "description": "How the agent obtains its client at the authorization server: a client ID metadata document it serves, a client the operator registered (issuer, id and secret from the deployment's secrets), or Dynamic Client Registration. The agent never falls back from one to another.",
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["registration"],
-              "properties": {
-                "registration": { "type": "string", "enum": ["metadata-document", "pre-registered", "dynamic"] },
-                "issuer": { "type": "string" },
-                "id": { "type": "string" },
-                "secret": { "type": "string" }
-              }
-            },
-            "scopes": {
-              "description": "The scopes asked; [] asks none. Absent: those of the server's challenge, else of its Protected Resource Metadata (TOOL-OAUTH-005).",
-              "type": "array",
-              "items": { "type": "string", "pattern": "^[\\x21\\x23-\\x5B\\x5D-\\x7E]+$" }
-            },
-            "bindingRequest": {
-              "description": "How the sign-in asks the service for the value of the account's binding (D110, layer a): a parameter of the authorization request, or a resource URL in which {value} stands for it.",
-              "type": "object",
-              "additionalProperties": false,
-              "minProperties": 1,
-              "maxProperties": 1,
-              "properties": {
-                "parameter": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$" },
-                "resource": { "type": "string", "minLength": 1 }
-              }
-            }
-          }
-        },
+        "oauth": { "$ref": "#/$defs/accountOAuth" },
         "from": {
-          "description": "A personal account: another source whose personal account this one uses, at the same URL (TOOL-CAT-015).",
+          "description": "A personal account: another source whose personal account this one uses, at the same URL (TOOL-CAT-015), or an account of tools.accounts (TOOL-CAT-020).",
           "$ref": "#/$defs/sourceId"
         },
         "binding": {
@@ -1886,23 +1861,7 @@
           "type": "string",
           "minLength": 1
         },
-        "check": {
-          "description": "A personal account: the read the agent makes once after each connection, outside the model, to name the account and check it (D110, TOOL-CAT-017). Each pointer is a JSON pointer (RFC 6901) into the tool's result.",
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["tool"],
-          "properties": {
-            "tool": { "type": "string", "minLength": 1 },
-            "binding": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["value"],
-              "properties": { "value": { "type": "string" }, "label": { "type": "string" } }
-            },
-            "email": { "type": "string" },
-            "label": { "type": "string", "minLength": 1, "maxLength": 200 }
-          }
-        },
+        "check": { "$ref": "#/$defs/accountCheck" },
         "tokenPatterns": {
           "description": "A space or personal account: regular expressions that find a credential of the source in a message (D109, TOOL-CAT-016).",
           "type": "array",
@@ -1910,6 +1869,105 @@
           "items": { "type": "string", "minLength": 1 }
         }
       }
+    },
+    "toolAccount": {
+      "description": "One person's own account of tools.accounts (D118, TOOL-CAT-020): what people read of it, its sign-in with a pre-registered client, and its check by the ID token. It declares no binding and no fields.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "oauth"],
+      "properties": {
+        "kind": { "const": "personal" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "oauth": { "$ref": "#/$defs/accountOAuth" },
+        "check": { "$ref": "#/$defs/accountCheck" }
+      }
+    },
+    "accountOAuth": {
+      "description": "A personal account of an MCP server: OAuth as MCP defines it, revision 2026-07-28 (D105, TOOL-CAT-014, TOOL-CAT-021).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["client"],
+      "properties": {
+        "client": {
+          "description": "How the agent obtains its client at the authorization server: a client ID metadata document it serves, a client the operator registered (issuer, id and secret from the deployment's secrets), or Dynamic Client Registration. The agent never falls back from one to another.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["registration"],
+          "properties": {
+            "registration": { "type": "string", "enum": ["metadata-document", "pre-registered", "dynamic"] },
+            "issuer": { "type": "string" },
+            "id": { "type": "string" },
+            "secret": { "type": "string" }
+          }
+        },
+        "scopes": {
+          "description": "The scopes asked; [] asks none. Absent: those of the server's challenge, else of its Protected Resource Metadata (TOOL-OAUTH-005). Not with tools that declare their own scopes (TOOL-CAT-021).",
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[\\x21\\x23-\\x5B\\x5D-\\x7E]+$" }
+        },
+        "bindingRequest": {
+          "description": "How the sign-in asks the service for the value of the account's binding (D110, layer a): a parameter of the authorization request, or a resource URL in which {value} stands for it.",
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "maxProperties": 1,
+          "properties": {
+            "parameter": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$" },
+            "resource": { "type": "string", "minLength": 1 }
+          }
+        },
+        "resource": {
+          "description": "false, for an account of tools.accounts alone: its authorization server issues tokens for its own interfaces, and neither the sign-in nor the token requests name a resource (RFC 8707, TOOL-CAT-021).",
+          "const": false
+        },
+        "parameters": {
+          "description": "Parameters added to the authorization request, each a name and a fixed text, never one the agent sets itself (TOOL-CAT-021, TOOL-OAUTH-014): at Google access_type, prompt and include_granted_scopes.",
+          "type": "object",
+          "propertyNames": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$" },
+          "additionalProperties": { "type": "string", "maxLength": 256 }
+        },
+        "loginHint": {
+          "description": "email: the email of the person's directory entry is sent as login_hint (TOOL-OAUTH-014).",
+          "type": "string",
+          "enum": ["email"]
+        },
+        "hostedDomain": {
+          "description": "The organization's domain, sent as hd (TOOL-OAUTH-014); it proves nothing, check.idToken.hostedDomain checks it (TOOL-OAUTH-016).",
+          "$ref": "#/$defs/domainName"
+        }
+      }
+    },
+    "accountCheck": {
+      "description": "A personal account: the check the agent makes once after each connection, outside the model, to name the account and check it: the read of a tool, with JSON pointers (RFC 6901) into its result (D110, TOOL-CAT-017), or, in its place, the ID token of the sign-in (D118, TOOL-CAT-021).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tool": { "type": "string", "minLength": 1 },
+        "idToken": {
+          "description": "The ID token of the sign-in, in place of a tool: its email verified and equal to the person's directory entry's, and, with hostedDomain, its hd equal to it (TOOL-OAUTH-016). The label then names {email}.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["email"],
+          "properties": {
+            "email": { "const": true },
+            "hostedDomain": { "$ref": "#/$defs/domainName" }
+          }
+        },
+        "binding": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["value"],
+          "properties": { "value": { "type": "string" }, "label": { "type": "string" } }
+        },
+        "email": { "type": "string" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 200 }
+      }
+    },
+    "domainName": {
+      "description": "A domain name, in lower case: 2060.io, example.org.",
+      "type": "string",
+      "pattern": "^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
     },
     "accountField": {
       "description": "One field of a space account (D102): its name, unique in the account, what its owner is asked for, and the pattern its value must match.",
@@ -1946,7 +2004,7 @@
       }
     },
     "toolDeclaration": {
-      "description": "What the agent-pack says of one tool of a source (TOOL-CAT-001/006/007/008/010): its title, effect, rule, trust and step-up.",
+      "description": "What the agent-pack says of one tool of a source (TOOL-CAT-001/006/007/008/010/021): its title, effect, rule, trust, step-up and scopes.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -1976,6 +2034,12 @@
             "attested": { "type": "string", "enum": ["optional", "required"] },
             "default": { "$ref": "#/$defs/packApprovalPolicy" }
           }
+        },
+        "scopes": {
+          "description": "A tool of a source whose account signs in with OAuth, directly or through from: the scopes it needs, written in full as the service names them; the model is given it only once all are granted (D118, TOOL-CAT-021, TOOL-OAUTH-013).",
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^[\\x21\\x23-\\x5B\\x5D-\\x7E]+$" }
         }
       }
     },
