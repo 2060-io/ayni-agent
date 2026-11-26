@@ -8,6 +8,7 @@
  * the test gives the folder service. A third declares `manage` but its server no `team-roots` (TOOL-FEAT-033). People
  * are named to the store by the email the directory gives them (D146), stood in for by the test's own list.
  */
+import { CUSTOM_EVENT } from '@ayni.org/ayni-agui-profile'
 import pino from 'pino'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { buildAgent, type RunningAgent } from '../src/app.js'
@@ -688,6 +689,28 @@ describe('a change of the members that fails (TOOL-FEAT-028, PROF-TOOL-041, PROF
     await folders.tick()
     expect(await membershipOf(alpha.id, zoe)).toBeUndefined()
     expect((await membersAtStore(cloud, alpha.id))['zoe@example.org']).toBeUndefined()
+  })
+})
+
+describe("what the owner's and the member's sessions hear (PROF-TOOL-041)", () => {
+  it("announces a change of a member's access to the owner's sessions and to that member's, with no change id", async () => {
+    const noa = await device('noa', ['employee'], 'noa@example.org')
+    await addMember(alpha.id, noa.principal.id)
+    const noaAlpha = await open(noa, alpha.id)
+    const jonasAlpha = await open(jonas, alpha.id)
+    await running.agent.spaces.membersChanged(alpha.id)
+    const heard = (sessionId: string) => {
+      const chunks: string[] = []
+      running.streams.attach(sessionId, { write: (c) => chunks.push(c), end: () => undefined }, 0)()
+      return parseSse(chunks.join(''))
+        .map((e) => e.event as Doc)
+        .filter((e) => e.type === 'CUSTOM' && e.name === CUSTOM_EVENT.spaceToolsChanged)
+        .map((e) => e.value)
+    }
+    const value = { spaceId: alpha.id, feature: 'files', source: 'cloud-team', state: 'ready', outcome: 'applied' }
+    expect(heard(noaAlpha.sessionId)).toContainEqual(value)
+    expect(heard(jonasAlpha.sessionId)).toContainEqual(value)
+    expect((await membershipOf(alpha.id, noa))?.state).toBe('in-place')
   })
 })
 
