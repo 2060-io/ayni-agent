@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.38.1](https://github.com/2060-io/ayni-agent/compare/v0.38.0...v0.38.1) (2026-11-27)
+
+
+### Bug Fixes
+
+* **tools:** each activity line of a managed folder carries the folder's title of its time (PROF-TOOL-043) ([#141](https://github.com/2060-io/ayni-agent/issues/141)) ([06d630d](https://github.com/2060-io/ayni-agent/commit/06d630d0cec36ff30c790194eb65a544920bb2ac))
+
 ## [0.38.0](https://github.com/2060-io/ayni-agent/compare/v0.37.0...v0.38.0) (2026-11-26)
 
 
