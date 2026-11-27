@@ -147,8 +147,14 @@ const space = (title: string, templateId = 'team-project') =>
   call(jonas, 'POST', '/spaces', { templateId, title, purpose: 'Build' }).then((r) => r.body as { id: string })
 const filesOf = async (d: Device, spaceId: string) =>
   ((await call(d, 'GET', `/spaces/${spaceId}/tools`)).body.tools as Doc[]).find((t) => t.feature.id === 'files') as Doc
-const activityOf = async (spaceId: string, d: Device = jonas) =>
-  ((await call(d, 'GET', `/spaces/${spaceId}/activity`)).body.activity as Doc[]).map((a) => a.kind)
+const linesOf = async (spaceId: string, d: Device = jonas) =>
+  (await call(d, 'GET', `/spaces/${spaceId}/activity`)).body.activity as Doc[]
+const activityOf = async (spaceId: string, d: Device = jonas) => (await linesOf(spaceId, d)).map((a) => a.kind)
+/** The kinds of the activity of the managed folder (PROF-TOOL-043), each naming the folder (UI-CONV-051). */
+const FOLDER_KINDS = ['folder-created', 'folder-renamed', 'folder-released', 'access-failed', 'manager-needed']
+/** The folder each line names, by kind, newest first: the lines of a kind the folder has not, none. */
+const foldersNamed = async (spaceId: string, d: Device = jonas) =>
+  (await linesOf(spaceId, d)).map((a) => [a.kind, a.folder?.title])
 const folderOf = (spaceId: string) => running.agent.store.managedFolders.get(spaceId, 'files')
 const membershipsOf = (spaceId: string) => running.agent.store.folderMemberships.listByFolder(spaceId, 'files')
 const teamOf = async (provider: FakeProvider, spaceId: string) => {
@@ -463,6 +469,24 @@ describe('adding Files in the managed mode (TOOL-FEAT-024 to 026, TOOL-FEAT-034,
     expect(detail.addedOutside).toEqual([])
     expect((await call(ana, 'GET', `/spaces/${alpha.id}`)).body.members[0].folderAccess).toBeUndefined()
     expect(await activityOf(alpha.id)).toEqual(expect.arrayContaining(['folder-created', 'access-failed']))
+  })
+
+  it('names the folder in each line of it, as it was named then, and in no other line (PROF-TOOL-043, UI-CONV-051)', async () => {
+    const lines = await linesOf(alpha.id)
+    expect(lines.find((a) => a.kind === 'folder-created')).toMatchObject({
+      tool: { source: 'cloud-team' },
+      feature: { id: 'files' },
+      folder: { title: 'Project Alpha' },
+    })
+    expect(lines.find((a) => a.kind === 'access-failed')).toMatchObject({
+      member: { name: 'tom' },
+      folder: { title: 'Project Alpha' },
+    })
+    // the folder's title alone: no address, no reference at the store (TOOL-FEAT-034)
+    expect(lines.find((a) => a.kind === 'folder-created')?.folder).toEqual({ title: 'Project Alpha' })
+    const others = lines.filter((a) => !FOLDER_KINDS.includes(a.kind))
+    expect(others.length).toBeGreaterThan(0)
+    expect(others.filter((a) => 'folder' in a)).toEqual([])
   })
 
   it("tells the owner, in the space's Notifications, of the member who has no access (PROF-TOOL-042)", async () => {
@@ -815,6 +839,32 @@ describe("the folder's name (TOOL-FEAT-030, PROF-TOOL-043)", () => {
     expect((await call(jonas, 'PATCH', `/spaces/${alpha.id}`, { title: 'Project Alpha 2' })).status).toBe(200)
     expect((await folderOf(alpha.id))?.name).toBe('Alpha Files')
     expect(await patch(jonas, { folder: {} })).toMatchObject({ status: 400, body: { error: 'bad-request' } })
+    // read afterwards, each line names the folder as it was named then, newest first: the rename its new name, the
+    // members who had no access while the store's own name stood (renamed there, above) that name, the first of them
+    // and the making the name it was made with; none follows the space's new title
+    const named = (await foldersNamed(alpha.id)).filter(([kind]) => FOLDER_KINDS.includes(kind))
+    expect([...new Set(named.map(([kind, title]) => `${kind}: ${title}`))]).toEqual([
+      'folder-renamed: Alpha Files',
+      'access-failed: Alpha (renamed at the store)',
+      'access-failed: Project Alpha',
+      'folder-created: Project Alpha',
+    ])
+    expect((await linesOf(alpha.id)).find((a) => a.kind === 'folder-renamed')?.by).toEqual({ name: 'jonas' })
+  })
+
+  it('gives no folder for a line the agent recorded before it kept the name, and the same line otherwise', async () => {
+    await running.agent.store.spaceActivity.insert({
+      id: 'act_before',
+      spaceId: alpha.id,
+      at: '2026-11-01T09:00:00.000Z',
+      actorId: jonas.principal.id,
+      action: 'folder-created',
+      sourceId: 'cloud-team',
+      featureId: 'files',
+    })
+    const line = (await linesOf(alpha.id)).find((a) => a.id === 'act_before')
+    expect(line).toMatchObject({ kind: 'folder-created', tool: { source: 'cloud-team' }, feature: { id: 'files' } })
+    expect(line && 'folder' in line).toBe(false)
   })
 
   it('answers not-managed for Files in the existing mode', async () => {
@@ -964,6 +1014,9 @@ describe("a shared drive managed with the owner's own account (TOOL-FEAT-025, TO
     await call(jonas, 'POST', `/spaces/${delta.id}/owner`, { memberId: `mem_${delta.id}_${ana.principal.id}` })
     expect(await folderOf(delta.id)).toMatchObject({ state: 'needs-manager', reason: 'manager-gone' })
     expect(await activityOf(delta.id, ana)).toContain('manager-needed')
+    expect((await linesOf(delta.id, ana)).find((a) => a.kind === 'manager-needed')?.folder).toEqual({
+      title: 'Project Delta',
+    })
     const owner = await filesOf(ana, delta.id)
     expect(owner.folder).toMatchObject({ state: 'needs-manager', reason: 'manager-gone', managedWith: 'owner' })
     // the members keep their access, and none is changed
@@ -1075,6 +1128,17 @@ describe('releasing the folder (TOOL-FEAT-032)', () => {
       Object.fromEntries((cloud.teamRoots.get(ref)?.shares ?? []).map((s) => [s.recipient.address, s.role]))
     ).toEqual(before)
     expect(await activityOf(alpha.id)).toContain('folder-released')
+    // the folder is no longer the space's: its lines still name it, each as it was named then (UI-CONV-051)
+    const named = (await foldersNamed(alpha.id)).filter(([kind]) => FOLDER_KINDS.includes(kind))
+    expect(named.slice(0, 2)).toEqual([
+      ['folder-released', 'Alpha Files'],
+      ['folder-renamed', 'Alpha Files'],
+    ])
+    // the making, and the line recorded before the agent kept the name, which names none
+    expect(named.filter(([kind]) => kind === 'folder-created')).toEqual([
+      ['folder-created', 'Project Alpha'],
+      ['folder-created', undefined],
+    ])
     const notices = (await call(jonas, 'GET', `/spaces/${alpha.id}/notifications`)).body.notifications as Doc[]
     expect(notices.filter((n) => n.kind === 'folder-access' && n.waiting)).toEqual([])
     expect((await filesOf(jonas, alpha.id)).folder).toBeUndefined()
@@ -1098,6 +1162,7 @@ describe('releasing the folder (TOOL-FEAT-032)', () => {
     expect(told.at(-1)).toMatchObject({ spaceId: managed.id, feature: 'files', source: null, outcome: 'applied' })
     expect(cloud.calls.slice(from)).toEqual([])
     expect((await activityOf(managed.id)).slice(0, 2)).toEqual(['tool-removed', 'folder-released'])
+    expect((await linesOf(managed.id))[1]?.folder).toEqual({ title: 'Project Removed' })
   })
 })
 

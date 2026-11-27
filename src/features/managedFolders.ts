@@ -525,6 +525,7 @@ export class ManagedFolders {
     await this.deps.spaces.record(space.id, space.ownerPrincipalId ?? AGENT_ACTOR, 'folder-created', {
       sourceId: source.name,
       featureId: folder.featureId,
+      folderTitle: made.name,
     })
     this.deps.logger.info({ spaceId: space.id, source: source.name }, 'the folder of a space was made')
     await this.reconcileFolder(space, made, source)
@@ -875,6 +876,7 @@ export class ManagedFolders {
       await this.deps.spaces.record(space.id, AGENT_ACTOR, 'access-failed', {
         sourceId: source.name,
         featureId: folder.featureId,
+        folderTitle: folder.name,
         principalId: m.principalId,
         reason,
       })
@@ -1024,6 +1026,7 @@ export class ManagedFolders {
       await this.deps.spaces.record(space.id, AGENT_ACTOR, 'manager-needed', {
         sourceId: source.name,
         featureId: folder.featureId,
+        folderTitle: folder.name,
       })
       this.deps.logger.warn(
         { spaceId: space.id, source: source.name },
@@ -1117,6 +1120,7 @@ export class ManagedFolders {
       await this.deps.spaces.record(space.id, actorId, 'folder-renamed', {
         sourceId: source.name,
         featureId: folder.featureId,
+        folderTitle: renamed.name,
       })
     })
   }
@@ -1233,6 +1237,8 @@ export class ManagedFolders {
     const folder = await this.folderOf(space.id, featureId)
     if (!folder) return
     await this.serial(`${space.id}|${featureId}`, async () => {
+      // its name as it is now, a rename queued before included: the line names it once it is gone (UI-CONV-051)
+      const current = (await this.folderOf(space.id, featureId)) ?? folder
       await this.deps.store.managedFolders.delete(space.id, featureId)
       await this.deps.store.folderMemberships.deleteByFolder(space.id, featureId)
       for (const n of await this.deps.store.governanceNotices.list({
@@ -1244,7 +1250,11 @@ export class ManagedFolders {
         await this.deps.store.governanceNotices.save(resolved)
         await this.hooks.noticeChanged?.(resolved)
       }
-      await this.deps.spaces.record(space.id, actorId, 'folder-released', { sourceId: folder.sourceId, featureId })
+      await this.deps.spaces.record(space.id, actorId, 'folder-released', {
+        sourceId: folder.sourceId,
+        featureId,
+        folderTitle: current.name,
+      })
       this.deps.logger.info(
         { spaceId: space.id, source: folder.sourceId },
         'the agent stopped managing the folder of a space'

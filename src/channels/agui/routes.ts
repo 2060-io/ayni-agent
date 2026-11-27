@@ -904,6 +904,8 @@ export class AgUiRoutes {
       ...((feature) => (feature ? { feature: { id: feature.id, title: feature.title } } : {}))(
         this.agent.catalog?.feature(a.featureId ?? this.agent.catalog?.source(a.sourceId ?? '')?.feature)
       ),
+      // a line of the managed folder names it as it was named then, the new name for a rename (PROF-TOOL-043)
+      ...(a.folderTitle ? { folder: { title: a.folderTitle } } : {}),
       // how the owner changed, and a steward's reason (SPACE-MEMB-008, PROF-SPACE-009)
       ...(a.how ? { how: a.how } : {}),
       ...(a.reason ? { reason: a.reason } : {}),

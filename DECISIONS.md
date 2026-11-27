@@ -2508,3 +2508,21 @@ Decisions taken while implementing ayni-spec v3, in the order they came up. Spec
       sign-in, a partial grant, Calendar allowed next on the same account, the model's tools and lines, the cards, the
       bad ID tokens one by one, the token at the connector alone, another issuer, a team space's shared drive waiting as
       `scope-missing` then made, Disconnect revoked at the fake Google, a log with no secret).
+88. **The folder a line of the activity names** (2026-11-27, found by the web UI while building a later phase: its
+    decision 55 fell back to the folder as the space's tools name it now; PROF-TOOL-043, UI-CONV-051).
+    - **The bug.** The lines `folder-created`, `folder-renamed`, `folder-released`, `access-failed` and `manager-needed`
+      carried no folder, and UI-CONV-051 names it in each ("<agent> made the folder <folder> at <tool>", "<by> renamed
+      the folder to <folder>", "<agent> stopped managing the folder <folder>", "<member> has no access to the folder
+      <folder> yet", "<agent> can no longer manage the folder <folder>"): a client could only name the folder as it is
+      now, so a line before a rename read the new name, and a released folder no name.
+    - **What is kept.** Each of these lines keeps the folder's title when it happened (`SpaceActivity.folderTitle`):
+      the name it was made with, the new name for a rename, the name it had when the member's access failed, when no
+      account managed it any more, or when it was released (read again inside the release, after a rename that waits
+      before it). A rename keeps the new name alone: the words of `folder-renamed` name no former one. A rename at the
+      store, read back by the agent, records no line; the lines after it name the store's name. The line is kept whole
+      in `space_activity.data` (a JSON document), so no migration; a line recorded before has none.
+    - **The wire** (`@ayni.org/ayni-agui-profile` 3.5.11): `SpaceActivityItem.folder: { title }` on these five kinds
+      only, absent on a line that keeps none. Additive.
+    - **Tests:** `tests/managedFolders.test.ts` (each kind with the title of its time, and no other line with one; a
+      rename then a read: each line with its own title, the store's rename included; the released folder's lines once
+      it is gone; a line recorded before with none).

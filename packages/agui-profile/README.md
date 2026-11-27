@@ -24,8 +24,8 @@ space by feature, each with one provider chosen among those its template allows,
 a feature with a contract and its choices, and the feature of every source a client is given; from 3.5.9, a team
 space's folder made and kept by the agent: the modes of Files, the folder, each member's access to it and its
 notifications; from 3.5.10, an account that several sources use and the scopes of each tool: an item's `access`, the
-sign-in for one source of it, and the Connect card that allows one more source) and the few AG-UI message shapes it
-reuses.
+sign-in for one source of it, and the Connect card that allows one more source; from 3.5.11, the folder a line of
+the activity of a managed folder names, as it was named then) and the few AG-UI message shapes it reuses.
 
 ```ts
 import { APP_LINK_DOMAIN, buildAppLink, parseAppLink, PROFILE_VERSION } from '@ayni.org/ayni-agui-profile'
