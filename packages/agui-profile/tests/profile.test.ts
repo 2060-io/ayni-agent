@@ -34,6 +34,7 @@ import {
   SPACE_CALL_RULES,
   SPACE_TOOL_STATES,
   type SpaceAccountRequest,
+  type SpaceActivityItem,
   type SpaceTool,
   TOOL_EFFECTS,
 } from '../src/index.js'
@@ -354,6 +355,28 @@ describe("each person's own accounts (§3.11, PROF-TOOL-014..021, agent D104 to 
       feature: { id: 'calendar', title: 'Calendar' },
     }
     expect(allow.allow?.source).toBe('calendar')
+  })
+
+  it('names the folder of a line of the managed folder as it was named then (3.5.11, PROF-TOOL-043)', () => {
+    const renamed: SpaceActivityItem = {
+      id: 'act_2',
+      at: '2026-11-26T10:05:00Z',
+      kind: 'folder-renamed',
+      by: { name: 'Jonas Weber' },
+      tool: { source: 'cloud-team', title: 'Nextcloud' },
+      feature: { id: 'files', title: 'Files' },
+      folder: { title: 'Alpha Files' },
+    }
+    const created: SpaceActivityItem = {
+      ...renamed,
+      id: 'act_1',
+      kind: 'folder-created',
+      folder: { title: 'Project Alpha' },
+    }
+    expect([created, renamed].map((a) => a.folder?.title)).toEqual(['Project Alpha', 'Alpha Files'])
+    // a line recorded before 3.5.11 carries none
+    const before: SpaceActivityItem = { id: 'act_0', at: '2026-11-25T09:00:00Z', kind: 'folder-released' }
+    expect(before.folder).toBeUndefined()
   })
 
   it('links to Your accounts of an agent (PROF-LINK-004)', () => {

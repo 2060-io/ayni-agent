@@ -2,6 +2,11 @@
  * Ayni AG-UI Profile 3.5 (2060-io/ayni-spec, v4/ayni-agui-profile/profile.md).
  * Every name below cites the section or the PROF-* requirement it implements.
  *
+ * 3.5, package 3.5.11 (the folder a line of the activity names): a line of the managed folder (`folder-created`,
+ * `folder-renamed`, `folder-released`, `access-failed`, `manager-needed`) carries `folder: { title }`, the folder's title
+ * when it happened, the new one for a rename (`SpaceActivityItem.folder`, PROF-TOOL-043); a line recorded before carries
+ * none. Additive.
+ *
  * 3.5, package 3.5.10 (an account that several sources use, and the scopes of each tool, agent D118): an item of Your
  * accounts for an account of `tools.accounts` (Google's, for Google Drive and Google Calendar), or whose source's tools
  * declare their scopes, carries `access`, one `ConnectionAccess` per source the person may use, `allowed` being `all`,
@@ -1569,6 +1574,12 @@ export interface SpaceActivityItem {
   tool?: { source: string; title: string; formerSource?: string }
   /** the feature it concerns (3.5.8, PROF-TOOL-006) */
   feature?: FeatureRef
+  /**
+   * a line of the managed folder (`folder-created`, `folder-renamed`, `folder-released`, `access-failed`,
+   * `manager-needed`; 3.5.11, PROF-TOOL-043): the folder's title when it happened, the new title for a rename, so that
+   * the line keeps its name once the folder is renamed or released; absent on a line the agent recorded before 3.5.11
+   */
+  folder?: { title: string }
   /** an `owner-changed`: how, the new owner being `member`, and a steward's reason (PROF-SPACE-009) */
   how?: OwnerChange
   reason?: string
