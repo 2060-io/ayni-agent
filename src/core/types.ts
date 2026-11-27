@@ -513,6 +513,11 @@ export interface SpaceActivity {
   featureId?: string
   /** a `provider-changed`: the provider it replaced (TOOL-FEAT-007) */
   formerSourceId?: string
+  /**
+   * a line of the managed folder (PROF-TOOL-043): the folder's title when it happened, the new one for a rename, so that
+   * the line keeps naming it once the folder is renamed or released (UI-CONV-051); none on a line recorded before
+   */
+  folderTitle?: string
   /** an `owner-changed`: how (SPACE-MEMB-012), and the reason a steward gave */
   how?: OwnerChange
   reason?: string

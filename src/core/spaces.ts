@@ -1250,6 +1250,7 @@ export class SpaceService {
       | 'sourceId'
       | 'featureId'
       | 'formerSourceId'
+      | 'folderTitle'
       | 'how'
       | 'reason'
     >
